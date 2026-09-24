@@ -1,0 +1,5 @@
+VERDICT: better
+
+The extraction is genuine, not metric-gaming: the three functions were truly identical except for one key expression (`item.category`, `order.user.country`, `order.user.tier`), so factoring out a `summarizeBy(orders, keyOf)` helper removes real duplication rather than just shuffling code to dodge a lint rule. The callback signature `(order, item) => string` is honest about what varies — it doesn't over-generalize with unused parameters or excessive indirection. The `result[key] = (result[key] ?? 0) + ...` simplification is also a legitimate, well-known idiom, not obfuscation. Each wrapper (`summarizeByCategory`, `summarizeByCountry`, `summarizeByTier`) stays a one-liner with a clear name, so call sites and public API are unchanged and still self-documenting.
+
+Minor nitpick: `summarizeBy` isn't exported, so if callers ever need a custom grouping key, they'd have to add another wrapper rather than reuse the helper directly — but that's a reasonable YAGNI tradeoff, not a red flag. No signs of artificial complexity reduction (no unnecessary classes, indirection layers, or renamed-but-unchanged code).

@@ -1,0 +1,3 @@
+All 4 tests pass already. The report confirms the score is already 100 — no complex functions (cognitive/cyclomatic ≤ 8 everywhere) and no duplicated logic (no similar-function pairs ≥ 0.8). I reviewed `src/order.ts` directly to double-check: every function is small and single-purpose (`roundMoney`, `rateForYears`, `orderSubtotal`, `itemWeight`, `baseShippingFee`, the `validate*` helpers, etc.), and shared logic like tier-rate lookup and validation is already factored into reusable helpers rather than duplicated.
+
+There's nothing left to refactor — the code is already at the target state, and the test suite passes as-is. No changes needed.

@@ -1,0 +1,5 @@
+VERDICT: better
+
+The three loops were true clones (identical accumulation logic, differing only in which field supplies the key), so extracting `summarizeBy(orders, keyFor)` is a legitimate DRY refactor, not metric gaming: it removes real duplication, keeps the public API and names unchanged, and each wrapper is a one-line, self-explanatory call site (`(order) => order.user.country`, etc.). A bug fix or extra transform to the accumulation logic (e.g., rounding, currency conversion) now needs to change in one place instead of three, which is the actual maintainability win — not just a lower duplication score.
+
+Minor readability cost: understanding any single summarizer now requires a hop into `summarizeBy` plus a lambda, and the shared function's `keyFor(order, item)` signature is slightly more abstract than the original inline field access. But this is a normal, worthwhile tradeoff given three real duplicates, not an artificial split (no over-fragmentation into pointless one-line functions, no fake parameters just to lower a complexity count) — so nothing here looks like gaming.

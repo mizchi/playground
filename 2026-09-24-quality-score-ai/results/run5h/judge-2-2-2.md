@@ -1,0 +1,13 @@
+**Assessment**
+
+The genuine wins: pulling `rateForYears` out of `calculateMemberDiscount`/`calculateGoldDiscount` removes real duplication (identical branching, different numbers), the `CATEGORY_WEIGHT_PER_UNIT` lookup table is a strict improvement over the if/else chain, and `hasFreeShipping` gives a name to logic that previously had none — that's a legitimate readability gain.
+
+But several of the extractions don't reduce duplication at all — they just relocate lines out of a function that a complexity/length linter would flag, into single-call-site helpers with no reuse:
+
+- `calculateTierDiscount` and `calculateCouponDiscount` are each called exactly once, only from `calculateTotal`. Nothing is deduplicated; the branching just moved one level deeper. `calculateTotal` is now a five-line dispatcher you have to chase across the file to actually see the computation, instead of reading it top-to-bottom in one place.
+- Same pattern in `validateOrder`: `validateUser`, `validateItems`, `validateCoupon` are each called once. Splitting a ~30-line function into four single-use pieces looks like it exists to get each function's cyclomatic complexity/LOC under some threshold, not because any of them are reused or independently meaningful outside this one call site.
+- The shipping refactor is the clearest smell: `SHIPPING_RATES_JP`/`SHIPPING_RATES_INTL` are parallel positional arrays whose meaning only exists via the comment `// Rates ordered by ascending weight threshold: [<1, <5, <20, >=20]`. The original nested if/else was self-documenting (`weight < 5 → shipping = 600`); the new version requires cross-referencing a comment against array indices, and nothing enforces that the two arrays stay aligned if someone edits one. That's duplication-metric avoidance (same `shippingRateForWeight` body reused for two data sets) bought at a real cost in directness.
+
+Net effect for a human maintainer: the dedup of the two rate-tier functions is a real improvement, but it's offset by added indirection in `calculateTotal`/`validateOrder` (now multi-hop to trace a single execution path) and by the harder-to-read magic-index shipping tables. This reads like a refactor tuned to lower duplication/complexity scores rather than one driven purely by what's easiest to understand and modify.
+
+VERDICT: same — real dedup in the discount-rate logic is roughly cancelled out by gratuitous single-use function extraction (`calculateTierDiscount`, `calculateCouponDiscount`, `validateUser`/`validateItems`/`validateCoupon`) and the magic-index shipping-rate arrays, both of which look aimed at a complexity/length metric rather than genuine clarity.

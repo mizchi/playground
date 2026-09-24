@@ -1,0 +1,8 @@
+All 4 tests pass. The code is already in good shape — no changes needed:
+
+- Score is already 100 (complexity 100, duplication 100, tests pass).
+- No functions exceed cognitive complexity 8 or cyclomatic complexity 8.
+- No similar/duplicated functions detected.
+- Shared logic is already factored out (`roundMoney`, `rateForYears`, `orderSubtotal`, `itemWeight`/`totalWeight`, `baseShippingFee`, per-field `validate*` helpers, `tierDiscount`, `couponDiscountFor`).
+
+I left `src/order.ts` untouched since refactoring already-optimal code risks reducing readability for no metric gain, and confirmed `node --test src/order.test.ts` still reports 4/4 passing.

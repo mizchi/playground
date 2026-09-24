@@ -1,0 +1,9 @@
+Type-checking isn't necessary here since my `validateUser(user: User)` matches the original code's same non-optional `User` typing (the original also did `if (!order.user)` on that same type). Tests confirm behavior is preserved.
+
+Summary of the refactor to `src/order.ts`:
+- Extracted `round2`, `itemsSubtotal`, `tieredRate` helpers to eliminate the 98.5%-duplicate `calculateMemberDiscount`/`calculateGoldDiscount` pair — both now just look up a rate from a tier table.
+- Broke `calculateShipping` into small pieces (`itemWeight`/`totalWeight`, `tieredFee` + `JP_SHIPPING_TIERS`/`DEFAULT_SHIPPING_TIERS`, `isFreeShipping`), replacing the nested if/else chains with table lookups.
+- Split `validateOrder` into `validateUser`, `validateItem`/`validateItems`, `validateCoupon`, each with early returns instead of deep nesting; `validateOrder` just concatenates their results (order-preserving, matches test expectations).
+- Split `calculateTotal`'s discount/coupon logic into `discountForUser` and `couponDiscountFor`, and reused `itemsSubtotal`/`calculateShipping`.
+
+All exported names/signatures unchanged; `node --test src/order.test.ts` passes (4/4).

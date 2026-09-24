@@ -36,6 +36,9 @@ fixture をコピー → 採点 ─┬→ claude -p にレポートを渡して�
 - `--accept score` (デフォルト): スコアが上がっていなければ棄却する。
 - `--accept judge`: スコアが下がる、または別プロンプトの judge が差分を `better` と判定しなければ棄却する。
   - `--judges N` で judge を N 人並列に走らせ、過半数が `better` なら採択する。
+- `--best-of N`: 1 iteration で N 個の候補を並列に生成する (各候補は現在の採択状態の clone 上で作業する)。
+  - 各候補にゲートと judge をかける。「judge の better 票が多い → スコアが高い → cognitive 合計が小さい」の順で最良の候補を選ぶ。
+  - 最良の候補も過半数の better を得ていなければ、その iteration は全棄却になる。
 - `--feedback`: 棄却された試行の理由と judge のコメント (直近 2 回分) を、次の iteration のリファクタプロンプトに追加する。あわせて「読みやすい関数は点数が低くてもそのままでよい、変更なしも可」と指示する。
 - 採択時だけ commit し、棄却時は `git reset --hard` で戻す。
 
@@ -52,6 +55,7 @@ node src/loop.ts --iterations 3 --model sonnet --judge                 # run1: �
 node src/loop.ts --iterations 4 --model sonnet --judge --accept judge  # run2: 点数が下がらず judge が better なら採用
 node src/loop.ts --iterations 4 --judge --accept judge --judges 3      # run3: judge 3 人を並列で走らせ、過半数が better なら採用
 node src/loop.ts --iterations 4 --judge --accept judge --judges 3 --feedback  # run4: 棄却理由を次のプロンプトに渡す
+node src/loop.ts --iterations 3 --judge --accept judge --judges 3 --best-of 3 # run5: 候補を 3 つ並列に作って最良を採る
 ```
 
 実行結果は `runs/<timestamp>/` に出る (gitignore 済み)。代表的な結果は `results/` に置いた。
@@ -187,6 +191,39 @@ run3 の問題 11 (無理な 100 点狙い) を受けて、棄却理由を次の
     - 現状のループは「最初の 1 手の当たり外れ」に大きく依存している。
     - 1 iteration で複数の候補を並列に生成し、最も良いものを採る (best-of-N) と安定するはず。
 
+## 結果 (run5: `--accept judge --judges 3 --best-of 3`, 2 並列, 3 iterations)
+
+run4 の問題 16 (最初の 1 手の当たり外れ) を受けて、1 iteration で候補を 3 つ並列に作り、最良のものを採るようにした。フィードバックは使っていない。
+
+| iteration | run5g の候補 (スコア / 票) | run5h の候補 (スコア / 票) |
+| --- | --- | --- |
+| 1 | #1 100 worse,same,same / #2 100 same,same,better / **#3 100 better,same,better → 採択** | #1 same,worse,worse / #2 same,same,better / #3 same,better,same → 全棄却 |
+| 2 | #1 変更なし / #2 変更なし / **#3 100 better,worse,better → 採択** (report.ts) | #1 better,same,better / #2 better,same,same / **#3 better ×3 → 採択** |
+| 3 | 全候補が変更なし | **#1 better ×3 → 採択** (report.ts) / #2 better ×3 / #3 better,same,better |
+| 最終 | 100 (cognitive 合計 38 / 最大 6) | 100 (cognitive 合計 32 / 最大 5) |
+
+どちらも最終 judge は `better` だった。`report.ts` の重複も解消し、テーブル + `find` + `Infinity` 番兵のパターンは最終コードに残っていない。
+詳細は `results/run5g/`, `results/run5h/` を参照。
+
+コスト (1 run あたり):
+
+| 設定 | リファクタ呼び出し | judge 呼び出し | 壁時計時間 |
+| --- | --- | --- | --- |
+| run3c (judge 3 人) | 4 | 12 | 4 分 48 秒 |
+| run4e (judge 3 人 + feedback) | 4 | 12 | 8 分 10 秒 |
+| run5g (best-of-3) | 9 | 12 | 3 分 32 秒 |
+| run5h (best-of-3) | 9 | 27 | 5 分 34 秒 |
+
+### run5 でわかったこと
+
+17. **best-of-N で結果が安定した。** 2 run とも 100 点に到達し、最終 judge も `better` だった。
+    - 同じ judge 3 人の条件でも、run3 は 95.2 / 100、run4 は 68.7 / 100 と結果が割れていた。
+    - 判定を受けた候補 13 個のうち、過半数の better を得たのは 7 個 (約 54%)。候補 1 つあたりの合格率が 5 割なら、3 つのうち 1 つ以上が合格する確率は約 88%。
+    - 実際、変更のあった 5 iteration のうち 4 回で合格候補が出た。
+18. **候補を増やすと、指標の見落としも拾いやすくなる。** run5g の iteration 2 では、3 候補のうち 2 つが「もう直すところはない」として変更しなかった。残る 1 つだけが `report.ts` の重複 (similarity-ts が検出しないもの) を見つけて直した。1 候補だけだと、run2a のようにここで止まっていた可能性がある。
+19. **並列化すれば、壁時計時間はほとんど増えない。** 呼び出し回数は 2〜3 倍になるが、並列なので時間は run3 と同程度だった。むしろ、棄却 → やり直しの直列ループが減るぶん短くなることもある (run4e の 8 分に対し、run5g は 3.5 分)。
+20. **それでも全棄却は起こる。** run5h の iteration 1 は 3 候補とも過半数を取れなかった。best-of-N と棄却理由のフィードバックを組み合わせる余地がある。
+
 ## cccc の評価
 
 `cccc-eval/README.md` にまとめた。要点:
@@ -199,7 +236,7 @@ run3 の問題 11 (無理な 100 点狙い) を受けて、棄却理由を次の
 
 ### 次に試すなら
 
-- 1 iteration で複数の候補を並列生成し、judge の評価が最も高いものを採る (best-of-N)
+- best-of-N と `--feedback` を組み合わせる (全棄却のときだけ理由を渡す)
 - 棄却された差分のうち judge が良いと言った部分だけを残す、部分採択の仕組みを入れる
 - iteration 数を増やして、保守的になった後に改善が再開するかを見る
 - スコアに cognitive 合計と関数数の増加を入れ、関数ごとの閾値だけでは満点にならないようにする

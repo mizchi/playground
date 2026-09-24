@@ -1,0 +1,8 @@
+All 4 tests pass. Refactored `src/order.ts`:
+
+- **Duplication**: `calculateMemberDiscount`/`calculateGoldDiscount` now share `rateForYears` (tiered lookup) and `roundCurrency`, only the rate table differs.
+- **`calculateShipping`**: split into `calculateOrderWeight` (table-driven per-category weight) and `baseShippingFee` (tiered lookup by country), with early returns for the gold/member free-shipping cases.
+- **`validateOrder`**: split into `validateUser`, `validateItems`/`validateItem`, `validateCoupon`, composed via array spread — each piece now trivially simple.
+- **`calculateTotal`**: extracted `calculateSubtotal` (also reused by shipping), `calculateTierDiscount`, `calculateCouponDiscount`.
+
+All exported names/signatures unchanged; `order.test.ts` untouched.

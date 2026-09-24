@@ -1,0 +1,266 @@
+{
+  "fixture": "fixtures/order-service",
+  "model": "sonnet",
+  "accept": "judge",
+  "judges": 3,
+  "feedback": false,
+  "bestOf": 3,
+  "baseline": {
+    "total": 51.6,
+    "complexity": 10.5,
+    "duplication": 92.6,
+    "complexityPenalty": 45,
+    "duplicatedLines": 13.8,
+    "testsPassed": true
+  },
+  "baseCognitive": {
+    "sum": 89,
+    "max": 28,
+    "functions": 8
+  },
+  "final": {
+    "total": 100,
+    "complexity": 100,
+    "duplication": 100,
+    "complexityPenalty": 0,
+    "duplicatedLines": 0,
+    "testsPassed": true
+  },
+  "history": [
+    {
+      "iteration": 1,
+      "before": {
+        "total": 51.6,
+        "complexity": 10.5,
+        "duplication": 92.6,
+        "complexityPenalty": 45,
+        "duplicatedLines": 13.8,
+        "testsPassed": true
+      },
+      "after": {
+        "total": 100,
+        "complexity": 100,
+        "duplication": 100,
+        "complexityPenalty": 0,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "accepted": false,
+      "reason": "all candidates rejected",
+      "votes": [
+        "same",
+        "same",
+        "better"
+      ],
+      "cognitive": {
+        "sum": 44,
+        "max": 6,
+        "functions": 19
+      },
+      "candidates": [
+        {
+          "k": 1,
+          "score": 100,
+          "votes": [
+            "same",
+            "worse",
+            "worse"
+          ],
+          "reason": "judge: same/worse/worse",
+          "cognitive": {
+            "sum": 51,
+            "max": 6,
+            "functions": 22
+          }
+        },
+        {
+          "k": 2,
+          "score": 100,
+          "votes": [
+            "same",
+            "same",
+            "better"
+          ],
+          "reason": "judge: same/same/better",
+          "cognitive": {
+            "sum": 44,
+            "max": 6,
+            "functions": 19
+          }
+        },
+        {
+          "k": 3,
+          "score": 100,
+          "votes": [
+            "same",
+            "better",
+            "same"
+          ],
+          "reason": "judge: same/better/same",
+          "cognitive": {
+            "sum": 45,
+            "max": 6,
+            "functions": 20
+          }
+        }
+      ]
+    },
+    {
+      "iteration": 2,
+      "before": {
+        "total": 51.6,
+        "complexity": 10.5,
+        "duplication": 92.6,
+        "complexityPenalty": 45,
+        "duplicatedLines": 13.8,
+        "testsPassed": true
+      },
+      "after": {
+        "total": 100,
+        "complexity": 100,
+        "duplication": 100,
+        "complexityPenalty": 0,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "accepted": true,
+      "reason": "accepted candidate 3",
+      "votes": [
+        "better",
+        "better",
+        "better"
+      ],
+      "cognitive": {
+        "sum": 46,
+        "max": 6,
+        "functions": 20
+      },
+      "candidates": [
+        {
+          "k": 1,
+          "score": 100,
+          "votes": [
+            "better",
+            "same",
+            "better"
+          ],
+          "reason": "ok",
+          "cognitive": {
+            "sum": 45,
+            "max": 6,
+            "functions": 20
+          }
+        },
+        {
+          "k": 2,
+          "score": 100,
+          "votes": [
+            "better",
+            "same",
+            "same"
+          ],
+          "reason": "judge: better/same/same",
+          "cognitive": {
+            "sum": 53,
+            "max": 6,
+            "functions": 20
+          }
+        },
+        {
+          "k": 3,
+          "score": 100,
+          "votes": [
+            "better",
+            "better",
+            "better"
+          ],
+          "reason": "ok",
+          "cognitive": {
+            "sum": 46,
+            "max": 6,
+            "functions": 20
+          }
+        }
+      ]
+    },
+    {
+      "iteration": 3,
+      "before": {
+        "total": 100,
+        "complexity": 100,
+        "duplication": 100,
+        "complexityPenalty": 0,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "after": {
+        "total": 100,
+        "complexity": 100,
+        "duplication": 100,
+        "complexityPenalty": 0,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "accepted": true,
+      "reason": "accepted candidate 1",
+      "votes": [
+        "better",
+        "better",
+        "better"
+      ],
+      "cognitive": {
+        "sum": 32,
+        "max": 5,
+        "functions": 21
+      },
+      "candidates": [
+        {
+          "k": 1,
+          "score": 100,
+          "votes": [
+            "better",
+            "better",
+            "better"
+          ],
+          "reason": "ok",
+          "cognitive": {
+            "sum": 32,
+            "max": 5,
+            "functions": 21
+          }
+        },
+        {
+          "k": 2,
+          "score": 100,
+          "votes": [
+            "better",
+            "better",
+            "better"
+          ],
+          "reason": "ok",
+          "cognitive": {
+            "sum": 32,
+            "max": 5,
+            "functions": 21
+          }
+        },
+        {
+          "k": 3,
+          "score": 100,
+          "votes": [
+            "better",
+            "same",
+            "better"
+          ],
+          "reason": "ok",
+          "cognitive": {
+            "sum": 34,
+            "max": 6,
+            "functions": 21
+          }
+        }
+      ]
+    }
+  ],
+  "judge": "**VERDICT: better**\n\nThe extractions map to real, reused concepts rather than cosmetic splitting: `roundCents` kills a duplicated formula, `tieredRate` unifies three near-identical ascending-threshold lookups (member discount, gold discount, shipping cost) into one table-driven pattern, `subtotalOf`/`totalWeight` are each called from two call sites, and `summarizeBy` in report.ts collapses three copy-pasted loops into one. The validation split (`validateUser`/`validateItem`/`validateItems`/`validateCoupon`) gives each rule a name without changing behavior, and I checked the shipping tier boundary math (`>=` descending order vs. the original `<` ascending chain) — it's behavior-preserving at every boundary (0.5, 1, 5, 20). This isn't just chasing a duplication/complexity score; the resulting names read close to the business rules (free shipping, tiered rate, category weight).\n\nTwo real smells worth fixing, though:\n\n1. **Misleading parameter names in `tieredRate`**: it's declared as `tieredRate(years: number, tiers: Array<[minYears: number, rate: number]>)`, but it's also called with `weight` for shipping (`tieredRate(weight, tiers)`). The generic helper still carries \"years\" naming baked in from its first use case — a maintainer skimming `baseShippingRate` has to notice the mismatch to trust it's correct. Rename the params to something domain-neutral (`x`, `minX`) since the function is genuinely generic.\n2. **Undocumented ordering contract**: `tieredRate` assumes its `tiers` array is sorted descending by threshold and returns on first match — that invariant isn't stated anywhere (no comment, no sort-on-read, no assertion). Someone adding a tier to `SHIPPING_RATE_TIERS` or `CATEGORY_UNIT_WEIGHT`-style tables out of order gets silently wrong results with no compile-time or runtime signal. This is the one place I'd ask for a one-line comment or a defensive sort before shipping the refactor.\n\nNeither of these is \"gaming\" a metric (no pointless function-splitting just to lower per-function complexity counts, no trivial one-line extractions solely to boost a reuse score) — they're a side effect of a legitimately good abstraction that wasn't fully cleaned up after generalizing.\n"
+}
