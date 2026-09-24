@@ -1,0 +1,8 @@
+Tests already pass via `node --test`, which is the verification method specified in the task. Summary of the refactor to `src/order.ts`:
+
+- Extracted shared helpers `roundMoney`, `computeSubtotal`, `tieredRate` — eliminates the 98.5% duplication between `calculateMemberDiscount`/`calculateGoldDiscount` (now both just supply their tier table).
+- `calculateShipping`: replaced nested if/else chains with a `WEIGHT_PER_CATEGORY` lookup and a `SHIPPING_RATES` table (`JP`/`default`) walked via `shippingCostForWeight`, cutting cyclomatic/cognitive complexity drastically.
+- `validateOrder`: split into `validateUser`, `validateItem`/`validateItems`, `validateCoupon`, each with early returns instead of deep nesting, then composed via array spread.
+- `calculateTotal`: pulled out `calculateTierDiscount` and `calculateCouponDiscount`, reusing `computeSubtotal`/`calculateShipping`.
+
+All exported names/signatures are unchanged, and `node --test src/order.test.ts` passes all 4 tests.

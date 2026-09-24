@@ -1,0 +1,9 @@
+All 4 tests pass. Summary of the refactor:
+
+- **`roundMoney`** and **`orderSubtotal`** — extracted from genuine duplicated logic (rounding appeared 3x, subtotal summing appeared 2x with real reuse across `calculateShipping`'s free-shipping check and `calculateTotal`).
+- **`calculateMemberDiscount`/`calculateGoldDiscount`** now share `tierDiscountRate(years, highRate, midRate, lowRate)` — this removes the flagged 98.5% duplicate while keeping thresholds/rates explicit as named arguments at each call site, avoiding the opaque tuple-array pattern that reviewers rejected three times.
+- **`calculateShipping`** — split into `itemWeight` (a genuinely separable per-item calculation) and `shippingRateForWeight` (same threshold-table pattern as above, reused twice for JP/INTL, both real duplication, not single-use).
+- **`validateOrder`** — split into `validateUser`/`validateItem`/`validateItems`/`validateCoupon`, mirroring the decomposition every reviewer across all three prior attempts agreed was a genuine readability win, verified to preserve exact branching/order behavior against the test cases.
+- **`calculateTotal`** — left its branch structure intact (only swapped in `orderSubtotal`/`roundMoney`), since reviewers specifically flagged single-use extractions like `tierDiscountAmount`/`couponDiscountAmount` as gaming rather than improvement.
+
+No opaque data-table lookups, no single-call "extraction for extraction's sake" — every new helper has genuine reuse or isolates a clearly separable concern.

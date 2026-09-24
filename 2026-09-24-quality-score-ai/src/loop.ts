@@ -105,7 +105,7 @@ async function judgeVotes(diff: string, n: number): Promise<{ verdict: string; v
 const history: Step[] = [];
 const feedback: string[] = [];
 const MAX_FEEDBACK = 2;
-const clean = (t: string) => t.replace(/^Warning: no stdin.*\n/m, "").trim().slice(0, 2000);
+const clean = (t: string) => t.replace(/^Warning: no stdin.*\n/m, "").trim().slice(0, 1200);
 
 let m = collect(work);
 const m0 = m;
@@ -213,11 +213,18 @@ for (let i = 1; i <= Number(args.iterations); i++) {
     m = best.metrics;
     current = best.score;
   } else {
-    for (const c of cands.filter((c) => c.reason !== "no change")) {
-      const body = c.reviews.length
-        ? c.reviews.map((r, n) => `Reviewer ${n + 1}:\n${r}`).join("\n\n")
-        : "(no reviewer comments)";
-      feedback.push(`Reason: ${c.reason}\n\n${body}`);
+    // Only when every candidate failed: one feedback entry per iteration, covering all candidates.
+    const failed = cands.filter((c) => c.reason !== "no change");
+    if (failed.length) {
+      const entry = failed
+        .map((c) => {
+          const body = c.reviews.length
+            ? c.reviews.map((r, n) => `Reviewer ${n + 1}:\n${r}`).join("\n\n")
+            : "(no reviewer comments)";
+          return `#### Candidate ${c.k} — ${c.reason}\n\n${body}`;
+        })
+        .join("\n\n");
+      feedback.push(entry);
       if (feedback.length > MAX_FEEDBACK) feedback.shift();
     }
   }

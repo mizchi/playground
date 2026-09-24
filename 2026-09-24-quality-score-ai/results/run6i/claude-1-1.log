@@ -1,0 +1,8 @@
+All 4 tests pass. Refactored `src/order.ts`:
+
+- **Deduplicated** `calculateMemberDiscount`/`calculateGoldDiscount` via a shared `tieredRate` helper (was 98.5% similar).
+- **`calculateShipping`**: replaced nested if/else chains with lookup tables (`CATEGORY_WEIGHT_PER_UNIT`, `SHIPPING_RATES_BY_COUNTRY`) and small single-purpose helpers (`itemWeight`, `totalWeight`, `shippingRateForWeight`, `hasFreeShipping`), dropping cyclomatic 16 → near-linear.
+- **`validateOrder`**: split into `validateUser`, `validateItem`/`validateItems`, `validateCoupon`, each with early returns instead of nested branches (cyclomatic 15 → small per-function).
+- **`calculateTotal`**: extracted `tierDiscount` and `couponDiscountAmount`, and a shared `subtotalOf`/`roundMoney` used across functions.
+
+All exported names/signatures are unchanged, `order.test.ts` untouched, and behavior is identical (verified by test run).

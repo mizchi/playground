@@ -1,0 +1,7 @@
+Only imports the `Order` type — unaffected. Exported names and signatures (`calculateMemberDiscount`, `calculateGoldDiscount`, `calculateShipping`, `validateOrder`, `calculateTotal`, plus `Item`/`User`/`Order` types) are all unchanged, and all tests pass.
+
+Summary of the refactor in `src/order.ts`:
+- `calculateMemberDiscount`/`calculateGoldDiscount` now delegate to a shared `tierDiscount` helper driven by declarative rate-band tables, eliminating the near-duplicate logic.
+- `calculateShipping` was split into small helpers (`orderWeight`, `shippingCostForWeight`, `qualifiesForFreeShipping`, `orderSubtotal`) driven by lookup tables instead of nested if/else chains, cutting both cognitive and cyclomatic complexity.
+- `validateOrder` was split into `validateUser`, `validateItem`/`validateItems`, and `validateCoupon`, each with a flat, single-purpose branch structure.
+- `calculateTotal` now composes `tierDiscountAmount`/`couponDiscountAmount`/`orderSubtotal` helpers instead of inline branching, and uses `Math.max`/`roundMoney` for the final clamp/round (previously duplicated rounding logic).

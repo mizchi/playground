@@ -39,7 +39,7 @@ fixture をコピー → 採点 ─┬→ claude -p にレポートを渡して�
 - `--best-of N`: 1 iteration で N 個の候補を並列に生成する (各候補は現在の採択状態の clone 上で作業する)。
   - 各候補にゲートと judge をかける。「judge の better 票が多い → スコアが高い → cognitive 合計が小さい」の順で最良の候補を選ぶ。
   - 最良の候補も過半数の better を得ていなければ、その iteration は全棄却になる。
-- `--feedback`: 棄却された試行の理由と judge のコメント (直近 2 回分) を、次の iteration のリファクタプロンプトに追加する。あわせて「読みやすい関数は点数が低くてもそのままでよい、変更なしも可」と指示する。
+- `--feedback`: 全候補が棄却された iteration について、全候補の棄却理由と judge のコメントを次の iteration のリファクタプロンプトに追加する (直近 2 iteration 分)。あわせて「読みやすい関数は点数が低くてもそのままでよい、変更なしも可」と指示する。
 - 採択時だけ commit し、棄却時は `git reset --hard` で戻す。
 
 ## 動かし方
@@ -56,6 +56,7 @@ node src/loop.ts --iterations 4 --model sonnet --judge --accept judge  # run2: �
 node src/loop.ts --iterations 4 --judge --accept judge --judges 3      # run3: judge 3 人を並列で走らせ、過半数が better なら採用
 node src/loop.ts --iterations 4 --judge --accept judge --judges 3 --feedback  # run4: 棄却理由を次のプロンプトに渡す
 node src/loop.ts --iterations 3 --judge --accept judge --judges 3 --best-of 3 # run5: 候補を 3 つ並列に作って最良を採る
+node src/loop.ts --iterations 3 --judge --accept judge --judges 3 --best-of 3 --feedback  # run6: run5 + 全棄却時のフィードバック
 ```
 
 実行結果は `runs/<timestamp>/` に出る (gitignore 済み)。代表的な結果は `results/` に置いた。
@@ -224,6 +225,58 @@ run4 の問題 16 (最初の 1 手の当たり外れ) を受けて、1 iteration
 19. **並列化すれば、壁時計時間はほとんど増えない。** 呼び出し回数は 2〜3 倍になるが、並列なので時間は run3 と同程度だった。むしろ、棄却 → やり直しの直列ループが減るぶん短くなることもある (run4e の 8 分に対し、run5g は 3.5 分)。
 20. **それでも全棄却は起こる。** run5h の iteration 1 は 3 候補とも過半数を取れなかった。best-of-N と棄却理由のフィードバックを組み合わせる余地がある。
 
+## 結果 (run6: `--best-of 3 --feedback`, 2 並列, 3 iterations)
+
+run5 に、全候補が棄却されたときだけ理由を次のプロンプトに渡すフィードバックを組み合わせた。
+
+| iteration | run6i | run6j |
+| --- | --- | --- |
+| 1 | **#1 better,same,better → 採択** / #2 worse,worse,better / #3 worse,same,same | #1 better,same,same / #2 same,same,better / #3 better,same,same → 全棄却 |
+| 2 | #1 変更なし / **#2 better,worse,better → 採択** (report.ts) / #3 変更なし | (フィードバックあり) #1 worse,same,same / **#2 95.2 better,better,same → 採択** / #3 same,better,same |
+| 3 | 全候補が変更なし | (フィードバックあり) 3 候補とも 100 点を狙い、worse / worse / worse → 全棄却 |
+| 最終 | 100 (最終 judge: same) | 95.2 (最終 judge: better) |
+
+詳細は `results/run6i/`, `results/run6j/` を参照。
+
+### run6 でわかったこと
+
+21. **フィードバックはほとんど発動しない。** best-of-3 では全棄却が起きにくいため、run6i では一度も使われなかった (実質 run5 と同じ条件)。
+22. **発動すると、run3c / run4e と同じ「保守的な着地」になった。** run6j はフィードバック後に 95.2 で採択された。
+    - 残ったのは、平坦な if の並びの `baseShippingRate` (cognitive 10)。
+    - iteration 3 では、3 候補ともこれを消して 100 点を狙い、ほぼ全員一致の `worse` で棄却された。
+    - レポートに載っている関数に注意が集中するため、3 候補とも `report.ts` の重複には気付かなかった。
+23. **各ステップの `better` が、全体の `better` になるとは限らない。** run6i は 2 ステップとも過半数の `better` で採択されたが、累積差分に対する最終 judge は `same` (細かく分割しすぎという指摘) だった。ただし、最終 judge は 1 人なので、これもぶれの範囲かもしれない。
+24. **この題材・この規模では、best-of-N 単独とフィードバック併用の差ははっきりしない。**
+
+## 全 run のまとめ
+
+| run | 設定 | 最終スコア | cognitive 合計 / 最大 | report.ts の重複 | 最終 judge |
+| --- | --- | --- | --- | --- | --- |
+| baseline | - | 51.6 | 89 / 28 | 残る | - |
+| run1 | スコアのみ | 100 | - | 棄却された | same |
+| run2a | judge 1 人 | 100 | 48 / 6 | 残る | same |
+| run2b | judge 1 人 | 100 | 29 / 5 | 解消 | same |
+| run3c | judge 3 人 | 95.2 | 55 / 10 | 残る | better |
+| run3d | judge 3 人 | 100 | 32 / 5 | 解消 | same |
+| run4e | judge 3 人 + feedback | 68.7 | 72 / 21 | 残る | better |
+| run4f | judge 3 人 + feedback | 100 | 32 / 5 | 解消 | better |
+| run5g | best-of-3 | 100 | 38 / 6 | 解消 | better |
+| run5h | best-of-3 | 100 | 32 / 5 | 解消 | better |
+| run6i | best-of-3 + feedback | 100 | 35 / 5 | 解消 | same |
+| run6j | best-of-3 + feedback | 95.2 | 57 / 10 | 残る | better |
+
+(run1 の cognitive は、`cccc-eval/README.md` のとおり order.ts だけで 71 / 28 → 28 / 5。最終 judge は、各 run の最後に累積差分を 1 人で判定したもの。)
+
+### 結論
+
+- **採点 → AI リファクタ → ゲートのループ自体は、簡単に自動化できる。** 定量指標は、AI に「どこを直すべきか」を示すのに有効だった。
+- **定量指標だけを報酬にすると、指標の穴 (関数分割・テーブル化・検出漏れ・100 点での頭打ち) にそのまま沿って最適化される。**
+- **judge (LLM による定性評価) を採択ゲートに入れると、指標を悪用した変更を止められる。** ただし、1 人だとぶれるので、3 人の多数決が最低ライン。
+- **最も安定したのは best-of-N。** 同じ judge でも、候補を増やすと「最初の 1 手の当たり外れ」が平均化される。並列にすれば時間もほとんど増えない。
+- **棄却理由のフィードバックは効くが、保守的な方向に効きやすい。**「悪い直し方」の指摘が「直さない」に一般化され、95.2 や 68.7 で止まることがあった。
+- **スコア 100 は、ゴールとして不適切。** 平坦な分岐のように「指標上は減点されるが、読みやすいコード」が存在する。スコアは改善箇所の候補リストとして使い、採否は judge が決める、という役割分担が良さそう。
+- 今回の検証は 1 題材 (約 190 行)、モデル 1 種 (sonnet)、各設定 2 run の小さな実験。より大きな実コードで試す必要がある。
+
 ## cccc の評価
 
 `cccc-eval/README.md` にまとめた。要点:
@@ -236,8 +289,8 @@ run4 の問題 16 (最初の 1 手の当たり外れ) を受けて、1 iteration
 
 ### 次に試すなら
 
-- best-of-N と `--feedback` を組み合わせる (全棄却のときだけ理由を渡す)
 - 棄却された差分のうち judge が良いと言った部分だけを残す、部分採択の仕組みを入れる
+- 平坦な分岐のように「読みやすいので残す」と judge が判断した関数を、次のレポートから除外する (無理な 100 点狙いを止める)
 - iteration 数を増やして、保守的になった後に改善が再開するかを見る
 - スコアに cognitive 合計と関数数の増加を入れ、関数ごとの閾値だけでは満点にならないようにする
 - 閾値 8 だと 1 回で飽和するので、より大きい実コードで試す

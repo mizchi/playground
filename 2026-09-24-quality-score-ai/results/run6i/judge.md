@@ -1,0 +1,14 @@
+**VERDICT: same** — real improvements are roughly cancelled out by one genuine readability regression and a pattern of over-fragmentation that looks aimed at metrics rather than clarity.
+
+**Genuine improvements:**
+- `summarizeByKey` correctly collapses three truly identical loops (`summarizeByCategory/Country/Tier`) — real duplication removed, real reuse gained.
+- `validateOrder` → `validateUser`/`validateItems`/`validateItem`/`validateCoupon` turns a deeply nested blob into a flat list of named concerns. This is a legitimate readability win even though each helper has one call site — the original nesting (user-check wrapping id/years checks, items-check wrapping the per-item loop) was the actual complexity, and flattening it into sequential, independently-readable checks helps a reader.
+- `CATEGORY_WEIGHT_PER_UNIT` / `SHIPPING_RATES_BY_COUNTRY` as lookup tables are a fair simplification of what was an if/else-if chain encoding the same shape of data twice (once per country).
+
+**Regression — looks like metric gaming:**
+- `tieredRate(years, atFive, atTwo, base)` is the clearest smell here. It merges two conceptually different domains (member rates vs. gold rates) into one function with unlabeled positional numeric parameters. At the call site, `tieredRate(user.years, 0.1, 0.05, 0.02)` gives no indication which number is which without going to read the function signature — and a future edit that swaps two arguments would silently break discount rates. The original, while repetitive, was self-documenting: `rate = 0.1` sat right next to `years >= 5` for gold or member specifically. This is a textbook case of collapsing "duplication" that wasn't really costing anything, in exchange for an actual footgun. Named the params or made it a rate-table lookup (like the shipping rates) would have kept the dedup without the positional-arg risk.
+
+**Borderline — fragmentation without reuse:**
+- `itemWeight`, `totalWeight`, `shippingRateForWeight`, `hasFreeShipping`, `tierDiscount`, `couponDiscountAmount` are each called from exactly one place. Splitting `calculateShipping` and `calculateTotal` into 4–5 single-use one-liners doesn't remove any duplication — it just lowers each function's own LOC/branch count while forcing the reader to jump through several extra indirections to reconstruct what was previously a single linear read. For logic this small and already sequential, this reads like an attempt to shrink per-function complexity/line-count scores rather than an organic decomposition driven by reused concepts.
+
+Net: the validation and reporting refactors are honest wins; the shipping/total refactor mostly trades one flat (if verbose) function for a chain of trivial single-use functions, and `tieredRate` actively makes the discount logic harder to verify at a glance. Calling it a wash rather than a clear improvement.

@@ -1,0 +1,8 @@
+Refactor complete and verified:
+
+- **`calculateMemberDiscount`/`calculateGoldDiscount`** now share `yearsBasedRate` (named parameters, not an opaque tuple table) — removes the 98.5% duplication while keeping the threshold ladder inline-readable.
+- **`calculateShipping`** split into `itemWeight`/`orderWeight`, `baseShippingRate`, and `qualifiesForFreeShipping` — each a self-contained, named step.
+- **`validateOrder`** split into `validateUser`/`validateItem`/`validateItems`/`validateCoupon`, composed via array spread — same error order/messages, much lower nesting.
+- **`calculateTotal`** now uses shared `subtotalOf`/`roundMoney` helpers and a small `couponDiscountFor` for the coupon branch, reading as a top-to-bottom pipeline.
+
+All 4 tests in `src/order.test.ts` pass unchanged; exported names/signatures untouched.

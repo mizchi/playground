@@ -1,0 +1,1 @@
+The report already shows a perfect score (100/100) with no complex functions or duplication detected, and I confirmed `src/order.ts` is already cleanly factored — small single-purpose helpers, no branching over cyclomatic/cognitive thresholds, no repeated logic. All 4 tests in `src/order.test.ts` pass. No refactor is needed; the code is left unchanged.
