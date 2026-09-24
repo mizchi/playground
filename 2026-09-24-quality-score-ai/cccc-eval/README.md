@@ -56,6 +56,25 @@ run1 (`../results/run1`) の `order.ts` について、リファクタ前後を�
 - cognitive 合計は 71 → 28 と実際に減った。ネストがなくなった分を、cognitive は正しく反映している。
 - 「分岐を減らしたのか、それとも散らしただけか」は、**cognitive 合計と cyclomatic 合計を並べて見ると区別できる。**
 
+### 平坦な分岐の過大評価
+
+run3c (`../results/run3c`) では、次の関数が 3 人の judge に「読みやすい」と判定されて残った。それでも cccc の cognitive は 10 で、閾値 8 を超えている。
+
+```ts
+function baseShippingCost(weight: number, country: string): number {
+  const domestic = country === "JP";
+  if (weight < 1) return domestic ? 300 : 1500;
+  if (weight < 5) return domestic ? 600 : 3000;
+  if (weight < 20) return domestic ? 1200 : 6000;
+  return domestic ? 3000 : 15000;
+}
+```
+
+- ネストはないが、`if` と三項演算子がそれぞれ +1 されるので積み上がる。
+- 仕様 (SonarSource) どおりの値であって、cccc のバグではない。
+- ただ、このような「表のような分岐」は人間にとっては低コストで、ここを下げようとすると過剰な抽象化 (テーブル + `find` + 番兵) が生まれる。
+- 閾値判定だけで採点すると、こうしたコードを悪化させる方向に AI を押してしまう。
+
 ## 4. 速度
 
 同じマシンで、4 コアでの参考値。

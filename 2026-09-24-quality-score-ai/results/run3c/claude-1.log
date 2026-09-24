@@ -1,0 +1,8 @@
+Refactored `src/order.ts`:
+
+- **Deduplicated** `calculateMemberDiscount`/`calculateGoldDiscount` (was 98.5% similar) into a shared `tieredRate` helper driven by small tier-rate tables.
+- **`calculateShipping`** (cognitive 24 → low): extracted `computeWeight` (category→weight table) and `tieredShippingRate` (threshold table lookup, used for both JP/other), replacing nested if/else chains.
+- **`validateOrder`** (cognitive 28 → low): split into `validateUser`, `validateItem`/`validateItems`, and `validateCoupon`, composed via array spread — each piece is now a simple linear function.
+- **`calculateTotal`** (cognitive 9 → low): reused `computeSubtotal`, summed member/gold discounts directly (mutually exclusive by tier so no branching needed), and extracted `calculateCouponDiscount`.
+
+Ran `node --test src/order.test.ts` — all 4 tests pass, `src/order.test.ts` untouched, all exported names/signatures unchanged.

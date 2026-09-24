@@ -1,0 +1,1 @@
+All 4 tests pass. `order.ts` was already clean with no complexity/duplication issues per the report; I deduplicated the three near-identical `summarize*` functions in `report.ts` into a single `summarizeBy` helper parameterized by key function, keeping all exported signatures unchanged.

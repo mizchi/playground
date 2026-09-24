@@ -35,6 +35,7 @@ fixture をコピー → 採点 ─┬→ claude -p にレポートを渡して�
 - テストが通らなければ棄却する。
 - `--accept score` (デフォルト): スコアが上がっていなければ棄却する。
 - `--accept judge`: スコアが下がる、または別プロンプトの judge が差分を `better` と判定しなければ棄却する。
+  - `--judges N` で judge を N 人並列に走らせ、過半数が `better` なら採択する。
 - 採択時だけ commit し、棄却時は `git reset --hard` で戻す。
 
 ## 動かし方
@@ -48,6 +49,7 @@ cargo install similarity-ts                     # または mizchi/similarity �
 node src/score.ts fixtures/order-service        # 採点のみ (--json で JSON 出力)
 node src/loop.ts --iterations 3 --model sonnet --judge                 # run1: 点数が上がれば採用
 node src/loop.ts --iterations 4 --model sonnet --judge --accept judge  # run2: 点数が下がらず judge が better なら採用
+node src/loop.ts --iterations 4 --judge --accept judge --judges 3      # run3: judge 3 人を並列で走らせ、過半数が better なら採用
 ```
 
 実行結果は `runs/<timestamp>/` に出る (gitignore 済み)。代表的な結果は `results/` に置いた。
@@ -114,6 +116,47 @@ run1 の問題 3 を受けて、採択条件を「スコアが下がらない、
 8. **棄却するたびにベースラインからやり直すので効率が悪い。** 棄却された試行の judge のコメントを次の試行のプロンプトに渡せば、同じ指摘を繰り返さずに済むはず (未実装)。
 9. **AI は報告されていない問題を見つけることもあれば、見つけないこともある。** `report.ts` の重複は、run2b では見つけたが、run2a では見つけなかった (iteration 3, 4 は「変更なし」)。指標の検出漏れを AI が補う保証はない。
 
+## 結果 (run3: `--accept judge --judges 3`, 2 並列)
+
+run2 の問題 7 (judge の判定がぶれる) を受けて、judge を 3 人にして多数決にした。
+
+| iteration | run3c | run3d |
+| --- | --- | --- |
+| 1 | 100 / worse, worse, same → 棄却 | 100 / better, better, same → **採択** |
+| 2 | 95.2 / same, better, better → **採択** | 100 / same, same, worse → 棄却 |
+| 3 | 100 / worse, worse, worse → 棄却 | 100 / same, same, same → 棄却 |
+| 4 | 100 / worse, same, worse → 棄却 | 100 / better, better, better → **採択** (report.ts の共通化) |
+| 最終 | **95.2** | 100 |
+
+詳細は `results/run3c/`, `results/run3d/` を参照。
+
+### run3 でわかったこと
+
+10. **多数決にすると、judge が指標に拒否権を持つようになる。** run3c は 95.2 で止まった。
+    - 残った `baseShippingCost` は cognitive 10 (閾値 8 を超える)。
+    - iteration 3, 4 で AI はこれを「テーブル + `find` + `Infinity` 番兵 + `!`」に書き換えて 100 点にしたが、judge は 3 人とも `worse` と判定した。理由は「平坦な if の並びの方が読みやすく、`!` は隠れた不変条件に依存している」。
+    - スコアだけで判定した run1 と、judge 1 人の run2b では、これと同じパターンが採択されていた。
+
+    ```ts
+    // 採択されたコード (cognitive 10、スコアは減点される)
+    function baseShippingCost(weight: number, country: string): number {
+      const domestic = country === "JP";
+      if (weight < 1) return domestic ? 300 : 1500;
+      if (weight < 5) return domestic ? 600 : 3000;
+      if (weight < 20) return domestic ? 1200 : 6000;
+      return domestic ? 3000 : 15000;
+    }
+    ```
+
+11. **指標と judge が食い違う典型例は「平坦な分岐の並び」だった。** cognitive は `if` と三項演算子を 1 つずつ数えるので、ネストのない表のような分岐でも閾値を超える。これを無理に消そうとすると過剰な抽象化になる。
+    - 「スコア 100」を目標にし続けると、この種の悪化した変更を AI に求め続けることになる。
+    - 閾値を上げるか、judge が棄却した理由を次のプロンプトに渡して「この関数はこのままでよい」と伝える仕組みが必要。
+12. **多数決でも、判定のぶれは残る。**
+    - run3d の iteration 3 (same ×3) と iteration 4 (better ×3) は、どちらも `summarizeBy(orders, keyFor)` への共通化で、cognitive 合計も同じ 32。
+    - 違いはコールバックの引数の設計 (使わない引数 `_order` があるかどうか) などの細部だけ。
+    - 多数決は同じ差分に対するぶれを減らすが、差分ごとの細かい差には敏感なまま。これは正しい挙動とも言える。
+13. **judge の人数分、コストが増える。** 1 iteration あたりの `claude -p` 呼び出しは 1 (リファクタ) + 3 (judge)。3 人は並列で実行したので、壁時計時間はほとんど増えなかった。
+
 ## cccc の評価
 
 `cccc-eval/README.md` にまとめた。要点:
@@ -126,8 +169,7 @@ run1 の問題 3 を受けて、採択条件を「スコアが下がらない、
 
 ### 次に試すなら
 
-- judge を 3 回実行して多数決にし、ぶれを抑える
-- 棄却理由 (judge のコメント) を次の iteration のプロンプトに渡す
+- 棄却理由 (judge のコメント) を次の iteration のプロンプトに渡す。特に「この関数はこのままでよい」を伝えて、無理な 100 点狙いを止める
 - スコアに cognitive 合計と関数数の増加を入れ、関数ごとの閾値だけでは満点にならないようにする
 - 閾値 8 だと 1 回で飽和するので、より大きい実コードで試す
 - 複数回実行してばらつきを見る

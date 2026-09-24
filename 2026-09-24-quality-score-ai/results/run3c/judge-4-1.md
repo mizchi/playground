@@ -1,0 +1,6 @@
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+VERDICT: worse
+
+The original was four flat, scannable if-statements mapping a weight threshold directly to a price — trivially readable top to bottom. The refactor replaces that with a data table plus a `.find()` that has to be read carefully to see it relies on `SHIPPING_TIERS` being sorted ascending and on `weight < t.limit` matching the first applicable tier (an implicit, undocumented invariant that the old code made syntactically obvious via ordered `if/else` chains). It also adds an awkward fallback (`?? SHIPPING_TIERS[...length-1]`) that's dead code in practice (the last tier's `limit` is `Infinity`, so `find` can never fall through to it), which is a sign of complexity added without benefit.
+
+This has the smell of restructuring specifically to reduce a cyclomatic-complexity or "duplicate literal" metric (turning 4 branches into 1 branch + a lookup, and collapsing repeated `domestic ? x : y` patterns into a table) rather than to help a reader. The domain logic (tiered pricing by weight and destination) is arguably clearer as explicit conditionals than as an abstracted table with a redundant guard clause.

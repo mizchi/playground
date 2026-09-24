@@ -1,0 +1,257 @@
+diff --git a/src/order.ts b/src/order.ts
+index 29758e0..7c40843 100644
+--- a/src/order.ts
++++ b/src/order.ts
+@@ -2,153 +2,127 @@ export type Item = { sku: string; price: number; qty: number; category: string }
+ export type User = { id: string; tier: "guest" | "member" | "gold"; years: number; country: string };
+ export type Order = { user: User; items: Item[]; coupon?: string };
+ 
++function round2(n: number): number {
++  return Math.round(n * 100) / 100;
++}
++
++function rateForYears(years: number, atLeast5: number, atLeast2: number, otherwise: number): number {
++  if (years >= 5) return atLeast5;
++  if (years >= 2) return atLeast2;
++  return otherwise;
++}
++
+ export function calculateMemberDiscount(user: User, subtotal: number): number {
+-  let rate = 0;
+-  if (user.tier === "member") {
+-    if (user.years >= 5) {
+-      rate = 0.1;
+-    } else if (user.years >= 2) {
+-      rate = 0.05;
+-    } else {
+-      rate = 0.02;
+-    }
+-  }
+-  const discount = subtotal * rate;
+-  return Math.round(discount * 100) / 100;
++  const rate = user.tier === "member" ? rateForYears(user.years, 0.1, 0.05, 0.02) : 0;
++  return round2(subtotal * rate);
+ }
+ 
+ export function calculateGoldDiscount(user: User, subtotal: number): number {
+-  let rate = 0;
+-  if (user.tier === "gold") {
+-    if (user.years >= 5) {
+-      rate = 0.2;
+-    } else if (user.years >= 2) {
+-      rate = 0.15;
+-    } else {
+-      rate = 0.1;
+-    }
+-  }
+-  const discount = subtotal * rate;
+-  return Math.round(discount * 100) / 100;
++  const rate = user.tier === "gold" ? rateForYears(user.years, 0.2, 0.15, 0.1) : 0;
++  return round2(subtotal * rate);
++}
++
++const WEIGHT_PER_UNIT: Record<string, number> = { book: 0.5, electronics: 2, furniture: 20 };
++
++function itemWeight(item: Item): number {
++  return (WEIGHT_PER_UNIT[item.category] ?? 1) * item.qty;
++}
++
++function totalWeight(items: Item[]): number {
++  return items.reduce((sum, item) => sum + itemWeight(item), 0);
++}
++
++function subtotalOf(items: Item[]): number {
++  return items.reduce((sum, item) => sum + item.price * item.qty, 0);
++}
++
++function baseShippingCost(weight: number, country: string): number {
++  const domestic = country === "JP";
++  if (weight < 1) return domestic ? 300 : 1500;
++  if (weight < 5) return domestic ? 600 : 3000;
++  if (weight < 20) return domestic ? 1200 : 6000;
++  return domestic ? 3000 : 15000;
+ }
+ 
+ export function calculateShipping(order: Order): number {
+-  let shipping = 0;
+-  let weight = 0;
+-  for (const item of order.items) {
+-    if (item.category === "book") {
+-      weight += 0.5 * item.qty;
+-    } else if (item.category === "electronics") {
+-      weight += 2 * item.qty;
+-    } else if (item.category === "furniture") {
+-      weight += 20 * item.qty;
+-    } else {
+-      weight += 1 * item.qty;
+-    }
++  if (order.user.tier === "gold") {
++    return 0;
+   }
+-  if (order.user.country === "JP") {
+-    if (weight < 1) {
+-      shipping = 300;
+-    } else if (weight < 5) {
+-      shipping = 600;
+-    } else if (weight < 20) {
+-      shipping = 1200;
+-    } else {
+-      shipping = 3000;
+-    }
+-  } else {
+-    if (weight < 1) {
+-      shipping = 1500;
+-    } else if (weight < 5) {
+-      shipping = 3000;
+-    } else if (weight < 20) {
+-      shipping = 6000;
+-    } else {
+-      shipping = 15000;
+-    }
++  if (order.user.tier === "member" && subtotalOf(order.items) >= 10000) {
++    return 0;
+   }
+-  if (order.user.tier === "gold") {
+-    shipping = 0;
+-  } else if (order.user.tier === "member") {
+-    let subtotal = 0;
+-    for (const item of order.items) {
+-      subtotal += item.price * item.qty;
+-    }
+-    if (subtotal >= 10000) {
+-      shipping = 0;
+-    }
++  return baseShippingCost(totalWeight(order.items), order.user.country);
++}
++
++function validateUser(user: User): string[] {
++  if (!user) {
++    return ["user is required"];
+   }
+-  return shipping;
++  const errors: string[] = [];
++  if (!user.id) errors.push("user.id is required");
++  if (user.years < 0) errors.push("user.years must be >= 0");
++  return errors;
+ }
+ 
+-export function validateOrder(order: Order): string[] {
++function validateItem(item: Item, index: number): string[] {
+   const errors: string[] = [];
+-  if (!order.user) {
+-    errors.push("user is required");
+-  } else {
+-    if (!order.user.id) {
+-      errors.push("user.id is required");
+-    }
+-    if (order.user.years < 0) {
+-      errors.push("user.years must be >= 0");
+-    }
+-  }
+-  if (!order.items || order.items.length === 0) {
+-    errors.push("items must not be empty");
+-  } else {
+-    for (let i = 0; i < order.items.length; i++) {
+-      const item = order.items[i];
+-      if (!item.sku) {
+-        errors.push(`items[${i}].sku is required`);
+-      }
+-      if (item.price < 0) {
+-        errors.push(`items[${i}].price must be >= 0`);
+-      } else if (item.qty <= 0) {
+-        errors.push(`items[${i}].qty must be > 0`);
+-      } else {
+-        if (item.category === "furniture" && item.qty > 10) {
+-          errors.push(`items[${i}] furniture qty must be <= 10`);
+-        }
+-      }
+-    }
++  if (!item.sku) {
++    errors.push(`items[${index}].sku is required`);
+   }
+-  if (order.coupon !== undefined) {
+-    if (order.coupon.length !== 8) {
+-      errors.push("coupon must be 8 chars");
+-    } else if (!/^[A-Z0-9]+$/.test(order.coupon)) {
+-      errors.push("coupon must be uppercase alphanumeric");
+-    }
++  if (item.price < 0) {
++    errors.push(`items[${index}].price must be >= 0`);
++  } else if (item.qty <= 0) {
++    errors.push(`items[${index}].qty must be > 0`);
++  } else if (item.category === "furniture" && item.qty > 10) {
++    errors.push(`items[${index}] furniture qty must be <= 10`);
+   }
+   return errors;
+ }
+ 
++function validateItems(items: Item[]): string[] {
++  if (!items || items.length === 0) {
++    return ["items must not be empty"];
++  }
++  return items.flatMap((item, index) => validateItem(item, index));
++}
++
++function validateCoupon(coupon: string | undefined): string[] {
++  if (coupon === undefined) return [];
++  if (coupon.length !== 8) return ["coupon must be 8 chars"];
++  if (!/^[A-Z0-9]+$/.test(coupon)) return ["coupon must be uppercase alphanumeric"];
++  return [];
++}
++
++export function validateOrder(order: Order): string[] {
++  return [
++    ...validateUser(order.user),
++    ...validateItems(order.items),
++    ...validateCoupon(order.coupon),
++  ];
++}
++
++function discountForTier(user: User, subtotal: number): number {
++  if (user.tier === "member") return calculateMemberDiscount(user, subtotal);
++  if (user.tier === "gold") return calculateGoldDiscount(user, subtotal);
++  return 0;
++}
++
++function couponDiscountFor(coupon: string | undefined, subtotal: number, discount: number): number {
++  if (!coupon) return 0;
++  if (coupon.startsWith("HALF")) return (subtotal - discount) * 0.5;
++  if (coupon.startsWith("OFF1")) return 1000;
++  return 0;
++}
++
+ export function calculateTotal(order: Order): number {
+   const errors = validateOrder(order);
+   if (errors.length > 0) {
+     throw new Error(errors.join(", "));
+   }
+-  let subtotal = 0;
+-  for (const item of order.items) {
+-    subtotal += item.price * item.qty;
+-  }
+-  let discount = 0;
+-  if (order.user.tier === "member") {
+-    discount = calculateMemberDiscount(order.user, subtotal);
+-  } else if (order.user.tier === "gold") {
+-    discount = calculateGoldDiscount(order.user, subtotal);
+-  }
+-  let couponDiscount = 0;
+-  if (order.coupon) {
+-    if (order.coupon.startsWith("HALF")) {
+-      couponDiscount = (subtotal - discount) * 0.5;
+-    } else if (order.coupon.startsWith("OFF1")) {
+-      couponDiscount = 1000;
+-    }
+-  }
++  const subtotal = subtotalOf(order.items);
++  const discount = discountForTier(order.user, subtotal);
++  const couponDiscount = couponDiscountFor(order.coupon, subtotal, discount);
+   const shipping = calculateShipping(order);
+-  let total = subtotal - discount - couponDiscount + shipping;
+-  if (total < 0) {
+-    total = 0;
+-  }
+-  return Math.round(total * 100) / 100;
++  const total = subtotal - discount - couponDiscount + shipping;
++  return round2(Math.max(total, 0));
+ }

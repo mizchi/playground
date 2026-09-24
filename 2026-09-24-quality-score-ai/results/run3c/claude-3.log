@@ -1,0 +1,1 @@
+All 4 tests pass. Refactored `baseShippingCost` (src/order.ts:39) from four sequential `if`/ternary branches (cognitive=10, cyclomatic=8) into a data-driven lookup over a `SHIPPING_RATE_TIERS` table plus a single `.find()`, dropping it to one conditional branch. Exported names/signatures and behavior are unchanged.
