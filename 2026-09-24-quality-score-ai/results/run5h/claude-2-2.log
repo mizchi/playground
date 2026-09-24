@@ -1,0 +1,8 @@
+All 4 tests pass. Refactor summary:
+
+- **Deduplicated** `calculateMemberDiscount`/`calculateGoldDiscount` (98.5% similar) into a shared `rateForYears` lookup driven by small rate tables.
+- **`calculateShipping`** (cognitive 24 → low single digits): split into `calculateWeight` (category→weight lookup table replacing if/else chain), `shippingRateForWeight` (threshold lookup shared for both country rate tables), and `hasFreeShipping`.
+- **`validateOrder`** (cognitive 28 → low): split into `validateUser`, `validateItem`/`validateItems`, `validateCoupon`, each a flat set of independent checks, composed via array spread.
+- **`calculateTotal`** (cognitive 9 → low): extracted `calculateTierDiscount` and `calculateCouponDiscount`; reused `calculateSubtotal` (also shared with shipping's free-shipping check) and `roundMoney`.
+
+All exported names/signatures are unchanged, `order.test.ts` untouched, and `node --test src/order.test.ts` passes (4/4).

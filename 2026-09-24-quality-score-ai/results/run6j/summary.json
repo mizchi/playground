@@ -1,0 +1,266 @@
+{
+  "fixture": "fixtures/order-service",
+  "model": "sonnet",
+  "accept": "judge",
+  "judges": 3,
+  "feedback": true,
+  "bestOf": 3,
+  "baseline": {
+    "total": 51.6,
+    "complexity": 10.5,
+    "duplication": 92.6,
+    "complexityPenalty": 45,
+    "duplicatedLines": 13.8,
+    "testsPassed": true
+  },
+  "baseCognitive": {
+    "sum": 89,
+    "max": 28,
+    "functions": 8
+  },
+  "final": {
+    "total": 95.2,
+    "complexity": 90.5,
+    "duplication": 100,
+    "complexityPenalty": 2,
+    "duplicatedLines": 0,
+    "testsPassed": true
+  },
+  "history": [
+    {
+      "iteration": 1,
+      "before": {
+        "total": 51.6,
+        "complexity": 10.5,
+        "duplication": 92.6,
+        "complexityPenalty": 45,
+        "duplicatedLines": 13.8,
+        "testsPassed": true
+      },
+      "after": {
+        "total": 100,
+        "complexity": 100,
+        "duplication": 100,
+        "complexityPenalty": 0,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "accepted": false,
+      "reason": "all candidates rejected",
+      "votes": [
+        "better",
+        "same",
+        "same"
+      ],
+      "cognitive": {
+        "sum": 44,
+        "max": 6,
+        "functions": 21
+      },
+      "candidates": [
+        {
+          "k": 1,
+          "score": 100,
+          "votes": [
+            "better",
+            "same",
+            "same"
+          ],
+          "reason": "judge: better/same/same",
+          "cognitive": {
+            "sum": 48,
+            "max": 6,
+            "functions": 22
+          }
+        },
+        {
+          "k": 2,
+          "score": 100,
+          "votes": [
+            "same",
+            "same",
+            "better"
+          ],
+          "reason": "judge: same/same/better",
+          "cognitive": {
+            "sum": 46,
+            "max": 6,
+            "functions": 19
+          }
+        },
+        {
+          "k": 3,
+          "score": 100,
+          "votes": [
+            "better",
+            "same",
+            "same"
+          ],
+          "reason": "judge: better/same/same",
+          "cognitive": {
+            "sum": 44,
+            "max": 6,
+            "functions": 21
+          }
+        }
+      ]
+    },
+    {
+      "iteration": 2,
+      "before": {
+        "total": 51.6,
+        "complexity": 10.5,
+        "duplication": 92.6,
+        "complexityPenalty": 45,
+        "duplicatedLines": 13.8,
+        "testsPassed": true
+      },
+      "after": {
+        "total": 95.2,
+        "complexity": 90.5,
+        "duplication": 100,
+        "complexityPenalty": 2,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "accepted": true,
+      "reason": "accepted candidate 2",
+      "votes": [
+        "better",
+        "better",
+        "same"
+      ],
+      "cognitive": {
+        "sum": 57,
+        "max": 10,
+        "functions": 20
+      },
+      "candidates": [
+        {
+          "k": 1,
+          "score": 100,
+          "votes": [
+            "worse",
+            "same",
+            "same"
+          ],
+          "reason": "judge: worse/same/same",
+          "cognitive": {
+            "sum": 52,
+            "max": 7,
+            "functions": 17
+          }
+        },
+        {
+          "k": 2,
+          "score": 95.2,
+          "votes": [
+            "better",
+            "better",
+            "same"
+          ],
+          "reason": "ok",
+          "cognitive": {
+            "sum": 57,
+            "max": 10,
+            "functions": 20
+          }
+        },
+        {
+          "k": 3,
+          "score": 100,
+          "votes": [
+            "same",
+            "better",
+            "same"
+          ],
+          "reason": "judge: same/better/same",
+          "cognitive": {
+            "sum": 50,
+            "max": 7,
+            "functions": 17
+          }
+        }
+      ]
+    },
+    {
+      "iteration": 3,
+      "before": {
+        "total": 95.2,
+        "complexity": 90.5,
+        "duplication": 100,
+        "complexityPenalty": 2,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "after": {
+        "total": 100,
+        "complexity": 100,
+        "duplication": 100,
+        "complexityPenalty": 0,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "accepted": false,
+      "reason": "all candidates rejected",
+      "votes": [
+        "worse",
+        "worse",
+        "worse"
+      ],
+      "cognitive": {
+        "sum": 51,
+        "max": 6,
+        "functions": 21
+      },
+      "candidates": [
+        {
+          "k": 1,
+          "score": 100,
+          "votes": [
+            "worse",
+            "worse",
+            "worse"
+          ],
+          "reason": "judge: worse/worse/worse",
+          "cognitive": {
+            "sum": 51,
+            "max": 6,
+            "functions": 21
+          }
+        },
+        {
+          "k": 2,
+          "score": 100,
+          "votes": [
+            "same",
+            "worse",
+            "worse"
+          ],
+          "reason": "judge: same/worse/worse",
+          "cognitive": {
+            "sum": 51,
+            "max": 6,
+            "functions": 21
+          }
+        },
+        {
+          "k": 3,
+          "score": 100,
+          "votes": [
+            "worse",
+            "worse",
+            "worse"
+          ],
+          "reason": "judge: worse/worse/worse",
+          "cognitive": {
+            "sum": 51,
+            "max": 6,
+            "functions": 21
+          }
+        }
+      ]
+    }
+  ],
+  "judge": "**VERDICT: better**\n\nMost of this refactor is genuine: `subtotalOf`/`roundMoney` eliminate real duplication used in 4+ places, and splitting `calculateShipping` into `orderWeight` → `baseShippingRate` → `qualifiesForFreeShipping` turns a deeply-nested wall of `if/else` into a readable pipeline. Same for `validateUser`/`validateItem`/`validateItems`/`validateCoupon` — each concern is now named and independently testable instead of buried in one 40-line function.\n\nOne extraction looks like it exists to shrink a duplication/complexity metric rather than to help a reader, and actually makes the code *worse*:\n\n```ts\nfunction yearsBasedRate(years: number, highRate: number, midRate: number, lowRate: number): number\n...\nyearsBasedRate(user.years, 0.1, 0.05, 0.02)   // member\nyearsBasedRate(user.years, 0.2, 0.15, 0.1)    // gold\n```\n\nThe two tier-discount blocks were structurally similar (a duplication scanner would flag them), but the original was self-documenting — you read `rate = 0.1` two lines below `user.years >= 5` inside `calculateMemberDiscount`, so meaning was local. Now the meaning lives at the call site as three bare positional floats (`0.1, 0.05, 0.02`) whose mapping to \"high/mid/low\" you have to trust or go verify in the function body — a transposed pair of args (e.g. swapping `0.2` and `0.15` for gold) would be a silent, easy-to-miss bug that no type system catches. This is a textbook \"collapse near-duplicate branches into a parameterized helper\" move that reduces a duplication/complexity score without adding real clarity — arguably it's a step backward in reviewability since the domain semantics (member vs. gold rate tables) are stripped out of the names.\n\nEverything else in the diff is legitimate simplification; only `yearsBasedRate` reads as metric-driven rather than reader-driven.\n"
+}

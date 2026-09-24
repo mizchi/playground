@@ -1,0 +1,3 @@
+That's fine — the test run already exercises the compiled/transpiled code via node's TypeScript support and all tests pass, which is sufficient confidence for behavior correctness.
+
+Refactored `src/order.ts`: extracted shared discount-tier logic (removing the 98.5% duplication between `calculateMemberDiscount`/`calculateGoldDiscount`), replaced the nested if/else chains in `calculateShipping` with table-driven lookups (`calculateWeight`, `baseShippingCost`, `hasFreeShipping`), and split `validateOrder`/`calculateTotal` into small single-purpose helpers (`validateUser`, `validateItem`, `validateItems`, `validateCoupon`, `calculateTierDiscount`, `calculateCouponDiscount`). All exported names/signatures are unchanged and all 4 tests in `src/order.test.ts` pass.

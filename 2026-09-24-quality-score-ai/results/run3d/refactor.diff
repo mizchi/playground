@@ -1,0 +1,365 @@
+diff --git a/src/order.ts b/src/order.ts
+index 29758e0..bdaafbd 100644
+--- a/src/order.ts
++++ b/src/order.ts
+@@ -2,153 +2,180 @@ export type Item = { sku: string; price: number; qty: number; category: string }
+ export type User = { id: string; tier: "guest" | "member" | "gold"; years: number; country: string };
+ export type Order = { user: User; items: Item[]; coupon?: string };
+ 
++type YearsRate = { minYears: number; rate: number };
++
++const MEMBER_DISCOUNT_RATES: YearsRate[] = [
++  { minYears: 5, rate: 0.1 },
++  { minYears: 2, rate: 0.05 },
++  { minYears: 0, rate: 0.02 },
++];
++
++const GOLD_DISCOUNT_RATES: YearsRate[] = [
++  { minYears: 5, rate: 0.2 },
++  { minYears: 2, rate: 0.15 },
++  { minYears: 0, rate: 0.1 },
++];
++
++function roundCurrency(amount: number): number {
++  return Math.round(amount * 100) / 100;
++}
++
++function rateForYears(years: number, tiers: YearsRate[]): number {
++  const tier = tiers.find((t) => years >= t.minYears);
++  return tier ? tier.rate : 0;
++}
++
++function calculateSubtotal(items: Item[]): number {
++  return items.reduce((sum, item) => sum + item.price * item.qty, 0);
++}
++
+ export function calculateMemberDiscount(user: User, subtotal: number): number {
+-  let rate = 0;
+-  if (user.tier === "member") {
+-    if (user.years >= 5) {
+-      rate = 0.1;
+-    } else if (user.years >= 2) {
+-      rate = 0.05;
+-    } else {
+-      rate = 0.02;
+-    }
+-  }
+-  const discount = subtotal * rate;
+-  return Math.round(discount * 100) / 100;
++  const rate = user.tier === "member" ? rateForYears(user.years, MEMBER_DISCOUNT_RATES) : 0;
++  return roundCurrency(subtotal * rate);
+ }
+ 
+ export function calculateGoldDiscount(user: User, subtotal: number): number {
+-  let rate = 0;
+-  if (user.tier === "gold") {
+-    if (user.years >= 5) {
+-      rate = 0.2;
+-    } else if (user.years >= 2) {
+-      rate = 0.15;
+-    } else {
+-      rate = 0.1;
+-    }
+-  }
+-  const discount = subtotal * rate;
+-  return Math.round(discount * 100) / 100;
++  const rate = user.tier === "gold" ? rateForYears(user.years, GOLD_DISCOUNT_RATES) : 0;
++  return roundCurrency(subtotal * rate);
++}
++
++const ITEM_WEIGHT_PER_UNIT: Record<string, number> = {
++  book: 0.5,
++  electronics: 2,
++  furniture: 20,
++};
++const DEFAULT_ITEM_WEIGHT = 1;
++
++type WeightBracket = { belowWeight: number; cost: number };
++
++const JP_SHIPPING_RATES: WeightBracket[] = [
++  { belowWeight: 1, cost: 300 },
++  { belowWeight: 5, cost: 600 },
++  { belowWeight: 20, cost: 1200 },
++  { belowWeight: Infinity, cost: 3000 },
++];
++
++const DEFAULT_SHIPPING_RATES: WeightBracket[] = [
++  { belowWeight: 1, cost: 1500 },
++  { belowWeight: 5, cost: 3000 },
++  { belowWeight: 20, cost: 6000 },
++  { belowWeight: Infinity, cost: 15000 },
++];
++
++function itemWeight(item: Item): number {
++  return (ITEM_WEIGHT_PER_UNIT[item.category] ?? DEFAULT_ITEM_WEIGHT) * item.qty;
++}
++
++function totalWeight(items: Item[]): number {
++  return items.reduce((sum, item) => sum + itemWeight(item), 0);
++}
++
++function shippingCostForWeight(weight: number, brackets: WeightBracket[]): number {
++  const bracket = brackets.find((b) => weight < b.belowWeight);
++  return bracket ? bracket.cost : brackets[brackets.length - 1].cost;
++}
++
++function hasFreeShipping(order: Order, subtotal: number): boolean {
++  if (order.user.tier === "gold") return true;
++  return order.user.tier === "member" && subtotal >= 10000;
+ }
+ 
+ export function calculateShipping(order: Order): number {
+-  let shipping = 0;
+-  let weight = 0;
+-  for (const item of order.items) {
+-    if (item.category === "book") {
+-      weight += 0.5 * item.qty;
+-    } else if (item.category === "electronics") {
+-      weight += 2 * item.qty;
+-    } else if (item.category === "furniture") {
+-      weight += 20 * item.qty;
+-    } else {
+-      weight += 1 * item.qty;
+-    }
++  const weight = totalWeight(order.items);
++  const rates = order.user.country === "JP" ? JP_SHIPPING_RATES : DEFAULT_SHIPPING_RATES;
++  const shipping = shippingCostForWeight(weight, rates);
++  return hasFreeShipping(order, calculateSubtotal(order.items)) ? 0 : shipping;
++}
++
++function validateUser(user: User): string[] {
++  if (!user) {
++    return ["user is required"];
+   }
+-  if (order.user.country === "JP") {
+-    if (weight < 1) {
+-      shipping = 300;
+-    } else if (weight < 5) {
+-      shipping = 600;
+-    } else if (weight < 20) {
+-      shipping = 1200;
+-    } else {
+-      shipping = 3000;
+-    }
+-  } else {
+-    if (weight < 1) {
+-      shipping = 1500;
+-    } else if (weight < 5) {
+-      shipping = 3000;
+-    } else if (weight < 20) {
+-      shipping = 6000;
+-    } else {
+-      shipping = 15000;
+-    }
++  const errors: string[] = [];
++  if (!user.id) {
++    errors.push("user.id is required");
+   }
+-  if (order.user.tier === "gold") {
+-    shipping = 0;
+-  } else if (order.user.tier === "member") {
+-    let subtotal = 0;
+-    for (const item of order.items) {
+-      subtotal += item.price * item.qty;
+-    }
+-    if (subtotal >= 10000) {
+-      shipping = 0;
+-    }
++  if (user.years < 0) {
++    errors.push("user.years must be >= 0");
+   }
+-  return shipping;
++  return errors;
+ }
+ 
+-export function validateOrder(order: Order): string[] {
++function validateItem(item: Item, index: number): string[] {
+   const errors: string[] = [];
+-  if (!order.user) {
+-    errors.push("user is required");
+-  } else {
+-    if (!order.user.id) {
+-      errors.push("user.id is required");
+-    }
+-    if (order.user.years < 0) {
+-      errors.push("user.years must be >= 0");
+-    }
++  if (!item.sku) {
++    errors.push(`items[${index}].sku is required`);
+   }
+-  if (!order.items || order.items.length === 0) {
+-    errors.push("items must not be empty");
+-  } else {
+-    for (let i = 0; i < order.items.length; i++) {
+-      const item = order.items[i];
+-      if (!item.sku) {
+-        errors.push(`items[${i}].sku is required`);
+-      }
+-      if (item.price < 0) {
+-        errors.push(`items[${i}].price must be >= 0`);
+-      } else if (item.qty <= 0) {
+-        errors.push(`items[${i}].qty must be > 0`);
+-      } else {
+-        if (item.category === "furniture" && item.qty > 10) {
+-          errors.push(`items[${i}] furniture qty must be <= 10`);
+-        }
+-      }
+-    }
+-  }
+-  if (order.coupon !== undefined) {
+-    if (order.coupon.length !== 8) {
+-      errors.push("coupon must be 8 chars");
+-    } else if (!/^[A-Z0-9]+$/.test(order.coupon)) {
+-      errors.push("coupon must be uppercase alphanumeric");
+-    }
++  if (item.price < 0) {
++    errors.push(`items[${index}].price must be >= 0`);
++  } else if (item.qty <= 0) {
++    errors.push(`items[${index}].qty must be > 0`);
++  } else if (item.category === "furniture" && item.qty > 10) {
++    errors.push(`items[${index}] furniture qty must be <= 10`);
+   }
+   return errors;
+ }
+ 
+-export function calculateTotal(order: Order): number {
+-  const errors = validateOrder(order);
+-  if (errors.length > 0) {
+-    throw new Error(errors.join(", "));
++function validateItems(items: Item[]): string[] {
++  if (!items || items.length === 0) {
++    return ["items must not be empty"];
++  }
++  return items.flatMap((item, index) => validateItem(item, index));
++}
++
++function validateCoupon(coupon: string | undefined): string[] {
++  if (coupon === undefined) {
++    return [];
++  }
++  if (coupon.length !== 8) {
++    return ["coupon must be 8 chars"];
+   }
+-  let subtotal = 0;
+-  for (const item of order.items) {
+-    subtotal += item.price * item.qty;
++  if (!/^[A-Z0-9]+$/.test(coupon)) {
++    return ["coupon must be uppercase alphanumeric"];
+   }
+-  let discount = 0;
++  return [];
++}
++
++export function validateOrder(order: Order): string[] {
++  return [
++    ...validateUser(order.user),
++    ...validateItems(order.items),
++    ...validateCoupon(order.coupon),
++  ];
++}
++
++function calculateTierDiscount(order: Order, subtotal: number): number {
+   if (order.user.tier === "member") {
+-    discount = calculateMemberDiscount(order.user, subtotal);
+-  } else if (order.user.tier === "gold") {
+-    discount = calculateGoldDiscount(order.user, subtotal);
++    return calculateMemberDiscount(order.user, subtotal);
+   }
+-  let couponDiscount = 0;
+-  if (order.coupon) {
+-    if (order.coupon.startsWith("HALF")) {
+-      couponDiscount = (subtotal - discount) * 0.5;
+-    } else if (order.coupon.startsWith("OFF1")) {
+-      couponDiscount = 1000;
+-    }
++  if (order.user.tier === "gold") {
++    return calculateGoldDiscount(order.user, subtotal);
+   }
+-  const shipping = calculateShipping(order);
+-  let total = subtotal - discount - couponDiscount + shipping;
+-  if (total < 0) {
+-    total = 0;
++  return 0;
++}
++
++function calculateCouponDiscount(coupon: string | undefined, subtotal: number, discount: number): number {
++  if (!coupon) {
++    return 0;
++  }
++  if (coupon.startsWith("HALF")) {
++    return (subtotal - discount) * 0.5;
++  }
++  if (coupon.startsWith("OFF1")) {
++    return 1000;
++  }
++  return 0;
++}
++
++export function calculateTotal(order: Order): number {
++  const errors = validateOrder(order);
++  if (errors.length > 0) {
++    throw new Error(errors.join(", "));
+   }
+-  return Math.round(total * 100) / 100;
++  const subtotal = calculateSubtotal(order.items);
++  const discount = calculateTierDiscount(order, subtotal);
++  const couponDiscount = calculateCouponDiscount(order.coupon, subtotal, discount);
++  const shipping = calculateShipping(order);
++  const total = Math.max(subtotal - discount - couponDiscount + shipping, 0);
++  return roundCurrency(total);
+ }
+diff --git a/src/report.ts b/src/report.ts
+index a5a3f71..4b1b22e 100644
+--- a/src/report.ts
++++ b/src/report.ts
+@@ -1,40 +1,24 @@
+-import type { Order } from "./order.ts";
++import type { Order, Item } from "./order.ts";
+ 
+-export function summarizeByCategory(orders: Order[]): Record<string, number> {
++function summarizeBy(orders: Order[], keyFor: (order: Order, item: Item) => string): Record<string, number> {
+   const result: Record<string, number> = {};
+   for (const order of orders) {
+     for (const item of order.items) {
+-      if (result[item.category] === undefined) {
+-        result[item.category] = 0;
+-      }
+-      result[item.category] += item.price * item.qty;
++      const key = keyFor(order, item);
++      result[key] = (result[key] ?? 0) + item.price * item.qty;
+     }
+   }
+   return result;
+ }
+ 
++export function summarizeByCategory(orders: Order[]): Record<string, number> {
++  return summarizeBy(orders, (_order, item) => item.category);
++}
++
+ export function summarizeByCountry(orders: Order[]): Record<string, number> {
+-  const result: Record<string, number> = {};
+-  for (const order of orders) {
+-    for (const item of order.items) {
+-      if (result[order.user.country] === undefined) {
+-        result[order.user.country] = 0;
+-      }
+-      result[order.user.country] += item.price * item.qty;
+-    }
+-  }
+-  return result;
++  return summarizeBy(orders, (order) => order.user.country);
+ }
+ 
+ export function summarizeByTier(orders: Order[]): Record<string, number> {
+-  const result: Record<string, number> = {};
+-  for (const order of orders) {
+-    for (const item of order.items) {
+-      if (result[order.user.tier] === undefined) {
+-        result[order.user.tier] = 0;
+-      }
+-      result[order.user.tier] += item.price * item.qty;
+-    }
+-  }
+-  return result;
++  return summarizeBy(orders, (order) => order.user.tier);
+ }

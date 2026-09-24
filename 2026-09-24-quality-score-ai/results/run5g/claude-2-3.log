@@ -1,0 +1,1 @@
+All 4 tests pass. I deduplicated `report.ts`'s three near-identical grouping functions (`summarizeByCategory`, `summarizeByCountry`, `summarizeByTier`) into a shared `summarizeBy` helper parameterized by a key selector, keeping exported names/signatures unchanged. `order.ts` was already clean (no complex or duplicated logic to fix).

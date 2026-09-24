@@ -1,0 +1,9 @@
+Tests pass via `node --test`, which is sufficient per the task rules (type-checking isn't required and needs an extra approval I'll skip since tests already confirm correctness).
+
+Refactor summary for `src/order.ts`:
+- **Deduplicated** `calculateMemberDiscount`/`calculateGoldDiscount` into a shared `discountForTier` + `tieredRate` helper driven by rate tables (fixes the 98.5% duplication).
+- **`calculateShipping`**: extracted `itemWeight`/`totalWeight`, table-driven `baseShippingCost` (per-country tier tables), and `isFreeShipping`, cutting cyclomatic/cognitive complexity from 16/24 to a handful of small single-purpose functions.
+- **`validateOrder`**: split into `validateUser`, `validateItem`/`validateItems`, `validateCoupon`, composed via array spread — preserves exact error ordering/messages, cyclomatic 15/cognitive 28 → simple branches per helper.
+- **`calculateTotal`**: extracted `tierDiscount` and `couponDiscountFor`, reused `subtotalOf` (also used by shipping), reducing branching and duplication.
+
+All exported names/signatures unchanged; `src/order.test.ts` untouched; all 4 test suites pass.

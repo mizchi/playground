@@ -1,0 +1,3 @@
+All 4 tests pass. 
+
+Refactored `baseShippingRate` in `src/order.ts:42` to remove its internal duplication: the weight-bracket thresholds (`<1`, `<5`, `<20`) were checked twice — once per country — with only the constants differing. I extracted `shippingRatesForWeight` to check the brackets once and return both rates, so `baseShippingRate` just picks the right one. This keeps the logic as plain, explicit if/else (unlike the array/lookup-table approach that reviewers previously rejected as opaque), while cutting the function's cyclomatic complexity from 8 to 1.

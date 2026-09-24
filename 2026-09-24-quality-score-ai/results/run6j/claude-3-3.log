@@ -1,0 +1,1 @@
+All 4 tests pass. I extracted `weightBasedRate`, mirroring the existing `yearsBasedRate` pattern already accepted in this codebase: an explicit, named-parameter helper (not a generic array/table) that removes the real duplication between the JP and international rate ladders while keeping each threshold self-documenting at the call site.

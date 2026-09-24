@@ -1,0 +1,14 @@
+**VERDICT: better**
+
+Reasoning:
+
+- **Real duplication removed, not just moved.** `calculateMemberDiscount`/`calculateGoldDiscount` and the JP/international shipping branches were literally mirror-image if/else chains with different numbers. Replacing them with a `{minYears/maxWeight, rate}` table + a single `find`-based lookup is a legitimate DRY win — adding a new tier now means editing one array entry instead of hunting two parallel branches. Same for `calculateSubtotal`, which used to be duplicated inline in both `calculateTotal` and the shipping member-discount check.
+- **`calculateTotal` now reads as a pipeline** (subtotal → tier discount → coupon discount → shipping → clamp/round) instead of a wall of mutable `let`s. That's a genuine comprehension improvement, not cosmetic.
+- **Validation split (`validateUser`/`validateItem`/`validateItems`/`validateCoupon`) is a fair decomposition** — each function is independently testable and named for what it checks. It doesn't remove duplication (there wasn't any to remove there), but it does reduce nesting depth honestly, without altering behavior (early return for missing user matches the original's short-circuit).
+- **No behavior changes/bugs spotted**: tier ordering (descending `minYears`, ascending `maxWeight`) is preserved correctly for `find()` semantics, coupon math order (`subtotal - discount`) is preserved, and the final clamp/round logic is identical.
+
+Where it's borderline but I wouldn't call it gaming:
+- `rateForYears`/`shippingRateForWeight` are generic "first matching tier" abstractions each used at only two call sites. Introducing two new types (`YearsRateTier`, `WeightRateTier`) and a generic lookup for what's fundamentally a simple range check is a bit more machinery than strictly necessary — a reader now has to jump between the constant tables and the generic finder to reconstruct the original if/else logic. This is the one place I'd flag as "arguably over-abstracted," but since the duplication it replaces was real (identical branching structure, different constants), it reads as principled DRY rather than metric-gaming filler.
+- `calculateTierDiscount`/`calculateCouponDiscount` do shave `calculateTotal`'s cyclomatic complexity by relocating branches into their own named functions — this is the kind of change that *also* happens to make a complexity linter happy, but it's justified here because it turns `calculateTotal` into a readable top-level summary rather than being extraction for extraction's sake.
+
+Nothing here looks like classic complexity-metric gaming (e.g., splitting a function into meaningless single-statement wrappers with no name value, or duplicating a helper just to dodge a duplication threshold). The extra functions all carry real intent-revealing names and eliminate genuine duplication or nesting.

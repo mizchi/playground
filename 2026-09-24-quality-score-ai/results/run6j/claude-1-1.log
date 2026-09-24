@@ -1,0 +1,8 @@
+All 4 tests pass. I refactored `src/order.ts` to cut cognitive/cyclomatic complexity and eliminate the duplicated discount logic, while keeping every exported name/signature identical:
+
+- **`calculateMemberDiscount`/`calculateGoldDiscount`**: deduplicated via a shared `rateByYears` lookup over tier tables — the 98.5%-similar bodies are now two one-line dispatches into a common helper.
+- **`calculateShipping`**: split into `itemWeight`/`totalWeight`, a weight-tier table (`rateByWeight`) replacing the nested if/else chains for JP vs. international rates, and `hasFreeShipping` for the gold/member override.
+- **`validateOrder`**: split into `validateUser`, `validateItem`/`validateItems`, and `validateCoupon`, composed with array spreads instead of one long branchy function.
+- **`calculateTotal`**: now composed from `subtotalOf` (also reused by `calculateShipping`), `tierDiscountFor`, and `couponDiscountFor`.
+
+No behavior changes — same rounding, same error messages/order, same shipping/discount amounts — confirmed by the untouched `order.test.ts` passing in full.

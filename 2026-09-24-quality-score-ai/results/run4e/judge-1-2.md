@@ -1,0 +1,12 @@
+VERDICT: same
+
+**What's genuinely better:**
+- `rateForYears`/`MEMBER_BRACKETS`/`GOLD_BRACKETS` and `baseShippingRate`/`DOMESTIC_...`/`INTERNATIONAL_...` remove *real* duplication — the member/gold and JP/international logic was copy-pasted with only numbers differing, which is a classic "forgot to update both copies" bug risk. Turning that into data tables + one lookup function is a legitimate improvement, not metric theater.
+- `validateOrder` composed from `validateUser`/`validateItems`/`validateCoupon` is a reasonable, self-documenting decomposition.
+
+**What's a wash or worse:**
+- `discountFor`, `couponDiscountFor`, and `hasFreeShipping` don't remove any duplication or branching — they just relocate the exact same if/else out of `calculateTotal`/`calculateShipping` into single-call, single-use functions. This is the textbook move for satisfying a per-function cyclomatic-complexity or max-statements linter: each function's own score drops, but the total number of decision points is unchanged and you now have to jump across 3–4 extra function definitions to reconstruct what used to be one linear read. That's a strong "gaming the metric" smell.
+- The bracket-table pattern introduces a new, *undocumented* invariant that didn't exist before: `rateForYears` relies on brackets being sorted **descending** by `min` (first match wins on `years >= min`), while `baseShippingRate` relies on brackets being sorted **ascending** by `belowWeight` (first match wins on `weight < belowWeight`). Same shape (`{threshold, rate}[]` + linear scan), opposite ordering convention, no comment or type-level enforcement. A future engineer adding a new bracket to either table has no signal about which order is required — previously the if/else chain made the ordering visually self-evident. This is a real regression in safety that the original explicit chain didn't have.
+- Net effect: you've traded "long but linear and obviously-correct" procedural code for "short functions, but you must hold 6–8 of them in your head plus an implicit array-ordering rule" to verify correctness. That's roughly a wash for a human reader, not a clear win.
+
+**Bottom line:** the bracket-table dedup for discounts/shipping is worth keeping. The extra one-line wrapper functions for pure branch relocation (`discountFor`, `couponDiscountFor`) look like they exist to shrink `calculateTotal`'s cyclomatic complexity score rather than to aid a reader, and the unlabeled ordering dependency in the bracket lookups is a latent bug waiting for the next person who edits a table.

@@ -1,0 +1,1 @@
+All 4 tests pass. `baseShippingRate` now delegates to `weightBasedRate` (a named-parameter helper matching the existing `yearsBasedRate` style already in the file), eliminating the duplicated JP/non-JP weight-tier logic while keeping each call site fully readable — no exported names or signatures changed.

@@ -1,0 +1,11 @@
+VERDICT: same
+
+**What genuinely improved:** `subtotalOf` (used in 3 places) and `WEIGHT_PER_UNIT` (replacing an if/else-if category ladder with a lookup table) are real, sensible simplifications — the mapping there is self-evidently "category → weight," no ambiguity. The `validateUser`/`validateItem`/`validateItems`/`validateCoupon` split is a reasonable decomposition of a genuinely tangled function.
+
+**What looks like metric-gaming rather than a readability win:**
+
+- `tierDiscountRate(years, [[5, 0.1], [2, 0.05], [0, 0.02]])` and `shippingCostForWeight(weight, [[1, 300], ...], overCost)` take the original's clear, linear if/else-if cascades — which read top-to-bottom exactly like the business rule ("5+ years → 10%, 2+ years → 5%, else 2%") — and turn them into generic loops over positional tuples. This is the classic "collapse branches into a table-driven helper to lower cyclomatic complexity / duplication counts." The cost: the tuples are unlabeled (`[number, number]` — is it `[threshold, rate]`? `[maxWeight, cost]`?), so the reader has to open the helper to know what each position means and which comparison/order it assumes.
+- The two helpers are *inconsistent* with each other: `tierDiscountRate` requires tiers sorted **descending** and uses `>=`; `shippingCostForWeight` requires **ascending** order and uses `<`. Two structurally similar "pick a bucket by threshold" functions with opposite ordering conventions and no comment explaining either is a real maintainability hazard — a future edit that appends a tier in the wrong position silently breaks the logic, and nothing in the type signature (`[number, number][]`) prevents it.
+- Each generic helper is used at only two call sites, so the abstraction doesn't pay for itself — it was worth introducing only if the goal was shrinking per-function branch/line counts, not clarifying intent. Named tier records (e.g. `{ minYears: 5, rate: 0.1 }`) or just keeping the original if/else-if would have been more legible than positional tuples plus a runtime scan.
+
+Net: real duplication removal is mixed with cosmetic branch-reduction that trades self-documenting, order-independent logic for terser but more fragile and less self-explanatory code. It's a wash, not a clear win.

@@ -1,0 +1,3 @@
+All tests pass, including the `report` suite that exercises `summarizeByCategory`/`summarizeByCountry`/`summarizeByTier`.
+
+The provided metrics report already showed 100/100 for `order.ts`, which is genuinely well-factored (shared `tierDiscount`/`rateForYears` helpers, small single-purpose validators, etc.) — no changes needed there. However `src/report.ts` had three near-identical functions differing only in how they derived the grouping key; I consolidated them into a single `summarizeBy` helper parameterized by a `keyOf` function, keeping all three exports and their signatures unchanged. Ran `node --test src/order.test.ts` — all 4 test suites pass.

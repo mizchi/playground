@@ -1,0 +1,10 @@
+{
+  "name": "quality-score-ai",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "score": "node src/score.ts",
+    "loop": "node src/loop.ts",
+    "test:fixture": "node --test fixtures/order-service/src/order.test.ts"
+  }
+}

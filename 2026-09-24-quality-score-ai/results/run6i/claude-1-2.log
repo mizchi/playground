@@ -1,0 +1,9 @@
+No build config present, and node's native TS test runner already confirmed the file executes correctly. The refactor is complete.
+
+Summary of changes to `src/order.ts`:
+- Extracted `tieredRate` + rate-tier tables to eliminate the 98.5% duplication between `calculateMemberDiscount` and `calculateGoldDiscount`.
+- Split `calculateShipping` into small helpers (`itemWeight`/`totalWeight`, `baseShipping` with tier tables, `hasFreeShipping`) instead of nested if/else chains.
+- Split `validateOrder` into `validateUser`, `validateItem`/`validateItems`, `validateCoupon`, each with early returns instead of nested branches.
+- Split `calculateTotal` into `subtotalOf`, `discountFor`, `couponDiscountFor` helpers.
+
+All exported names/signatures are unchanged, `order.test.ts` was not touched, and `node --test src/order.test.ts` passes (4/4).

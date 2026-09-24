@@ -1,0 +1,236 @@
+{
+  "fixture": "fixtures/order-service",
+  "model": "sonnet",
+  "accept": "judge",
+  "judges": 3,
+  "feedback": false,
+  "bestOf": 3,
+  "baseline": {
+    "total": 51.6,
+    "complexity": 10.5,
+    "duplication": 92.6,
+    "complexityPenalty": 45,
+    "duplicatedLines": 13.8,
+    "testsPassed": true
+  },
+  "baseCognitive": {
+    "sum": 89,
+    "max": 28,
+    "functions": 8
+  },
+  "final": {
+    "total": 100,
+    "complexity": 100,
+    "duplication": 100,
+    "complexityPenalty": 0,
+    "duplicatedLines": 0,
+    "testsPassed": true
+  },
+  "history": [
+    {
+      "iteration": 1,
+      "before": {
+        "total": 51.6,
+        "complexity": 10.5,
+        "duplication": 92.6,
+        "complexityPenalty": 45,
+        "duplicatedLines": 13.8,
+        "testsPassed": true
+      },
+      "after": {
+        "total": 100,
+        "complexity": 100,
+        "duplication": 100,
+        "complexityPenalty": 0,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "accepted": true,
+      "reason": "accepted candidate 3",
+      "votes": [
+        "better",
+        "same",
+        "better"
+      ],
+      "cognitive": {
+        "sum": 50,
+        "max": 6,
+        "functions": 21
+      },
+      "candidates": [
+        {
+          "k": 1,
+          "score": 100,
+          "votes": [
+            "worse",
+            "same",
+            "same"
+          ],
+          "reason": "judge: worse/same/same",
+          "cognitive": {
+            "sum": 47,
+            "max": 6,
+            "functions": 19
+          }
+        },
+        {
+          "k": 2,
+          "score": 100,
+          "votes": [
+            "same",
+            "same",
+            "better"
+          ],
+          "reason": "judge: same/same/better",
+          "cognitive": {
+            "sum": 50,
+            "max": 6,
+            "functions": 21
+          }
+        },
+        {
+          "k": 3,
+          "score": 100,
+          "votes": [
+            "better",
+            "same",
+            "better"
+          ],
+          "reason": "ok",
+          "cognitive": {
+            "sum": 50,
+            "max": 6,
+            "functions": 21
+          }
+        }
+      ]
+    },
+    {
+      "iteration": 2,
+      "before": {
+        "total": 100,
+        "complexity": 100,
+        "duplication": 100,
+        "complexityPenalty": 0,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "after": {
+        "total": 100,
+        "complexity": 100,
+        "duplication": 100,
+        "complexityPenalty": 0,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "accepted": true,
+      "reason": "accepted candidate 3",
+      "votes": [
+        "better",
+        "worse",
+        "better"
+      ],
+      "cognitive": {
+        "sum": 38,
+        "max": 6,
+        "functions": 22
+      },
+      "candidates": [
+        {
+          "k": 1,
+          "score": 100,
+          "reason": "no change",
+          "cognitive": {
+            "sum": 50,
+            "max": 6,
+            "functions": 21
+          }
+        },
+        {
+          "k": 2,
+          "score": 100,
+          "reason": "no change",
+          "cognitive": {
+            "sum": 50,
+            "max": 6,
+            "functions": 21
+          }
+        },
+        {
+          "k": 3,
+          "score": 100,
+          "votes": [
+            "better",
+            "worse",
+            "better"
+          ],
+          "reason": "ok",
+          "cognitive": {
+            "sum": 38,
+            "max": 6,
+            "functions": 22
+          }
+        }
+      ]
+    },
+    {
+      "iteration": 3,
+      "before": {
+        "total": 100,
+        "complexity": 100,
+        "duplication": 100,
+        "complexityPenalty": 0,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "after": {
+        "total": 100,
+        "complexity": 100,
+        "duplication": 100,
+        "complexityPenalty": 0,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "accepted": false,
+      "reason": "all candidates rejected",
+      "cognitive": {
+        "sum": 38,
+        "max": 6,
+        "functions": 22
+      },
+      "candidates": [
+        {
+          "k": 1,
+          "score": 100,
+          "reason": "no change",
+          "cognitive": {
+            "sum": 38,
+            "max": 6,
+            "functions": 22
+          }
+        },
+        {
+          "k": 2,
+          "score": 100,
+          "reason": "no change",
+          "cognitive": {
+            "sum": 38,
+            "max": 6,
+            "functions": 22
+          }
+        },
+        {
+          "k": 3,
+          "score": 100,
+          "reason": "no change",
+          "cognitive": {
+            "sum": 38,
+            "max": 6,
+            "functions": 22
+          }
+        }
+      ]
+    }
+  ],
+  "judge": "**VERDICT: better**\n\nThe refactor is mostly legitimate: `validateOrder` is genuinely clearer split into `validateUser`/`validateItems`/`validateItem`/`validateCoupon` (removes nesting, no behavior change), and `report.ts`'s `summarizeBy` collapses three copy-pasted loops into one real abstraction with an obvious `keyFor` callback — that's textbook DRY, not metric gaming. Replacing the shipping weight/fee if-chains with `CATEGORY_WEIGHT_FACTORS` / `SHIPPING_RATES` tables is also a fair trade: adding a country or category is now a data-table edit instead of another branch, and I traced the bracket logic against the original and it's behavior-preserving.\n\nOne spot leans toward gaming a duplication/complexity checker rather than serving readers: `rateForYears(years, tiers)` used by both `calculateMemberDiscount` and `calculateGoldDiscount`. The two original functions were nearly identical in *shape* but encode distinct, self-explanatory business rules (member vs. gold loyalty tiers). Collapsing them into a generic loop over anonymous tuples like `[[5, 0.1], [2, 0.05], [0, 0.02]]` removes the \"if years >= 5 → 0.1\" phrasing that made the rule legible at the call site, and forces the reader to mentally re-sort/interpret bare number pairs (and trust that the list is ordered descending and terminated with a `0` catch-all — nothing enforces that). This reads like it exists to make two similar-but-not-truly-duplicate blocks stop tripping a duplication detector, at a small but real cost to at-a-glance clarity. It's minor and still net-positive since the dedup is small, but it's the one place I'd push back on in review and suggest keeping the explicit if/else (or at least naming the tuple fields via a small interface) instead.\n\nEverything else — `roundMoney`, `orderSubtotal`, `tierDiscount`, `couponDiscountFor`, `hasFreeShipping` — are honest, well-named extractions that reduce nesting and duplication without obscuring intent.\n"
+}

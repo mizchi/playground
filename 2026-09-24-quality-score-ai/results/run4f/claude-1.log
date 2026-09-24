@@ -1,0 +1,8 @@
+Refactored `src/order.ts` to cut duplication and complexity:
+
+- **Discount functions**: extracted a shared `discountRate()` helper + tier tables, eliminating the 98.5% duplicate logic between `calculateMemberDiscount`/`calculateGoldDiscount`.
+- **`calculateShipping`**: replaced nested if/else chains with lookup tables (`ITEM_WEIGHTS`, `SHIPPING_RATES`) and small helpers (`calculateOrderWeight`, `baseShippingRate`, `hasFreeShipping`).
+- **`validateOrder`**: split into `validateUser`, `validateItem`/`validateItems`, `validateCoupon`, composed via array spread — same error messages/order preserved.
+- **`calculateTotal`**: extracted `calculateDiscount` and `calculateCouponDiscount`, reused the new `calculateSubtotal` helper.
+
+All exported names/signatures are unchanged, and `node --test src/order.test.ts` passes (4/4 tests, `order.test.ts` untouched).

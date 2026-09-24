@@ -1,0 +1,1 @@
+All 4 tests pass. Since the report already shows a perfect score (100/100, no complex functions, no duplication), and my own review of `src/order.ts` confirms the code is already cleanly factored, there's no refactor to make — any forced change would just be cosmetic churn without improving the score. No files were modified.

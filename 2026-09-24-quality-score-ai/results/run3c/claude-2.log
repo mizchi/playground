@@ -1,0 +1,12 @@
+No tsconfig present — this project runs .ts directly via Node's type stripping, so there's no separate type-check step to run. Tests already confirm correctness.
+
+## Summary
+
+Refactored `src/order.ts` to eliminate duplication and reduce complexity while keeping all exports and behavior identical:
+
+- **Deduplicated** `calculateMemberDiscount`/`calculateGoldDiscount` via a shared `rateForYears` helper (was 98.5% similar).
+- **`calculateShipping`**: extracted `itemWeight`/`totalWeight` (category→weight lookup table instead of if/else chain), `subtotalOf`, and `baseShippingCost` (country/weight lookup) — cyclomatic 16→~4.
+- **`validateOrder`**: split into `validateUser`, `validateItem`/`validateItems`, `validateCoupon`, composed via array spread — cyclomatic 15→~2.
+- **`calculateTotal`**: extracted `discountForTier` and `couponDiscountFor` dispatch helpers, reused `subtotalOf` — cyclomatic 9→~3.
+
+`node --test src/order.test.ts` — all 4 tests pass.

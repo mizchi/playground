@@ -1,0 +1,1 @@
+Both `src/order.ts` and `src/report.ts` are already well-refactored — duplication is factored out (`calculateTierDiscount`, `summarizeBy`), functions are small and single-purpose, and the report confirms a perfect score with no complex or duplicated functions. Tests pass (4/4). No changes are needed.

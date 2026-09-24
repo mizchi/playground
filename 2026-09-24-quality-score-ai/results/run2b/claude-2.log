@@ -1,0 +1,8 @@
+Node's built-in TypeScript execution already ran the `.ts` files directly for the test, and all 4 suites passed, so the refactor is verified. Summary of changes to `src/order.ts`:
+
+- **Deduplicated** `calculateMemberDiscount`/`calculateGoldDiscount` (98.5% similar) via a shared `tieredRate` helper.
+- **`calculateShipping`**: replaced nested if/else chains with a `WEIGHT_PER_UNIT` lookup, a `SHIPPING_TIERS` table, and a `hasFreeShipping` helper.
+- **`validateOrder`**: split into `validateUser`, `validateItem`/`validateItems`, and `validateCoupon`, each with a single responsibility.
+- **`calculateTotal`**: extracted `computeSubtotal`, `computeTierDiscount`, `computeCouponDiscount` to flatten the branching.
+
+All exported names/signatures are unchanged, `src/order.test.ts` untouched, and `node --test src/order.test.ts` reports 4/4 passing.

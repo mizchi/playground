@@ -1,0 +1,3 @@
+No tsconfig present, and the test run via `node --test` (using native TS stripping) already validated the code compiles and runs correctly. 
+
+Refactored `src/order.ts`: extracted shared rate-table lookup logic to eliminate the `calculateMemberDiscount`/`calculateGoldDiscount` duplication, split `calculateShipping` into small table-driven helpers (`itemWeight`, `totalWeight`, `shippingCostForWeight`, `hasFreeShipping`), broke `validateOrder` into per-field validators (`validateUser`, `validateItems`/`validateItem`, `validateCoupon`), and split `calculateTotal` into `calculateTierDiscount`/`calculateCouponDiscount`/`calculateSubtotal`. All exported names/signatures are unchanged, and all 4 tests in `src/order.test.ts` (untouched) still pass.

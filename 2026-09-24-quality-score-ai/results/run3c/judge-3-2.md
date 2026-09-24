@@ -1,0 +1,6 @@
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+VERDICT: worse
+
+The original is four straightforward `if` lines that read top-to-bottom exactly like the rate table they represent — trivial to scan and modify. The new version replaces this with a module-level array plus a `.find()` call, which is more code, an extra indirection to follow, and a non-obvious `!` non-null assertion (only safe because the last tier's `belowWeight` is `Infinity`, which isn't obvious at the call site). It's a net increase in cognitive load for no behavioral benefit.
+
+This has the signature of gaming a complexity/duplication metric: the four near-identical `if` statements likely tripped a "duplicate code" or cyclomatic-complexity linter, so the branches were mechanically converted into data + a single `.find()` to collapse the branch count — not because the data-table shape is actually clearer here. With only four fixed, unlikely-to-grow tiers, the `if` chain was already the more direct expression of the logic; the array-of-objects version pays real readability cost (indirection, the `!`, an extra type literal) to satisfy a metric rather than a human reader.

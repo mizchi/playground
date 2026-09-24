@@ -1,0 +1,1 @@
+All 4 tests pass. No changes were needed — `src/order.ts` already scores 100/100 with no complex functions or duplication flagged, and I don't see any refactor that would meaningfully improve it without risking unnecessary churn.

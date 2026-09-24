@@ -1,0 +1,11 @@
+**VERDICT: same** — real duplication was removed, but it's roughly offset by new indirection and a fragile implicit invariant that the original code didn't have.
+
+**Genuine improvements:**
+- `roundCents`, `calculateSubtotal`, `CATEGORY_UNIT_WEIGHT` map, and the validate* split are honest DRY/SRP wins — the member/gold discount logic and weight-category branching really were copy-pasted before, and the validation functions are now independently testable.
+
+**Signs of chasing a complexity/duplication metric rather than clarity:**
+- `rateForYears`/`shippingRateForWeight` collapse explicit if/else-if chains into a generic "find first matching tier" over a data array. This trades a self-documenting, order-obvious chain for logic whose correctness now depends on an **unenforced ordering invariant** — `MEMBER_RATE_TIERS`/`GOLD_RATE_TIERS` must stay sorted descending by `minYears`, and the shipping tiers must stay sorted ascending by `maxWeight`. Nothing in the types or code enforces this; a careless edit (e.g. inserting a new tier in the wrong position) silently produces wrong discounts/shipping costs with no error. That's a real maintainability regression hiding behind a "no more nested if/else" appearance.
+- `calculateTierDiscount` and `calculateCouponDiscount` mostly just relocate two independent if-chains out of `calculateTotal` into their own functions. This lowers `calculateTotal`'s per-function branch/line count (which is exactly what cyclomatic-complexity linters measure) without reducing overall conceptual complexity — the same number of branches exist, just spread across more files-worth of indirection. Reading "how is shipping computed for a JP gold member" now requires jumping through `calculateShipping` → `hasFreeShipping` → `calculateSubtotal`, plus `calculateOrderWeight` and a separate tier table, instead of one straight-line function.
+- `hasFreeShipping` recomputes `calculateSubtotal(order.items)`, duplicating work `calculateTotal` also does — a minor cost of over-decomposition.
+
+Net effect: fewer duplicated literals, but more files/functions to trace for the same behavior, and a new silent-failure mode (tier ordering) that wasn't possible in the original explicit if/else-if code. Not a clear win.

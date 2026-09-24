@@ -1,0 +1,9 @@
+Refactored `src/order.ts` and confirmed `node --test src/order.test.ts` passes (4/4). Summary of changes, aimed at the specific complaints from the rejected attempts:
+
+- **`roundMoney`** and **`subtotalOf`** — extracted the literally-duplicated rounding and subtotal-summing logic (previously repeated 3-4 times).
+- **`tierRate(years, highRate, midRate, lowRate)`** — replaces the near-identical if/else years ladders in `calculateMemberDiscount`/`calculateGoldDiscount`. Unlike the rejected generic tier-table (`[number, number][]` + implicit sort-order invariant + non-null assertion), this keeps the two breakpoints (5, 2) fixed and explicit in one small function, and each call site still shows its actual business numbers (e.g. `tierRate(user.years, 0.1, 0.05, 0.02)`), so nothing is hidden behind opaque tuples.
+- **`weightFor`** (switch on category) and **`shippingRateFor(weight, tiny, small, medium, large)`** — same fixed-breakpoint approach applied to `calculateShipping`, removing the duplicated JP/non-JP cascades without going through a lookup table.
+- **`validateUser`/`validateItem`/`validateItems`/`validateCoupon`** — split `validateOrder` along its natural concerns (the piece every reviewer agreed was a genuine win), preserving exact original error ordering and short-circuit behavior.
+- `calculateTotal` now reuses `subtotalOf`/`roundMoney` and uses `Math.max(0, …)` instead of a mutable if, dropping it under the complexity threshold without adding any new single-use "relocation" functions (avoided extracting things like `tierDiscountAmount`/`couponDiscountAmount`, which reviewers flagged as pure indirection).
+
+All exported names/signatures are unchanged, and `report.ts`/`order.test.ts` were untouched.

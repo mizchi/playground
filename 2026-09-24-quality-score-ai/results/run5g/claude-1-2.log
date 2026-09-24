@@ -1,0 +1,9 @@
+No local TypeScript compiler installed, and the tests (run via `node --test`, which passed) are the specified verification method. The refactor is done.
+
+Summary of changes to `src/order.ts`:
+- **Deduplicated** `calculateMemberDiscount`/`calculateGoldDiscount` via shared `tieredRate`/`roundMoney` helpers (was 98.5% similar).
+- **`calculateShipping`**: extracted `itemWeight`/`totalWeight` (category→weight lookup replacing if/else chain), `baseShipping` (tiered lookup by country replacing nested if/else), and `isFreeShipping` (gold/member-threshold logic), cutting it from cognitive 24/cyclomatic 16 to a two-line body.
+- **`validateOrder`**: split into `validateUser`, `validateItem`, `validateItems`, `validateCoupon`, each with early returns instead of deep nesting; from cognitive 28/cyclomatic 15 down to trivial branching per function.
+- **`calculateTotal`**: extracted `getSubtotal` (shared with shipping's free-shipping check), `getTierDiscount`, `getCouponDiscount`, replacing nested if/else with flat guard clauses.
+
+All exported names/signatures are unchanged, and `node --test src/order.test.ts` passes (4/4).

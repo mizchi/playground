@@ -1,0 +1,12 @@
+VERDICT: better
+
+Reasoning: The bulk of the change is genuine decomposition — `validateUser`/`validateItem`/`validateItems`/`validateCoupon`, `calculateSubtotal`, `calculateTierDiscount`, `calculateCouponDiscount`, and `roundCurrency` all extract clearly-named, independently testable units out of what were previously two sprawling functions (`validateOrder`, `calculateTotal`). That's a real readability win, not just a metric win — `calculateTotal` now reads almost like prose, and the validation logic no longer nests three levels deep.
+
+The shipping refactor (`calculateWeight`, `baseShippingCost`, `hasFreeShipping`) is a comparable improvement: it removes the accidental coupling between weight calculation, country-rate lookup, and tier-based free-shipping override that were all tangled in one loop+if-chain before.
+
+Things that look like they're gaming a complexity/duplication metric rather than truly helping a reader:
+
+- `discountRateByYears(years, tiers, baseRate)` + `MEMBER_DISCOUNT_TIERS`/`GOLD_DISCOUNT_TIERS`. This does remove literal duplication between the member/gold branches, so it's not pure gaming, but it trades an explicit, obviously-correct if/else-if chain for a `.find()` over an array whose correctness depends on an *undocumented invariant*: entries must be sorted descending by `minYears`. Nothing enforces that ordering, and a future contributor adding a tier in the "natural" ascending order would silently get wrong discounts. A reader now has to mentally simulate `Array.find` instead of just reading top-to-bottom conditions — lower cyclomatic complexity, arguably no better (maybe worse) actual comprehension.
+- `SHIPPING_RATE_TIERS` + `SHIPPING_RATE_OVER` has the same "must be ascending order, first match wins" invariant, and additionally uses an inconsistent shape (array of `{belowWeight, jpRate, intlRate}` vs. a lone fallback object without `belowWeight`), which is a bit awkward compared to the clarity of the original nested if/else.
+
+Net effect: the validation/total-calculation extraction is unambiguously good engineering; the tiered-rate-table extraction is a reasonable dedup but introduces a fragile implicit ordering contract that isn't documented or guarded (e.g., no assertion that tiers are sorted, no comment explaining "first match" semantics). I'd ask the author to add a comment or sort-assertion on those tier arrays, but overall the diff moves the file in the right direction.

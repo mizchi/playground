@@ -1,0 +1,10 @@
+All good — only the `Order` type and the tested exports (`calculateTotal`, `calculateShipping`, `validateOrder`) are used externally, and all signatures are unchanged.
+
+Summary of the refactor in `src/order.ts`:
+- Extracted shared helpers `roundCents` and `calculateSubtotal` to remove duplication between discount, shipping, and total calculations.
+- Replaced the near-duplicate `calculateMemberDiscount`/`calculateGoldDiscount` if/else chains with a shared `rateForYears` lookup against small tier tables, eliminating the 98.5% duplication.
+- Broke `calculateShipping` into `calculateOrderWeight` (category weight lookup), `shippingRateForWeight` (tiered rate lookup), and `hasFreeShipping`, replacing nested if/else chains with table-driven logic.
+- Split `validateOrder` into `validateUser`, `validateItem`/`validateItems`, and `validateCoupon`, each with a single responsibility, then composed via array spread.
+- Split `calculateTotal` into `calculateTierDiscount` and `calculateCouponDiscount` helpers, using `Math.max(0, …)` instead of an if-clamp.
+
+Tests pass: `node --test src/order.test.ts` — 4/4 pass.

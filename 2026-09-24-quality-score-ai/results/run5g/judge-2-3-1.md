@@ -1,0 +1,3 @@
+VERDICT: better
+
+The three loops were true duplicates (same accumulation logic, differing only in the key expression), so extracting a `summarizeBy(orders, keyFor)` helper is legitimate DRY, not metric gaming — behavior is unchanged, each call site still reads clearly (`item.category`, `order.user.country`, `order.user.tier`), and a bug fix or new dimension now only needs to touch one place. The `keyFor` signature takes `(order, item)` even though `summarizeByCategory` ignores `order` (`_order`), which is a minor wart but a reasonable price for one shared function instead of three near-identical ones. No red flags like hiding logic behind indirection/strings/reflection purely to dodge a duplication scanner.

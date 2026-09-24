@@ -1,0 +1,158 @@
+{
+  "fixture": "fixtures/order-service",
+  "model": "sonnet",
+  "accept": "judge",
+  "judges": 3,
+  "baseline": {
+    "total": 51.6,
+    "complexity": 10.5,
+    "duplication": 92.6,
+    "complexityPenalty": 45,
+    "duplicatedLines": 13.8,
+    "testsPassed": true
+  },
+  "baseCognitive": {
+    "sum": 89,
+    "max": 28,
+    "functions": 8
+  },
+  "final": {
+    "total": 95.2,
+    "complexity": 90.5,
+    "duplication": 100,
+    "complexityPenalty": 2,
+    "duplicatedLines": 0,
+    "testsPassed": true
+  },
+  "history": [
+    {
+      "iteration": 1,
+      "before": {
+        "total": 51.6,
+        "complexity": 10.5,
+        "duplication": 92.6,
+        "complexityPenalty": 45,
+        "duplicatedLines": 13.8,
+        "testsPassed": true
+      },
+      "after": {
+        "total": 100,
+        "complexity": 100,
+        "duplication": 100,
+        "complexityPenalty": 0,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "accepted": false,
+      "reason": "judge: worse/worse/same",
+      "verdict": "not-better",
+      "votes": [
+        "worse",
+        "worse",
+        "same"
+      ],
+      "cognitive": {
+        "sum": 47,
+        "max": 6,
+        "functions": 18
+      }
+    },
+    {
+      "iteration": 2,
+      "before": {
+        "total": 51.6,
+        "complexity": 10.5,
+        "duplication": 92.6,
+        "complexityPenalty": 45,
+        "duplicatedLines": 13.8,
+        "testsPassed": true
+      },
+      "after": {
+        "total": 95.2,
+        "complexity": 90.5,
+        "duplication": 100,
+        "complexityPenalty": 2,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "accepted": true,
+      "reason": "accepted",
+      "verdict": "better",
+      "votes": [
+        "same",
+        "better",
+        "better"
+      ],
+      "cognitive": {
+        "sum": 55,
+        "max": 10,
+        "functions": 20
+      }
+    },
+    {
+      "iteration": 3,
+      "before": {
+        "total": 95.2,
+        "complexity": 90.5,
+        "duplication": 100,
+        "complexityPenalty": 2,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "after": {
+        "total": 100,
+        "complexity": 100,
+        "duplication": 100,
+        "complexityPenalty": 0,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "accepted": false,
+      "reason": "judge: worse/worse/worse",
+      "verdict": "not-better",
+      "votes": [
+        "worse",
+        "worse",
+        "worse"
+      ],
+      "cognitive": {
+        "sum": 46,
+        "max": 6,
+        "functions": 20
+      }
+    },
+    {
+      "iteration": 4,
+      "before": {
+        "total": 95.2,
+        "complexity": 90.5,
+        "duplication": 100,
+        "complexityPenalty": 2,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "after": {
+        "total": 100,
+        "complexity": 100,
+        "duplication": 100,
+        "complexityPenalty": 0,
+        "duplicatedLines": 0,
+        "testsPassed": true
+      },
+      "accepted": false,
+      "reason": "judge: worse/same/worse",
+      "verdict": "not-better",
+      "votes": [
+        "worse",
+        "same",
+        "worse"
+      ],
+      "cognitive": {
+        "sum": 47,
+        "max": 6,
+        "functions": 20
+      }
+    }
+  ],
+  "judge": "Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.\n**VERDICT: better** — with one significant reservation.\n\n**What's genuinely better:**\n- `round2` dedupes the `Math.round(x*100)/100` pattern (was 3x duplicated) — this is a real, meaningful shared operation.\n- `subtotalOf` dedupes an identical reduce loop that existed twice in the original (`calculateShipping` and `calculateTotal`).\n- Splitting `validateOrder` into `validateUser`/`validateItem`/`validateItems`/`validateCoupon` gives each validation rule a name and lets you read `validateOrder` as a flat list of concerns — this is a legitimate readability win over one large nested function.\n- `calculateShipping`'s early returns for gold/member-free-shipping are clearer than the original's mutate-then-override `shipping` variable.\n- `discountForTier` / `couponDiscountFor` composing cleanly in `calculateTotal` reads better than the original inline if/else chain.\n\n**What looks like metric gaming, not real refactoring:**\n`rateForYears(years, atLeast5, atLeast2, otherwise)` is the tell. The original:\n```js\nif (user.years >= 5) rate = 0.1;\nelse if (user.years >= 2) rate = 0.05;\nelse rate = 0.02;\n```\nwas self-documenting at the call site. The new version:\n```js\nrateForYears(user.years, 0.1, 0.05, 0.02)\n```\nrequires jumping to the function definition to learn that the second argument means \"rate if years≥5,\" the third means \"rate if years≥2,\" etc. TypeScript/JS gives no positional-argument labels at the call site, so this trades a clear, linear if/else for an opaque tuple of magic numbers. It also isn't a *real* shared abstraction — member and gold discount tiers are two independently-changeable business rules that happen to share a shape (three tiers by years) today; forcing them through one generic helper couples them for no benefit and will get awkward the moment one tier's thresholds diverge (e.g., a 10-year bracket added to gold only). This reads exactly like an extraction done to shrink a duplication-detector's \"clone\" flag or a cyclomatic-complexity count per function, not to help a future reader. I'd either inline it back to two explicit if/else chains, or if shared logic is truly wanted, pass a named/object config: `rateForYears(years, { atLeast5: 0.1, atLeast2: 0.05, otherwise: 0.02 })`.\n\nEverything else in the diff is honest simplification. That one extraction is the kind of thing worth pushing back on in review.\n"
+}

@@ -1,0 +1,1 @@
+All 4 tests pass. There's nothing to refactor here — the report already reflects a score of 100 with no complex or duplicated functions found, and my own read of `src/order.ts` confirms it: each function is small and single-purpose, and shared logic (bracket lookups, `roundMoney`, discount tiers) is already factored into common helpers rather than duplicated. No changes needed.

@@ -1,0 +1,1 @@
+All 4 tests pass. Refactored `baseShippingCost` in `src/order.ts:39` from four sequential `if`/ternary branches into a table lookup (`SHIPPING_TIERS` array + `.find`), cutting the branching to a single `find` call and one ternary — same exported behavior, no signature changes.

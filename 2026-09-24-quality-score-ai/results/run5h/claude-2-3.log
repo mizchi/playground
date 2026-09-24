@@ -1,0 +1,10 @@
+No tsconfig present; Node's native TS support already ran the tests successfully, which is sufficient verification here.
+
+I refactored `src/order.ts` to cut duplication and branching:
+
+- **`calculateMemberDiscount`/`calculateGoldDiscount`**: both now delegate to a shared `tieredRate` helper with a rate table, eliminating the ~98%-duplicate logic while keeping identical signatures and outputs.
+- **`calculateShipping`**: split into small pure helpers (`totalWeight`, `subtotalOf`, `baseShippingRate` via `tieredRate`, `hasFreeShipping`), replacing the nested if/else chains (weight-by-category, country tiers, tier-based free shipping) with table lookups.
+- **`validateOrder`**: split into `validateUser`, `validateItem`/`validateItems`, and `validateCoupon`, composed via array spread — removes the deep nesting while preserving exact error message order and text.
+- **`calculateTotal`**: extracted `discountFor` and `couponDiscountFor` to remove the inline branching, keeping the same math.
+
+All 4 tests in `src/order.test.ts` (unmodified) still pass.
