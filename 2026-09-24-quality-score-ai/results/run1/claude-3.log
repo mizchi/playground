@@ -1,0 +1,1 @@
+All 4 tests pass. I removed the duplicated aggregation loop in `src/report.ts` by extracting a shared `summarizeBy` helper parameterized by a key-extraction function; `order.ts` was already well-factored, so no changes were needed there. Exported names and signatures are unchanged.
