@@ -1,0 +1,12 @@
+All 4 tests pass.
+
+**Changes made** (learning from the two rejected attempts, keeping only what reviewers consistently called genuine improvements):
+- `round2` — deduped the identical `Math.round(x * 100) / 100` rounding logic used 3 times.
+- `subtotalOf` — deduped the identical subtotal-summing loop used 3 times (including inside `calculateShipping`).
+- Split `validateOrder` into `validateUser`/`validateItem`/`validateItems`/`validateCoupon`, each mapping to a distinct entity, with `validateItem` reused per-item in a loop; flattened its nested `if/else{if}` into a flat `else if` chain.
+
+**Deliberately left unchanged:**
+- `calculateMemberDiscount`/`calculateGoldDiscount` still have separate, explicit tier if/else chains rather than a shared generic helper — all three reviewers in attempt 1 flagged a positional-args helper (`tierDiscountRate(years, 0.1, 0.05, 0.02)`) as actively harmful (unlabeled numbers, transposition risk in pricing code), and the two policies aren't really the same rule, just the same shape.
+- `calculateShipping`'s weight/rate-tier logic stays as one linear function rather than being split into `itemWeight`/`baseShippingRate`/`hasFreeShipping`; all three reviewers in attempt 2 said that fragmentation added indirection without reducing real complexity, since each helper had only one call site.
+
+Per the report's rule for already-adequate tradeoffs, these two spots accept a lower complexity/duplication score in exchange for keeping the pricing logic self-documenting and easy to audit.

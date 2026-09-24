@@ -36,6 +36,7 @@ fixture をコピー → 採点 ─┬→ claude -p にレポートを渡して�
 - `--accept score` (デフォルト): スコアが上がっていなければ棄却する。
 - `--accept judge`: スコアが下がる、または別プロンプトの judge が差分を `better` と判定しなければ棄却する。
   - `--judges N` で judge を N 人並列に走らせ、過半数が `better` なら採択する。
+- `--feedback`: 棄却された試行の理由と judge のコメント (直近 2 回分) を、次の iteration のリファクタプロンプトに追加する。あわせて「読みやすい関数は点数が低くてもそのままでよい、変更なしも可」と指示する。
 - 採択時だけ commit し、棄却時は `git reset --hard` で戻す。
 
 ## 動かし方
@@ -50,6 +51,7 @@ node src/score.ts fixtures/order-service        # 採点のみ (--json で JSON 
 node src/loop.ts --iterations 3 --model sonnet --judge                 # run1: 点数が上がれば採用
 node src/loop.ts --iterations 4 --model sonnet --judge --accept judge  # run2: 点数が下がらず judge が better なら採用
 node src/loop.ts --iterations 4 --judge --accept judge --judges 3      # run3: judge 3 人を並列で走らせ、過半数が better なら採用
+node src/loop.ts --iterations 4 --judge --accept judge --judges 3 --feedback  # run4: 棄却理由を次のプロンプトに渡す
 ```
 
 実行結果は `runs/<timestamp>/` に出る (gitignore 済み)。代表的な結果は `results/` に置いた。
@@ -157,6 +159,34 @@ run2 の問題 7 (judge の判定がぶれる) を受けて、judge を 3 人に
     - 多数決は同じ差分に対するぶれを減らすが、差分ごとの細かい差には敏感なまま。これは正しい挙動とも言える。
 13. **judge の人数分、コストが増える。** 1 iteration あたりの `claude -p` 呼び出しは 1 (リファクタ) + 3 (judge)。3 人は並列で実行したので、壁時計時間はほとんど増えなかった。
 
+## 結果 (run4: `--accept judge --judges 3 --feedback`, 2 並列)
+
+run3 の問題 11 (無理な 100 点狙い) を受けて、棄却理由を次のプロンプトに渡した。
+
+| iteration | run4e | run4f |
+| --- | --- | --- |
+| 1 | 100 / better, same, same → 棄却 | 100 / better ×3 → **採択** |
+| 2 | 100 / worse ×3 → 棄却 | 100 / better ×3 → **採択** (report.ts の共通化) |
+| 3 | 92 / same ×3 → 棄却 | 変更なし |
+| 4 | 68.7 / better ×3 → **採択** | 変更なし |
+| 最終 | **68.7** (cognitive 合計 72 / 最大 21) | **100** (cognitive 合計 32 / 最大 5) |
+
+詳細は `results/run4e/`, `results/run4f/` を参照 (`prompt-*.md` に、実際に渡したプロンプトがある)。
+
+### run4 でわかったこと
+
+14. **フィードバックは確かに効く。** run4e の iteration 4 のログで、AI は棄却理由を引用して方針を変えていた。
+    - 「attempt 1 では 3 人とも、位置引数のヘルパー `tierDiscountRate(years, 0.1, 0.05, 0.02)` を有害と指摘した」
+    - 「attempt 2 では、呼び出し元が 1 つしかないヘルパーへの分割は間接参照を増やすだけと言われた」
+    - そのうえで、`round2` / `subtotalOf` / validate の分割という「3 人とも本物の改善と認めた部分」だけを残した。結果は全員一致の `better` で採択された。
+15. **ただし効きすぎて保守的になった。** スコアは 100 → 100 → 92 → 68.7 と試行ごとに下がった。
+    - `calculateShipping` (cognitive 21) と、割引関数の重複 (98%) には手を付けずに終わった。
+    - run3c では、読みやすく cognitive 10 まで下げた `baseShippingCost` が採択されていた。つまり「悪い直し方」への指摘が「直さない」に一般化された。
+    - 棄却理由を渡すなら、「何がダメだったか」だけでなく「どこまでは良かったか」(部分的に採択できた変更) も渡す必要がある。
+16. **同じ設定でも、最初の 1 手で結果が大きく変わる。** run4f は 1 回目から全員一致の `better` で、フィードバックは一度も使われないまま 100 点 / cognitive 最大 5 に到達した。これは全 run の中で最も良い結果。run4e との差は、最初の試行の出来だけ。
+    - 現状のループは「最初の 1 手の当たり外れ」に大きく依存している。
+    - 1 iteration で複数の候補を並列に生成し、最も良いものを採る (best-of-N) と安定するはず。
+
 ## cccc の評価
 
 `cccc-eval/README.md` にまとめた。要点:
@@ -169,7 +199,9 @@ run2 の問題 7 (judge の判定がぶれる) を受けて、judge を 3 人に
 
 ### 次に試すなら
 
-- 棄却理由 (judge のコメント) を次の iteration のプロンプトに渡す。特に「この関数はこのままでよい」を伝えて、無理な 100 点狙いを止める
+- 1 iteration で複数の候補を並列生成し、judge の評価が最も高いものを採る (best-of-N)
+- 棄却された差分のうち judge が良いと言った部分だけを残す、部分採択の仕組みを入れる
+- iteration 数を増やして、保守的になった後に改善が再開するかを見る
 - スコアに cognitive 合計と関数数の増加を入れ、関数ごとの閾値だけでは満点にならないようにする
 - 閾値 8 だと 1 回で飽和するので、より大きい実コードで試す
 - 複数回実行してばらつきを見る

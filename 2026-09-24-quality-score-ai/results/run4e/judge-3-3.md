@@ -1,0 +1,13 @@
+**VERDICT: same** — genuine improvements are mixed in with several single-use extractions that look aimed at lowering a per-function complexity/LOC score rather than improving clarity.
+
+**Real wins:**
+- `round2` and `subtotalOf` are used from ≥2 call sites each and are self-explanatory — legitimate duplication removal.
+- Flattening `validateItem`'s nested `if/else { if ... }` into a flat `else if` chain is a genuine readability improvement over the original nested block.
+
+**Signs of metric gaming (complexity/duplication pushed down, not removed):**
+- `itemWeight(item)` is called from exactly one place (`totalWeight`). Splitting a single per-item weight rule out of its only caller doesn't reduce real complexity — it just moves the same `if/else` chain into a function with one caller, presumably to shrink `calculateShipping`'s cyclomatic complexity/line count on paper.
+- `validateUser` / `validateItem` / `validateItems` / `validateCoupon` are each called exactly once, from `validateOrder`. The original function read top-to-bottom as one cohesive validation pass with clear sections; now understanding "how is an order validated" requires jumping across 4 extra functions with no reuse benefit. This is the classic pattern of decomposing a function until every branch's complexity is "someone else's function," which drives down average cyclomatic complexity / function-length metrics without making the *logic* any simpler.
+- `hasFreeShipping` + `baseShippingRate` fragment what was one shipping calculation with two clearly labeled phases (weight → base rate, then tier override) into four indirection layers (`itemWeight → totalWeight`, `hasFreeShipping`, `baseShippingRate`, `calculateShipping`). It's not wrong, but it trades a linear narrative for a scatter of tiny functions you must mentally re-inline to verify the original behavior is preserved (e.g., confirming `subtotalOf` is still only meaningfully used for the `member` tier check).
+- Minor behavioral/perf nit introduced by this style of extraction: `calculateShipping` now always computes `subtotalOf(order.items)` before checking tier, even for `guest` orders where it's discarded — the original only computed subtotal inside the `member` branch. Harmless here, but it's the kind of thing that slips in when you decompose for structure rather than for meaning.
+
+Net: the diff isn't a regression, but it's not a clear maintainability win either — it reads like an automated or metric-driven pass that extracted *every* branch into a function, rather than an engineer choosing to extract the two or three pieces (`round2`, `subtotalOf`) that actually had real reuse.

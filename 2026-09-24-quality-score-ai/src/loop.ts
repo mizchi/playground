@@ -17,6 +17,8 @@ const { values: args } = parseArgs({
     accept: { type: "string", default: "score" },
     // Number of independent judges per iteration (run in parallel); accept on a strict majority of "better".
     judges: { type: "string", default: "1" },
+    // Pass the reasons for rejected attempts (incl. judge reviews) into the next refactor prompt.
+    feedback: { type: "boolean", default: false },
   },
 });
 
@@ -56,7 +58,17 @@ function claudeAsync(prompt: string): Promise<string> {
   });
 }
 
-function refactorPrompt(rep: string): string {
+function refactorPrompt(rep: string, feedback: string[]): string {
+  const fb = feedback.length
+    ? `
+
+Previous attempts were REJECTED and rolled back. Learn from the reviewers' feedback below.
+If a reported function is already readable and further change would only add indirection,
+leave it as it is: a lower metric score is acceptable, a less readable change is not.
+Making no change at all is an acceptable outcome.
+
+${feedback.map((f, k) => `### Rejected attempt ${k + 1}\n${f}`).join("\n\n")}`
+    : "";
   return `You are improving code quality in this TypeScript project (src/).
 A metrics tool produced the report below. Refactor to reduce cognitive/cyclomatic complexity
 and remove duplicated logic, so that the score goes up.
@@ -68,7 +80,7 @@ Rules:
 - You may run: node --test ${TEST_FILE}
 
 Report:
-${rep}`;
+${rep}${fb}`;
 }
 
 type Step = {
@@ -97,6 +109,9 @@ async function judgeVotes(diff: string, n: number): Promise<{ verdict: string; v
   return { verdict: better * 2 > n ? "better" : "not-better", votes, texts };
 }
 const history: Step[] = [];
+const feedback: string[] = [];
+const MAX_FEEDBACK = 2;
+const clean = (t: string) => t.replace(/^Warning: no stdin.*\n/m, "").trim().slice(0, 2000);
 
 let m = collect(work);
 const m0 = m;
@@ -106,7 +121,9 @@ console.log(`baseline: ${current.total}`);
 console.log(report(m, current));
 
 for (let i = 1; i <= Number(args.iterations); i++) {
-  const log = claude(refactorPrompt(report(m, current)), "Read Edit Write Glob Grep Bash(node --test:*)");
+  const prompt = refactorPrompt(report(m, current), args.feedback ? feedback : []);
+  writeFileSync(join(runDir, `prompt-${i}.md`), prompt);
+  const log = claude(prompt, "Read Edit Write Glob Grep Bash(node --test:*)");
   writeFileSync(join(runDir, `claude-${i}.log`), log);
 
   const nextM = collect(work);
@@ -114,6 +131,7 @@ for (let i = 1; i <= Number(args.iterations); i++) {
   let reason = "";
   let verdict: string | undefined;
   let votes: string[] | undefined;
+  let reviews: string[] = [];
   if (hash(TEST_FILE) !== testHash) reason = "test file modified";
   else if (!next.testsPassed) reason = "tests failed";
   else if (args.accept === "score") {
@@ -126,6 +144,7 @@ for (let i = 1; i <= Number(args.iterations); i++) {
       const j = await judgeVotes(diff, Number(args.judges));
       verdict = j.verdict;
       votes = j.votes;
+      reviews = j.texts.map(clean);
       j.texts.forEach((t, k) => writeFileSync(join(runDir, `judge-${i}-${k + 1}.md`), t));
       if (verdict !== "better") reason = `judge: ${votes.join("/")}`;
     }
@@ -148,6 +167,13 @@ for (let i = 1; i <= Number(args.iterations); i++) {
     m = nextM;
     current = next;
   } else {
+    if (reason !== "no change") {
+      const body = reviews.length
+        ? reviews.map((r, k) => `Reviewer ${k + 1}:\n${r}`).join("\n\n")
+        : "(no reviewer comments)";
+      feedback.push(`Reason: ${reason}\n\n${body}`);
+      if (feedback.length > MAX_FEEDBACK) feedback.shift();
+    }
     git("reset", "-q", "--hard");
     git("clean", "-q", "-fd");
   }
@@ -165,7 +191,7 @@ const baseCognitive = {
   max: Math.max(...m0.functions.map((f) => f.cognitive)),
   functions: m0.functions.length,
 };
-const summary = { fixture: args.fixture, model: args.model, accept: args.accept, judges: Number(args.judges), baseline, baseCognitive, final: current, history, judge };
+const summary = { fixture: args.fixture, model: args.model, accept: args.accept, judges: Number(args.judges), feedback: args.feedback, baseline, baseCognitive, final: current, history, judge };
 writeFileSync(join(runDir, "summary.json"), JSON.stringify(summary, null, 2));
 writeFileSync(join(runDir, "final-report.md"), report(m, current));
 console.log(`final: ${baseline.total} -> ${current.total}`);
