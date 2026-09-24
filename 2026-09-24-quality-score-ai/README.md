@@ -33,7 +33,8 @@ fixture をコピー → 採点 ─┬→ claude -p にレポートを渡して�
 
 - テストファイルのハッシュが変わっていたら棄却する (テストを書き換えて通す行為を防ぐ)。
 - テストが通らなければ棄却する。
-- スコアが上がっていなければ棄却する。
+- `--accept score` (デフォルト): スコアが上がっていなければ棄却する。
+- `--accept judge`: スコアが下がる、または別プロンプトの judge が差分を `better` と判定しなければ棄却する。
 - 採択時だけ commit し、棄却時は `git reset --hard` で戻す。
 
 ## 動かし方
@@ -45,7 +46,8 @@ cargo +1.98.1 install --locked cccc-cli        # rustc >= 1.96 が必要
 cargo install similarity-ts                     # または mizchi/similarity から --path で入れる
 
 node src/score.ts fixtures/order-service        # 採点のみ (--json で JSON 出力)
-node src/loop.ts --iterations 3 --model sonnet --judge
+node src/loop.ts --iterations 3 --model sonnet --judge                 # run1: 点数が上がれば採用
+node src/loop.ts --iterations 4 --model sonnet --judge --accept judge  # run2: 点数が下がらず judge が better なら採用
 ```
 
 実行結果は `runs/<timestamp>/` に出る (gitignore 済み)。代表的な結果は `results/` に置いた。
@@ -84,10 +86,49 @@ node src/loop.ts --iterations 3 --model sonnet --judge
    - ただし judge 自体も主観的で、テーブル駆動化は妥当と見る人もいるはず。
 5. **採点のゲートは必要。** テストファイルのハッシュ検査と、テスト失敗時にスコアを 0 にする仕組みがないと、テストや機能を削ってスコアを上げる方向に流れうる。今回の run では、そういった挙動は起きなかった。
 
+## 結果 (run2: sonnet, 4 iterations, `--accept judge`, 2 並列)
+
+run1 の問題 3 を受けて、採択条件を「スコアが下がらない、かつ judge が better と判定」に変えた。
+
+| iteration | run2a | run2b |
+| --- | --- | --- |
+| 1 | 100 / same → 棄却 | 100 / same → 棄却 |
+| 2 | 100 / better → **採択** | 100 / same → 棄却 |
+| 3 | 変更なし | 100 / better → **採択** |
+| 4 | 変更なし | 100 / better → **採択** (report.ts の 3 重複を共通化) |
+
+各 iteration 後の cognitive 合計 / 最大 (ベースラインは 89 / 28):
+
+- run2a: 45/6 (棄却), 48/6 (採択)
+- run2b: 46/6 (棄却), 46/6 (棄却), 43/6 (採択), 29/5 (採択)
+
+詳細は `results/run2a/`, `results/run2b/` を参照。
+
+### run2 でわかったこと
+
+6. **judge を採択条件に入れると、スコアが頭打ちでも正しい改善が採択される。** run2b の iteration 4 では、run1 で棄却された `report.ts` の共通化が 100 → 100 のまま採択された (judge は「本物の重複除去で、ハックではない」と判定)。
+7. **judge は厳しいが、判定がぶれる。** judge の判定 6 回のうち 3 回が `same` で、棄却された。
+   - 棄却された差分と採択された差分は、どちらも「割引率・送料のテーブル化 + validate の分割」で、中身はほぼ同じ。
+   - それでも、ある回はテーブル化を「ハック臭い」と言い、別の回は「本物の改善」と言う。
+   - 1 回の LLM 判定を唯一のゲートにするのは不安定。多数決や、判定理由に基づく採点基準の固定が必要。
+8. **棄却するたびにベースラインからやり直すので効率が悪い。** 棄却された試行の judge のコメントを次の試行のプロンプトに渡せば、同じ指摘を繰り返さずに済むはず (未実装)。
+9. **AI は報告されていない問題を見つけることもあれば、見つけないこともある。** `report.ts` の重複は、run2b では見つけたが、run2a では見つけなかった (iteration 3, 4 は「変更なし」)。指標の検出漏れを AI が補う保証はない。
+
+## cccc の評価
+
+`cccc-eval/README.md` にまとめた。要点:
+
+- SonarSource の仕様どおりに数えた (11 ケース中 10 ケースが一致。残る 1 ケース、クロージャを親と別に採点する点は README に明記された意図的な仕様)。
+- TypeScript コンパイラ (約 3.4 万関数) を 0.22 秒で処理した。ループの中で毎回呼んでもコストはない。
+- 三項演算子や短絡評価に詰め込むハックには強い。
+- 関数分割やクロージャへの退避で「関数ごとの最大値」は簡単に下がる。算術で分岐を消すと 0 になる。
+- 分岐を減らしたのか散らしただけかは、cognitive 合計と cyclomatic 合計を並べると区別できる (run1: cognitive 71 → 28、cyclomatic 48 → 50)。
+
 ### 次に試すなら
 
-- 採択条件を「スコアが下がらない、かつ judge が better」に変える
-- judge の判定 (better / same / worse) もスコアに組み込み、定量指標と定性評価のハイブリッドにする
+- judge を 3 回実行して多数決にし、ぶれを抑える
+- 棄却理由 (judge のコメント) を次の iteration のプロンプトに渡す
+- スコアに cognitive 合計と関数数の増加を入れ、関数ごとの閾値だけでは満点にならないようにする
 - 閾値 8 だと 1 回で飽和するので、より大きい実コードで試す
 - 複数回実行してばらつきを見る
 - similarity の検出漏れと誤検出のトレードオフを定量化する (閾値ごとに検出数を見る)

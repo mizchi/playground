@@ -1,0 +1,3 @@
+All 4 tests pass. I reviewed `src/order.ts` (154 LOC, 19 functions) and the report confirms it already scores 100/100 — no functions exceed the complexity thresholds and no duplicated logic was detected. This matches what I see in the code: it's already well-decomposed (small single-purpose helpers like `validateUser`, `validateItem`, `calculateTierDiscount`, etc.), with shared logic like `tierRateByYears` and `roundMoney` already factored out to avoid duplication between the member/gold discount functions.
+
+There's nothing to refactor here — the code is already at the target score, and making further changes risks violating the "don't obfuscate/cram to game the metric" and "keep behavior identical" rules for no measurable gain. I'll leave the file as is.

@@ -1,0 +1,1 @@
+All tests pass, and the report already shows a perfect score of 100 with no complex functions or duplication flagged. The code in `src/order.ts` is already well-factored — small single-purpose helpers, no repeated logic, low branching per function. There's nothing left to refactor here; making further changes would risk breaking behavior for no metric gain.

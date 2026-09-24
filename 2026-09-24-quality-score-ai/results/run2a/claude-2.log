@@ -1,0 +1,8 @@
+No build config present, so `node --test` is the available check, and it passes. The refactor is complete.
+
+**Summary of changes to `src/order.ts`:**
+- `calculateMemberDiscount`/`calculateGoldDiscount` now share a `tierRateByYears` helper, eliminating the 98.5%-duplicate logic.
+- `calculateShipping` split into `calculateWeight`, `baseShippingRate`, and `calculateSubtotal` helpers, replacing nested if/else chains with early returns and a rate-table lookup.
+- `validateOrder` split into `validateUser`, `validateItem`/`validateItems`, and `validateCoupon`, each with early returns instead of deep nesting.
+- `calculateTotal` split into `calculateTierDiscount` and `calculateCouponDiscount` helpers, flattening its branching.
+- All exported names/signatures unchanged; `src/order.test.ts` untouched and all 4 tests pass.
