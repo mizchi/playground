@@ -13,7 +13,9 @@ pub fn which(name: &str) -> Option<PathBuf> {
         return Some(name.into());
     }
     let p = std::env::var_os("PATH")?;
-    std::env::split_paths(&p).map(|d| d.join(name)).find(|p| p.is_file())
+    std::env::split_paths(&p)
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
 }
 
 /// 使うリンカの実行ファイル。既定は wild > mold > ld.lld > ld。

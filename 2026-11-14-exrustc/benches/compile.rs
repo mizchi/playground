@@ -19,7 +19,10 @@ use serde_json::json;
 const N: usize = 1000;
 
 fn opts() -> Options {
-    Options { linker: std::env::var("EXRUSTC_BENCH_LINKER").ok(), ..Options::default() }
+    Options {
+        linker: std::env::var("EXRUSTC_BENCH_LINKER").ok(),
+        ..Options::default()
+    }
 }
 
 fn open_msg(text: &str) -> String {
@@ -60,7 +63,9 @@ fn lsp(c: &mut Criterion) {
     let same = change_msg(&v[0]);
     let mut srv = Server::new();
     srv.handle(&open_msg(&v[0]));
-    g.bench_function(format!("did_change_noop/{N}"), |b| b.iter(|| srv.handle(&same)));
+    g.bench_function(format!("did_change_noop/{N}"), |b| {
+        b.iter(|| srv.handle(&same))
+    });
 
     g.finish();
 }
@@ -74,11 +79,19 @@ fn cold(c: &mut Criterion) {
     // LSP: 初めて開いたとき (全関数を検査)
     let open = open_msg(&v);
     g.bench_function(format!("lsp_did_open/{N}"), |b| {
-        b.iter_batched(Server::new, |mut s| s.handle(&open), BatchSize::PerIteration)
+        b.iter_batched(
+            Server::new,
+            |mut s| s.handle(&open),
+            BatchSize::PerIteration,
+        )
     });
     let out = tmpdir().join("cold");
     g.bench_function(format!("build/{N}"), |b| {
-        b.iter_batched(|| Session::new(opts()), |mut s| s.build(&v, &out).unwrap(), BatchSize::PerIteration)
+        b.iter_batched(
+            || Session::new(opts()),
+            |mut s| s.build(&v, &out).unwrap(),
+            BatchSize::PerIteration,
+        )
     });
     g.finish();
 }
@@ -121,7 +134,9 @@ fn build(c: &mut Criterion) {
 
 fn front(c: &mut Criterion) {
     let v = program(N, 0);
-    c.bench_function(&format!("front/lex/{N}"), |b| b.iter(|| exrustc::lexer::split(&v).unwrap().len()));
+    c.bench_function(&format!("front/lex/{N}"), |b| {
+        b.iter(|| exrustc::lexer::split(&v).unwrap().len())
+    });
 }
 
 fn config() -> Criterion {

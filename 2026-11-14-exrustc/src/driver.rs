@@ -23,6 +23,7 @@ use crate::codegen::{self, Blob, RELOC_KINDS, Target, Worker};
 use std::sync::Mutex;
 
 use crate::front::{self, Insts, Program, Summary};
+use crate::fxhash::{FxMap, FxSet};
 use crate::lexer::{self, ItemKind, SrcItem};
 use crate::link;
 
@@ -43,7 +44,9 @@ impl Default for Options {
             fast_regalloc: true,
             linker: None,
             time: false,
-            jobs: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+            jobs: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
             no_cache: false,
         }
     }
@@ -63,15 +66,27 @@ impl Diagnostic {
         let mut it = s.splitn(3, ':');
         if let (Some(l), Some(c), Some(m)) = (it.next(), it.next(), it.next()) {
             if let (Ok(line), Ok(col)) = (l.trim().parse(), c.trim().parse()) {
-                return Diagnostic { line, col, msg: m.trim().to_string() };
+                return Diagnostic {
+                    line,
+                    col,
+                    msg: m.trim().to_string(),
+                };
             }
         }
         if let Some((l, m)) = s.split_once(':') {
             if let Ok(line) = l.trim().parse() {
-                return Diagnostic { line, col: 1, msg: m.trim().to_string() };
+                return Diagnostic {
+                    line,
+                    col: 1,
+                    msg: m.trim().to_string(),
+                };
             }
         }
-        Diagnostic { line: 1, col: 1, msg: s.to_string() }
+        Diagnostic {
+            line: 1,
+            col: 1,
+            msg: s.to_string(),
+        }
     }
 }
 
@@ -97,8 +112,8 @@ pub struct Session {
     isa: OwnedTargetIsa,
     cid: (u64, u128),
     disk: Cache,
-    mem: HashMap<Key, Vec<u8>>,
-    used: HashSet<Key>,
+    mem: FxMap<Key, Vec<u8>>,
+    used: FxSet<Key>,
 }
 
 struct Timer {
@@ -110,7 +125,12 @@ impl Timer {
     fn lap(&mut self, what: &str, extra: impl std::fmt::Display) {
         if self.on {
             let now = Instant::now();
-            eprintln!("  {:<10} {:>8.2} ms  {}", what, (now - self.last).as_secs_f64() * 1e3, extra);
+            eprintln!(
+                "  {:<10} {:>8.2} ms  {}",
+                what,
+                (now - self.last).as_secs_f64() * 1e3,
+                extra
+            );
             self.last = now;
         }
     }
@@ -118,9 +138,17 @@ impl Timer {
 
 fn make_isa(o: &Options) -> OwnedTargetIsa {
     let mut f = settings::builder();
-    f.set("opt_level", if o.opt { "speed_and_size" } else { "none" }).unwrap();
-    f.set("regalloc_algorithm", if o.fast_regalloc { "single_pass" } else { "backtracking" })
+    f.set("opt_level", if o.opt { "speed_and_size" } else { "none" })
         .unwrap();
+    f.set(
+        "regalloc_algorithm",
+        if o.fast_regalloc {
+            "single_pass"
+        } else {
+            "backtracking"
+        },
+    )
+    .unwrap();
     f.set("is_pic", "true").unwrap();
     // 開発ビルドではアンウィンド情報不要 (panic/unwind をまだ持たない)
     f.set("unwind_info", "false").unwrap();
@@ -164,12 +192,21 @@ struct Analysis {
     n_parsed: usize,
     /// アイテム単位のエラー (そのアイテムは空の要約として扱う)
     errors: Vec<String>,
+    /// 関数ごとの const / static の参照
+    crefs: Vec<Vec<u32>>,
 }
 
 impl Session {
     pub fn new(opts: Options) -> Session {
         let isa = make_isa(&opts);
-        Session { opts, isa, cid: compiler_id(), disk: Cache::empty(), mem: HashMap::new(), used: HashSet::new() }
+        Session {
+            opts,
+            isa,
+            cid: compiler_id(),
+            disk: Cache::empty(),
+            mem: FxMap::default(),
+            used: FxSet::default(),
+        }
     }
 
     /// ディスク上のキャッシュを読み込む (以後の参照で使われる)
@@ -213,20 +250,23 @@ impl Session {
                 h.finish()
             })
             .collect();
-        let mut sums: Vec<Option<Summary>> =
-            sum_keys.iter().map(|&k| self.get(k).and_then(Summary::decode)).collect();
+        let mut sums: Vec<Option<Summary>> = sum_keys
+            .iter()
+            .map(|&k| self.get(k).and_then(Summary::decode))
+            .collect();
         let todo: Vec<usize> = (0..items.len()).filter(|&i| sums[i].is_none()).collect();
         let n_parsed = todo.len();
         let mut errors = vec![];
         let mut failed = HashSet::new();
-        let mut record = |ii: usize, r: Result<Summary, String>, sums: &mut Vec<Option<Summary>>| match r {
-            Ok(sm) => sums[ii] = Some(sm),
-            Err(e) => {
-                errors.push(e);
-                failed.insert(ii);
-                sums[ii] = Some(Summary::default());
-            }
-        };
+        let mut record =
+            |ii: usize, r: Result<Summary, String>, sums: &mut Vec<Option<Summary>>| match r {
+                Ok(sm) => sums[ii] = Some(sm),
+                Err(e) => {
+                    errors.push(e);
+                    failed.insert(ii);
+                    sums[ii] = Some(Summary::default());
+                }
+            };
         // impl / trait ヘッダを先に要約する (メンバの `Self` / trait 名を決めるのに必要)
         let is_header = |k: ItemKind| matches!(k, ItemKind::ImplHeader | ItemKind::TraitHeader);
         for &ii in todo.iter().filter(|&&i| is_header(items[i].kind)) {
@@ -240,20 +280,28 @@ impl Session {
                 ItemKind::ImplMember(h) => {
                     let hs = sums[h as usize].as_ref().unwrap();
                     hs.impl_self.clone().map(|n| front::Owner {
-                        self_ty: hs.impl_self_ty.clone().unwrap_or(front::TySyn::Named(n.clone())),
+                        self_ty: hs
+                            .impl_self_ty
+                            .clone()
+                            .unwrap_or(front::TySyn::Named(n.clone())),
                         base: n,
                         impl_trait: hs.impl_trait.clone(),
                         generics: hs.impl_generics.clone(),
                         is_trait: false,
                     })
                 }
-                ItemKind::TraitMember(h) => sums[h as usize].as_ref().unwrap().trait_decl.clone().map(|n| front::Owner {
-                    self_ty: front::TySyn::Named("Self".into()),
-                    generics: vec![("Self".into(), vec![n.clone()])],
-                    base: n,
-                    impl_trait: None,
-                    is_trait: true,
-                }),
+                ItemKind::TraitMember(h) => sums[h as usize]
+                    .as_ref()
+                    .unwrap()
+                    .trait_decl
+                    .clone()
+                    .map(|n| front::Owner {
+                        self_ty: front::TySyn::Named("Self".into()),
+                        generics: vec![("Self".into(), vec![n.clone()])],
+                        base: n,
+                        impl_trait: None,
+                        is_trait: true,
+                    }),
                 _ => None,
             })
             .collect();
@@ -296,12 +344,29 @@ impl Session {
             }
         }
         let prog = Program::build(&items, &sums)?;
-        let (refs, srefs): (Vec<Vec<u32>>, Vec<Vec<u32>>) = prog
-            .item_of
-            .iter()
-            .map(|ii| ii.map(|ii| prog.refs(src, &items[ii as usize])).unwrap_or_default())
-            .unzip();
-        Ok(Analysis { items, sums, sum_keys, prog, refs, srefs, parsed, n_parsed, errors })
+        let mut refs = Vec::with_capacity(prog.item_of.len());
+        let mut srefs = Vec::with_capacity(prog.item_of.len());
+        let mut crefs = Vec::with_capacity(prog.item_of.len());
+        for ii in &prog.item_of {
+            let (f, st, c) = ii
+                .map(|ii| prog.refs(src, &items[ii as usize]))
+                .unwrap_or_default();
+            refs.push(f);
+            srefs.push(st);
+            crefs.push(c);
+        }
+        Ok(Analysis {
+            items,
+            sums,
+            sum_keys,
+            prog,
+            refs,
+            srefs,
+            crefs,
+            parsed,
+            n_parsed,
+            errors,
+        })
     }
 
     /// 関数 id の内容キー: 本体ハッシュ + 自分と参照先のシグネチャ + 名前で現れる struct
@@ -318,6 +383,12 @@ impl Session {
         // 名前で現れる struct はレイアウトごと (deep hash)
         for &s in &a.srefs[id] {
             h.add(&a.prog.structs[s as usize].deep);
+        }
+        // const は式ごと埋め込むので定義のハッシュ、static は名前と型
+        for &c in &a.crefs[id] {
+            let cd = &a.prog.consts[c as usize];
+            h.add(&(cd.name.as_str(), a.items[cd.item as usize].hash));
+            a.prog.hash_ty(cd.ty, &mut h);
         }
         h.finish()
     }
@@ -347,13 +418,19 @@ impl Session {
     /// 型検査だけを行い、全診断を返す (LSP 用)。到達しない関数も検査する。
     /// 検査に通った関数は「OK」の印をキャッシュし、次回は parse もしない。
     pub fn check(&mut self, src: &str) -> Vec<Diagnostic> {
-        let user_lines = src.lines().count() + 1;
         let out = match with_prelude(src) {
             Ok((full, items)) => self.check_inner(&full, items),
             Err(e) => vec![e],
         };
         // prelude の中の診断は出さない (ユーザのコードではない)
-        let out: Vec<String> = out.into_iter().filter(|e| Diagnostic::parse(e).line <= user_lines).collect();
+        let out: Vec<String> = if out.is_empty() {
+            out
+        } else {
+            let user_lines = src.lines().count() + 1;
+            out.into_iter()
+                .filter(|e| Diagnostic::parse(e).line <= user_lines)
+                .collect()
+        };
         self.gc();
         let mut d: Vec<Diagnostic> = out.iter().map(|e| Diagnostic::parse(e)).collect();
         d.sort_by_key(|d| (d.line, d.col));
@@ -372,7 +449,10 @@ impl Session {
         let base = base.finish();
         // 検査済みの印がない関数だけ検査する。ジェネリック関数は、要求されたインスタンスごとに検査する
         let insts = Mutex::new(Insts::new(&a.prog));
-        let mut ids: Vec<u32> = (0..a.prog.names.len()).filter(|&i| Self::concrete(&a.prog, i)).map(|i| i as u32).collect();
+        let mut ids: Vec<u32> = (0..a.prog.names.len())
+            .filter(|&i| Self::concrete(&a.prog, i))
+            .map(|i| i as u32)
+            .collect();
         let mut parsed = std::mem::take(&mut a.parsed);
         while !ids.is_empty() {
             let mut todo = vec![];
@@ -388,7 +468,16 @@ impl Session {
                 }
             }
             let tids: Vec<u32> = todo.iter().map(|&(id, _)| id).collect();
-            let results = check_all(&self.opts, src, &a.items, &a.prog, &insts, &tids, std::mem::take(&mut parsed), &self.isa);
+            let results = check_all(
+                &self.opts,
+                src,
+                &a.items,
+                &a.prog,
+                &insts,
+                &tids,
+                std::mem::take(&mut parsed),
+                &self.isa,
+            );
             for ((_, k), r) in todo.into_iter().zip(results) {
                 match r {
                     Ok(req) => {
@@ -413,14 +502,26 @@ impl Session {
         r
     }
 
-    fn build_inner(&mut self, src: &str, items: Vec<SrcItem>, output: &Path) -> Result<BuildReport, String> {
+    fn build_inner(
+        &mut self,
+        src: &str,
+        items: Vec<SrcItem>,
+        output: &Path,
+    ) -> Result<BuildReport, String> {
         let t0 = Instant::now();
-        let mut tm = Timer { on: self.opts.time, start: t0, last: t0 };
+        let mut tm = Timer {
+            on: self.opts.time,
+            start: t0,
+            last: t0,
+        };
         let mut a = self.analyze(src, items)?;
         if let Some(e) = a.errors.first() {
             return Err(e.clone());
         }
-        tm.lap("front", format!("{} items, {} parsed", a.items.len(), a.n_parsed));
+        tm.lap(
+            "front",
+            format!("{} items, {} parsed", a.items.len(), a.n_parsed),
+        );
 
         let live = a.prog.reachable(&a.refs);
         let mut base = KeyHasher::new();
@@ -428,25 +529,37 @@ impl Session {
         base.add(self.isa.triple().to_string().as_str());
         base.add(&(self.opts.opt, self.opts.fast_regalloc));
         let base = base.finish();
-        let user_live: Vec<u32> =
-            (0..a.prog.names.len()).filter(|&i| live[i] && Self::concrete(&a.prog, i)).map(|i| i as u32).collect();
+        let user_live: Vec<u32> = (0..a.prog.names.len())
+            .filter(|&i| live[i] && Self::concrete(&a.prog, i))
+            .map(|i| i as u32)
+            .collect();
         let n_user = a.prog.item_of.iter().filter(|i| i.is_some()).count();
-        tm.lap("plan", format!("{} live fns, {} unreachable skipped", user_live.len(), n_user - user_live.len()));
+        tm.lap(
+            "plan",
+            format!(
+                "{} live fns, {} unreachable skipped",
+                user_live.len(),
+                n_user - user_live.len()
+            ),
+        );
 
         // 関数 → (キャッシュ or コンパイル)。その途中で要求されたインスタンスを、不動点まで同じように処理する
         let insts = Mutex::new(Insts::new(&a.prog));
-        let mut blobs: HashMap<u32, Blob> = HashMap::new();
+        let mut blobs: FxMap<u32, Blob> = FxMap::default();
         let mut parsed = std::mem::take(&mut a.parsed);
         let mut n_hit = 0;
         let mut n_compiled = 0;
         let mut wave = user_live.clone();
         while !wave.is_empty() {
             let mut misses = vec![];
-            let mut keys = HashMap::new();
+            let mut keys: FxMap<u32, Key> = FxMap::default();
             for &id in &wave {
                 let k = Self::key_of(&a, &insts, id, base);
                 keys.insert(id, k);
-                match self.get(k).and_then(|d| cache::decode_blob(d, &a.prog, &insts)) {
+                match self
+                    .get(k)
+                    .and_then(|d| cache::decode_blob(d, &a.prog, &insts))
+                {
                     Some(b) => {
                         n_hit += 1;
                         blobs.insert(id, b);
@@ -454,8 +567,16 @@ impl Session {
                     None => misses.push(id),
                 }
             }
-            let compiled =
-                compile_all(&self.opts, src, &a.items, &a.prog, &insts, &misses, std::mem::take(&mut parsed), &self.isa)?;
+            let compiled = compile_all(
+                &self.opts,
+                src,
+                &a.items,
+                &a.prog,
+                &insts,
+                &misses,
+                std::mem::take(&mut parsed),
+                &self.isa,
+            )?;
             n_compiled += misses.len();
             for (id, b) in compiled {
                 let mut buf = vec![];
@@ -469,7 +590,10 @@ impl Session {
         let insts = insts.into_inner().unwrap();
         tm.lap(
             "codegen",
-            format!("{n_hit} hit / {n_compiled} compiled ({} generic instances)", insts.list.len()),
+            format!(
+                "{n_hit} hit / {n_compiled} compiled ({} generic instances)",
+                insts.list.len()
+            ),
         );
 
         let obj = emit_object(&a.prog, &insts, &live, &user_live, &blobs, self.isa.clone())?;
@@ -486,7 +610,10 @@ impl Session {
         let last = self.get(link_key).map(|d| d.to_vec());
         let obj_path = output.with_extension("o");
         let mut linked = false;
-        if last.as_deref() == Some(&obj_key.to_le_bytes()[..]) && output.exists() && obj_path.exists() {
+        if last.as_deref() == Some(&obj_key.to_le_bytes()[..])
+            && output.exists()
+            && obj_path.exists()
+        {
             tm.lap("link", "skipped (object unchanged)");
         } else {
             std::fs::write(&obj_path, &obj).map_err(|e| e.to_string())?;
@@ -509,7 +636,12 @@ impl Session {
         })
         .inspect(|_| {
             if self.opts.time {
-                eprintln!("  {:<10} {:>8.2} ms  peak RSS {} KiB", "total", tm.start.elapsed().as_secs_f64() * 1e3, peak_rss_kib());
+                eprintln!(
+                    "  {:<10} {:>8.2} ms  peak RSS {} KiB",
+                    "total",
+                    tm.start.elapsed().as_secs_f64() * 1e3,
+                    peak_rss_kib()
+                );
             }
         })
     }
@@ -544,11 +676,12 @@ impl Session {
 /// ユーザのソースの後ろに、使われうる prelude のアイテム (Option / Result など) を付ける。
 /// 後ろに付けるのでユーザのコードの行番号は変わらない。ユーザのコードの字句解析はここで 1 回だけ行い、
 /// prelude の分だけ追加で字句解析して結合する
-fn with_prelude(src: &str) -> Result<(String, Vec<SrcItem>), String> {
+fn with_prelude(src: &str) -> Result<(std::borrow::Cow<'_, str>, Vec<SrcItem>), String> {
     let mut items = lexer::split(src)?;
     let extra = crate::prelude::select(src, &items);
     if extra.is_empty() {
-        return Ok((src.to_string(), items));
+        // prelude を使わなければソースはそのまま (コピーしない)
+        return Ok((std::borrow::Cow::Borrowed(src), items));
     }
     let base = src.len() + 1;
     let lines = src.bytes().filter(|&c| c == b'\n').count() + 1;
@@ -572,12 +705,17 @@ fn with_prelude(src: &str) -> Result<(String, Vec<SrcItem>), String> {
     full.push_str(src);
     full.push('\n');
     full.push_str(&extra);
-    Ok((full, items))
+    Ok((std::borrow::Cow::Owned(full), items))
 }
 
 /// 入力を小さな塊ごとに取り合う単純な並列 map (結果は入力順)。
 /// `min_per_job` は 1 スレッドに割り当てる最小の要素数 (小さな入力でスレッドを立てすぎない)
-fn par_map<T: Send, F>(jobs: usize, input: &[usize], min_per_job: usize, f: F) -> Result<Vec<T>, String>
+fn par_map<T: Send, F>(
+    jobs: usize,
+    input: &[usize],
+    min_per_job: usize,
+    f: F,
+) -> Result<Vec<T>, String>
 where
     F: Fn(usize) -> Result<T, String> + Sync,
 {
@@ -630,8 +768,11 @@ fn compile_one(
         Some(i) => i,
         None => front::parse_item(src, it)?,
     };
-    let syn::Item::Fn(f) = item else { unreachable!() };
-    w.compile(prog, insts, id, &f, isa).map_err(|e| front::relocate_err(e, it))
+    let syn::Item::Fn(f) = item else {
+        unreachable!()
+    };
+    w.compile(prog, insts, id, &f, isa)
+        .map_err(|e| front::relocate_err(e, it))
     // f (AST) はここで捨てる: 同時に生きている AST は常に 1 関数分だけ
 }
 
@@ -656,7 +797,10 @@ fn compile_all(
             .map(|&id| {
                 let body = insts.lock().unwrap().body_of(id);
                 let pre = parsed.remove(&(prog.item_of[body as usize].unwrap() as usize));
-                Ok((id, compile_one(&mut w, src, items, prog, insts, id, pre, &**isa)?))
+                Ok((
+                    id,
+                    compile_one(&mut w, src, items, prog, insts, id, pre, &**isa)?,
+                ))
             })
             .collect();
     }
@@ -677,7 +821,10 @@ fn compile_all(
                             break;
                         }
                         for &id in &misses[i..(i + 8).min(misses.len())] {
-                            out.push((id, compile_one(&mut w, src, items, prog, insts, id, None, &*isa)?));
+                            out.push((
+                                id,
+                                compile_one(&mut w, src, items, prog, insts, id, None, &*isa)?,
+                            ));
                         }
                     }
                     Ok(out)
@@ -711,8 +858,11 @@ fn check_all(
             Some(i) => i,
             None => front::parse_item(src, it)?,
         };
-        let syn::Item::Fn(f) = item else { return Ok(vec![]) };
-        w.check(prog, insts, id, &f, &**isa).map_err(|e| front::relocate_err(e, it))
+        let syn::Item::Fn(f) = item else {
+            return Ok(vec![]);
+        };
+        w.check(prog, insts, id, &f, &**isa)
+            .map_err(|e| front::relocate_err(e, it))
     };
     if ids.len() <= KEEP_PARSED {
         let mut w = Worker::new();
@@ -730,7 +880,10 @@ fn check_all(
     let starts: Vec<usize> = (0..ids.len()).step_by(chunk).collect();
     par_map(o.jobs, &starts, 2, |st| {
         let mut w = Worker::new();
-        Ok(ids[st..(st + chunk).min(ids.len())].iter().map(|&id| one(&mut w, id, None)).collect::<Vec<_>>())
+        Ok(ids[st..(st + chunk).min(ids.len())]
+            .iter()
+            .map(|&id| one(&mut w, id, None))
+            .collect::<Vec<_>>())
     })
     .map(|v: Vec<Vec<Result<Vec<u32>, String>>>| v.into_iter().flatten().collect())
     .unwrap_or_else(|e| vec![Err(e)])
@@ -741,7 +894,7 @@ fn emit_object(
     insts: &Insts,
     live: &[bool],
     user_live: &[u32],
-    blobs: &HashMap<u32, Blob>,
+    blobs: &FxMap<u32, Blob>,
     isa: OwnedTargetIsa,
 ) -> Result<Vec<u8>, String> {
     let cc = isa.default_call_conv();
@@ -750,7 +903,7 @@ fn emit_object(
     // 関数ごとにセクションを分ける → リンカの --gc-sections が効く
     b.per_function_section(true);
     let mut m = ObjectModule::new(b);
-    let mut ids = HashMap::new();
+    let mut ids: FxMap<u32, cranelift_module::FuncId> = FxMap::default();
     for (i, sig) in prog.sigs.iter().enumerate() {
         // ジェネリック関数そのものは ABI を持たない (インスタンスだけを置く)
         if !live[i] || sig.is_generic() || !sig.has_body {
@@ -769,8 +922,17 @@ fn emit_object(
         ids.insert(i as u32, id);
     }
     // インスタンスはシンボル名順に並べる (登録順は並列実行で変わるが、.o は決定的にしたい)
-    let mut order: Vec<u32> = (0..insts.list.len() as u32).map(|i| insts.n_fns + i).collect();
-    order.sort_by(|a, b| insts.get(*a).unwrap().sig.symbol.cmp(&insts.get(*b).unwrap().sig.symbol));
+    let mut order: Vec<u32> = (0..insts.list.len() as u32)
+        .map(|i| insts.n_fns + i)
+        .collect();
+    order.sort_by(|a, b| {
+        insts
+            .get(*a)
+            .unwrap()
+            .sig
+            .symbol
+            .cmp(&insts.get(*b).unwrap().sig.symbol)
+    });
     for &iid in &order {
         let sig = &insts.get(iid).unwrap().sig;
         let id = m
@@ -778,9 +940,112 @@ fn emit_object(
             .map_err(|e| e.to_string())?;
         ids.insert(iid, id);
     }
+    // static: コードから参照されているもの (と、その初期値から参照されているもの) だけを置く
+    let mut statics: HashMap<u32, cranelift_module::DataId> = HashMap::new();
+    let mut todo: Vec<u32> = user_live
+        .iter()
+        .chain(&order)
+        .flat_map(|u| {
+            blobs[u].relocs.iter().filter_map(|r| {
+                if let Target::Static(c) = r.target {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+    todo.sort_unstable();
+    todo.dedup();
+    let mut defs = vec![];
+    while let Some(ci) = todo.pop() {
+        if statics.contains_key(&ci) {
+            continue;
+        }
+        let c = &prog.consts[ci as usize];
+        let id = m
+            .declare_data(
+                &format!("_xS{}", c.name),
+                Linkage::Local,
+                c.stat == Some(true),
+                false,
+            )
+            .map_err(|e| e.to_string())?;
+        statics.insert(ci, id);
+        let e: syn::Expr = syn::parse_str(&c.expr).map_err(|e| e.to_string())?;
+        let dv = crate::consteval::eval(prog, &e, c.ty)
+            .map_err(|e| format!("in static `{}`: {e}", c.name))?;
+        fn statics_in(dv: &crate::consteval::DataVal, out: &mut Vec<u32>) {
+            for (_, r) in &dv.relocs {
+                match r {
+                    crate::consteval::DRef::Static(c) => out.push(*c),
+                    crate::consteval::DRef::Anon(inner) => statics_in(inner, out),
+                }
+            }
+        }
+        statics_in(&dv, &mut todo);
+        defs.push((id, dv));
+    }
+    // 無名データは内容で重複を除く (文字列リテラルの共有)
+    let mut anon: HashMap<Vec<u8>, cranelift_module::DataId> = HashMap::new();
+    fn define_val(
+        m: &mut ObjectModule,
+        id: cranelift_module::DataId,
+        dv: crate::consteval::DataVal,
+        anon: &mut HashMap<Vec<u8>, cranelift_module::DataId>,
+        statics: &HashMap<u32, cranelift_module::DataId>,
+    ) -> Result<(), String> {
+        let mut desc = cranelift_module::DataDescription::new();
+        desc.define(dv.bytes.into_boxed_slice());
+        desc.set_align(dv.align as u64);
+        for (off, r) in dv.relocs {
+            let target = match r {
+                crate::consteval::DRef::Static(c) => statics[&c],
+                crate::consteval::DRef::Anon(inner) if inner.relocs.is_empty() => {
+                    anon_data(m, inner.bytes, inner.align, anon)?
+                }
+                crate::consteval::DRef::Anon(inner) => {
+                    let nid = m
+                        .declare_anonymous_data(false, false)
+                        .map_err(|e| e.to_string())?;
+                    define_val(m, nid, inner, anon, statics)?;
+                    nid
+                }
+            };
+            let gv = desc.import_global_value(ModuleRelocTarget::from(target));
+            desc.write_data_addr(off, gv, 0);
+        }
+        m.define_data(id, &desc).map_err(|e| e.to_string())
+    }
+    fn anon_data(
+        m: &mut ObjectModule,
+        bytes: Vec<u8>,
+        align: u32,
+        anon: &mut HashMap<Vec<u8>, cranelift_module::DataId>,
+    ) -> Result<cranelift_module::DataId, String> {
+        if let Some(&id) = anon.get(&bytes) {
+            return Ok(id);
+        }
+        let id = m
+            .declare_anonymous_data(false, false)
+            .map_err(|e| e.to_string())?;
+        let mut desc = cranelift_module::DataDescription::new();
+        desc.define(bytes.clone().into_boxed_slice());
+        desc.set_align(align.max(1) as u64);
+        m.define_data(id, &desc).map_err(|e| e.to_string())?;
+        anon.insert(bytes, id);
+        Ok(id)
+    }
+    for (id, dv) in defs {
+        define_val(&mut m, id, dv, &mut anon, &statics)?;
+    }
     for &uid in user_live.iter().chain(&order) {
         let blob = &blobs[&uid];
         let fid = ids[&uid];
+        let mut data_ids = vec![];
+        for d in &blob.datas {
+            data_ids.push(anon_data(&mut m, d.clone(), 1, &mut anon)?);
+        }
         let relocs: Vec<ModuleReloc> = blob
             .relocs
             .iter()
@@ -791,6 +1056,8 @@ fn emit_object(
                 name: match r.target {
                     Target::Func(t) => ModuleRelocTarget::from(ids[&t]),
                     Target::SelfOffset(off) => ModuleRelocTarget::FunctionOffset(fid, off),
+                    Target::Data(k) => ModuleRelocTarget::from(data_ids[k as usize]),
+                    Target::Static(c) => ModuleRelocTarget::from(statics[&c]),
                 },
             })
             .collect();

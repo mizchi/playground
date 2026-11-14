@@ -26,13 +26,15 @@ fn main() {
             args.next();
         }
         Some("lsp") => {
-            std::process::exit(match exrustc::lsp::run(std::io::stdin().lock(), std::io::stdout().lock()) {
-                Ok(()) => 0,
-                Err(e) => {
-                    eprintln!("exrustc lsp: {e}");
-                    1
-                }
-            });
+            std::process::exit(
+                match exrustc::lsp::run(std::io::stdin().lock(), std::io::stdout().lock()) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        eprintln!("exrustc lsp: {e}");
+                        1
+                    }
+                },
+            );
         }
         _ => {}
     }
@@ -47,7 +49,12 @@ fn main() {
             "--regalloc=good" => o.fast_regalloc = false,
             "--time" => o.time = true,
             "--no-cache" => o.no_cache = true,
-            "-j" => o.jobs = args.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
+            "-j" => {
+                o.jobs = args
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(|| usage())
+            }
             s if s.starts_with("--linker=") => o.linker = Some(s["--linker=".len()..].into()),
             s if s.starts_with('-') => usage(),
             s => input = s.into(),

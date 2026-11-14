@@ -89,7 +89,11 @@ impl Cache {
     }
 
     pub fn empty() -> Cache {
-        Cache { data: vec![], index: HashMap::new(), last_obj: 0 }
+        Cache {
+            data: vec![],
+            index: HashMap::new(),
+            last_obj: 0,
+        }
     }
 
     fn parse_index(d: &[u8]) -> Option<(HashMap<Key, (usize, usize)>, Key)> {
@@ -124,7 +128,12 @@ impl Cache {
     }
 
     /// 使ったエントリだけで新しいキャッシュファイルを書く (tmp + rename)。
-    pub fn save(&self, path: &Path, entries: &[(Key, &[u8])], last_obj: Key) -> std::io::Result<usize> {
+    pub fn save(
+        &self,
+        path: &Path,
+        entries: &[(Key, &[u8])],
+        last_obj: Key,
+    ) -> std::io::Result<usize> {
         let mut out = Vec::with_capacity(self.data.len());
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&last_obj.to_le_bytes());
@@ -179,7 +188,23 @@ pub fn encode_blob(b: &Blob, prog: &Program, insts: &Insts, out: &mut Vec<u8>) {
                 out.push(1);
                 out.extend_from_slice(&o.to_le_bytes());
             }
+            Target::Data(k) => {
+                out.push(3);
+                out.extend_from_slice(&k.to_le_bytes());
+            }
+            // static は名前で (番号はアイテムの並びで変わる)
+            Target::Static(ci) => {
+                out.push(4);
+                let n = prog.consts[ci as usize].name.as_bytes();
+                out.extend_from_slice(&(n.len() as u16).to_le_bytes());
+                out.extend_from_slice(n);
+            }
         }
+    }
+    out.extend_from_slice(&(b.datas.len() as u32).to_le_bytes());
+    for d in &b.datas {
+        out.extend_from_slice(&(d.len() as u32).to_le_bytes());
+        out.extend_from_slice(d);
     }
 }
 
@@ -205,7 +230,9 @@ pub fn encode_insts(ids: &[u32], prog: &Program, insts: &Insts, out: &mut Vec<u8
 /// encode_insts の逆。各インスタンスを insts に要求し直す。読めなければ false
 pub fn request_insts(d: &[u8], prog: &Program, insts: &Mutex<Insts>) -> bool {
     let mut r = Rd(d, 0);
-    let Some(n) = r.u32() else { return d.is_empty() };
+    let Some(n) = r.u32() else {
+        return d.is_empty();
+    };
     for _ in 0..n {
         let ok = (|| {
             let len = r.u16()? as usize;
@@ -257,9 +284,31 @@ pub fn decode_blob(d: &[u8], prog: &Program, insts: &Mutex<Insts>) -> Option<Blo
                 }
             }
             1 => Target::SelfOffset(r.u32()?),
+            3 => Target::Data(r.u32()?),
+            4 => {
+                let len = r.u16()? as usize;
+                let name = std::str::from_utf8(r.take(len)?).ok()?;
+                Target::Static(*prog.const_index.get(name)?)
+            }
             _ => return None,
         };
-        relocs.push(BlobReloc { offset, kind, addend, target });
+        relocs.push(BlobReloc {
+            offset,
+            kind,
+            addend,
+            target,
+        });
     }
-    Some(Blob { align, code, relocs })
+    let nd = r.u32()? as usize;
+    let mut datas = Vec::with_capacity(nd);
+    for _ in 0..nd {
+        let n = r.u32()? as usize;
+        datas.push(r.take(n)?.to_vec());
+    }
+    Some(Blob {
+        align,
+        code,
+        relocs,
+        datas,
+    })
 }

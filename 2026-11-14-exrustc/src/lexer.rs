@@ -55,6 +55,9 @@ struct St<'a> {
     line_cache: (usize, usize),
     /// 今のアイテムで、トップレベルの最初の識別子をもう見たか (`impl` 判定用)
     seen_ident: bool,
+    /// アイテムの先頭の (pub などを除いた) 識別子 (最大 2 個、byte range)
+    head: [(u32, u32); 2],
+    n_head: usize,
 }
 
 impl St<'_> {
@@ -77,7 +80,8 @@ impl St<'_> {
         let joint = op && self.prev_punct && !self.prev_ws;
         // (種類, 長さ, 本体) の列にする。長さを入れるので曖昧さがない
         self.buf.push(kind << 1 | joint as u8);
-        self.buf.extend_from_slice(&((en - st) as u32).to_le_bytes());
+        self.buf
+            .extend_from_slice(&((en - st) as u32).to_le_bytes());
         self.buf.extend_from_slice(&self.s[st..en]);
         self.prev_punct = op;
         if kind == 2 {
@@ -93,7 +97,19 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
     let mut i = 0;
     let mut items: Vec<SrcItem> = vec![];
     let mut depth: i32 = 0;
-    let mut st = St { s, cur: None, prev_ws: true, prev_punct: false, buf: Vec::with_capacity(4096), line_cache: (0, 1), seen_ident: false };
+    let mut st = St {
+        s,
+        cur: None,
+        prev_ws: true,
+        prev_punct: false,
+        buf: Vec::with_capacity(4096),
+        line_cache: (0, 1),
+        seen_ident: false,
+        head: [(0, 0); 2],
+        n_head: 0,
+    };
+    // `use` / `const` / `static` / `type` は `}` ではなく `;` で終わる (`use a::{b, c};` / `const P: T = T { .. };`)
+    let mut semi_only = false;
     // impl ブロックの中にいるときは、メンバの区切りを depth 1 で判定する
     let mut base: i32 = 0;
     let mut impl_header: Option<u32> = None;
@@ -158,6 +174,23 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
                 i += 1;
             }
             tok!(start, i, 2u8);
+            if depth == base && st.n_head < 2 {
+                let w = &s[start..i];
+                if !matches!(w, b"pub" | b"crate" | b"super" | b"in") {
+                    st.head[st.n_head] = (start as u32, i as u32);
+                    st.n_head += 1;
+                    let h0 = &s[st.head[0].0 as usize..st.head[0].1 as usize];
+                    semi_only = match (h0, st.n_head) {
+                        (b"use" | b"static" | b"type", _) => true,
+                        (b"const", 1) => true,
+                        (b"const", _) => {
+                            let h1 = &s[st.head[1].0 as usize..st.head[1].1 as usize];
+                            !matches!(h1, b"fn" | b"unsafe" | b"extern" | b"async")
+                        }
+                        _ => false,
+                    };
+                }
+            }
             if depth == 0 && !st.seen_ident {
                 let w = &s[start..i];
                 // `unsafe impl` に備えて unsafe は読み飛ばす
@@ -207,7 +240,10 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
         // impl ブロックの閉じ括弧はどのアイテムにも属さない
         if c == b'}' && impl_header.is_some() && depth == 1 {
             if st.cur.is_some() {
-                return Err(format!("{}:1: unterminated item in impl block", st.line_at(start)));
+                return Err(format!(
+                    "{}:1: unterminated item in impl block",
+                    st.line_at(start)
+                ));
             }
             depth = 0;
             base = 0;
@@ -227,44 +263,68 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
             b')' | b']' | b'}' => {
                 depth -= 1;
                 if depth < 0 {
-                    return Err(format!("{}:1: unbalanced `{}`", st.line_at(start), c as char));
+                    return Err(format!(
+                        "{}:1: unbalanced `{}`",
+                        st.line_at(start),
+                        c as char
+                    ));
                 }
             }
             _ => {}
         }
         let header_end = c == b'{' && depth == 1 && impl_pending;
         let attr_end = inner_attr && c == b']' && depth == 0;
-        if header_end || attr_end || (depth == base && (c == b';' || c == b'}')) {
+        let item_end = depth == base && (c == b';' || (c == b'}' && !semi_only));
+        if header_end || attr_end || item_end {
             let (sp, ln, idents) = st.cur.take().unwrap();
             let mut h = KeyHasher::new();
             let kind = if attr_end {
                 inner_attr = false;
                 ItemKind::InnerAttr
             } else if header_end {
-                if is_trait { ItemKind::TraitHeader } else { ItemKind::ImplHeader }
+                if is_trait {
+                    ItemKind::TraitHeader
+                } else {
+                    ItemKind::ImplHeader
+                }
             } else if let Some(hi) = impl_header {
                 // メンバのハッシュにはヘッダ (= self 型 / trait 名) を含める
                 h.add(&items[hi as usize].hash);
-                if is_trait { ItemKind::TraitMember(hi) } else { ItemKind::ImplMember(hi) }
+                if is_trait {
+                    ItemKind::TraitMember(hi)
+                } else {
+                    ItemKind::ImplMember(hi)
+                }
             } else {
                 ItemKind::Normal
             };
             h.add(&st.buf[..]);
             st.buf.clear();
             st.seen_ident = false;
+            st.n_head = 0;
+            semi_only = false;
             if header_end {
                 impl_pending = false;
                 impl_header = Some(items.len() as u32);
                 base = 1;
             }
-            items.push(SrcItem { start: sp, end: i, line: ln, hash: h.finish(), idents, kind });
+            items.push(SrcItem {
+                start: sp,
+                end: i,
+                line: ln,
+                hash: h.finish(),
+                idents,
+                kind,
+            });
         }
     }
     if impl_header.is_some() {
         return Err("unterminated impl block".into());
     }
     if let Some((sp, ln, ..)) = st.cur {
-        return Err(format!("{ln}:1: unterminated item starting here (byte {sp})"));
+        return Err(format!(
+            "{ln}:1: unterminated item starting here (byte {sp})"
+        ));
     }
     Ok(items)
 }
@@ -315,7 +375,10 @@ fn string_lit(s: &[u8], mut i: usize) -> Option<usize> {
             if j >= n {
                 return Some(n);
             }
-            if s[j] == b'"' && s.len() >= j + 1 + hashes && s[j + 1..j + 1 + hashes].iter().all(|&c| c == b'#') {
+            if s[j] == b'"'
+                && s.len() >= j + 1 + hashes
+                && s[j + 1..j + 1 + hashes].iter().all(|&c| c == b'#')
+            {
                 return Some(j + 1 + hashes);
             }
             j += 1;
@@ -364,9 +427,18 @@ mod tests {
         let kinds: Vec<_> = it.iter().map(|i| i.kind).collect();
         assert_eq!(
             kinds,
-            vec![ItemKind::Normal, ItemKind::ImplHeader, ItemKind::ImplMember(1), ItemKind::ImplMember(1), ItemKind::Normal]
+            vec![
+                ItemKind::Normal,
+                ItemKind::ImplHeader,
+                ItemKind::ImplMember(1),
+                ItemKind::ImplMember(1),
+                ItemKind::Normal
+            ]
         );
-        assert_eq!(&src[it[2].start..it[2].end], "fn a(&self) -> i64 { self.x }");
+        assert_eq!(
+            &src[it[2].start..it[2].end],
+            "fn a(&self) -> i64 { self.x }"
+        );
         assert_eq!(it[2].line, 3);
         // メソッド b だけ編集すると a のハッシュは変わらない
         let it2 = split(&src.replace("fn b() {}", "fn b() { 1; }")).unwrap();
@@ -378,13 +450,32 @@ mod tests {
     }
 
     #[test]
+    fn use_and_const_items_end_at_semicolon() {
+        let src = "use core::cmp::{max, min};\nconst P: Pt = Pt { x: 1 };\nconst fn f() -> u8 { 1 }\nfn main() {}";
+        let it = split(src).unwrap();
+        let texts: Vec<&str> = it.iter().map(|i| &src[i.start..i.end]).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "use core::cmp::{max, min};",
+                "const P: Pt = Pt { x: 1 };",
+                "const fn f() -> u8 { 1 }",
+                "fn main() {}"
+            ]
+        );
+    }
+
+    #[test]
     fn jointness_matters() {
         assert_ne!(hashes("fn f() { a && b; }"), hashes("fn f() { a & &b; }"));
     }
 
     #[test]
     fn strings_chars_lifetimes() {
-        let it = split("fn f() { let s = \"}\"; let c = '}'; let b = b'}'; let r = r#\"}\"#; }\nfn g<'a>() {}").unwrap();
+        let it = split(
+            "fn f() { let s = \"}\"; let c = '}'; let b = b'}'; let r = r#\"}\"#; }\nfn g<'a>() {}",
+        )
+        .unwrap();
         assert_eq!(it.len(), 2);
     }
 }

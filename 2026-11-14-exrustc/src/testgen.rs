@@ -10,8 +10,16 @@ pub fn program(n: usize, variant: usize) -> String {
     for i in 0..n {
         let k = (i * 7 + 3) % 13 + 1;
         let extra = if i == n / 2 { variant } else { 0 };
-        let callee = if i > 0 { format!("f{}(x / 2 + {k})", i - 1) } else { "x".into() };
-        let other = if 1 < i && i < 300 && i % 3 == 0 { format!(" + f{}(x % {})", i / 2, k + 1) } else { String::new() };
+        let callee = if i > 0 {
+            format!("f{}(x / 2 + {k})", i - 1)
+        } else {
+            "x".into()
+        };
+        let other = if 1 < i && i < 300 && i % 3 == 0 {
+            format!(" + f{}(x % {})", i / 2, k + 1)
+        } else {
+            String::new()
+        };
         writeln!(
             s,
             "fn f{i}(x: u64) -> u64 {{
@@ -35,6 +43,11 @@ pub fn program(n: usize, variant: usize) -> String {
         )
         .unwrap();
     }
-    writeln!(s, "fn main() {{\n    print_u64(f{}(12345));\n    unsafe {{\n        putchar(10);\n    }}\n}}", n - 1).unwrap();
+    writeln!(
+        s,
+        "fn main() {{\n    print_u64(f{}(12345));\n    unsafe {{\n        putchar(10);\n    }}\n}}",
+        n - 1
+    )
+    .unwrap();
     s
 }

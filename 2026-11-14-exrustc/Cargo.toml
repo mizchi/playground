@@ -2,6 +2,8 @@
 name = "exrustc"
 version = "0.1.0"
 edition = "2024"
+# examples/ は exrustc でコンパイルする入力 (Cargo の example ではない。no_std のものもある)
+autoexamples = false
 
 # 他の実験と干渉しないよう、このディレクトリ単独のワークスペースにする
 [workspace]
@@ -15,6 +17,7 @@ cranelift-module = "0.137"
 cranelift-object = "0.137"
 cranelift-native = "0.137"
 serde_json = "1"
+quote = { version = "1", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

@@ -10,6 +10,7 @@ use syn::spanned::Spanned;
 
 use crate::cache::{Key, KeyHasher};
 use crate::enc::{Enc, Rd};
+use crate::fxhash::FxMap;
 use crate::lexer::{ItemKind, SrcItem};
 
 pub type R<T> = Result<T, String>;
@@ -108,7 +109,16 @@ impl Ty {
     pub fn is_int(self) -> bool {
         matches!(
             self,
-            Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::Isize | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Usize
+            Ty::I8
+                | Ty::I16
+                | Ty::I32
+                | Ty::I64
+                | Ty::Isize
+                | Ty::U8
+                | Ty::U16
+                | Ty::U32
+                | Ty::U64
+                | Ty::Usize
         )
     }
 
@@ -125,7 +135,13 @@ impl Ty {
             Ty::I64 | Ty::U64 | Ty::Isize | Ty::Usize | Ty::Ptr(..) => 64,
             Ty::Ref(..) if self.is_fat() => 0,
             Ty::Ref(..) => 64,
-            Ty::Unit | Ty::Never | Ty::Struct(_) | Ty::Param(_) | Ty::Array(..) | Ty::Slice(_) | Ty::Str => 0,
+            Ty::Unit
+            | Ty::Never
+            | Ty::Struct(_)
+            | Ty::Param(_)
+            | Ty::Array(..)
+            | Ty::Slice(_)
+            | Ty::Str => 0,
         }
     }
 }
@@ -160,17 +176,33 @@ pub fn parse_tysyn(t: &syn::Type, self_ty: Option<&TySyn>) -> R<TySyn> {
     Ok(match t {
         syn::Type::Never(_) => TySyn::Prim(Ty::Never),
         syn::Type::Tuple(tt) if tt.elems.is_empty() => TySyn::Prim(Ty::Unit),
-        syn::Type::Tuple(tt) => TySyn::Tuple(tt.elems.iter().map(|e| parse_tysyn(e, self_ty)).collect::<R<_>>()?),
+        syn::Type::Tuple(tt) => TySyn::Tuple(
+            tt.elems
+                .iter()
+                .map(|e| parse_tysyn(e, self_ty))
+                .collect::<R<_>>()?,
+        ),
         syn::Type::Paren(p) => parse_tysyn(&p.elem, self_ty)?,
         syn::Type::Group(g) => parse_tysyn(&g.elem, self_ty)?,
         // ライフタイムはコード生成に影響しないので消去する
-        syn::Type::Reference(r) => TySyn::Ref(r.mutability.is_some(), Box::new(parse_tysyn(&r.elem, self_ty)?)),
-        syn::Type::Ptr(p) => TySyn::Ptr(p.mutability.is_some(), Box::new(parse_tysyn(&p.elem, self_ty)?)),
+        syn::Type::Reference(r) => TySyn::Ref(
+            r.mutability.is_some(),
+            Box::new(parse_tysyn(&r.elem, self_ty)?),
+        ),
+        syn::Type::Ptr(p) => TySyn::Ptr(
+            p.mutability.is_some(),
+            Box::new(parse_tysyn(&p.elem, self_ty)?),
+        ),
         syn::Type::Slice(sl) => TySyn::Slice(Box::new(parse_tysyn(&sl.elem, self_ty)?)),
         syn::Type::Array(a) => {
             let len = match &a.len {
-                syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. }) => ArrLen::Lit(i.base10_parse().map_err(|e| e.to_string())?),
-                syn::Expr::Path(p) if p.path.get_ident().is_some() => ArrLen::Const(p.path.get_ident().unwrap().to_string()),
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Int(i),
+                    ..
+                }) => ArrLen::Lit(i.base10_parse().map_err(|e| e.to_string())?),
+                syn::Expr::Path(p) if p.path.get_ident().is_some() => {
+                    ArrLen::Const(p.path.get_ident().unwrap().to_string())
+                }
                 e => return err(e.span(), "array length must be a literal or a const"),
             };
             TySyn::Array(Box::new(parse_tysyn(&a.elem, self_ty)?), len)
@@ -289,6 +321,8 @@ impl FnSig {
 pub struct TyEnv {
     pub self_sid: Option<u32>,
     pub params: Vec<(String, Ty)>,
+    /// `Self` の型 (struct なら Struct(self_sid)、プリミティブへの trait 実装なら u32 など)
+    pub self_ty: Option<Ty>,
 }
 
 /// enum のバリアント (要約に保存する形)
@@ -368,7 +402,11 @@ pub struct AdtTable {
 
 impl AdtTable {
     fn new() -> Self {
-        AdtTable { v: Mutex::new(vec![]), inst: Mutex::new(HashMap::new()), tuples: Mutex::new(HashMap::new()) }
+        AdtTable {
+            v: Mutex::new(vec![]),
+            inst: Mutex::new(HashMap::new()),
+            tuples: Mutex::new(HashMap::new()),
+        }
     }
     pub fn len(&self) -> usize {
         self.v.lock().unwrap().len()
@@ -428,6 +466,22 @@ pub struct Summary {
     /// impl ヘッダの型パラメータと self 型 (`impl<T> Option<T>`)
     pub impl_generics: Vec<(String, Vec<String>)>,
     pub impl_self_ty: Option<TySyn>,
+    /// `const N: T = e;` の (名前, 型, 式のソース)。使う側で式として埋め込む
+    pub consts: Vec<(String, TySyn, String)>,
+    /// `static [mut] N: T = e;` の (名前, 型, 初期値のソース, mut)
+    pub statics: Vec<(String, TySyn, String, bool)>,
+}
+
+/// const / static の定義
+pub struct ConstDef {
+    pub name: String,
+    pub ty: Ty,
+    /// 初期値の式のソース (使う側・初期化で parse し直す)
+    pub expr: String,
+    /// 定義しているアイテム (キャッシュキー用)
+    pub item: u32,
+    /// static なら Some(mut か)
+    pub stat: Option<bool>,
 }
 
 /// impl / trait のメンバの所有者
@@ -441,6 +495,33 @@ pub struct Owner {
     /// impl の型パラメータ (trait なら `Self`)
     pub generics: Vec<(String, Vec<String>)>,
     pub is_trait: bool,
+}
+
+/// `u32::MAX` などの関連定数
+pub fn prim_assoc_const(t: Ty, name: &str) -> Option<i128> {
+    let bits = t.bits();
+    Some(match (name, t.signed()) {
+        ("BITS", _) => bits as i128,
+        ("MAX", true) => (1i128 << (bits - 1)) - 1,
+        ("MIN", true) => -(1i128 << (bits - 1)),
+        ("MAX", false) if t == Ty::Char => 0x10FFFF,
+        ("MAX", false) => (1i128 << bits) - 1,
+        ("MIN", false) => 0,
+        _ => return None,
+    })
+}
+
+/// syn の式をソースに戻す (const の式を要約に保存するため)
+mod quote_like {
+    pub trait ToSrc {
+        fn to_src(&self) -> String;
+    }
+    impl ToSrc for syn::Expr {
+        fn to_src(&self) -> String {
+            use quote::ToTokens;
+            self.to_token_stream().to_string()
+        }
+    }
 }
 
 /// `#[name]` か `#[unsafe(name)]` が付いているか
@@ -480,20 +561,25 @@ fn derive_names(attrs: &[syn::Attribute]) -> Vec<String> {
 pub struct Program {
     /// 全関数 (ユーザ定義 + extern)。index が u32 の関数 ID になる
     pub names: Vec<String>,
-    pub index: HashMap<String, u32>,
+    pub index: FxMap<String, u32>,
     pub sigs: Vec<FnSig>,
     /// ユーザ定義関数を定義しているアイテム番号 (extern は None)
     pub item_of: Vec<Option<u32>>,
     pub structs: AdtTable,
-    pub struct_index: HashMap<String, u32>,
+    pub struct_index: FxMap<String, u32>,
     /// 名前の最後のセグメント → 関数 ID 群 (`len` → `A::len`, `B::len`)。参照の過大近似用
-    pub by_last: HashMap<String, Vec<u32>>,
+    pub by_last: FxMap<String, Vec<u32>>,
     /// trait 名 → その trait で宣言された関数
-    pub traits: HashMap<String, Vec<u32>>,
+    pub traits: FxMap<String, Vec<u32>>,
     /// (型, trait) の実装
     pub impls: HashSet<(u32, String)>,
     /// `#[panic_handler]` の関数 (no_std)。panic (範囲外アクセス・unwrap など) はここを呼ぶ
     pub panic_handler: Option<u32>,
+    /// const と static
+    pub consts: Vec<ConstDef>,
+    pub const_index: FxMap<String, u32>,
+    /// プリミティブ型への trait 実装 (型, trait)
+    pub prim_impls: HashSet<(Ty, String)>,
 }
 
 /// 単相化したインスタンス (ジェネリック関数 base に型引数 args を入れたもの)
@@ -514,11 +600,17 @@ pub struct Insts {
 
 impl Insts {
     pub fn new(prog: &Program) -> Insts {
-        Insts { n_fns: prog.names.len() as u32, list: vec![], map: HashMap::new(), pending: vec![] }
+        Insts {
+            n_fns: prog.names.len() as u32,
+            list: vec![],
+            map: HashMap::new(),
+            pending: vec![],
+        }
     }
 
     pub fn get(&self, id: u32) -> Option<&Inst> {
-        id.checked_sub(self.n_fns).and_then(|i| self.list.get(i as usize))
+        id.checked_sub(self.n_fns)
+            .and_then(|i| self.list.get(i as usize))
     }
 
     /// インスタンスを要求する (なければ作り、pending に積む)。トレイト境界もここで確かめる
@@ -528,12 +620,19 @@ impl Insts {
         }
         let b = &prog.sigs[base as usize];
         if b.generics.len() != args.len() {
-            return Err(format!("`{}` takes {} type arguments", prog.names[base as usize], b.generics.len()));
+            return Err(format!(
+                "`{}` takes {} type arguments",
+                prog.names[base as usize],
+                b.generics.len()
+            ));
         }
         for ((pn, bounds), &t) in b.generics.iter().zip(&args) {
             for tr in bounds {
                 if !prog.implements(t, tr) {
-                    return Err(format!("the trait bound `{}: {tr}` is not satisfied (for `{pn}`)", prog.tn(t)));
+                    return Err(format!(
+                        "the trait bound `{}: {tr}` is not satisfied (for `{pn}`)",
+                        prog.tn(t)
+                    ));
                 }
             }
         }
@@ -561,12 +660,21 @@ impl Insts {
             trait_of: None,
             has_body: true,
             impl_trait: None,
-            self_ty: impl_of.map(Ty::Struct),
+            // Self: trait のデフォルトメソッドなら型引数の先頭、impl のメソッドなら self 型に型引数を入れたもの
+            self_ty: if b.trait_of.is_some() {
+                Some(args[0])
+            } else {
+                b.self_ty.map(|t| prog.subst(t, &args))
+            },
             export: false,
             panic_handler: false,
         };
         let id = self.n_fns + self.list.len() as u32;
-        self.list.push(Inst { base, args: args.clone(), sig });
+        self.list.push(Inst {
+            base,
+            args: args.clone(),
+            sig,
+        });
         self.map.insert((base, args), id);
         self.pending.push(id);
         Ok(id)
@@ -592,10 +700,23 @@ impl Insts {
                 let b = &prog.sigs[i.base as usize];
                 TyEnv {
                     self_sid: i.sig.impl_of,
-                    params: b.generics.iter().map(|g| g.0.clone()).zip(i.args.iter().copied()).collect(),
+                    params: b
+                        .generics
+                        .iter()
+                        .map(|g| g.0.clone())
+                        .zip(i.args.iter().copied())
+                        .collect(),
+                    self_ty: i.sig.self_ty,
                 }
             }
-            None => TyEnv { self_sid: prog.sigs[id as usize].impl_of, params: vec![] },
+            None => {
+                let s = &prog.sigs[id as usize];
+                TyEnv {
+                    self_sid: s.impl_of,
+                    params: vec![],
+                    self_ty: s.self_ty.filter(|t| !prog.has_param(*t)),
+                }
+            }
         }
     }
 }
@@ -624,7 +745,8 @@ pub fn parse_item(src: &str, it: &SrcItem) -> R<syn::Item> {
                     sig: f.sig,
                     block: Box::new(block),
                 })),
-                None => err(f.sig.span(), "trait method has no default body").map_err(|e| relocate_err(e, it)),
+                None => err(f.sig.span(), "trait method has no default body")
+                    .map_err(|e| relocate_err(e, it)),
             }
         }
         ItemKind::ImplMember(_) => match syn::parse_str::<syn::ImplItem>(text).map_err(fix)? {
@@ -644,7 +766,9 @@ pub fn parse_trait_member(src: &str, it: &SrcItem) -> R<syn::TraitItemFn> {
     let text = &src[it.start..it.end];
     match syn::parse_str::<syn::TraitItem>(text) {
         Ok(syn::TraitItem::Fn(f)) => Ok(f),
-        Ok(other) => err(other.span(), "only fns are supported in traits").map_err(|e| relocate_err(e, it)),
+        Ok(other) => {
+            err(other.span(), "only fns are supported in traits").map_err(|e| relocate_err(e, it))
+        }
         Err(e) => {
             let s = e.span().start();
             Err(format!("{}:{}: {e}", s.line + it.line - 1, s.column + 1))
@@ -654,15 +778,27 @@ pub fn parse_trait_member(src: &str, it: &SrcItem) -> R<syn::TraitItemFn> {
 
 /// アイテムを parse して要約する。owner は impl / trait のメンバのとき、その self 型 / trait 名。
 /// codegen でも使う AST (本体のある関数) があれば一緒に返す
-pub fn parse_and_summarize(src: &str, it: &SrcItem, owner: Option<&Owner>) -> R<(Summary, Option<syn::Item>)> {
+pub fn parse_and_summarize(
+    src: &str,
+    it: &SrcItem,
+    owner: Option<&Owner>,
+) -> R<(Summary, Option<syn::Item>)> {
     if let ItemKind::TraitMember(_) = it.kind {
         let ow = owner.ok_or("trait member without trait")?;
         let f = parse_trait_member(src, it)?;
         let mut sig = parse_sig(&f.sig, false, false, Some(ow)).map_err(|e| relocate_err(e, it))?;
         sig.has_body = f.default.is_some();
-        let sm = Summary { fns: vec![(format!("{}::{}", ow.base, f.sig.ident), sig)], ..Default::default() };
+        let sm = Summary {
+            fns: vec![(format!("{}::{}", ow.base, f.sig.ident), sig)],
+            ..Default::default()
+        };
         let item = f.default.map(|block| {
-            syn::Item::Fn(syn::ItemFn { attrs: f.attrs, vis: syn::Visibility::Inherited, sig: f.sig, block: Box::new(block) })
+            syn::Item::Fn(syn::ItemFn {
+                attrs: f.attrs,
+                vis: syn::Visibility::Inherited,
+                sig: f.sig,
+                block: Box::new(block),
+            })
         });
         return Ok((sm, item));
     }
@@ -745,12 +881,33 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
         }
         // `use` は名前の最後のセグメントで解決するので読み飛ばす。クレート属性も同じ
         syn::Item::Use(_) | syn::Item::Verbatim(_) => {}
+        syn::Item::Const(c) => {
+            use quote_like::ToSrc;
+            sm.consts.push((
+                c.ident.to_string(),
+                parse_tysyn(&c.ty, None)?,
+                c.expr.to_src(),
+            ));
+        }
+        syn::Item::Static(st) => {
+            use quote_like::ToSrc;
+            let m = matches!(st.mutability, syn::StaticMutability::Mut(_));
+            sm.statics.push((
+                st.ident.to_string(),
+                parse_tysyn(&st.ty, None)?,
+                st.expr.to_src(),
+                m,
+            ));
+        }
         syn::Item::ForeignMod(m) => {
             for fi in &m.items {
                 let syn::ForeignItem::Fn(f) = fi else {
                     return err(fi.span(), "only fns are supported in extern blocks");
                 };
-                sm.fns.push((f.sig.ident.to_string(), parse_sig(&f.sig, true, false, None)?));
+                sm.fns.push((
+                    f.sig.ident.to_string(),
+                    parse_sig(&f.sig, true, false, None)?,
+                ));
             }
         }
         syn::Item::Enum(e) => {
@@ -772,7 +929,10 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
                     syn::Fields::Named(nf) => {
                         let mut fs = vec![];
                         for f in &nf.named {
-                            fs.push((f.ident.as_ref().unwrap().to_string(), parse_tysyn(&f.ty, sn_ty)?));
+                            fs.push((
+                                f.ident.as_ref().unwrap().to_string(),
+                                parse_tysyn(&f.ty, sn_ty)?,
+                            ));
                         }
                         (VariantKind::Struct, fs)
                     }
@@ -781,7 +941,12 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
                     None => None,
                     Some((_, ex)) => Some(const_int(ex)?),
                 };
-                vs.push(VariantSyn { name: v.ident.to_string(), kind, fields, discr });
+                vs.push(VariantSyn {
+                    name: v.ident.to_string(),
+                    kind,
+                    fields,
+                    discr,
+                });
             }
             let d = derive_names(&e.attrs);
             if !d.is_empty() {
@@ -824,7 +989,10 @@ fn self_of(name: &str, generics: &[String]) -> TySyn {
     if generics.is_empty() {
         TySyn::Named(name.to_string())
     } else {
-        TySyn::App(name.to_string(), generics.iter().map(|g| TySyn::Named(g.clone())).collect())
+        TySyn::App(
+            name.to_string(),
+            generics.iter().map(|g| TySyn::Named(g.clone())).collect(),
+        )
     }
 }
 
@@ -832,16 +1000,43 @@ impl Program {
     pub fn build(items: &[SrcItem], sums: &[Summary]) -> R<Program> {
         let mut p = Program {
             names: vec![],
-            index: HashMap::new(),
+            index: FxMap::default(),
             sigs: vec![],
             item_of: vec![],
             structs: AdtTable::new(),
-            struct_index: HashMap::new(),
-            by_last: HashMap::new(),
-            traits: HashMap::new(),
+            struct_index: FxMap::default(),
+            by_last: FxMap::default(),
+            traits: FxMap::default(),
             impls: HashSet::new(),
             panic_handler: None,
+            consts: vec![],
+            const_index: FxMap::default(),
+            prim_impls: HashSet::new(),
         };
+        // 0. const / static の名前 (配列の長さで使うので型より先に)
+        for (ii, sm) in sums.iter().enumerate() {
+            let cs = sm
+                .consts
+                .iter()
+                .map(|(n, t, e)| (n, t, e, None))
+                .chain(sm.statics.iter().map(|(n, t, e, m)| (n, t, e, Some(*m))));
+            for (n, _, e, stat) in cs {
+                if p.const_index.contains_key(n) {
+                    return Err(format!(
+                        "{}:1: duplicate definition of `{n}`",
+                        items[ii].line
+                    ));
+                }
+                p.const_index.insert(n.clone(), p.consts.len() as u32);
+                p.consts.push(ConstDef {
+                    name: n.clone(),
+                    ty: Ty::Unit,
+                    expr: e.clone(),
+                    item: ii as u32,
+                    stat,
+                });
+            }
+        }
         // 1. struct / enum 名を登録
         let mut sdefs: Vec<(usize, String, AdtShape, Vec<String>)> = vec![];
         for (ii, (it, sm)) in items.iter().zip(sums).enumerate() {
@@ -884,7 +1079,9 @@ impl Program {
                 let mut hs = vec![];
                 while let Some(t) = stack.pop() {
                     match t {
-                        Ty::Ref(_, i) | Ty::Ptr(_, i) | Ty::Array(i, _) | Ty::Slice(i) => stack.push(*i),
+                        Ty::Ref(_, i) | Ty::Ptr(_, i) | Ty::Array(i, _) | Ty::Slice(i) => {
+                            stack.push(*i)
+                        }
                         Ty::Struct(sid) => {
                             if !seen.insert(sid) {
                                 continue;
@@ -913,6 +1110,18 @@ impl Program {
         for (i, d) in deeps.into_iter().enumerate() {
             p.structs.get_mut(i).deep = d;
         }
+        // const / static の型
+        let mut k = 0;
+        for (it, sm) in items.iter().zip(sums) {
+            for (_, t, _) in &sm.consts {
+                p.consts[k].ty = p.resolve(t).map_err(|e| format!("{}:1: {e}", it.line))?;
+                k += 1;
+            }
+            for (_, t, _, _) in &sm.statics {
+                p.consts[k].ty = p.resolve(t).map_err(|e| format!("{}:1: {e}", it.line))?;
+                k += 1;
+            }
+        }
         // 3. 関数
         for (ii, (it, sm)) in items.iter().zip(sums).enumerate() {
             for (name, ss) in &sm.fns {
@@ -922,25 +1131,42 @@ impl Program {
                 let gnames: Vec<&str> = ss.generics.iter().map(|g| g.0.as_str()).collect();
                 let mut params = vec![];
                 for t in &ss.params {
-                    params.push(p.resolve_g(t, &gnames).map_err(|e| format!("{}:1: {e}", it.line))?);
+                    params.push(
+                        p.resolve_g(t, &gnames)
+                            .map_err(|e| format!("{}:1: {e}", it.line))?,
+                    );
                 }
-                let ret = p.resolve_g(&ss.ret, &gnames).map_err(|e| format!("{}:1: {e}", it.line))?;
+                let ret = p
+                    .resolve_g(&ss.ret, &gnames)
+                    .map_err(|e| format!("{}:1: {e}", it.line))?;
                 let self_ty = match &ss.self_ty {
-                    Some(t) => Some(p.resolve_g(t, &gnames).map_err(|e| format!("{}:1: {e}", it.line))?),
+                    Some(t) => Some(
+                        p.resolve_g(t, &gnames)
+                            .map_err(|e| format!("{}:1: {e}", it.line))?,
+                    ),
                     None => None,
                 };
                 let impl_of = match &ss.impl_of {
+                    Some(n) if Ty::prim(n).is_some() => None,
                     Some(n) => match p.struct_index.get(n) {
                         Some(&sid) => Some(sid),
-                        None => return Err(format!("{}:1: cannot find struct `{n}` for impl", it.line)),
+                        None => {
+                            return Err(format!("{}:1: cannot find struct `{n}` for impl", it.line));
+                        }
                     },
                     None => None,
                 };
                 if ss.is_extern && params.iter().chain([&ret]).any(|t| t.is_agg()) {
-                    return Err(format!("{}:1: passing structs by value to extern fns is not supported", it.line));
+                    return Err(format!(
+                        "{}:1: passing structs by value to extern fns is not supported",
+                        it.line
+                    ));
                 }
                 let last = name.rsplit("::").next().unwrap().to_string();
-                p.by_last.entry(last).or_default().push(p.names.len() as u32);
+                p.by_last
+                    .entry(last)
+                    .or_default()
+                    .push(p.names.len() as u32);
                 p.index.insert(name.clone(), p.names.len() as u32);
                 p.names.push(name.clone());
                 p.item_of.push((!ss.is_extern).then_some(ii as u32));
@@ -964,7 +1190,10 @@ impl Program {
                     p.panic_handler = Some(p.names.len() as u32 - 1);
                 }
                 if let Some(tr) = &ss.trait_of {
-                    p.traits.entry(tr.clone()).or_default().push(p.names.len() as u32 - 1);
+                    p.traits
+                        .entry(tr.clone())
+                        .or_default()
+                        .push(p.names.len() as u32 - 1);
                 }
             }
             if let Some(tr) = &sm.trait_decl {
@@ -973,15 +1202,30 @@ impl Program {
         }
         // 4. trait の実装 (impl ヘッダの要約から)
         for (it, sm) in items.iter().zip(sums) {
-            let (Some(sn), Some(tr)) = (&sm.impl_self, &sm.impl_trait) else { continue };
-            let Some(&sid) = p.struct_index.get(sn) else {
-                return Err(format!("{}:1: cannot find type `{sn}`", it.line));
+            let (Some(sn), Some(tr)) = (&sm.impl_self, &sm.impl_trait) else {
+                continue;
             };
             if !p.traits.contains_key(tr) {
                 return Err(format!("{}:1: cannot find trait `{tr}`", it.line));
             }
+            // プリミティブ型への trait 実装 (`impl Tr for u32`)
+            if let Some(pt) = Ty::prim(sn) {
+                if !p.prim_impls.insert((pt, tr.clone())) {
+                    return Err(format!(
+                        "{}:1: conflicting implementations of trait `{tr}` for `{sn}`",
+                        it.line
+                    ));
+                }
+                continue;
+            }
+            let Some(&sid) = p.struct_index.get(sn) else {
+                return Err(format!("{}:1: cannot find type `{sn}`", it.line));
+            };
             if !p.impls.insert((sid, tr.clone())) {
-                return Err(format!("{}:1: conflicting implementations of trait `{tr}` for `{sn}`", it.line));
+                return Err(format!(
+                    "{}:1: conflicting implementations of trait `{tr}` for `{sn}`",
+                    it.line
+                ));
             }
         }
         // derive は実装扱い (Clone / Copy など。中身は常にビットコピーなので本体は要らない)
@@ -996,7 +1240,9 @@ impl Program {
         }
         // 必須メソッドが実装されているか
         for (sid, tr) in &p.impls {
-            let Some(decls) = p.traits.get(tr) else { continue }; // derive した組み込み trait
+            let Some(decls) = p.traits.get(tr) else {
+                continue;
+            }; // derive した組み込み trait
             for &d in decls {
                 let m = p.names[d as usize].rsplit("::").next().unwrap();
                 if !p.sigs[d as usize].has_body && p.method(*sid, m).is_none() {
@@ -1017,12 +1263,53 @@ impl Program {
     pub fn implements(&self, t: Ty, tr: &str) -> bool {
         match t {
             Ty::Struct(sid) => self.impls.contains(&(self.base_of(sid), tr.to_string())),
-            Ty::Array(e, _) => tr == "Sized" || (matches!(tr, "Copy" | "Clone") && self.implements(*e, tr)),
+            Ty::Array(e, _) => {
+                tr == "Sized" || (matches!(tr, "Copy" | "Clone") && self.implements(*e, tr))
+            }
             Ty::Slice(_) | Ty::Str => false,
-            // 組み込み型はマーカー trait だけ
+            // 組み込み型: マーカー trait と比較・既定値など (core が実装しているもの)
             Ty::Ref(true, _) => tr == "Sized",
+            Ty::Ptr(..) | Ty::Ref(..) => {
+                matches!(tr, "Copy" | "Clone" | "Sized" | "PartialEq" | "Eq")
+            }
+            t if t.is_int() || matches!(t, Ty::Bool | Ty::Char) => {
+                matches!(
+                    tr,
+                    "Copy"
+                        | "Clone"
+                        | "Sized"
+                        | "PartialEq"
+                        | "Eq"
+                        | "PartialOrd"
+                        | "Ord"
+                        | "Default"
+                        | "Debug"
+                        | "Hash"
+                ) || self.prim_impls.contains(&(t, tr.to_string()))
+            }
             _ => matches!(tr, "Copy" | "Clone" | "Sized"),
         }
+    }
+
+    /// プリミティブ型 t のメソッド (trait 実装のもの → なければ trait のデフォルトメソッド)
+    pub fn prim_method(&self, t: Ty, name: &str) -> Option<u32> {
+        if let Some(&id) = self.index.get(&format!("{}::{name}", self.tn(t))) {
+            return Some(id);
+        }
+        let mut found = None;
+        for (pt, tr) in &self.prim_impls {
+            if *pt != t {
+                continue;
+            }
+            for &d in self.traits.get(tr).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if self.sigs[d as usize].has_body
+                    && self.names[d as usize].rsplit("::").next() == Some(name)
+                {
+                    found = Some(d);
+                }
+            }
+        }
+        found
     }
 
     /// struct sid に名前 name のメソッドが見つからないとき、実装している trait のデフォルトメソッド
@@ -1033,9 +1320,13 @@ impl Program {
             if *s != sid {
                 continue;
             }
-            let Some(decls) = self.traits.get(tr) else { continue };
+            let Some(decls) = self.traits.get(tr) else {
+                continue;
+            };
             for &d in decls {
-                if self.sigs[d as usize].has_body && self.names[d as usize].rsplit("::").next() == Some(name) {
+                if self.sigs[d as usize].has_body
+                    && self.names[d as usize].rsplit("::").next() == Some(name)
+                {
                     found = Some(d);
                 }
             }
@@ -1045,7 +1336,12 @@ impl Program {
 
     /// TySyn → Ty。generics に含まれる名前は型パラメータになる
     pub fn resolve_g(&self, t: &TySyn, generics: &[&str]) -> R<Ty> {
-        self.resolve_with(t, &|n| generics.iter().position(|g| *g == n).map(|i| Ty::Param(i as u8)))
+        self.resolve_with(t, &|n| {
+            generics
+                .iter()
+                .position(|g| *g == n)
+                .map(|i| Ty::Param(i as u8))
+        })
     }
 
     /// 名前の解決を names に先に聞いてから struct 名を引く
@@ -1089,9 +1385,76 @@ impl Program {
         })
     }
 
-    /// 配列の長さに使う const (要約の const 表から)
+    /// 配列の長さに使う const (要約の const 表から整数の定数式として評価する)
     fn const_usize(&self, name: &str) -> R<u64> {
-        Err(format!("cannot find constant `{name}` (array lengths from consts are not supported yet)"))
+        let v = self.const_int(name, 0)?;
+        u64::try_from(v).map_err(|_| format!("constant `{name}` is negative"))
+    }
+
+    /// 整数の const を評価する (リテラル・四則演算・ビット演算・シフト・キャスト・他の const)
+    pub fn const_int(&self, name: &str, depth: u32) -> R<i128> {
+        if depth > 64 {
+            return Err(format!("cycle while evaluating constant `{name}`"));
+        }
+        let Some(&ci) = self.const_index.get(name) else {
+            return Err(format!("cannot find constant `{name}`"));
+        };
+        let src = &self.consts[ci as usize].expr;
+        let e: syn::Expr = syn::parse_str(src).map_err(|e| e.to_string())?;
+        self.eval_int(&e, depth + 1)
+    }
+
+    pub fn eval_int(&self, e: &syn::Expr, depth: u32) -> R<i128> {
+        use syn::{BinOp, Expr, Lit, UnOp};
+        Ok(match e {
+            Expr::Lit(l) => match &l.lit {
+                Lit::Int(i) => i.base10_parse().map_err(|e| e.to_string())?,
+                Lit::Bool(b) => b.value as i128,
+                Lit::Byte(b) => b.value() as i128,
+                Lit::Char(c) => c.value() as i128,
+                _ => return Err("not an integer constant".into()),
+            },
+            Expr::Paren(p) => self.eval_int(&p.expr, depth)?,
+            Expr::Group(g) => self.eval_int(&g.expr, depth)?,
+            Expr::Cast(c) => self.eval_int(&c.expr, depth)?,
+            Expr::Unary(u) => {
+                let v = self.eval_int(&u.expr, depth)?;
+                match u.op {
+                    UnOp::Neg(_) => -v,
+                    UnOp::Not(_) => !v,
+                    _ => return Err("not an integer constant".into()),
+                }
+            }
+            Expr::Binary(b) => {
+                let (l, r) = (
+                    self.eval_int(&b.left, depth)?,
+                    self.eval_int(&b.right, depth)?,
+                );
+                match b.op {
+                    BinOp::Add(_) => l + r,
+                    BinOp::Sub(_) => l - r,
+                    BinOp::Mul(_) => l * r,
+                    BinOp::Div(_) if r != 0 => l / r,
+                    BinOp::Rem(_) if r != 0 => l % r,
+                    BinOp::Shl(_) => l << r,
+                    BinOp::Shr(_) => l >> r,
+                    BinOp::BitAnd(_) => l & r,
+                    BinOp::BitOr(_) => l | r,
+                    BinOp::BitXor(_) => l ^ r,
+                    _ => return Err("unsupported operator in constant".into()),
+                }
+            }
+            Expr::Path(p) if p.path.get_ident().is_some() => {
+                self.const_int(&p.path.get_ident().unwrap().to_string(), depth)?
+            }
+            Expr::Path(p) if p.path.segments.len() == 2 => {
+                let t = Ty::prim(&p.path.segments[0].ident.to_string())
+                    .ok_or("unsupported path in constant")?;
+                prim_assoc_const(t, &p.path.segments[1].ident.to_string())
+                    .ok_or("unsupported constant")?
+            }
+            _ => return Err("unsupported expression in constant".into()),
+        })
     }
 
     /// n 要素のタプルの (組み込みの) ジェネリック定義
@@ -1101,7 +1464,9 @@ impl Program {
         }
         let mut d = StructDef::blank(format!("#tuple{n}"), false);
         d.generics = (0..n).map(|i| format!("T{i}")).collect();
-        d.fields = (0..n).map(|i| (i.to_string(), Ty::Param(i as u8), 0)).collect();
+        d.fields = (0..n)
+            .map(|i| (i.to_string(), Ty::Param(i as u8), 0))
+            .collect();
         let mut h = KeyHasher::new();
         h.add(&("tuple", n));
         d.deep = h.finish();
@@ -1115,7 +1480,9 @@ impl Program {
     }
 
     pub fn is_tuple(&self, sid: u32) -> bool {
-        self.structs[self.base_of(sid) as usize].name.starts_with("#tuple")
+        self.structs[self.base_of(sid) as usize]
+            .name
+            .starts_with("#tuple")
     }
 
     /// インスタンスなら元の定義
@@ -1131,12 +1498,21 @@ impl Program {
         }
         let b = &self.structs[base as usize];
         if b.generics.len() != args.len() {
-            return Err(format!("`{}` takes {} type arguments, but {} were given", b.name, b.generics.len(), args.len()));
+            return Err(format!(
+                "`{}` takes {} type arguments, but {} were given",
+                b.name,
+                b.generics.len(),
+                args.len()
+            ));
         }
         let symbolic = args.iter().any(|&t| self.has_param(t));
         let names: Vec<String> = args.iter().map(|&t| self.tn(t)).collect();
         let name = if b.name.starts_with("#tuple") {
-            if names.len() == 1 { format!("({},)", names[0]) } else { format!("({})", names.join(", ")) }
+            if names.len() == 1 {
+                format!("({},)", names[0])
+            } else {
+                format!("({})", names.join(", "))
+            }
         } else {
             format!("{}<{}>", b.name, names.join(", "))
         };
@@ -1148,7 +1524,11 @@ impl Program {
             if b.is_enum {
                 let mut vs = vec![];
                 for v in &b.variants {
-                    let fs = v.fields.iter().map(|(n, t, _)| (n.clone(), self.subst(*t, &args))).collect();
+                    let fs = v
+                        .fields
+                        .iter()
+                        .map(|(n, t, _)| (n.clone(), self.subst(*t, &args)))
+                        .collect();
                     vs.push((v.name.clone(), v.kind, fs, v.discr));
                 }
                 let (vs, size, align) = self.enum_layout(vs, b.tag);
@@ -1156,7 +1536,11 @@ impl Program {
                 d.size = size;
                 d.align = align;
             } else {
-                let fs: Vec<(String, Ty)> = b.fields.iter().map(|(n, t, _)| (n.clone(), self.subst(*t, &args))).collect();
+                let fs: Vec<(String, Ty)> = b
+                    .fields
+                    .iter()
+                    .map(|(n, t, _)| (n.clone(), self.subst(*t, &args)))
+                    .collect();
                 let (fs, size, align) = self.struct_layout(fs);
                 d.fields = fs;
                 d.size = size;
@@ -1187,7 +1571,11 @@ impl Program {
     }
 
     /// タグ (判別値) は先頭、ペイロードは全バリアントで共有する領域に置く
-    fn enum_layout(&self, vs: Vec<(String, VariantKind, Vec<(String, Ty)>, i64)>, tag: Ty) -> (Vec<VariantDef>, u32, u32) {
+    fn enum_layout(
+        &self,
+        vs: Vec<(String, VariantKind, Vec<(String, Ty)>, i64)>,
+        tag: Ty,
+    ) -> (Vec<VariantDef>, u32, u32) {
         let tag_size = tag.bits() / 8;
         let mut laid = vec![];
         let (mut pmax, mut palign) = (0u32, 1u32);
@@ -1217,7 +1605,10 @@ impl Program {
         match t {
             Ty::Param(_) => true,
             Ty::Ref(_, i) | Ty::Ptr(_, i) | Ty::Array(i, _) | Ty::Slice(i) => self.has_param(*i),
-            Ty::Struct(sid) => self.structs[sid as usize].args.iter().any(|&a| self.has_param(a)),
+            Ty::Struct(sid) => self.structs[sid as usize]
+                .args
+                .iter()
+                .any(|&a| self.has_param(a)),
             _ => false,
         }
     }
@@ -1244,8 +1635,14 @@ impl Program {
 
     /// 分かっている型パラメータだけ置き換える (分からないものは Param のまま)
     pub fn partial_subst(&self, t: Ty, sol: &[Option<Ty>]) -> Ty {
-        let args: Vec<Ty> = (0..sol.len()).map(|i| sol[i].unwrap_or(Ty::Param(i as u8))).collect();
-        if args.is_empty() { t } else { self.subst(t, &args) }
+        let args: Vec<Ty> = (0..sol.len())
+            .map(|i| sol[i].unwrap_or(Ty::Param(i as u8)))
+            .collect();
+        if args.is_empty() {
+            t
+        } else {
+            self.subst(t, &args)
+        }
     }
 
     /// 仮引数型 pt (型パラメータを含む) と実引数型 at を突き合わせて型パラメータを解く
@@ -1260,16 +1657,18 @@ impl Program {
                     true
                 }
             },
-            (Ty::Ref(_, a), Ty::Ref(_, b)) | (Ty::Ptr(_, a), Ty::Ptr(_, b)) | (Ty::Slice(a), Ty::Slice(b)) => {
-                self.match_ty(*a, *b, sol)
-            }
+            (Ty::Ref(_, a), Ty::Ref(_, b))
+            | (Ty::Ptr(_, a), Ty::Ptr(_, b))
+            | (Ty::Slice(a), Ty::Slice(b)) => self.match_ty(*a, *b, sol),
             (Ty::Array(a, n), Ty::Array(b, m)) => n == m && self.match_ty(*a, *b, sol),
             (Ty::Struct(a), Ty::Struct(b)) if a != b => {
                 let (sa, sb) = (&self.structs[a as usize], &self.structs[b as usize]);
                 match (sa.base, sb.base) {
-                    (Some(x), Some(y)) if x == y => {
-                        sa.args.iter().zip(&sb.args).all(|(&p, &q)| self.match_ty(p, q, sol))
-                    }
+                    (Some(x), Some(y)) if x == y => sa
+                        .args
+                        .iter()
+                        .zip(&sb.args)
+                        .all(|(&p, &q)| self.match_ty(p, q, sol)),
                     _ => false,
                 }
             }
@@ -1288,7 +1687,9 @@ impl Program {
             Ty::Struct(id) => {
                 let sd = &self.structs[id as usize];
                 match sd.base {
-                    Some(b) if self.is_tuple(b) => TySyn::Tuple(sd.args.iter().map(|&a| self.ty_syn(a)).collect()),
+                    Some(b) if self.is_tuple(b) => {
+                        TySyn::Tuple(sd.args.iter().map(|&a| self.ty_syn(a)).collect())
+                    }
                     Some(b) => TySyn::App(
                         self.structs[b as usize].name.clone(),
                         sd.args.iter().map(|&a| self.ty_syn(a)).collect(),
@@ -1309,7 +1710,12 @@ impl Program {
     ) -> R<()> {
         match state[id] {
             2 => return Ok(()),
-            1 => return Err(format!("recursive type `{}` has infinite size", sdefs[id].1)),
+            1 => {
+                return Err(format!(
+                    "recursive type `{}` has infinite size",
+                    sdefs[id].1
+                ));
+            }
             _ => {}
         }
         state[id] = 1;
@@ -1320,10 +1726,16 @@ impl Program {
         let fields_of = |sh: &AdtShape| -> Vec<TySyn> {
             match sh {
                 AdtShape::Struct(f) => f.iter().map(|x| x.1.clone()).collect(),
-                AdtShape::Enum(vs) => vs.iter().flat_map(|v| v.fields.iter().map(|x| x.1.clone())).collect(),
+                AdtShape::Enum(vs) => vs
+                    .iter()
+                    .flat_map(|v| v.fields.iter().map(|x| x.1.clone()))
+                    .collect(),
             }
         };
-        let mut todo: Vec<(TySyn, Vec<String>)> = fields_of(shape).into_iter().map(|t| (t, generics.clone())).collect();
+        let mut todo: Vec<(TySyn, Vec<String>)> = fields_of(shape)
+            .into_iter()
+            .map(|t| (t, generics.clone()))
+            .collect();
         let mut visited_bases = HashSet::new();
         while let Some((t, gs)) = todo.pop() {
             match t {
@@ -1338,7 +1750,11 @@ impl Program {
                     if let Some(&sid) = self.struct_index.get(&n) {
                         if visited_bases.insert(sid) {
                             let bg = sdefs[sid as usize].3.clone();
-                            todo.extend(fields_of(&sdefs[sid as usize].2).into_iter().map(|t| (t, bg.clone())));
+                            todo.extend(
+                                fields_of(&sdefs[sid as usize].2)
+                                    .into_iter()
+                                    .map(|t| (t, bg.clone())),
+                            );
                         }
                     }
                     todo.extend(args.into_iter().map(|a| (a, gs.clone())));
@@ -1350,7 +1766,13 @@ impl Program {
         }
         let res = |this: &Program, fs: &[(String, TySyn)]| -> R<Vec<(String, Ty)>> {
             fs.iter()
-                .map(|(n, t)| Ok((n.clone(), this.resolve_g(t, &gnames).map_err(|e| format!("{line}:1: {e}"))?)))
+                .map(|(n, t)| {
+                    Ok((
+                        n.clone(),
+                        this.resolve_g(t, &gnames)
+                            .map_err(|e| format!("{line}:1: {e}"))?,
+                    ))
+                })
                 .collect()
         };
         let generic = !generics.is_empty();
@@ -1358,7 +1780,8 @@ impl Program {
             AdtShape::Struct(fields) => {
                 let fs = res(self, fields)?;
                 if generic {
-                    self.structs.get_mut(id).fields = fs.into_iter().map(|(n, t)| (n, t, 0)).collect();
+                    self.structs.get_mut(id).fields =
+                        fs.into_iter().map(|(n, t)| (n, t, 0)).collect();
                 } else {
                     let (out, size, align) = self.struct_layout(fs);
                     let sd = self.structs.get_mut(id);
@@ -1373,12 +1796,18 @@ impl Program {
                 for v in vs {
                     let d = v.discr.unwrap_or(next);
                     if discrs.contains(&d) {
-                        return Err(format!("{line}:1: discriminant value `{d}` assigned more than once"));
+                        return Err(format!(
+                            "{line}:1: discriminant value `{d}` assigned more than once"
+                        ));
                     }
                     discrs.push(d);
                     next = d + 1;
                 }
-                let tag = if discrs.iter().all(|&d| (0..=255).contains(&d)) { Ty::U8 } else { Ty::I32 };
+                let tag = if discrs.iter().all(|&d| (0..=255).contains(&d)) {
+                    Ty::U8
+                } else {
+                    Ty::I32
+                };
                 let mut rv = vec![];
                 for (v, d) in vs.iter().zip(discrs) {
                     rv.push((v.name.clone(), v.kind, res(self, &v.fields)?, d));
@@ -1415,7 +1844,9 @@ impl Program {
     pub fn variant_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<(u32, usize)> {
         let segs: Vec<&syn::PathSegment> = p.segments.iter().collect();
         // `core::option::Option::Some` などは最後の 2 つで見る
-        let segs = if segs.len() > 2 && matches!(segs[0].ident.to_string().as_str(), "core" | "crate" | "std") {
+        let segs = if segs.len() > 2
+            && matches!(segs[0].ident.to_string().as_str(), "core" | "crate" | "std")
+        {
             segs[segs.len() - 2..].to_vec()
         } else {
             segs
@@ -1428,20 +1859,30 @@ impl Program {
                 _ => return None,
             };
             let sid = *self.struct_index.get(en)?;
-            let vi = self.structs[sid as usize].variants.iter().position(|v| v.name == n)?;
+            let vi = self.structs[sid as usize]
+                .variants
+                .iter()
+                .position(|v| v.name == n)?;
             return Some((sid, vi));
         }
         if segs.len() != 2 || !segs[1].arguments.is_none() {
             return None;
         }
         let tn = segs[0].ident.to_string();
-        let sid = if tn == "Self" { self_sid? } else { *self.struct_index.get(&tn)? };
+        let sid = if tn == "Self" {
+            self_sid?
+        } else {
+            *self.struct_index.get(&tn)?
+        };
         let sd = &self.structs[sid as usize];
         if !sd.is_enum {
             return None;
         }
         let vn = p.segments[1].ident.to_string();
-        sd.variants.iter().position(|v| v.name == vn).map(|vi| (sid, vi))
+        sd.variants
+            .iter()
+            .position(|v| v.name == vn)
+            .map(|vi| (sid, vi))
     }
 
     pub fn resolve(&self, t: &TySyn) -> R<Ty> {
@@ -1457,7 +1898,7 @@ impl Program {
     pub fn resolve_env(&self, t: &TySyn, env: &TyEnv) -> R<Ty> {
         self.resolve_with(t, &|n| {
             if n == "Self" {
-                return env.self_sid.map(Ty::Struct);
+                return env.self_ty.or(env.self_sid.map(Ty::Struct));
             }
             env.params.iter().find(|p| p.0 == n).map(|p| p.1)
         })
@@ -1476,11 +1917,30 @@ impl Program {
     pub fn fn_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
         // 最後のセグメントの turbofish (`f::<T>`) は呼び出し側で読む
         let n = p.segments.len();
-        if p.leading_colon.is_some() || p.segments.iter().take(n.saturating_sub(1)).any(|s| !s.arguments.is_none()) {
+        if p.leading_colon.is_some()
+            || p.segments
+                .iter()
+                .take(n.saturating_sub(1))
+                .any(|s| !s.arguments.is_none())
+        {
             return None;
         }
+        // `core::cmp::max` / `core::mem::swap` などは prelude の `__core_*` へ
+        if n >= 2 && matches!(p.segments[0].ident.to_string().as_str(), "core" | "std") {
+            return self
+                .index
+                .get(&format!("__core_{}", p.segments[n - 1].ident))
+                .copied();
+        }
         match p.segments.len() {
-            1 => self.index.get(&p.segments[0].ident.to_string()).copied(),
+            1 => {
+                let name = p.segments[0].ident.to_string();
+                // `use core::cmp::max;` してからの `max(..)`: ユーザの関数がなければ core のもの
+                self.index
+                    .get(&name)
+                    .or_else(|| self.index.get(&format!("__core_{name}")))
+                    .copied()
+            }
             2 => {
                 let ty = p.segments[0].ident.to_string();
                 let ty = if ty == "Self" {
@@ -1488,7 +1948,9 @@ impl Program {
                 } else {
                     ty
                 };
-                self.index.get(&format!("{ty}::{}", p.segments[1].ident)).copied()
+                self.index
+                    .get(&format!("{ty}::{}", p.segments[1].ident))
+                    .copied()
             }
             _ => None,
         }
@@ -1496,7 +1958,12 @@ impl Program {
 
     /// struct `sid` のメソッド `name`
     pub fn method(&self, sid: u32, name: &str) -> Option<u32> {
-        self.index.get(&format!("{}::{name}", self.structs[self.base_of(sid) as usize].name)).copied()
+        self.index
+            .get(&format!(
+                "{}::{name}",
+                self.structs[self.base_of(sid) as usize].name
+            ))
+            .copied()
     }
 
     pub fn size_align(&self, t: Ty) -> (u32, u32) {
@@ -1582,8 +2049,17 @@ impl Program {
     pub fn hash_sig(&self, id: u32, h: &mut KeyHasher) {
         let s = &self.sigs[id as usize];
         h.add(self.names[id as usize].as_str());
-        h.add(&(s.symbol.as_str(), s.is_extern, s.is_main, s.has_self, s.params.len()));
-        h.add(&(&s.generics, &s.trait_of, s.has_body, &s.impl_trait));
+        h.add(&(
+            s.symbol.as_str(),
+            s.is_extern,
+            s.is_main,
+            s.has_self,
+            s.params.len(),
+        ));
+        // 大半の関数では空のフィールドは、空でないときだけ入れる (no-op ビルドで全関数分ハッシュするため)
+        if !s.generics.is_empty() || s.trait_of.is_some() || !s.has_body || s.impl_trait.is_some() {
+            h.add(&(&s.generics, &s.trait_of, s.has_body, &s.impl_trait));
+        }
         if let Some(t) = s.self_ty {
             self.hash_ty(t, h);
         }
@@ -1596,9 +2072,24 @@ impl Program {
     /// アイテム内の識別子のうち関数名に一致するもの (ソート済み) と struct 名に一致するもの。
     /// ローカル変数による shadowing は無視した過大近似だが、
     /// キャッシュキーと到達可能性の両方にとって安全側である。
-    pub fn refs(&self, src: &str, it: &SrcItem) -> (Vec<u32>, Vec<u32>) {
+    /// 識別子のうち const / static に一致するもの
+    pub fn const_refs(&self, src: &str, it: &SrcItem) -> Vec<u32> {
+        let mut v: Vec<u32> = it
+            .idents
+            .iter()
+            .filter_map(|&(a, b)| self.const_index.get(&src[a as usize..b as usize]).copied())
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// (関数, struct / enum, const / static) の参照。識別子を 1 回だけ走査する
+    pub fn refs(&self, src: &str, it: &SrcItem) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
         let mut fns = vec![];
         let mut sts = vec![];
+        let mut cs = vec![];
+        let has_consts = !self.const_index.is_empty();
         for &(a, b) in &it.idents {
             let s = &src[a as usize..b as usize];
             if let Some(ids) = self.by_last.get(s) {
@@ -1607,12 +2098,17 @@ impl Program {
             if let Some(&i) = self.struct_index.get(s) {
                 sts.push(i);
             }
+            if has_consts {
+                if let Some(&i) = self.const_index.get(s) {
+                    cs.push(i);
+                }
+            }
         }
-        for v in [&mut fns, &mut sts] {
+        for v in [&mut fns, &mut sts, &mut cs] {
             v.sort_unstable();
             v.dedup();
         }
-        (fns, sts)
+        (fns, sts, cs)
     }
 
     /// main から到達可能な関数 ID。
@@ -1636,8 +2132,20 @@ impl Program {
 // --- Summary のシリアライズ ------------------------------------------------
 
 const TYS: [Ty; 14] = [
-    Ty::I8, Ty::I16, Ty::I32, Ty::I64, Ty::Isize, Ty::U8, Ty::U16, Ty::U32, Ty::U64, Ty::Usize,
-    Ty::Bool, Ty::Unit, Ty::Never, Ty::Char,
+    Ty::I8,
+    Ty::I16,
+    Ty::I32,
+    Ty::I64,
+    Ty::Isize,
+    Ty::U8,
+    Ty::U16,
+    Ty::U32,
+    Ty::U64,
+    Ty::Usize,
+    Ty::Bool,
+    Ty::Unit,
+    Ty::Never,
+    Ty::Char,
 ];
 
 fn ty_code(t: Ty) -> u8 {
@@ -1723,21 +2231,68 @@ impl Enc for VariantKind {
         out.push(*self as u8)
     }
     fn dec(r: &mut Rd) -> Option<Self> {
-        [VariantKind::Unit, VariantKind::Tuple, VariantKind::Struct].get(r.u8()? as usize).copied()
+        [VariantKind::Unit, VariantKind::Tuple, VariantKind::Struct]
+            .get(r.u8()? as usize)
+            .copied()
     }
     fn is_empty_val(&self) -> bool {
         *self == VariantKind::Unit
     }
 }
 
-crate::enc_struct!(VariantSyn { name, kind, fields, discr });
+crate::enc_struct!(VariantSyn {
+    name,
+    kind,
+    fields,
+    discr
+});
 crate::enc_struct!(SigSyn {
-    params, ret, symbol, is_extern, is_main, impl_of, has_self, generics, trait_of, has_body, impl_trait, self_ty,
-    export, panic_handler,
+    params,
+    ret,
+    symbol,
+    is_extern,
+    is_main,
+    impl_of,
+    has_self,
+    generics,
+    trait_of,
+    has_body,
+    impl_trait,
+    self_ty,
+    export,
+    panic_handler,
 });
 crate::enc_struct!(Summary {
-    fns, structs, impl_self, enums, trait_decl, impl_trait, derives, adt_generics, impl_generics, impl_self_ty,
+    fns,
+    structs,
+    impl_self,
+    enums,
+    trait_decl,
+    impl_trait,
+    derives,
+    adt_generics,
+    impl_generics,
+    impl_self_ty,
+    consts,
+    statics,
 });
+
+impl Enc for (String, TySyn, String, bool) {
+    fn enc(&self, out: &mut Vec<u8>) {
+        self.0.enc(out);
+        self.1.enc(out);
+        self.2.enc(out);
+        self.3.enc(out);
+    }
+    fn dec(r: &mut Rd) -> Option<Self> {
+        Some((
+            String::dec(r)?,
+            TySyn::dec(r)?,
+            String::dec(r)?,
+            bool::dec(r)?,
+        ))
+    }
+}
 
 /// キャッシュにインスタンスの型引数を書くため
 pub fn put_ty(out: &mut Vec<u8>, t: &TySyn) {
@@ -1765,10 +2320,20 @@ impl Summary {
 /// 判別値などの整数定数式 (リテラルと単項マイナスだけ)
 fn const_int(e: &syn::Expr) -> R<i64> {
     match e {
-        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. }) => i.base10_parse::<i64>().map_err(|e| e.to_string()),
-        syn::Expr::Unary(syn::ExprUnary { op: syn::UnOp::Neg(_), expr, .. }) => Ok(-const_int(expr)?),
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Int(i),
+            ..
+        }) => i.base10_parse::<i64>().map_err(|e| e.to_string()),
+        syn::Expr::Unary(syn::ExprUnary {
+            op: syn::UnOp::Neg(_),
+            expr,
+            ..
+        }) => Ok(-const_int(expr)?),
         syn::Expr::Paren(p) => const_int(&p.expr),
-        _ => err(e.span(), "only integer literals are supported as discriminants"),
+        _ => err(
+            e.span(),
+            "only integer literals are supported as discriminants",
+        ),
     }
 }
 
@@ -1784,30 +2349,37 @@ fn only_lifetimes(g: &syn::Generics) -> R<()> {
 
 /// trait 境界 (`T: A + B` と where 節) を集める
 fn collect_generics(g: &syn::Generics, out: &mut Vec<(String, Vec<String>)>) -> R<()> {
-    let bound_names = |bs: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>| -> R<Vec<String>> {
-        let mut v = vec![];
-        for b in bs {
-            match b {
-                syn::TypeParamBound::Trait(t) => match t.path.get_ident() {
-                    Some(id) => v.push(id.to_string()),
-                    None => return err(t.span(), "unsupported trait bound"),
-                },
-                syn::TypeParamBound::Lifetime(_) => {}
-                _ => return err(b.span(), "unsupported bound"),
+    let bound_names =
+        |bs: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>| -> R<Vec<String>> {
+            let mut v = vec![];
+            for b in bs {
+                match b {
+                    syn::TypeParamBound::Trait(t) => match t.path.get_ident() {
+                        Some(id) => v.push(id.to_string()),
+                        None => return err(t.span(), "unsupported trait bound"),
+                    },
+                    syn::TypeParamBound::Lifetime(_) => {}
+                    _ => return err(b.span(), "unsupported bound"),
+                }
             }
-        }
-        Ok(v)
-    };
+            Ok(v)
+        };
     for p in &g.params {
         match p {
             syn::GenericParam::Lifetime(_) => {}
-            syn::GenericParam::Type(tp) => out.push((tp.ident.to_string(), bound_names(&tp.bounds)?)),
-            syn::GenericParam::Const(c) => return err(c.span(), "const generics are not supported"),
+            syn::GenericParam::Type(tp) => {
+                out.push((tp.ident.to_string(), bound_names(&tp.bounds)?))
+            }
+            syn::GenericParam::Const(c) => {
+                return err(c.span(), "const generics are not supported");
+            }
         }
     }
     if let Some(w) = &g.where_clause {
         for pr in &w.predicates {
-            let syn::WherePredicate::Type(pt) = pr else { continue };
+            let syn::WherePredicate::Type(pt) = pr else {
+                continue;
+            };
             let syn::Type::Path(tp) = &pt.bounded_ty else {
                 return err(pt.span(), "unsupported where clause");
             };
@@ -1825,7 +2397,12 @@ fn collect_generics(g: &syn::Generics, out: &mut Vec<(String, Vec<String>)>) -> 
 }
 
 /// owner: impl / trait のメンバならその所有者
-fn parse_sig(sig: &syn::Signature, is_extern: bool, is_main: bool, owner: Option<&Owner>) -> R<SigSyn> {
+fn parse_sig(
+    sig: &syn::Signature,
+    is_extern: bool,
+    is_main: bool,
+    owner: Option<&Owner>,
+) -> R<SigSyn> {
     let mut generics = owner.map(|o| o.generics.clone()).unwrap_or_default();
     collect_generics(&sig.generics, &mut generics)?;
     if is_extern && !generics.is_empty() {

@@ -9,7 +9,9 @@ fn reports_all_errors_and_recovers() {
     assert_eq!(d.len(), 2, "{d:?}");
     assert_eq!((d[0].line, d[1].line), (4, 8));
     // 直した後は診断が消え、変わっていない関数は検査済みの印で飛ばされる
-    let fixed = src.replace("E::A(x, y)", "E::A(x)").replace("-> bool { 1 }", "-> bool { true }");
+    let fixed = src
+        .replace("E::A(x, y)", "E::A(x)")
+        .replace("-> bool { 1 }", "-> bool { true }");
     assert!(s.check(&fixed).is_empty());
     assert!(s.check(&fixed).is_empty());
 }
@@ -18,10 +20,14 @@ fn reports_all_errors_and_recovers() {
 /// (検査済みの印に、その関数が要求したインスタンスを保存して要求し直すため)
 #[test]
 fn generic_body_errors_with_cached_callers() {
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/traits.rs")).unwrap();
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/traits.rs"))
+        .unwrap();
     let mut s = Session::new(Options::default());
     assert!(s.check(&src).is_empty());
-    let bad = src.replace("    a.area() + b.area()\n", "    a.area() + b.area() + true\n");
+    let bad = src.replace(
+        "    a.area() + b.area()\n",
+        "    a.area() + b.area() + true\n",
+    );
     assert_ne!(bad, src);
     let d = s.check(&bad);
     assert_eq!(d.len(), 1, "{d:?}");

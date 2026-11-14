@@ -34,7 +34,12 @@ fn diagnostics_roundtrip() {
     let diags = d["params"]["diagnostics"].as_array().unwrap();
     assert_eq!(diags.len(), 1, "{d}");
     assert_eq!(diags[0]["range"]["start"]["line"], 1);
-    assert!(diags[0]["message"].as_str().unwrap().contains("mismatched types"));
+    assert!(
+        diags[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("mismatched types")
+    );
 
     // 直すと診断が消える
     let good = "fn f() -> u8 {\n    1\n}\nfn main() {}\n";

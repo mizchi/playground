@@ -80,66 +80,140 @@ bench/regress.sh
 
 | ベンチ（`benches/compile.rs`、N=1000） | 何を見るか | 現在値 |
 |---|---|---:|
-| `lsp/did_change_1fn` | LSP 応答性：1 関数編集の didChange から publishDiagnostics まで | 5.3 ms |
-| `lsp/did_change_noop` | 内容が同じ didChange（保存など） | 0.3 ms |
-| `cold/lsp_did_open` | 初めて開いたとき（全関数を検査） | 53 ms |
-| `build/noop` | 無変更ビルド（リンク省略） | 9.7 ms |
+| `lsp/did_change_1fn` | LSP 応答性：1 関数編集の didChange から publishDiagnostics まで | 4.6 ms |
+| `lsp/did_change_noop` | 内容が同じ didChange（保存など） | 0.25 ms |
+| `cold/lsp_did_open` | 初めて開いたとき（全関数を検査） | 58 ms |
+| `build/noop` | 無変更ビルド（リンク省略） | 9.2 ms |
 | `build/edit_1fn` | 1 関数編集ビルド（リンク込み） | 18 ms |
-| `cold/build` | キャッシュなしのビルド | 97 ms |
-| `front/lex` | 字句解析だけ（no-op の下限） | 2.2 ms |
+| `cold/build` | キャッシュなしのビルド | 95 ms |
+| `front/lex` | 字句解析だけ（no-op の下限） | 2.3 ms |
 
 - 判定の閾値：5% 未満の変化は無視し（`noise_threshold`）、有意水準は 1% にしている。
   cold 系は実行ごとに ±10% ぶれるので、閾値を 15% にしている。
 - サイズ予算は、バイナリ・`.o`・キャッシュ・LSP のメモリ上キャッシュを、例ごとに上限バイトで持つ。
   意図して増やすなら `UPDATE_BUDGET=1`、新しい例を足しただけなら `UPDATE_BUDGET=new`（既存の上限は変えない）。
-- 実際に回帰検出が働いた例が 2 つある。どちらも予算を緩めず、要約の符号化を詰めて解決した。
-  - enum 追加で要約が 1 byte/アイテム増えた
-  - 検査済みの印が 4 byte/関数増えた
+- 回帰検出が実際に働いた例（どれも予算や閾値を緩めずに直した）：
+  - サイズ
+    - enum の追加で要約が 1 byte/アイテム増えた。要約の符号化を詰めて解決した。
+    - 検査済みの印が 4 byte/関数増えた。空なら書かないようにした。
+    - prelude を全部付けていたので、どのキャッシュも約 2.3 KB 増えた。使われるものだけを付けるようにした。
+    - フィールド名 `min` / `max` で `core::cmp` の関数まで付いていた。`core` という識別子が現れたときだけにした。
+  - 速度
+    - no_std 対応で、LSP の 1 関数編集が +31%、no-op ビルドが +10% 遅くなった。
+    - 時間帯によるぶれを除くため、ベースラインのコミットを worktree で同時にベンチし、callgrind で原因を詰めた。
+    - 直したもの：毎回の全識別子のハッシュ（prelude の選択）、LSP が本文全体をハッシュしていたこと、名前表の SipHash。
+    - 名前表は自前の FxHasher に替えた。キャッシュのキーには使わない。
+    - 結果、LSP の 1 関数編集は −7%、no-op ビルドは −4% と、ベースラインより速くなった。
 
-## 対応している言語サブセット
+## 対応している言語サブセット（no_std の範囲）
 
-rustc でもそのままコンパイルできる範囲に限っている。そのため、出力を rustc の結果と比較して検証できる（`tests/compare.sh`）。
+当面のゴールは「no_std で扱う範囲が動くこと」。具体的には、次の条件を満たすプログラムを対象にしている。
+
+- alloc を使わない。
+- 書式化マクロ（`write!` / `format_args!`）を使わない。
+- `#![no_std]` / `#![no_main]` / `#[panic_handler]` / `#[unsafe(no_mangle)] pub extern "C" fn main` を使ってよい。
+
+検証は、そうしたプログラムを rustc でもビルドし、実行結果（標準出力と終了コード）が一致することで行う。
+
+- rustc 側は libcore だけでビルドする（`-C panic=abort`）。
+- 比較は `tests/compare.sh` が行う。対象は `examples/*.rs` の 12 本で、そのうち no_std は 5 本。
+
+### 言語
 
 - アイテム：
   - `fn`
-  - `unsafe extern "C" { fn ...; }`
-  - 名前付きフィールドの `struct`
-  - `enum`。バリアントは unit / tuple / struct の 3 種類で、判別値 `A = 3` も書ける
-  - 固有 `impl`（`impl S { ... }`。複数に分けてもよい）
-  - `trait`：必須メソッドとデフォルトメソッド。`impl Trait for S` / enum
-  - `#[derive(Clone, Copy)]`（ビットコピーなので、境界の判定にだけ使う）
-  - ジェネリック関数：`fn f<T: A + B>(..)`、`where T: A`、turbofish `f::<T>(..)`。
-    呼び出し元で型引数を推論し、単相化する。ライフタイムは消去する
+  - `extern "C"` の宣言と定義
+  - `struct`：名前付き / タプル / unit
+  - `enum`：unit / tuple / struct のバリアントと、判別値
+  - `const`、`static`、`static mut`
+  - `use`（名前は最後のセグメントで解決する）
+  - クレート属性（`#![no_std]` など）
+- impl と trait：
+  - 固有 `impl`
+  - `trait`（必須メソッドとデフォルトメソッド）
+  - `impl Trait for S`：struct / enum / プリミティブ型（`impl Tr for u32`）
+  - `#[derive(Clone, Copy, PartialEq, ..)]`
+- ジェネリクス：
+  - 関数（`<T: A + B>`、`where`、turbofish）
+  - struct / enum（`Pair<T>`、`Option<T>`）
+  - `impl<T> X<T>`、`impl<T> Option<&T>` のような self 型パターン
+  - すべて呼び出し元で型引数を推論し、単相化する。ライフタイムは消去する
 - 型：
-  - `i8`〜`i64`、`u8`〜`u64`、`isize`、`usize`、`bool`、`()`、`!`
-  - `&T`、`&mut T`
-  - struct（入れ子可。フィールドに `&'a T` も置ける）
+  - 整数（`i8`〜`i64`、`u8`〜`u64`、`isize`、`usize`）、`bool`、`char`、`()`、`!`
+  - `&T`、`&mut T`、`*const T`、`*mut T`
+  - `[T; N]`（N はリテラルか const）、`&[T]`、`&mut [T]`、`&str`
+  - タプル、struct、enum
+  - `core::ffi::c_int` などの C 型の別名
 - 式：
-  - 算術、ビット演算、シフト、比較、`&&` `||`（短絡評価）、単項の `-` と `!`、`as`（整数と bool の間）
-  - `let [mut]`、代入、複合代入（左辺はローカル変数・フィールド・`*r` を使える）
-  - `if`/`else`（式として使える。struct も返せる）、`while`、`loop`、`break`、`continue`、`return`
-  - 関数呼び出し（struct の値渡し・値返しを含む）、ブロック、`unsafe {}`
-  - メソッド：
-    - `self` / `mut self` / `&self` / `&mut self` を受け取れる。`Self` も使える
-    - 呼び出しは `x.m(..)`。レシーバは自動 deref し、必要なら自動参照する（`&&x` 越しでも可）
-    - `S::new(..)` / `Self::new(..)` / `S::m(&x)`（UFCS）
-  - struct リテラル（`S { x, y: e }`）、フィールドアクセス（参照越しは自動 deref）
-  - `&e` / `&mut e`（一時値への参照も可）、`*e`
-  - enum の値（`E::A` / `E::B(x)` / `E::C { x }` / `Self::A`）、フィールドのない enum の `as` キャスト
-  - `match`、`if let`、`while let`、分解する `let`（`let S { x, y } = s;`）
-    - パターン：`_`、束縛、`x @ p`、リテラル、範囲（`1..=5` / `-5..0`）、`|`、バリアント、struct、`&p`、入れ子、ガード
-    - 参照を match したときのデフォルト束縛モード（`match self { E::A(x) => .. }` の x は `&T`）
-    - `|` の中での束縛は未対応
-  - trait メソッドの呼び出しは静的ディスパッチ：
-    - `x.m()` は固有メソッド → trait 実装 → デフォルトメソッドの順に探す
-    - `Trait::m(&x)` / `<S as Trait>::m(&x)` の形でも呼べる
-- 型推論は関数単位の単一化（`src/infer.rs`）。
-  - 整数リテラルの型は、後ろの使用箇所から決める（`let mut i = 0; bump(&mut i)` のような参照越しの使用も含む）。
-  - 決まらなければ `i32` にする。
-- 借用検査・可変性検査・ムーブ検査・match の網羅性検査はしない。
-  rustc を通るプログラムなら意味は変わらない前提で、struct は常にコピーしている。
-  どの arm にも合わない場合は trap する。
-- 未対応：`dyn Trait`、ジェネリックな struct / enum / impl、トレイトの関連型。
+  - 算術・ビット演算・比較・短絡評価・`as`
+    - キャストは整数 ⇔ char / bool、参照 → ポインタ、ポインタ ⇔ usize、フィールドのない enum → 整数
+  - `let`（分解も）、代入、複合代入
+    - 左辺はローカル変数・フィールド・`*p`・`a[i]`・static
+  - `if` / `match` / `if let` / `while let` / `while` / `loop` / `for`（`break` / `continue` / `return`）
+  - `for` で回せるもの：
+    - `a..b`、`a..=b`、`(a..b).rev()`
+    - 配列・スライス（`&xs`、`&mut xs`、値渡し）と、それに `.iter()` / `.iter_mut()` / `.copied()` / `.enumerate()` / `.rev()` を付けたもの
+  - 構築：struct / タプル / enum / 配列（`[a, b]`、`[x; N]`）
+  - 添字 `a[i]`（範囲外なら panic）、`&a[lo..hi]`（`..` / `lo..` / `..=hi` も）
+  - `&[T; N]` → `&[T]` の暗黙の変換
+  - `==` / `!=`：struct / enum / タプル / 配列は構造的に比べる。手書きの `eq` があればそれを呼ぶ
+  - リテラル：`"..."`（`&'static str`）、`b"..."`、`b'x'`、`'x'`、負のリテラル
+  - `?`（Option / Result）
+  - マクロ：`panic!` / `unreachable!` / `todo!` / `assert!` / `assert_eq!` / `assert_ne!` / `debug_assert*!` / `matches!`
+    - メッセージは書式化しない
+- パターン：
+  - `_`、束縛（`ref` / `mut`）、`x @ p`、リテラル、範囲、`|`
+  - バリアント、struct、タプル、`&p`、入れ子、ガード
+  - 参照を match したときのデフォルト束縛モード
+  - `None` などの unit バリアント
+- メソッド：
+  - 自動 deref と自動参照、UFCS（`S::m(&x)` / `Trait::m(&x)` / `<S as Trait>::m(&x)`）
+  - 静的ディスパッチ。固有メソッド → trait 実装 → デフォルトメソッドの順に探す
+- panic：
+  - `#[panic_handler]` があればそれを呼ぶ（範囲外アクセス・`unwrap`・`assert!`・`panic!` など）
+  - なければ trap する
+
+### core の代わり（組み込みの prelude、`src/prelude.rs`）
+
+- `Option<T>`：`is_some` / `is_none` / `unwrap` / `unwrap_or` / `ok_or` / `or` / `xor` / `take` / `replace` / `as_ref` / `as_mut` / `copied` / `cloned`
+- `Result<T, E>`：`is_ok` / `is_err` / `unwrap` / `unwrap_err` / `unwrap_or` / `ok` / `err`
+- `core::panic::PanicInfo`
+- `core::cmp::{min, max}`、`core::mem::{swap, replace, size_of, align_of}`、`core::ptr::{null, null_mut, read_volatile, write_volatile}`
+- 組み込みメソッド：
+  - 整数：`wrapping_*` / `checked_*`（→ Option）/ `saturating_*` / `min` / `max` / `abs` / `abs_diff` / `signum` / `pow` / `count_ones` / `leading_zeros` / `trailing_zeros` / `is_power_of_two` / `rotate_*` / `swap_bytes` / `is_ascii_*` / `to_ascii_*`
+  - 関連定数：`u32::MAX` / `MIN` / `BITS`
+  - 配列・スライス：`len` / `is_empty` / `get` / `get_mut` / `first` / `last` / `swap` / `contains` / `as_ptr` / `as_mut_ptr`
+  - `&str`：`len` / `is_empty` / `as_bytes` / `as_ptr`
+  - 生ポインタ：`add` / `sub` / `offset` / `is_null` / `read` / `write` / `read_volatile` / `write_volatile` / `cast`
+
+prelude は、ユーザのコードの識別子から辿れるアイテムだけを付ける。`Option` を使わないプログラムには何も足さないので、キャッシュもビルド時間も増えない。
+
+- `core::cmp::max` などは、ユーザが同じ名前の関数を定義してもぶつからないよう `__core_*` という名前で持っている。
+- それらは、コードに `core::` か `use core::` が現れたときだけ付ける。
+
+### 型推論と検査
+
+- 型推論は関数単位の単一化で行う（`src/infer.rs`）。
+  - 参照・ポインタ・配列・スライス、ジェネリックな ADT の形も単一化する。
+  - リテラル・構築・呼び出しの型も記録し、codegen で期待型が分からないときに使う（`Pair { a: 1 }.swap()` の `1` を、後ろの使用箇所から `i64` に決める）。
+- 借用検査・可変性検査・ムーブ検査・match の網羅性検査・算術オーバーフロー検査はしない。
+  - rustc を通るプログラムなら意味は変わらない前提で、struct は常にコピーしている。
+  - どの arm にも合わなければ trap する。
+  - オーバーフローは wrap する（rustc の debug ビルドなら panic する）。
+
+### 未対応
+
+- alloc（`Vec` / `Box` / `String`）
+- 書式化（`write!` / `core::fmt`）
+- クロージャ
+- `dyn Trait`、関連型、関連定数（`u32::MAX` などの組み込みは可）
+- 浮動小数点
+- 128 bit 整数
+- モジュール（`mod`）、マクロ定義（`macro_rules!`）
+- `|` パターンの中での束縛
+- ラベル付き `break`
+- イテレータのアダプタ（`for` の中で直接使う形以外）
+- `impl Trait for [T; N]` のような、プリミティブ以外の組み込み型への impl
 
 ### 値の表現と ABI（内部用）
 
@@ -290,7 +364,8 @@ rustc 側はほとんどが std 由来。
 ## 次にやること
 
 - **言語**
-  - 配列とスライス、タプル、`dyn Trait`、ジェネリックな struct / enum
+  - クロージャ、`dyn Trait`、モジュール、`core::fmt` 相当の書式化
+  - 浮動小数点、オーバーフロー検査（debug ビルドの rustc と同じ panic）
   - 単相化をレイアウトでキーにして共有する（`Vec<A>` と `Vec<B>` を 1 つにする。blaze の polymorph）
   - 最小の自前 std（relax 方式）
 - **インクリメンタル**

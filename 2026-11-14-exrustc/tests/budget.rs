@@ -25,7 +25,10 @@ fn measure() -> BTreeMap<String, u64> {
     for (name, src) in &cases {
         let out = dir.join(name);
         // リンカで大きさが変わるので bfd ではなく既定 (自動選択) を使う。CI では EXRUSTC_BENCH_LINKER で固定
-        let o = Options { linker: std::env::var("EXRUSTC_BENCH_LINKER").ok(), ..Options::default() };
+        let o = Options {
+            linker: std::env::var("EXRUSTC_BENCH_LINKER").ok(),
+            ..Options::default()
+        };
         let mut s = Session::new(o);
         let r = s.build(src, &out).unwrap_or_else(|e| panic!("{name}: {e}"));
         let cache = s.save_cache(&cache_path(&out)).unwrap();
@@ -49,7 +52,10 @@ fn sizes_within_budget() {
             .unwrap_or_default()
             .lines()
             .filter(|l| !l.starts_with('#'))
-            .filter_map(|l| l.split_once(' ').map(|(k, v)| (k.to_string(), v.trim().parse().unwrap())))
+            .filter_map(|l| {
+                l.split_once(' ')
+                    .map(|(k, v)| (k.to_string(), v.trim().parse().unwrap()))
+            })
             .collect();
         let keep_old = mode == "new";
         let body: String = now
@@ -59,12 +65,20 @@ fn sizes_within_budget() {
                 _ => format!("{k} {}\n", v + v / 20),
             })
             .collect();
-        std::fs::write(BUDGET, format!("# 名前 上限バイト (UPDATE_BUDGET=1 で再生成: 現在値 + 5%)\n{body}")).unwrap();
+        std::fs::write(
+            BUDGET,
+            format!("# 名前 上限バイト (UPDATE_BUDGET=1 で再生成: 現在値 + 5%)\n{body}"),
+        )
+        .unwrap();
         return;
     }
-    let text = std::fs::read_to_string(BUDGET).expect("bench/budget.txt がない: UPDATE_BUDGET=1 で作る");
+    let text =
+        std::fs::read_to_string(BUDGET).expect("bench/budget.txt がない: UPDATE_BUDGET=1 で作る");
     let mut over = vec![];
-    for line in text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+    for line in text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+    {
         let (k, v) = line.split_once(' ').unwrap();
         let limit: u64 = v.trim().parse().unwrap();
         match now.get(k) {

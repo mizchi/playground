@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 use crate::{Options, Session};
 
 pub struct Server {
-    /// uri → (セッション, 直前の本文のハッシュと診断)
-    docs: HashMap<String, (Session, u64, Vec<Value>)>,
+    /// uri → (セッション, 直前の本文と診断)
+    docs: HashMap<String, (Session, String, Vec<Value>)>,
     pub exit: bool,
     shutdown: bool,
 }
@@ -26,7 +26,11 @@ impl Default for Server {
 
 impl Server {
     pub fn new() -> Server {
-        Server { docs: HashMap::new(), exit: false, shutdown: false }
+        Server {
+            docs: HashMap::new(),
+            exit: false,
+            shutdown: false,
+        }
     }
 
     /// 1 メッセージを処理し、送り返すメッセージ (JSON 文字列) を返す
@@ -37,7 +41,8 @@ impl Server {
         let method = v["method"].as_str().unwrap_or("");
         let id = v.get("id").cloned();
         let p = &v["params"];
-        let reply = |result: Value| json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string();
+        let reply =
+            |result: Value| json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string();
         match method {
             "initialize" => vec![reply(json!({
                 "capabilities": { "textDocumentSync": 1 },
@@ -59,7 +64,10 @@ impl Server {
             "textDocument/didChange" => {
                 let uri = p["textDocument"]["uri"].as_str().unwrap_or("").to_string();
                 // 全文同期 (textDocumentSync = 1) なので最後の変更が全文
-                let Some(text) = p["contentChanges"].as_array().and_then(|a| a.last()).and_then(|c| c["text"].as_str())
+                let Some(text) = p["contentChanges"]
+                    .as_array()
+                    .and_then(|a| a.last())
+                    .and_then(|c| c["text"].as_str())
                 else {
                     return vec![];
                 };
@@ -70,26 +78,24 @@ impl Server {
                 self.docs.remove(&uri);
                 vec![publish(&uri, Value::Null, vec![])]
             }
-            _ if id.is_some() => vec![json!({
-                "jsonrpc": "2.0", "id": id,
-                "error": {"code": -32601, "message": format!("method not found: {method}")}
-            })
-            .to_string()],
+            _ if id.is_some() => vec![
+                json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "error": {"code": -32601, "message": format!("method not found: {method}")}
+                })
+                .to_string(),
+            ],
             _ => vec![], // 未対応の通知は無視
         }
     }
 
     fn diagnose(&mut self, uri: String, text: &str, version: Value) -> String {
-        let h = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::hash::DefaultHasher::new();
-            text.hash(&mut h);
-            h.finish()
-        };
-        let (s, last, cached) =
-            self.docs.entry(uri.clone()).or_insert_with(|| (Session::new(Options::default()), 0, vec![]));
-        // 本文が同じ (保存しただけ等) なら前回の診断をそのまま返す
-        if *last == h {
+        let (s, last, cached) = self
+            .docs
+            .entry(uri.clone())
+            .or_insert_with(|| (Session::new(Options::default()), String::new(), vec![]));
+        // 本文が同じ (保存しただけ等) なら前回の診断をそのまま返す。比較は memcmp なのでハッシュより安い
+        if !last.is_empty() && last == text {
             return publish(&uri, version, cached.clone());
         }
         let diags: Vec<Value> = s
@@ -105,7 +111,8 @@ impl Server {
                 })
             })
             .collect();
-        *last = h;
+        last.clear();
+        last.push_str(text);
         *cached = diags.clone();
         publish(&uri, version, diags)
     }
@@ -116,7 +123,8 @@ fn publish(uri: &str, version: Value, diags: Vec<Value>) -> String {
     if !version.is_null() {
         params["version"] = version;
     }
-    json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": params}).to_string()
+    json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": params})
+        .to_string()
 }
 
 /// `Content-Length: N\r\n\r\n<body>` を 1 つ読む。EOF なら None
@@ -135,10 +143,13 @@ pub fn read_msg<R: BufRead>(r: &mut R) -> io::Result<Option<String>> {
             len = v.trim().parse::<usize>().ok();
         }
     }
-    let len = len.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing Content-Length"))?;
+    let len =
+        len.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing Content-Length"))?;
     let mut buf = vec![0; len];
     r.read_exact(&mut buf)?;
-    String::from_utf8(buf).map(Some).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    String::from_utf8(buf)
+        .map(Some)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 pub fn write_msg<W: Write>(w: &mut W, body: &str) -> io::Result<()> {

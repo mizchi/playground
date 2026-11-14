@@ -3,9 +3,11 @@
 
 pub mod cache;
 pub mod codegen;
+pub mod consteval;
 pub mod driver;
 pub mod enc;
 pub mod front;
+pub mod fxhash;
 pub mod infer;
 pub mod lexer;
 pub mod link;

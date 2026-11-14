@@ -1,4 +1,7 @@
 # 名前 上限バイト (UPDATE_BUDGET=1 で再生成: 現在値 + 5%)
+arrays.binary_bytes 13826
+arrays.cache_bytes 11974
+arrays.object_bytes 12373
 enums.binary_bytes 10264
 enums.cache_bytes 8491
 enums.object_bytes 8937
@@ -12,6 +15,24 @@ lsp1000.mem_bytes 20843
 methods.binary_bytes 7232
 methods.cache_bytes 6072
 methods.object_bytes 7005
+nostd_core.binary_bytes 10256
+nostd_core.cache_bytes 8668
+nostd_core.object_bytes 9525
+nostd_embedded.binary_bytes 9886
+nostd_embedded.cache_bytes 10144
+nostd_embedded.object_bytes 10525
+nostd_panic_assert.binary_bytes 6560
+nostd_panic_assert.cache_bytes 3391
+nostd_panic_assert.object_bytes 4015
+nostd_panic_index.binary_bytes 6594
+nostd_panic_index.cache_bytes 3397
+nostd_panic_index.object_bytes 4015
+nostd_panic_unwrap.binary_bytes 6644
+nostd_panic_unwrap.cache_bytes 3489
+nostd_panic_unwrap.object_bytes 4099
+options.binary_bytes 12255
+options.cache_bytes 13053
+options.object_bytes 12675
 structs.binary_bytes 7266
 structs.cache_bytes 5075
 structs.object_bytes 6048

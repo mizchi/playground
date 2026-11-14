@@ -6,6 +6,33 @@ pub struct PanicInfo {
     _private: u8,
 }
 
+// core::cmp / core::mem / core::ptr の関数。ユーザが同じ名前の関数を定義してもぶつからないよう
+// `__core_` を付けて置き、`core::cmp::max` などのパス (と未定義の名前) からだけ引く
+pub fn __core_min<T: Ord + Copy>(a: T, b: T) -> T {
+    if b < a { b } else { a }
+}
+pub fn __core_max<T: Ord + Copy>(a: T, b: T) -> T {
+    if b < a { a } else { b }
+}
+pub fn __core_swap<T: Copy>(a: &mut T, b: &mut T) {
+    let t = *a;
+    *a = *b;
+    *b = t;
+}
+pub fn __core_replace<T: Copy>(dest: &mut T, src: T) -> T {
+    let old = *dest;
+    *dest = src;
+    old
+}
+pub unsafe fn __core_read_volatile<T: Copy>(p: *const T) -> T {
+    unsafe { *p }
+}
+pub unsafe fn __core_write_volatile<T: Copy>(p: *mut T, v: T) {
+    unsafe {
+        *p = v;
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum Option<T> {
     None,
@@ -154,58 +181,111 @@ use std::sync::OnceLock;
 
 use crate::lexer::{self, ItemKind, SrcItem};
 
-/// prelude のアイテム (一度だけ字句解析する)。(アイテム, 定義する名前)
-fn items() -> &'static [(SrcItem, Option<String>)] {
-    static ITEMS: OnceLock<Vec<(SrcItem, Option<String>)>> = OnceLock::new();
+/// prelude のアイテム (一度だけ字句解析する)。(アイテム, 定義する名前, core:: 経由でしか使えないか)
+fn items() -> &'static [(SrcItem, Option<String>, bool)] {
+    static ITEMS: OnceLock<Vec<(SrcItem, Option<String>, bool)>> = OnceLock::new();
     ITEMS.get_or_init(|| {
         lexer::split(PRELUDE)
             .expect("prelude must lex")
             .into_iter()
             .map(|it| {
                 let name = defined_name(PRELUDE, &it);
-                (it, name)
+                let core_only = it
+                    .idents
+                    .iter()
+                    .any(|&(a, b)| PRELUDE[a as usize..b as usize].starts_with("__core_"));
+                (it, name, core_only)
             })
             .collect()
     })
 }
 
-/// `fn x` / `struct X` / `enum X` の名前
+/// `fn x` / `struct X` / `enum X` の名前 (`__core_x` は x として引かれる)
 fn defined_name(src: &str, it: &SrcItem) -> Option<String> {
-    let ids: Vec<&str> = it.idents.iter().map(|&(a, b)| &src[a as usize..b as usize]).collect();
-    let k = ids.iter().position(|w| matches!(*w, "fn" | "struct" | "enum"))?;
-    ids.get(k + 1).map(|s| s.to_string())
+    let ids: Vec<&str> = it
+        .idents
+        .iter()
+        .map(|&(a, b)| &src[a as usize..b as usize])
+        .collect();
+    let k = ids
+        .iter()
+        .position(|w| matches!(*w, "fn" | "struct" | "enum"))?;
+    ids.get(k + 1)
+        .map(|s| s.strip_prefix("__core_").unwrap_or(s).to_string())
 }
 
 /// ユーザのコードから (識別子を辿って) 使われうる prelude のアイテムだけを、ソースとして返す。
 /// Option を使わないプログラムには何も足さないので、キャッシュも大きくならない
 pub fn select(user_src: &str, user_items: &[SrcItem]) -> String {
     let all = items();
-    let mut need: HashSet<&str> = user_items
-        .iter()
-        .flat_map(|it| it.idents.iter().map(|&(a, b)| &user_src[a as usize..b as usize]))
-        .collect();
+    // ユーザの識別子のうち、prelude が定義する名前 (と関係する名前) に当たるものだけを集める。
+    // 全識別子の集合を作ると大きなプログラムで毎回 ms 単位かかるので、小さい集合に対して引く
+    // 先頭の 1 文字ごとの候補 (数個) と直接比べる。ハッシュしないので大きなプログラムでも速い
+    static NAMES: OnceLock<Vec<Vec<&'static str>>> = OnceLock::new();
+    let by_first = NAMES.get_or_init(|| {
+        let mut h: Vec<&'static str> = all.iter().filter_map(|x| x.1.as_deref()).collect();
+        h.extend(["Some", "None", "Ok", "Err", "core", "std"]);
+        let mut t: Vec<Vec<&'static str>> = vec![vec![]; 256];
+        for n in h {
+            if !t[n.as_bytes()[0] as usize].contains(&n) {
+                t[n.as_bytes()[0] as usize].push(n);
+            }
+        }
+        t
+    });
+    let mut need: HashSet<&str> = HashSet::new();
+    let bytes = user_src.as_bytes();
+    for it in user_items {
+        for &(a, b) in &it.idents {
+            let cands = &by_first[bytes[a as usize] as usize];
+            if cands.is_empty() {
+                continue;
+            }
+            let w = &user_src[a as usize..b as usize];
+            if let Some(n) = cands.iter().find(|n| **n == w) {
+                need.insert(n);
+            }
+        }
+    }
+    if need.is_empty() {
+        return String::new();
+    }
     let mut chosen = vec![false; all.len()];
     loop {
         let mut changed = false;
-        for (i, (it, name)) in all.iter().enumerate() {
+        for (i, (it, name, core_only)) in all.iter().enumerate() {
             if chosen[i] || matches!(it.kind, ItemKind::ImplHeader | ItemKind::TraitHeader) {
+                continue;
+            }
+            // core::cmp::max などは `core` / `std` という識別子 (パスか use) がなければ使えない
+            if *core_only && !(need.contains("core") || need.contains("std")) {
                 continue;
             }
             // バリアント名 (Some など) で enum が要る
             let wanted = match name {
                 Some(n) => need.contains(n.as_str()),
                 None => false,
-            } || (name.as_deref() == Some("Option") && (need.contains("Some") || need.contains("None")))
-                || (name.as_deref() == Some("Result") && (need.contains("Ok") || need.contains("Err")));
+            } || (name.as_deref() == Some("Option")
+                && (need.contains("Some") || need.contains("None")))
+                || (name.as_deref() == Some("Result")
+                    && (need.contains("Ok") || need.contains("Err")));
             if wanted {
                 chosen[i] = true;
                 changed = true;
-                need.extend(it.idents.iter().map(|&(a, b)| &PRELUDE[a as usize..b as usize]));
+                need.extend(
+                    it.idents
+                        .iter()
+                        .map(|&(a, b)| &PRELUDE[a as usize..b as usize]),
+                );
                 if let ItemKind::ImplMember(h) = it.kind {
                     if !chosen[h as usize] {
                         chosen[h as usize] = true;
                         let hit = &all[h as usize].0;
-                        need.extend(hit.idents.iter().map(|&(a, b)| &PRELUDE[a as usize..b as usize]));
+                        need.extend(
+                            hit.idents
+                                .iter()
+                                .map(|&(a, b)| &PRELUDE[a as usize..b as usize]),
+                        );
                     }
                 }
             }
@@ -216,7 +296,7 @@ pub fn select(user_src: &str, user_items: &[SrcItem]) -> String {
     }
     let mut out = String::new();
     let mut open_impl = false;
-    for (i, (it, _)) in all.iter().enumerate() {
+    for (i, (it, _, _)) in all.iter().enumerate() {
         let in_impl = matches!(it.kind, ItemKind::ImplMember(_));
         if open_impl && !in_impl {
             out.push_str("}\n");
