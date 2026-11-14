@@ -116,7 +116,7 @@ bench/regress.sh
 検証は、そうしたプログラムを rustc でもビルドし、実行結果（標準出力と終了コード）が一致することで行う。
 
 - rustc 側は libcore だけでビルドする（`-C panic=abort`）。
-- 比較は `tests/compare.sh` が行う。対象は `examples/*.rs` の 12 本で、そのうち no_std は 5 本。
+- 比較は `tests/compare.sh` が行う。対象は `examples/*.rs` の 13 本で、そのうち no_std は 6 本（`nostd_calc` は字句解析と後置記法の電卓で、ジェネリック struct・`?`・const 配列・`12 本で、そのうち no_std は 5 本。12 本で、そのうち no_std は 5 本。str` の自動 deref を使う）。
 
 ### 言語
 

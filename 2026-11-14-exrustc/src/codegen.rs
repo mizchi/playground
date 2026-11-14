@@ -1406,7 +1406,7 @@ impl Cx<'_, '_> {
             },
             _ => None,
         };
-        self.call_fn(id, None, &args, tf, c.span())
+        self.call_fn(id, None, &args, tf, expected, c.span())
     }
 
     /// `recv.m(args)`: レシーバを自動 deref して struct を見つけ、
@@ -1485,6 +1485,7 @@ impl Cx<'_, '_> {
             Some((recv, recv_ty)),
             &args,
             mc.turbofish.as_ref(),
+            None,
             mc.span(),
         )
     }
@@ -1526,6 +1527,7 @@ impl Cx<'_, '_> {
             Some((recv, recv_ty)),
             &args,
             mc.turbofish.as_ref(),
+            None,
             mc.span(),
         )
         .map(Some)
@@ -1559,6 +1561,7 @@ impl Cx<'_, '_> {
         id: u32,
         arg_tys: &[Ty],
         mut sol: Vec<Option<Ty>>,
+        ret_hint: Option<Ty>,
         span: proc_macro2::Span,
     ) -> R<(u32, FnSig)> {
         let sig = self.prog.sigs[id as usize].clone();
@@ -1575,6 +1578,13 @@ impl Cx<'_, '_> {
                         self.prog.tn(at)
                     ),
                 );
+            }
+        }
+        // 引数から決まらない型パラメータは期待される戻り値型から (`let s: S<i64> = S::new()`)
+        if let Some(rt) = ret_hint.filter(|_| sol.iter().any(|s| s.is_none())) {
+            let mut s2 = sol.clone();
+            if self.prog.match_ty(sig.ret, rt, &mut s2) {
+                sol = s2;
             }
         }
         let Some(args) = sol.iter().copied().collect::<Option<Vec<Ty>>>() else {
@@ -1626,6 +1636,7 @@ impl Cx<'_, '_> {
         recv: Option<(Value, Ty)>,
         args: &[&Expr],
         turbofish: Option<&syn::AngleBracketedGenericArguments>,
+        expected: Option<Ty>,
         span: proc_macro2::Span,
     ) -> R<V> {
         let sig0 = self.prog.sigs[id as usize].clone();
@@ -1663,12 +1674,26 @@ impl Cx<'_, '_> {
                     t = Ty::Ref(pm, intern(Ty::Slice(e)));
                 }
             }
+            // 自動 deref 強制: `&&T` を `&T` の引数に渡す
+            let want = self.prog.partial_subst(pt, &sol);
+            while let (Ty::Ref(_, _), Ty::Ref(_, inner @ Ty::Ref(..)), Some(val)) = (want, t, v) {
+                if t == want || self.prog.has_param(want) {
+                    break;
+                }
+                // fat な参照 (`&str` / `&[T]`) はメモリ上の 16 byte のアドレスが値なのでそのまま
+                v = Some(if inner.is_fat() {
+                    val
+                } else {
+                    self.b.ins().load(PTR, mf(), val, 0)
+                });
+                t = *inner;
+            }
             self.prog.match_ty(pt, t, &mut sol);
             vals.push((v.unwrap(), t, a.span()));
         }
         let arg_tys: Vec<Ty> = vals.iter().map(|v| v.1).collect();
         let sol0 = self.turbofish_sol(&sig0, turbofish)?;
-        let (target, sig) = self.resolve_call(id, &arg_tys, sol0, span)?;
+        let (target, sig) = self.resolve_call(id, &arg_tys, sol0, expected, span)?;
         let mut cv = vec![];
         let sret = if is_sret(&sig) {
             let a = self.temp(sig.ret);
@@ -2259,7 +2284,8 @@ impl Cx<'_, '_> {
 
     /// 添字アクセスの対象 (配列 / スライス / それらへの参照) の (先頭アドレス, 長さ, 要素型)
     fn indexable(&mut self, e: &Expr) -> R<(Value, Value, Ty)> {
-        let mut p = if is_place_expr(e) {
+        let is_const = matches!(e, Expr::Path(p) if self.const_of(p).is_some());
+        let mut p = if is_place_expr(e) && !is_const {
             self.place(e)?
         } else {
             match self.expr(e, None)? {
@@ -3036,7 +3062,9 @@ impl Cx<'_, '_> {
             Expr::Reference(r) => (Some(r.mutability.is_some()), &r.expr),
             _ => (None, e),
         };
-        let (ptr, len, elem) = self.indexable(base_e)?;
+        // `&a[lo..hi]` は部分スライス (参照ごと評価する)
+        let sub = matches!(base_e, Expr::Index(ix) if matches!(&*ix.index, Expr::Range(_)));
+        let (ptr, len, elem) = self.indexable(if sub { e } else { base_e })?;
         let mut mode = by_ref;
         let base_is_ref = by_ref.is_none() && matches!(self.peek(base_e), Some(Ty::Ref(..)));
         if base_is_ref {
