@@ -203,8 +203,7 @@ impl Session {
         self.mem.retain(|k, _| used.contains(k));
     }
 
-    fn analyze(&mut self, src: &str) -> Result<Analysis, String> {
-        let items = lexer::split(src)?;
+    fn analyze(&mut self, src: &str, items: Vec<SrcItem>) -> Result<Analysis, String> {
         let cid = self.cid;
         let sum_keys: Vec<Key> = items
             .iter()
@@ -348,7 +347,13 @@ impl Session {
     /// 型検査だけを行い、全診断を返す (LSP 用)。到達しない関数も検査する。
     /// 検査に通った関数は「OK」の印をキャッシュし、次回は parse もしない。
     pub fn check(&mut self, src: &str) -> Vec<Diagnostic> {
-        let out = self.check_inner(src);
+        let user_lines = src.lines().count() + 1;
+        let out = match with_prelude(src) {
+            Ok((full, items)) => self.check_inner(&full, items),
+            Err(e) => vec![e],
+        };
+        // prelude の中の診断は出さない (ユーザのコードではない)
+        let out: Vec<String> = out.into_iter().filter(|e| Diagnostic::parse(e).line <= user_lines).collect();
         self.gc();
         let mut d: Vec<Diagnostic> = out.iter().map(|e| Diagnostic::parse(e)).collect();
         d.sort_by_key(|d| (d.line, d.col));
@@ -356,8 +361,8 @@ impl Session {
         d
     }
 
-    fn check_inner(&mut self, src: &str) -> Vec<String> {
-        let mut a = match self.analyze(src) {
+    fn check_inner(&mut self, src: &str, items: Vec<SrcItem>) -> Vec<String> {
+        let mut a = match self.analyze(src, items) {
             Ok(a) => a,
             Err(e) => return vec![e],
         };
@@ -401,17 +406,17 @@ impl Session {
 
     /// ビルドして実行ファイルを書く。キャッシュの書き戻しは save_cache で行う。
     pub fn build(&mut self, src: &str, output: &Path) -> Result<BuildReport, String> {
-        let r = self.build_inner(src, output);
+        let r = with_prelude(src).and_then(|(full, items)| self.build_inner(&full, items, output));
         if r.is_err() {
             self.used.clear();
         }
         r
     }
 
-    fn build_inner(&mut self, src: &str, output: &Path) -> Result<BuildReport, String> {
+    fn build_inner(&mut self, src: &str, items: Vec<SrcItem>, output: &Path) -> Result<BuildReport, String> {
         let t0 = Instant::now();
         let mut tm = Timer { on: self.opts.time, start: t0, last: t0 };
-        let mut a = self.analyze(src)?;
+        let mut a = self.analyze(src, items)?;
         if let Some(e) = a.errors.first() {
             return Err(e.clone());
         }
@@ -534,6 +539,40 @@ impl Session {
         self.gc();
         Ok(n)
     }
+}
+
+/// ユーザのソースの後ろに、使われうる prelude のアイテム (Option / Result など) を付ける。
+/// 後ろに付けるのでユーザのコードの行番号は変わらない。ユーザのコードの字句解析はここで 1 回だけ行い、
+/// prelude の分だけ追加で字句解析して結合する
+fn with_prelude(src: &str) -> Result<(String, Vec<SrcItem>), String> {
+    let mut items = lexer::split(src)?;
+    let extra = crate::prelude::select(src, &items);
+    if extra.is_empty() {
+        return Ok((src.to_string(), items));
+    }
+    let base = src.len() + 1;
+    let lines = src.bytes().filter(|&c| c == b'\n').count() + 1;
+    let n0 = items.len() as u32;
+    for mut it in lexer::split(&extra)? {
+        it.start += base;
+        it.end += base;
+        it.line += lines;
+        for r in &mut it.idents {
+            r.0 += base as u32;
+            r.1 += base as u32;
+        }
+        it.kind = match it.kind {
+            ItemKind::ImplMember(h) => ItemKind::ImplMember(h + n0),
+            ItemKind::TraitMember(h) => ItemKind::TraitMember(h + n0),
+            k => k,
+        };
+        items.push(it);
+    }
+    let mut full = String::with_capacity(base + extra.len());
+    full.push_str(src);
+    full.push('\n');
+    full.push_str(&extra);
+    Ok((full, items))
 }
 
 /// 入力を小さな塊ごとに取り合う単純な並列 map (結果は入力順)。
@@ -719,7 +758,7 @@ fn emit_object(
         }
         let linkage = if sig.is_extern {
             Linkage::Import
-        } else if sig.is_main {
+        } else if sig.is_main || sig.export {
             Linkage::Export
         } else {
             Linkage::Local

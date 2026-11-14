@@ -10,6 +10,7 @@ pub mod infer;
 pub mod lexer;
 pub mod link;
 pub mod lsp;
+pub mod prelude;
 #[doc(hidden)]
 pub mod testgen;
 

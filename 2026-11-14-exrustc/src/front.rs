@@ -39,6 +39,8 @@ pub enum Ty {
     Bool,
     Unit,
     Never,
+    /// Unicode のスカラー値 (32 bit)
+    Char,
     /// `&T` (false) / `&mut T` (true)
     Ref(bool, &'static Ty),
     /// Program::structs の index
@@ -98,6 +100,7 @@ impl Ty {
     fn prim(s: &str) -> Option<Ty> {
         Ty::from_suffix(s).or(match s {
             "bool" => Some(Ty::Bool),
+            "char" => Some(Ty::Char),
             _ => None,
         })
     }
@@ -118,7 +121,7 @@ impl Ty {
         match self {
             Ty::I8 | Ty::U8 | Ty::Bool => 8,
             Ty::I16 | Ty::U16 => 16,
-            Ty::I32 | Ty::U32 => 32,
+            Ty::I32 | Ty::U32 | Ty::Char => 32,
             Ty::I64 | Ty::U64 | Ty::Isize | Ty::Usize | Ty::Ptr(..) => 64,
             Ty::Ref(..) if self.is_fat() => 0,
             Ty::Ref(..) => 64,
@@ -247,6 +250,10 @@ pub struct SigSyn {
     pub impl_trait: Option<String>,
     /// impl の中の関数なら `Self` の型 (`impl<T> Option<T>` なら `Option<T>`)
     pub self_ty: Option<TySyn>,
+    /// `#[no_mangle]` / `#[unsafe(no_mangle)]`: 名前そのままで外に見せる
+    pub export: bool,
+    /// `#[panic_handler]`
+    pub panic_handler: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -266,6 +273,8 @@ pub struct FnSig {
     pub impl_trait: Option<String>,
     /// impl の中の関数の `Self` (型パラメータを含みうる)
     pub self_ty: Option<Ty>,
+    pub export: bool,
+    pub panic_handler: bool,
 }
 
 impl FnSig {
@@ -434,6 +443,24 @@ pub struct Owner {
     pub is_trait: bool,
 }
 
+/// `#[name]` か `#[unsafe(name)]` が付いているか
+fn has_attr(attrs: &[syn::Attribute], name: &str) -> bool {
+    attrs.iter().any(|a| {
+        if a.path().is_ident(name) {
+            return true;
+        }
+        if a.path().is_ident("unsafe") {
+            let mut found = false;
+            let _ = a.parse_nested_meta(|m| {
+                found |= m.path.is_ident(name);
+                Ok(())
+            });
+            return found;
+        }
+        false
+    })
+}
+
 /// `#[derive(A, B)]` の名前
 fn derive_names(attrs: &[syn::Attribute]) -> Vec<String> {
     let mut out = vec![];
@@ -465,6 +492,8 @@ pub struct Program {
     pub traits: HashMap<String, Vec<u32>>,
     /// (型, trait) の実装
     pub impls: HashSet<(u32, String)>,
+    /// `#[panic_handler]` の関数 (no_std)。panic (範囲外アクセス・unwrap など) はここを呼ぶ
+    pub panic_handler: Option<u32>,
 }
 
 /// 単相化したインスタンス (ジェネリック関数 base に型引数 args を入れたもの)
@@ -533,6 +562,8 @@ impl Insts {
             has_body: true,
             impl_trait: None,
             self_ty: impl_of.map(Ty::Struct),
+            export: false,
+            panic_handler: false,
         };
         let id = self.n_fns + self.list.len() as u32;
         self.list.push(Inst { base, args: args.clone(), sig });
@@ -579,6 +610,8 @@ pub fn parse_item(src: &str, it: &SrcItem) -> R<syn::Item> {
     };
     match it.kind {
         ItemKind::Normal => syn::parse_str::<syn::Item>(text).map_err(fix),
+        // クレート属性 (`#![no_std]` など) は意味を持たない
+        ItemKind::InnerAttr => Ok(syn::Item::Verbatim(Default::default())),
         ItemKind::ImplHeader | ItemKind::TraitHeader => {
             syn::parse_str::<syn::Item>(&format!("{text}}}")).map_err(fix)
         }
@@ -691,13 +724,27 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
         }
         syn::Item::Fn(f) => {
             let name = f.sig.ident.to_string();
-            let is_main = name == "main";
-            let sig = parse_sig(&f.sig, false, is_main, None)?;
+            let export = has_attr(&f.attrs, "no_mangle");
+            // `#[no_mangle] extern "C" fn main() -> i32` (no_main) は C の main そのもの
+            let is_main = name == "main" && !export;
+            let mut sig = parse_sig(&f.sig, false, is_main, None)?;
             if is_main && (!sig.params.is_empty() || sig.ret != TySyn::Prim(Ty::Unit)) {
                 return err(f.sig.span(), "`main` must be `fn main()`");
             }
+            if export {
+                sig.export = true;
+                sig.symbol = name.clone();
+            }
+            if has_attr(&f.attrs, "panic_handler") {
+                sig.panic_handler = true;
+                if sig.ret != TySyn::Prim(Ty::Never) {
+                    return err(f.sig.span(), "`#[panic_handler]` function must return `!`");
+                }
+            }
             sm.fns.push((name, sig));
         }
+        // `use` は名前の最後のセグメントで解決するので読み飛ばす。クレート属性も同じ
+        syn::Item::Use(_) | syn::Item::Verbatim(_) => {}
         syn::Item::ForeignMod(m) => {
             for fi in &m.items {
                 let syn::ForeignItem::Fn(f) = fi else {
@@ -793,6 +840,7 @@ impl Program {
             by_last: HashMap::new(),
             traits: HashMap::new(),
             impls: HashSet::new(),
+            panic_handler: None,
         };
         // 1. struct / enum 名を登録
         let mut sdefs: Vec<(usize, String, AdtShape, Vec<String>)> = vec![];
@@ -909,7 +957,12 @@ impl Program {
                     has_body: ss.has_body,
                     impl_trait: ss.impl_trait.clone(),
                     self_ty,
+                    export: ss.export,
+                    panic_handler: ss.panic_handler,
                 });
+                if ss.panic_handler {
+                    p.panic_handler = Some(p.names.len() as u32 - 1);
+                }
                 if let Some(tr) = &ss.trait_of {
                     p.traits.entry(tr.clone()).or_default().push(p.names.len() as u32 - 1);
                 }
@@ -1566,7 +1619,10 @@ impl Program {
     /// 到達しない関数は parse も型検査もコード生成もしない (relax/blaze の demand-driven の AOT 版)。
     pub fn reachable(&self, refs: &[Vec<u32>]) -> Vec<bool> {
         let mut seen = vec![false; self.names.len()];
+        // 根: main・外に見せる関数・panic handler (panic はどこからでも起こりうる)
         let mut stack = vec![self.index["main"]];
+        stack.extend((0..self.names.len() as u32).filter(|&i| self.sigs[i as usize].export));
+        stack.extend(self.panic_handler);
         while let Some(i) = stack.pop() {
             if std::mem::replace(&mut seen[i as usize], true) {
                 continue;
@@ -1579,9 +1635,9 @@ impl Program {
 
 // --- Summary のシリアライズ ------------------------------------------------
 
-const TYS: [Ty; 13] = [
+const TYS: [Ty; 14] = [
     Ty::I8, Ty::I16, Ty::I32, Ty::I64, Ty::Isize, Ty::U8, Ty::U16, Ty::U32, Ty::U64, Ty::Usize,
-    Ty::Bool, Ty::Unit, Ty::Never,
+    Ty::Bool, Ty::Unit, Ty::Never, Ty::Char,
 ];
 
 fn ty_code(t: Ty) -> u8 {
@@ -1638,7 +1694,7 @@ impl Enc for TySyn {
     }
     fn dec(r: &mut Rd) -> Option<Self> {
         Some(match r.u8()? {
-            c @ 0..13 => TySyn::Prim(TYS[c as usize]),
+            c @ 0..14 => TySyn::Prim(TYS[c as usize]),
             c @ (20 | 21) => TySyn::Ref(c == 21, Box::new(TySyn::dec(r)?)),
             22 => TySyn::Named(String::dec(r)?),
             23 => TySyn::App(String::dec(r)?, Vec::dec(r)?),
@@ -1677,6 +1733,7 @@ impl Enc for VariantKind {
 crate::enc_struct!(VariantSyn { name, kind, fields, discr });
 crate::enc_struct!(SigSyn {
     params, ret, symbol, is_extern, is_main, impl_of, has_self, generics, trait_of, has_body, impl_trait, self_ty,
+    export, panic_handler,
 });
 crate::enc_struct!(Summary {
     fns, structs, impl_self, enums, trait_decl, impl_trait, derives, adt_generics, impl_generics, impl_self_ty,
@@ -1821,5 +1878,7 @@ fn parse_sig(sig: &syn::Signature, is_extern: bool, is_main: bool, owner: Option
         has_body: true,
         impl_trait: owner.and_then(|o| o.impl_trait.clone()),
         self_ty: owner.filter(|_| !is_trait).map(|o| o.self_ty.clone()),
+        export: false,
+        panic_handler: false,
     })
 }

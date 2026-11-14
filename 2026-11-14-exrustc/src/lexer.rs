@@ -31,6 +31,8 @@ pub enum ItemKind {
     TraitHeader,
     /// trait の中のアイテム (デフォルト実装のない宣言も含む)
     TraitMember(u32),
+    /// `#![no_std]` などのクレート属性
+    InnerAttr,
 }
 
 fn is_ident_start(c: u8) -> bool {
@@ -98,6 +100,8 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
     let mut impl_pending = false;
     // ブロックが trait か impl か
     let mut is_trait = false;
+    // `#![...]` (クレート属性) の途中か
+    let mut inner_attr = false;
     macro_rules! tok {
         ($a:expr, $b:expr, $k:expr) => {
             st.tok($a, $b, $k)
@@ -210,6 +214,13 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
             impl_header = None;
             continue;
         }
+        if c == b'#' && depth == 0 && st.cur.is_none() {
+            let mut j = i;
+            while j < n && s[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            inner_attr = j < n && s[j] == b'!';
+        }
         tok!(start, i, 5u8);
         match c {
             b'(' | b'[' | b'{' => depth += 1,
@@ -222,10 +233,14 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
             _ => {}
         }
         let header_end = c == b'{' && depth == 1 && impl_pending;
-        if header_end || (depth == base && (c == b';' || c == b'}')) {
+        let attr_end = inner_attr && c == b']' && depth == 0;
+        if header_end || attr_end || (depth == base && (c == b';' || c == b'}')) {
             let (sp, ln, idents) = st.cur.take().unwrap();
             let mut h = KeyHasher::new();
-            let kind = if header_end {
+            let kind = if attr_end {
+                inner_attr = false;
+                ItemKind::InnerAttr
+            } else if header_end {
                 if is_trait { ItemKind::TraitHeader } else { ItemKind::ImplHeader }
             } else if let Some(hi) = impl_header {
                 // メンバのハッシュにはヘッダ (= self 型 / trait 名) を含める

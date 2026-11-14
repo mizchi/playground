@@ -588,7 +588,15 @@ impl Cx<'_, '_> {
                     }
                 }
                 Stmt::Item(it) => return err(it.span(), "nested items are not supported"),
-                Stmt::Macro(m) => return err(m.span(), "macros are not supported yet"),
+                Stmt::Macro(m) => {
+                    let r = self.macro_(&m.mac, None)?;
+                    if r.1 == Ty::Never {
+                        diverged = true;
+                    }
+                    if last && m.semi_token.is_none() {
+                        result = r;
+                    }
+                }
             }
         }
         self.scopes.pop();
@@ -605,6 +613,7 @@ impl Cx<'_, '_> {
                 Lit::Int(i) => Ty::from_suffix(i.suffix()),
                 Lit::Bool(_) => Some(Ty::Bool),
                 Lit::Byte(_) => Some(Ty::U8),
+                Lit::Char(_) => Some(Ty::Char),
                 _ => None,
             },
             Expr::Path(p) if p.path.segments.len() == 2 => {
@@ -647,8 +656,8 @@ impl Cx<'_, '_> {
                 while let Ty::Ref(_, i) = t {
                     t = *i;
                 }
-                let (Ty::Struct(sid), syn::Member::Named(id)) = (t, &f.member) else { return None };
-                self.prog.field(sid, &id.to_string()).map(|(t, _)| t)
+                let Ty::Struct(sid) = t else { return None };
+                self.prog.field(sid, &member_name(&f.member)).map(|(t, _)| t)
             }
             Expr::Struct(s) => self
                 .prog
@@ -724,15 +733,13 @@ impl Cx<'_, '_> {
                 }
             }
             Expr::Field(f) => {
-                let syn::Member::Named(fid) = &f.member else {
-                    return err(f.member.span(), "tuple fields are not supported");
-                };
+                let fname = member_name(&f.member);
                 let (a, o, sid) = self.struct_base(&f.base)?;
-                match self.prog.field(sid, &fid.to_string()) {
+                match self.prog.field(sid, &fname) {
                     Some((ft, foff)) => Ok(Place::Mem(a, o + foff as i32, ft)),
                     None => err(
-                        fid.span(),
-                        format!("no field `{fid}` on type `{}`", self.prog.structs[sid as usize].name),
+                        f.member.span(),
+                        format!("no field `{fname}` on type `{}`", self.prog.structs[sid as usize].name),
                     ),
                 }
             }
@@ -779,6 +786,14 @@ impl Cx<'_, '_> {
     // --- 式 -------------------------------------------------------------
 
     fn expr(&mut self, e: &Expr, expected: Option<Ty>) -> R<V> {
+        // 期待型がなければ、型推論が後ろの使用から決めた型を使う
+        let expected = match expected {
+            Some(t) => Some(t),
+            None if matches!(e, Expr::Lit(_) | Expr::Struct(_) | Expr::Call(_) | Expr::Path(_)) => {
+                self.lets.get(&(e as *const Expr as usize)).copied()
+            }
+            None => None,
+        };
         match e {
             Expr::Lit(l) => self.lit(&l.lit, expected),
             Expr::Paren(p) => self.expr(&p.expr, expected),
@@ -790,14 +805,14 @@ impl Cx<'_, '_> {
                 self.block(&b.block, expected)
             }
             Expr::Unsafe(u) => self.block(&u.block, expected),
-            Expr::Path(p) if p.path.segments.len() == 2 => {
+            Expr::Path(p) if self.is_variant_path(&p.path) || p.path.segments.len() >= 2 => {
                 let Some((sid, vi)) = self.prog.variant_by_path(&p.path, self.self_sid) else {
-                    return err(p.span(), "cannot find value (paths other than enum variants are not supported)");
+                    return self.path_value(p, expected);
                 };
                 if self.prog.structs[sid as usize].variants[vi].kind != crate::front::VariantKind::Unit {
                     return err(p.span(), "this variant has fields: use `E::V(..)` or `E::V { .. }`");
                 }
-                self.variant_value(sid, vi, &[])
+                self.variant_value(sid, vi, &[], expected)
             }
             Expr::Match(m) => self.match_(m, expected),
             Expr::Path(_) | Expr::Field(_) => {
@@ -810,7 +825,7 @@ impl Cx<'_, '_> {
             }
             Expr::Unary(u) => self.unary(u, expected),
             Expr::Reference(r) => self.reference(r, expected),
-            Expr::Struct(s) => self.struct_lit(s),
+            Expr::Struct(s) => self.struct_lit(s, expected),
             Expr::Binary(b) => self.binary(b, expected),
             Expr::Assign(a) => {
                 let p = self.place(&a.left)?;
@@ -923,7 +938,7 @@ impl Cx<'_, '_> {
                 self.emit_return(v);
                 Ok(self.dead())
             }
-            Expr::Call(c) => self.call(c),
+            Expr::Call(c) => self.call(c, expected),
             Expr::MethodCall(mc) => self.method_call(mc),
             Expr::Cast(c) => {
                 let to = self.prog.parse_ty(&c.ty, &self.env)?;
@@ -941,7 +956,10 @@ impl Cx<'_, '_> {
                         return Ok((Some(self.convert(t, tag, to)), to));
                     }
                 }
-                if !to.is_int() || !(from.is_int() || from == Ty::Bool) {
+                // 整数 ⇔ char / bool → 整数 (char には u8 からだけ)
+                let ok = (to.is_int() && (from.is_int() || matches!(from, Ty::Bool | Ty::Char)))
+                    || (to == Ty::Char && matches!(from, Ty::U8 | Ty::Char));
+                if !ok {
                     return err(
                         c.span(),
                         format!("unsupported cast `{}` as `{}`", self.prog.tn(from), self.prog.tn(to)),
@@ -949,7 +967,8 @@ impl Cx<'_, '_> {
                 }
                 Ok((Some(self.convert(v.unwrap(), from, to)), to))
             }
-            Expr::Macro(m) => err(m.span(), "macros are not supported yet"),
+            Expr::Macro(m) => self.macro_(&m.mac, expected),
+            Expr::Try(t) => self.try_(t),
             _ => err(e.span(), "unsupported expression"),
         }
     }
@@ -988,7 +1007,7 @@ impl Cx<'_, '_> {
         Ok((Some(a), Ty::Ref(m, intern(t))))
     }
 
-    fn struct_lit(&mut self, s: &syn::ExprStruct) -> R<V> {
+    fn struct_lit(&mut self, s: &syn::ExprStruct, expected: Option<Ty>) -> R<V> {
         if let Some((sid, vi)) = self.prog.variant_by_path(&s.path, self.self_sid) {
             let v = &self.prog.structs[sid as usize].variants[vi];
             if v.kind != crate::front::VariantKind::Struct {
@@ -1010,7 +1029,7 @@ impl Cx<'_, '_> {
             if args.len() != v.fields.len() || s.rest.is_some() {
                 return err(s.span(), format!("missing fields in initializer of `{}`", v.name));
             }
-            return self.variant_value(sid, vi, &args);
+            return self.variant_value(sid, vi, &args, expected);
         }
         let Some(sid) = self.prog.struct_by_path(&s.path, self.self_sid) else {
             return err(s.path.span(), "cannot find struct");
@@ -1018,35 +1037,28 @@ impl Cx<'_, '_> {
         if s.rest.is_some() || s.dot2_token.is_some() {
             return err(s.span(), "functional update syntax `..` is not supported");
         }
-        let t = Ty::Struct(sid);
-        let a = self.temp(t);
-        let mut seen = HashSet::new();
+        let fields = self.prog.structs[sid as usize].fields.clone();
+        let mut args = vec![];
         for fv in &s.fields {
-            let syn::Member::Named(fid) = &fv.member else {
-                return err(fv.member.span(), "tuple fields are not supported");
+            let name = match &fv.member {
+                syn::Member::Named(fid) => fid.to_string(),
+                syn::Member::Unnamed(i) => i.index.to_string(),
             };
-            let name = fid.to_string();
-            let Some((ft, off)) = self.prog.field(sid, &name) else {
-                return err(fid.span(), format!("struct `{}` has no field named `{name}`", self.prog.tn(t)));
+            let Some(fi) = fields.iter().position(|f| f.0 == name) else {
+                return err(fv.member.span(), format!("struct `{}` has no field named `{name}`", self.prog.structs[sid as usize].name));
             };
-            if !seen.insert(name.clone()) {
-                return err(fid.span(), format!("field `{name}` specified more than once"));
+            if args.iter().any(|&(i, _)| i == fi) {
+                return err(fv.member.span(), format!("field `{name}` specified more than once"));
             }
-            let (v, vt) = self.expr(&fv.expr, Some(ft))?;
-            if vt == Ty::Never {
-                return Ok((None, Ty::Never));
-            }
-            self.same(fv.expr.span(), vt, ft)?;
-            self.write(Place::Mem(a, off as i32, ft), v);
+            args.push((fi, &fv.expr));
         }
-        let n = self.prog.structs[sid as usize].fields.len();
-        if seen.len() != n {
-            return err(s.span(), format!("missing fields in initializer of `{}`", self.prog.tn(t)));
+        if args.len() != fields.len() {
+            return err(s.span(), format!("missing fields in initializer of `{}`", self.prog.structs[sid as usize].name));
         }
-        Ok((Some(a), t))
+        self.adt_value(sid, None, &args, expected, s.span())
     }
 
-    fn call(&mut self, c: &syn::ExprCall) -> R<V> {
+    fn call(&mut self, c: &syn::ExprCall, expected: Option<Ty>) -> R<V> {
         if let Expr::Path(p) = &*c.func {
             if let Some((sid, vi)) = self.prog.variant_by_path(&p.path, self.self_sid) {
                 let v = &self.prog.structs[sid as usize].variants[vi];
@@ -1054,7 +1066,18 @@ impl Cx<'_, '_> {
                     return err(c.span(), format!("variant `{}` takes {} fields", v.name, v.fields.len()));
                 }
                 let args: Vec<(usize, &Expr)> = c.args.iter().enumerate().collect();
-                return self.variant_value(sid, vi, &args);
+                return self.variant_value(sid, vi, &args, expected);
+            }
+            // タプル構造体の構築 `P(1, 2)`
+            if let Some(sid) = self.prog.struct_by_path(&p.path, self.self_sid) {
+                if self.lookup(&p.path.segments[0].ident.to_string()).is_none() && self.prog.fn_by_path(&p.path, self.self_sid).is_none() {
+                    let n = self.prog.structs[sid as usize].fields.len();
+                    if n != c.args.len() {
+                        return err(c.span(), format!("this struct takes {n} fields"));
+                    }
+                    let args: Vec<(usize, &Expr)> = c.args.iter().enumerate().collect();
+                    return self.adt_value(sid, None, &args, expected, c.span());
+                }
             }
         }
         let Some((id, _)) = self.callee(&c.func) else {
@@ -1276,6 +1299,7 @@ impl Cx<'_, '_> {
             }
             Lit::Bool(b) => Ok((Some(self.b.ins().iconst(types::I8, b.value as i64)), Ty::Bool)),
             Lit::Byte(b) => Ok((Some(self.b.ins().iconst(types::I8, b.value() as i64)), Ty::U8)),
+            Lit::Char(c) => Ok((Some(self.b.ins().iconst(types::I32, c.value() as i64)), Ty::Char)),
             _ => err(l.span(), "unsupported literal"),
         }
     }
@@ -1360,7 +1384,7 @@ impl Cx<'_, '_> {
 
         if is_cmp(&b.op) {
             self.same(b.right.span(), rt, lt)?;
-            if !(lt.is_int() || lt == Ty::Bool) {
+            if !(lt.is_int() || matches!(lt, Ty::Bool | Ty::Char)) {
                 return err(b.span(), format!("comparison of `{}` is not supported", self.prog.tn(lt)));
             }
             let s = lt.signed();
@@ -1493,23 +1517,268 @@ impl Cx<'_, '_> {
     // --- enum の値 ------------------------------------------------------
 
     /// 一時領域にタグと各フィールドを書いて enum の値を作る。args は (フィールド番号, 式)
-    fn variant_value(&mut self, sid: u32, vi: usize, args: &[(usize, &Expr)]) -> R<V> {
-        let t = Ty::Struct(sid);
-        let a = self.temp(t);
-        let sd = &self.prog.structs[sid as usize];
-        let (tag, discr) = (sd.tag, sd.variants[vi].discr);
-        let tv = self.b.ins().iconst(clif_ty(tag).unwrap(), discr);
-        self.b.ins().store(mf(), tv, a, 0);
+    fn variant_value(&mut self, sid: u32, vi: usize, args: &[(usize, &Expr)], expected: Option<Ty>) -> R<V> {
+        self.adt_value(sid, Some(vi), args, expected, proc_macro2::Span::call_site())
+    }
+
+    /// struct (vi = None) / enum のバリアント (vi = Some) の値を一時領域に作る。args は (フィールド番号, 式)。
+    /// ジェネリックな定義なら、期待型 → 実引数の型 の順にインスタンスを決める
+    fn adt_value(&mut self, base: u32, vi: Option<usize>, args: &[(usize, &Expr)], expected: Option<Ty>, span: proc_macro2::Span) -> R<V> {
+        let fields_of = |this: &Self, sid: u32| -> Vec<(String, Ty, u32)> {
+            let sd = &this.prog.structs[sid as usize];
+            match vi {
+                Some(vi) => sd.variants[vi].fields.clone(),
+                None => sd.fields.clone(),
+            }
+        };
+        let bdef = &self.prog.structs[base as usize];
+        let n_gen = bdef.generics.len();
+        let mut inst = if n_gen == 0 {
+            Some(base)
+        } else {
+            match expected {
+                Some(Ty::Struct(e)) if self.prog.base_of(e) == self.prog.base_of(base) && !self.prog.has_param(Ty::Struct(e)) => Some(e),
+                _ => None,
+            }
+        };
+        let gen_fields = fields_of(self, self.prog.base_of(base));
+        let mut sol: Vec<Option<Ty>> = vec![None; n_gen];
+        let mut vals = vec![];
         for &(fi, e) in args {
-            let (_, fty, off) = self.prog.structs[sid as usize].variants[vi].fields[fi].clone();
-            let (v, vt) = self.expr(e, Some(fty))?;
+            let exp = match inst {
+                Some(i) => Some(fields_of(self, i)[fi].1),
+                None => Some(self.prog.partial_subst(gen_fields[fi].1, &sol)).filter(|&t| !self.prog.has_param(t)),
+            };
+            let (v, vt) = self.expr(e, exp)?;
             if vt == Ty::Never {
                 return Ok((None, Ty::Never));
             }
-            self.same(e.span(), vt, fty)?;
+            if inst.is_none() {
+                self.prog.match_ty(gen_fields[fi].1, vt, &mut sol);
+            }
+            vals.push((fi, v, vt, e.span()));
+        }
+        let inst = match inst.take() {
+            Some(i) => i,
+            None => match sol.iter().copied().collect::<Option<Vec<Ty>>>() {
+                Some(targs) => self.prog.instantiate(self.prog.base_of(base), targs).or_else(|e| err(span, e))?,
+                None => {
+                    let n = &self.prog.structs[base as usize].name;
+                    return err(span, format!("type annotations needed for `{n}<..>`"));
+                }
+            },
+        };
+        let t = Ty::Struct(inst);
+        let a = self.temp(t);
+        let fields = fields_of(self, inst);
+        if let Some(vi) = vi {
+            let sd = &self.prog.structs[inst as usize];
+            let (tag, discr) = (sd.tag, sd.variants[vi].discr);
+            let tv = self.b.ins().iconst(clif_ty(tag).unwrap(), discr);
+            self.b.ins().store(mf(), tv, a, 0);
+        }
+        for (fi, v, vt, sp) in vals {
+            let (_, fty, off) = fields[fi];
+            self.same(sp, vt, fty)?;
             self.write(Place::Mem(a, off as i32, fty), v);
         }
         Ok((Some(a), t))
+    }
+
+    // --- panic / マクロ / `?` ---------------------------------------------
+
+    /// panic する: `#[panic_handler]` があればそれを呼び (戻らない)、なければ trap する
+    fn panic_call(&mut self) -> V {
+        if let Some(h) = self.prog.panic_handler {
+            let sig = self.prog.sigs[h as usize].clone();
+            let info_ty = match sig.params.first() {
+                Some(Ty::Ref(_, t)) => **t,
+                _ => Ty::U8,
+            };
+            let info = self.temp(info_ty);
+            let f = self.fref(h, &sig);
+            self.b.ins().call(f, &[info]);
+        }
+        self.b.ins().trap(TrapCode::unwrap_user(3));
+        self.dead()
+    }
+
+    fn macro_args(&self, mac: &syn::Macro) -> R<Vec<Expr>> {
+        use syn::parse::Parser;
+        let p = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated;
+        p.parse2(mac.tokens.clone()).map(|v| v.into_iter().collect()).or_else(|e| err(mac.span(), e))
+    }
+
+    /// 対応しているマクロ: panic! / unreachable! / todo! / unimplemented! / assert! / assert_eq! /
+    /// assert_ne! (と debug_ 版) / matches!。メッセージの書式化はしない
+    fn macro_(&mut self, mac: &syn::Macro, expected: Option<Ty>) -> R<V> {
+        let name = mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+        match name.as_str() {
+            "panic" | "unreachable" | "todo" | "unimplemented" => Ok(self.panic_call()),
+            "assert" | "debug_assert" => {
+                let args = self.macro_args(mac)?;
+                let Some(c) = args.first() else { return err(mac.span(), "assert! needs a condition") };
+                let (cv, ct) = self.expr(c, Some(Ty::Bool))?;
+                self.same(c.span(), ct, Ty::Bool)?;
+                if let Some(cv) = cv {
+                    self.panic_unless(cv);
+                }
+                Ok((None, Ty::Unit))
+            }
+            "assert_eq" | "assert_ne" | "debug_assert_eq" | "debug_assert_ne" => {
+                let args = self.macro_args(mac)?;
+                if args.len() < 2 {
+                    return err(mac.span(), format!("{name}! needs two arguments"));
+                }
+                let hint = self.peek(&args[0]).or_else(|| self.peek(&args[1]));
+                let (l, lt) = self.expr(&args[0], hint)?;
+                let (r, rt) = self.expr(&args[1], Some(lt))?;
+                self.same(args[1].span(), rt, lt)?;
+                let (Some(l), Some(r)) = (l, r) else { return Ok((None, Ty::Unit)) };
+                if !(lt.is_int() || matches!(lt, Ty::Bool | Ty::Char)) {
+                    return err(mac.span(), format!("{name}! is only supported for integers, bool and char"));
+                }
+                let cc = if name.ends_with("_eq") { IntCC::Equal } else { IntCC::NotEqual };
+                let c = self.b.ins().icmp(cc, l, r);
+                self.panic_unless(c);
+                Ok((None, Ty::Unit))
+            }
+            "matches" => {
+                use syn::parse::Parser;
+                let parser = |input: syn::parse::ParseStream| -> syn::Result<(Expr, Pat, Option<Expr>)> {
+                    let e: Expr = input.parse()?;
+                    input.parse::<syn::Token![,]>()?;
+                    let p = Pat::parse_multi_with_leading_vert(input)?;
+                    let g = if input.peek(syn::Token![if]) {
+                        input.parse::<syn::Token![if]>()?;
+                        Some(input.parse()?)
+                    } else {
+                        None
+                    };
+                    let _ = input.parse::<Option<syn::Token![,]>>();
+                    Ok((e, p, g))
+                };
+                let (e, pat, guard) = parser.parse2(mac.tokens.clone()).or_else(|er| err(mac.span(), er))?;
+                let Some(place) = self.scrutinee(&e)? else { return Ok((None, Ty::Never)) };
+                let no = self.b.create_block();
+                let merge = self.b.create_block();
+                let res = self.b.append_block_param(merge, types::I8);
+                self.pat_test(&pat, place, no)?;
+                self.scopes.push(vec![]);
+                self.pat_bind(&pat, place, BindMode::Move)?;
+                if let Some(g) = &guard {
+                    let (c, _) = self.expr(g, Some(Ty::Bool))?;
+                    if let Some(c) = c {
+                        self.require(c, no);
+                    }
+                }
+                self.scopes.pop();
+                let one = self.b.ins().iconst(types::I8, 1);
+                self.b.ins().jump(merge, &[one.into()]);
+                self.b.switch_to_block(no);
+                let zero = self.b.ins().iconst(types::I8, 0);
+                self.b.ins().jump(merge, &[zero.into()]);
+                self.b.switch_to_block(merge);
+                let _ = expected;
+                Ok((Some(res), Ty::Bool))
+            }
+            _ => err(mac.span(), format!("macro `{name}!` is not supported")),
+        }
+    }
+
+    /// cond が偽なら panic する
+    fn panic_unless(&mut self, cond: Value) {
+        let ok = self.b.create_block();
+        let bad = self.b.create_block();
+        self.b.ins().brif(cond, ok, &[], bad, &[]);
+        self.b.switch_to_block(bad);
+        self.panic_call();
+        self.b.ins().trap(TrapCode::unwrap_user(3));
+        self.b.switch_to_block(ok);
+    }
+
+    fn store_tag(&mut self, a: Value, inst: u32, vi: usize) {
+        let sd = &self.prog.structs[inst as usize];
+        let (tag, discr) = (sd.tag, sd.variants[vi].discr);
+        let tv = self.b.ins().iconst(clif_ty(tag).unwrap(), discr);
+        self.b.ins().store(mf(), tv, a, 0);
+    }
+
+    /// `e?`: Option なら None、Result なら Err(e) をそのまま return する
+    fn try_(&mut self, t: &syn::ExprTry) -> R<V> {
+        let Some(place) = self.scrutinee(&t.expr)? else { return Ok((None, Ty::Never)) };
+        let (place, _) = self.pat_deref(place, BindMode::Move);
+        let Ty::Struct(inst) = place.ty() else {
+            return err(t.span(), format!("the `?` operator cannot be applied to type `{}`", self.prog.tn(place.ty())));
+        };
+        let family = self.prog.structs[self.prog.base_of(inst) as usize].name.clone();
+        let (okn, errn) = match family.as_str() {
+            "Option" => ("Some", "None"),
+            "Result" => ("Ok", "Err"),
+            _ => return err(t.span(), format!("the `?` operator cannot be applied to type `{}`", self.prog.tn(place.ty()))),
+        };
+        let vpos = |this: &Self, sid: u32, n: &str| this.prog.structs[sid as usize].variants.iter().position(|v| v.name == n).unwrap();
+        let ok_vi = vpos(self, inst, okn);
+        let err_vi = vpos(self, inst, errn);
+        let fail = self.b.create_block();
+        self.test_variant(place, inst, ok_vi, t.span(), fail)?;
+        let (_, oty, ooff) = self.prog.structs[inst as usize].variants[ok_vi].fields[0];
+        let (okv, _) = self.read(Self::field_place(place, oty, ooff));
+        let cont = self.b.create_block();
+        let param = clif_ty(oty).map(|ct| self.b.append_block_param(cont, ct));
+        match okv {
+            Some(v) => self.b.ins().jump(cont, &[v.into()]),
+            None => self.b.ins().jump(cont, &[]),
+        };
+        // 失敗側: 関数の戻り値型の None / Err を作って return
+        self.b.switch_to_block(fail);
+        let ret = self.ret;
+        let rinst = match ret {
+            Ty::Struct(r) if self.prog.structs[self.prog.base_of(r) as usize].name == family => r,
+            _ => {
+                return err(
+                    t.span(),
+                    format!("the `?` operator can only be used in a function that returns `{family}` (returns `{}`)", self.prog.tn(ret)),
+                );
+            }
+        };
+        let a = self.temp(ret);
+        let r_err = vpos(self, rinst, errn);
+        self.store_tag(a, rinst, r_err);
+        if family == "Result" {
+            let (_, ety, eoff) = self.prog.structs[inst as usize].variants[err_vi].fields[0];
+            let (_, rety, reoff) = self.prog.structs[rinst as usize].variants[r_err].fields[0];
+            self.same(t.span(), ety, rety)?;
+            let (ev, _) = self.read(Self::field_place(place, ety, eoff));
+            self.write(Place::Mem(a, reoff as i32, rety), ev);
+        }
+        self.emit_return(Some(a));
+        self.b.switch_to_block(cont);
+        Ok((param, oty))
+    }
+
+    /// 1 セグメントのパスがローカル変数でなく enum のバリアント (`None` など) か
+    fn is_variant_path(&self, p: &syn::Path) -> bool {
+        if let Some(id) = p.get_ident() {
+            if self.lookup(&id.to_string()).is_some() {
+                return false;
+            }
+        }
+        self.prog.variant_by_path(p, self.self_sid).is_some()
+    }
+
+    /// パターンのパスのバリアントを、match 対象の型 t (インスタンス) に合わせて引く
+    fn variant_on(&self, p: &syn::Path, t: Ty) -> Option<(u32, usize)> {
+        let (sid, vi) = self.prog.variant_by_path(p, self.self_sid)?;
+        match t {
+            Ty::Struct(x) if self.prog.base_of(x) == self.prog.base_of(sid) => Some((x, vi)),
+            _ => Some((sid, vi)),
+        }
+    }
+
+    /// 変数でもバリアントでもないパス (定数など)。後で const / 関連定数を足す
+    fn path_value(&mut self, p: &syn::ExprPath, _expected: Option<Ty>) -> R<V> {
+        err(p.span(), "cannot find value (unsupported path)")
     }
 
     // --- match / if let / while let --------------------------------------
@@ -1711,6 +1980,13 @@ impl Cx<'_, '_> {
     fn pat_test(&mut self, pat: &Pat, p: Place, fail: Block) -> R<()> {
         match pat {
             Pat::Wild(_) | Pat::Rest(_) => Ok(()),
+            // `None` のように unit バリアントに解決される識別子は、束縛ではなくパスのパターン
+            Pat::Ident(pi) if unit_variant_ident(self.prog, pi).is_some() => {
+                let path = unit_variant_ident(self.prog, pi).unwrap();
+                let (p, _) = self.pat_deref(p, BindMode::Move);
+                let Some((sid, vi)) = self.variant_on(&path, p.ty()) else { unreachable!() };
+                self.test_variant(p, sid, vi, pi.span(), fail)
+            }
             Pat::Ident(pi) => match &pi.subpat {
                 Some((_, sub)) => self.pat_test(sub, p, fail),
                 None => Ok(()),
@@ -1780,17 +2056,19 @@ impl Cx<'_, '_> {
                         Ok(())
                     }
                     Pat::Path(pp) => {
-                        let Some((sid, vi)) = self.prog.variant_by_path(&pp.path, self.self_sid) else {
+                        let Some((sid, vi)) = self.variant_on(&pp.path, t) else {
                             return err(pp.span(), self.no_variant_msg(&pp.path));
                         };
                         self.test_variant(p, sid, vi, pp.span(), fail)
                     }
                     Pat::TupleStruct(ts) => {
-                        let Some((sid, vi)) = self.prog.variant_by_path(&ts.path, self.self_sid) else {
-                            return err(ts.path.span(), self.no_variant_msg(&ts.path));
+                        let fields = match self.variant_on(&ts.path, t) {
+                            Some((sid, vi)) => {
+                                self.test_variant(p, sid, vi, ts.span(), fail)?;
+                                self.prog.structs[sid as usize].variants[vi].fields.clone()
+                            }
+                            None => self.tuple_struct_fields(&ts.path, t, ts.span())?,
                         };
-                        self.test_variant(p, sid, vi, ts.span(), fail)?;
-                        let fields = self.prog.structs[sid as usize].variants[vi].fields.clone();
                         for (fi, sub) in Self::tuple_fields(ts.elems.iter(), fields.len(), ts.span())? {
                             let (_, fty, off) = fields[fi];
                             self.pat_test(sub, Self::field_place(p, fty, off), fail)?;
@@ -1810,6 +2088,17 @@ impl Cx<'_, '_> {
         }
     }
 
+    /// struct パターン (`P(a, b)` / `S { .. }`) のフィールド。match 対象の型 t のインスタンスで引く
+    fn tuple_struct_fields(&self, path: &syn::Path, t: Ty, span: proc_macro2::Span) -> R<Vec<(String, Ty, u32)>> {
+        let Some(sid) = self.prog.struct_by_path(path, self.self_sid) else {
+            return err(span, self.no_variant_msg(path));
+        };
+        match t {
+            Ty::Struct(x) if self.prog.base_of(x) == self.prog.base_of(sid) => Ok(self.prog.structs[x as usize].fields.clone()),
+            _ => err(span, format!("mismatched types: expected `{}`, found `{}`", self.prog.tn(t), self.prog.structs[sid as usize].name)),
+        }
+    }
+
     fn pat_deref_once(&mut self, p: Place) -> (Place, bool) {
         match p {
             Place::Var(v, Ty::Ref(m, i)) => (Place::Mem(self.b.use_var(v), 0, *i), m),
@@ -1826,14 +2115,13 @@ impl Cx<'_, '_> {
         p: Place,
         fail: Option<Block>,
     ) -> R<Vec<(&'e Pat, Place)>> {
-        let fields: Vec<(String, Ty, u32)> = if let Some((sid, vi)) = self.prog.variant_by_path(&ps.path, self.self_sid) {
+        let fields: Vec<(String, Ty, u32)> = if let Some((sid, vi)) = self.variant_on(&ps.path, p.ty()) {
             if let Some(fail) = fail {
                 self.test_variant(p, sid, vi, ps.span(), fail)?;
             }
             self.prog.structs[sid as usize].variants[vi].fields.clone()
-        } else if let Some(sid) = self.prog.struct_by_path(&ps.path, self.self_sid) {
-            self.same(ps.span(), Ty::Struct(sid), p.ty())?;
-            self.prog.structs[sid as usize].fields.clone()
+        } else if self.prog.struct_by_path(&ps.path, self.self_sid).is_some() {
+            self.tuple_struct_fields(&ps.path, p.ty(), ps.span())?
         } else {
             return err(ps.path.span(), "cannot find struct or variant");
         };
@@ -1857,6 +2145,7 @@ impl Cx<'_, '_> {
     fn pat_bind(&mut self, pat: &Pat, p: Place, mode: BindMode) -> R<()> {
         match pat {
             Pat::Wild(_) | Pat::Rest(_) | Pat::Lit(_) | Pat::Range(_) | Pat::Path(_) => Ok(()),
+            Pat::Ident(pi) if unit_variant_ident(self.prog, pi).is_some() => Ok(()),
             Pat::Ident(pi) => {
                 if let Some((_, sub)) = &pi.subpat {
                     self.pat_bind(sub, p, mode)?;
@@ -1895,10 +2184,10 @@ impl Cx<'_, '_> {
             }
             Pat::TupleStruct(ts) => {
                 let (p, mode) = self.pat_deref(p, mode);
-                let Some((sid, vi)) = self.prog.variant_by_path(&ts.path, self.self_sid) else {
-                    return err(ts.path.span(), "cannot find tuple variant");
+                let fields = match self.variant_on(&ts.path, p.ty()) {
+                    Some((sid, vi)) => self.prog.structs[sid as usize].variants[vi].fields.clone(),
+                    None => self.tuple_struct_fields(&ts.path, p.ty(), ts.span())?,
                 };
-                let fields = self.prog.structs[sid as usize].variants[vi].fields.clone();
                 for (fi, sub) in Self::tuple_fields(ts.elems.iter(), fields.len(), ts.span())? {
                     let (_, fty, off) = fields[fi];
                     self.pat_bind(sub, Self::field_place(p, fty, off), mode)?;
@@ -1927,8 +2216,27 @@ fn is_simple_let(p: &Pat) -> bool {
     }
 }
 
+/// `x.f` / `x.0` のフィールド名
+fn member_name(m: &syn::Member) -> String {
+    match m {
+        syn::Member::Named(id) => id.to_string(),
+        syn::Member::Unnamed(i) => i.index.to_string(),
+    }
+}
+
+/// 識別子のパターンが unit バリアント (`None` など) に解決されるなら、そのパス
+pub(crate) fn unit_variant_ident(prog: &Program, pi: &syn::PatIdent) -> Option<syn::Path> {
+    if pi.by_ref.is_some() || pi.mutability.is_some() || pi.subpat.is_some() {
+        return None;
+    }
+    let path = syn::Path::from(pi.ident.clone());
+    let (sid, vi) = prog.variant_by_path(&path, None)?;
+    (prog.structs[sid as usize].variants[vi].kind == crate::front::VariantKind::Unit).then_some(path)
+}
+
 fn has_bindings(p: &Pat) -> bool {
     match p {
+        Pat::Ident(pi) if pi.ident == "None" && pi.subpat.is_none() => false,
         Pat::Ident(_) => true,
         Pat::Paren(pp) => has_bindings(&pp.pat),
         Pat::Reference(r) => has_bindings(&r.pat),
