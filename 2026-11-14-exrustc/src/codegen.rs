@@ -32,7 +32,7 @@ use syn::{BinOp, Expr, Lit, Pat, Stmt, UnOp};
 
 use std::sync::Mutex;
 
-use crate::front::{FnSig, Insts, Program, R, Ty, TyEnv, err, has_param, intern, match_ty, subst};
+use crate::front::{FnSig, Insts, Program, R, Ty, TyEnv, err, intern};
 
 /// ポインタ型 (x86-64 / AArch64 前提)
 const PTR: ir::Type = types::I64;
@@ -622,7 +622,7 @@ impl Cx<'_, '_> {
                 .get_ident()
                 .and_then(|id| self.lookup(&id.to_string()))
                 .map(|(_, t)| t),
-            Expr::Call(c) => self.callee(&c.func).map(|(_, s)| s.ret).filter(|&t| !has_param(t)),
+            Expr::Call(c) => self.callee(&c.func).map(|(_, s)| s.ret).filter(|&t| !self.prog.has_param(t)),
             Expr::Cast(c) => self.prog.parse_ty(&c.ty, &self.env).ok(),
             Expr::MethodCall(mc) => {
                 let mut t = self.peek(&mc.receiver)?;
@@ -632,7 +632,7 @@ impl Cx<'_, '_> {
                 let Ty::Struct(sid) = t else { return None };
                 let name = mc.method.to_string();
                 let id = self.prog.method(sid, &name).or_else(|| self.prog.default_method(sid, &name))?;
-                Some(subst(self.prog.sigs[id as usize].ret, &[Ty::Struct(sid)])).filter(|&t| !has_param(t))
+                Some(self.prog.subst(self.prog.sigs[id as usize].ret, &[Ty::Struct(sid)])).filter(|&t| !self.prog.has_param(t))
             }
             Expr::Paren(p) => self.peek(&p.expr),
             Expr::Group(g) => self.peek(&g.expr),
@@ -1151,7 +1151,7 @@ impl Cx<'_, '_> {
             return Ok((id, sig));
         }
         for (&pt, &at) in sig.params.iter().zip(arg_tys) {
-            if !match_ty(pt, at, &mut sol) {
+            if !self.prog.match_ty(pt, at, &mut sol) {
                 return err(span, format!("mismatched types: expected `{}`, found `{}`", self.prog.tn(pt), self.prog.tn(at)));
             }
         }
@@ -1198,16 +1198,16 @@ impl Cx<'_, '_> {
         let mut sol = self.turbofish_sol(&sig0, turbofish)?;
         let mut vals: Vec<(Value, Ty, proc_macro2::Span)> = vec![];
         if let Some((r, rt)) = recv {
-            match_ty(sig0.params[0], rt, &mut sol);
+            self.prog.match_ty(sig0.params[0], rt, &mut sol);
             vals.push((r, rt, span));
         }
         for (a, &pt) in args.iter().zip(&sig0.params[skip..]) {
-            let exp = partial_subst(pt, &sol).filter(|&t| !has_param(t));
+            let exp = Some(self.prog.partial_subst(pt, &sol)).filter(|&t| !self.prog.has_param(t));
             let (v, t) = self.expr(a, exp)?;
             if t == Ty::Never {
                 return Ok((None, Ty::Never));
             }
-            match_ty(pt, t, &mut sol);
+            self.prog.match_ty(pt, t, &mut sol);
             vals.push((v.unwrap(), t, a.span()));
         }
         let arg_tys: Vec<Ty> = vals.iter().map(|v| v.1).collect();
@@ -1925,15 +1925,6 @@ fn is_simple_let(p: &Pat) -> bool {
         Pat::Type(pt) => is_simple_let(&pt.pat),
         _ => false,
     }
-}
-
-/// 分かっている型パラメータだけ置き換える (分からないものは Param のまま)
-fn partial_subst(t: Ty, sol: &[Option<Ty>]) -> Option<Ty> {
-    Some(match t {
-        Ty::Param(i) => sol.get(i as usize).copied().flatten().unwrap_or(t),
-        Ty::Ref(m, i) => Ty::Ref(m, intern(partial_subst(*i, sol)?)),
-        t => t,
-    })
 }
 
 fn has_bindings(p: &Pat) -> bool {

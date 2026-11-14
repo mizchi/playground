@@ -234,19 +234,31 @@ impl Session {
             let r = front::parse_and_summarize(src, &items[ii], None).map(|x| x.0);
             record(ii, r, &mut sums);
         }
-        // メンバの所有者: impl なら (self 型, 実装する trait)、trait なら (trait 名, None)
-        let owners: Vec<Option<(String, Option<String>)>> = items
+        // メンバの所有者 (impl なら self 型と型パラメータ、trait なら trait 名)
+        let owners: Vec<Option<front::Owner>> = items
             .iter()
             .map(|it| match it.kind {
                 ItemKind::ImplMember(h) => {
                     let hs = sums[h as usize].as_ref().unwrap();
-                    hs.impl_self.clone().map(|n| (n, hs.impl_trait.clone()))
+                    hs.impl_self.clone().map(|n| front::Owner {
+                        self_ty: hs.impl_self_ty.clone().unwrap_or(front::TySyn::Named(n.clone())),
+                        base: n,
+                        impl_trait: hs.impl_trait.clone(),
+                        generics: hs.impl_generics.clone(),
+                        is_trait: false,
+                    })
                 }
-                ItemKind::TraitMember(h) => sums[h as usize].as_ref().unwrap().trait_decl.clone().map(|n| (n, None)),
+                ItemKind::TraitMember(h) => sums[h as usize].as_ref().unwrap().trait_decl.clone().map(|n| front::Owner {
+                    self_ty: front::TySyn::Named("Self".into()),
+                    generics: vec![("Self".into(), vec![n.clone()])],
+                    base: n,
+                    impl_trait: None,
+                    is_trait: true,
+                }),
                 _ => None,
             })
             .collect();
-        let owner = |ii: usize| owners[ii].as_ref().map(|(a, b)| (a.as_str(), b.as_deref()));
+        let owner = |ii: usize| owners[ii].as_ref();
         let todo: Vec<usize> = todo.into_iter().filter(|&i| sums[i].is_none()).collect();
         let mut parsed: HashMap<usize, syn::Item> = HashMap::new();
         if todo.len() <= KEEP_PARSED {

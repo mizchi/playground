@@ -4,6 +4,7 @@
 pub mod cache;
 pub mod codegen;
 pub mod driver;
+pub mod enc;
 pub mod front;
 pub mod infer;
 pub mod lexer;
