@@ -155,7 +155,17 @@ impl Worker {
         }
     }
 
+    /// 型検査だけ (Cranelift IR まで作り、機械語は作らない)。LSP の check 用
+    pub fn check(&mut self, prog: &Program, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<()> {
+        self.lower(prog, id, f, isa)
+    }
+
     pub fn compile(&mut self, prog: &Program, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<Blob> {
+        self.lower(prog, id, f, isa)?;
+        self.emit(prog, id, isa)
+    }
+
+    fn lower(&mut self, prog: &Program, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<()> {
         let sig = &prog.sigs[id as usize];
         let cc = isa.default_call_conv();
         self.ctx.clear();
@@ -182,6 +192,10 @@ impl Worker {
             cx.b.seal_all_blocks();
             cx.b.finalize(isa.frontend_config());
         }
+        Ok(())
+    }
+
+    fn emit(&mut self, prog: &Program, id: u32, isa: &dyn TargetIsa) -> R<Blob> {
 
         self.ctx
             .compile(isa, &mut ControlPlane::default())
@@ -455,7 +469,12 @@ impl Cx<'_, '_> {
             self.b.ins().trap(TrapCode::unwrap_user(1));
             return Ok(());
         }
-        self.same(f.block.span(), t, self.ret)?;
+        // エラー位置は末尾式 (なければブロック) にする
+        let span = match f.block.stmts.last() {
+            Some(Stmt::Expr(e, None)) => e.span(),
+            _ => f.block.span(),
+        };
+        self.same(span, t, self.ret)?;
         self.emit_return(v);
         Ok(())
     }

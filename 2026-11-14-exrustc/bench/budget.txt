@@ -1,0 +1,14 @@
+# 名前 上限バイト (UPDATE_BUDGET=1 で再生成: 現在値 + 5%)
+gen1000.binary_bytes 443545
+gen1000.cache_bytes 537575
+gen1000.object_bytes 634418
+hello.binary_bytes 6451
+hello.cache_bytes 3202
+hello.object_bytes 4132
+lsp1000.mem_bytes 20843
+methods.binary_bytes 7232
+methods.cache_bytes 6072
+methods.object_bytes 7005
+structs.binary_bytes 7266
+structs.cache_bytes 5075
+structs.object_bytes 6048
