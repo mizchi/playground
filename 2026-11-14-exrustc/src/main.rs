@@ -147,35 +147,49 @@ fn run(o: &Opts) -> Result<(), String> {
     let cid = compiler_id();
 
     // --- アイテム要約: 変わったアイテムだけ syn で parse --------------------
+    let sum_keys: Vec<Key> = items
+        .iter()
+        .map(|it| {
+            let mut h = KeyHasher::new();
+            h.add(&(cid, 0u8, it.hash));
+            h.finish()
+        })
+        .collect();
+    let mut sums: Vec<Option<Summary>> =
+        sum_keys.iter().map(|&k| cache.get(k).and_then(Summary::decode)).collect();
+    let todo: Vec<usize> = (0..items.len()).filter(|&i| sums[i].is_none()).collect();
+    let n_parsed = todo.len();
     let mut parsed: HashMap<usize, syn::Item> = HashMap::new();
-    let mut sums = Vec::with_capacity(items.len());
-    let mut sum_keys = Vec::with_capacity(items.len());
-    for (ii, it) in items.iter().enumerate() {
-        let mut h = KeyHasher::new();
-        h.add(&(cid, 0u8, it.hash));
-        let k = h.finish();
-        sum_keys.push(k);
-        let cached = cache.get(k).and_then(Summary::decode);
-        let sm = match cached {
-            Some(sm) => sm,
-            None => {
-                let item = front::parse_item(&src, it)?;
-                let sm = front::summarize(&item).map_err(|e| front::relocate_err(e, it))?;
-                parsed.insert(ii, item);
-                sm
-            }
-        };
-        sums.push(sm);
+    if todo.len() <= KEEP_PARSED {
+        // インクリメンタル: その場で parse し、AST は codegen 用に取っておく
+        for &ii in &todo {
+            let it = &items[ii];
+            let item = front::parse_item(&src, it)?;
+            sums[ii] = Some(front::summarize(&item).map_err(|e| front::relocate_err(e, it))?);
+            parsed.insert(ii, item);
+        }
+    } else {
+        // cold: 並列に parse して要約だけ持ち帰る (AST は !Send なのでスレッド内で捨てる)
+        let done = par_map(o.jobs, &todo, |ii| {
+            let it = &items[ii];
+            let item = front::parse_item(&src, it)?;
+            front::summarize(&item).map_err(|e| front::relocate_err(e, it))
+        })?;
+        for (ii, sm) in todo.iter().zip(done) {
+            sums[*ii] = Some(sm);
+        }
     }
+    let sums: Vec<Summary> = sums.into_iter().map(Option::unwrap).collect();
     let prog = Program::build(&items, &sums)?;
-    tm.lap("summary", format!("{} parsed / {} cached", parsed.len(), items.len() - parsed.len()));
+    let n_cached = sums.len() - n_parsed;
+    tm.lap("summary", format!("{n_parsed} parsed / {n_cached} cached"));
 
     // --- 到達可能性とキャッシュキー ------------------------------------------
-    let refs: Vec<Vec<u32>> = prog
+    let (refs, srefs): (Vec<Vec<u32>>, Vec<Vec<u32>>) = prog
         .item_of
         .iter()
         .map(|ii| ii.map(|ii| prog.refs(&src, &items[ii as usize])).unwrap_or_default())
-        .collect();
+        .unzip();
     let live = prog.reachable(&refs);
     let mut base = KeyHasher::new();
     base.add(&(cid, 1u8));
@@ -192,10 +206,15 @@ fn run(o: &Opts) -> Result<(), String> {
         user_live.push(id as u32);
         let mut h = KeyHasher::new();
         h.add(&(base, items[*ii as usize].hash));
+        // 自分のシグネチャ (struct 引数のレイアウトを含む) と、
         // 参照先はシグネチャだけ (本体の変更は呼び出し元に波及しない)
+        prog.hash_sig(id as u32, &mut h);
         for &r in &refs[id] {
-            h.add(prog.names[r as usize].as_str());
-            h.add(&prog.sigs[r as usize]);
+            prog.hash_sig(r, &mut h);
+        }
+        // 名前で現れる struct はレイアウトごと (deep hash)
+        for &s in &srefs[id] {
+            h.add(&prog.structs[s as usize].deep);
         }
         keys[id] = h.finish();
     }
@@ -268,6 +287,43 @@ fn run(o: &Opts) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+const KEEP_PARSED: usize = 32;
+
+/// 入力を小さな塊ごとに取り合う単純な並列 map (結果は入力順)。
+fn par_map<T: Send, F>(jobs: usize, input: &[usize], f: F) -> Result<Vec<T>, String>
+where
+    F: Fn(usize) -> Result<T, String> + Sync,
+{
+    let jobs = jobs.min(input.len() / 32).max(1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let chunks: Vec<Result<Vec<(usize, T)>, String>> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..jobs)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut out = vec![];
+                    loop {
+                        let i = next.fetch_add(16, std::sync::atomic::Ordering::Relaxed);
+                        if i >= input.len() {
+                            break;
+                        }
+                        for j in i..(i + 16).min(input.len()) {
+                            out.push((j, f(input[j])?));
+                        }
+                    }
+                    Ok(out)
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut all: Vec<(usize, T)> = vec![];
+    for c in chunks {
+        all.extend(c?);
+    }
+    all.sort_by_key(|(j, _)| *j);
+    Ok(all.into_iter().map(|(_, t)| t).collect())
 }
 
 fn cache_path(output: &Path) -> PathBuf {

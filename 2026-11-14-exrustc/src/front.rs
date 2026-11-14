@@ -1,12 +1,14 @@
-//! フロントエンド: syn の AST からシグネチャ表と呼び出しグラフを作る。
+//! フロントエンド: アイテム要約 (シグネチャ・struct 定義) から型表と参照グラフを作る。
 //!
 //! ここは「関数本体を見ない」軽い処理だけにしている。本体の型検査・lowering は
 //! codegen 側で関数ごとに行い、キャッシュヒットした関数は本体に一切触れない。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use syn::spanned::Spanned;
 
+use crate::cache::{Key, KeyHasher};
 use crate::lexer::SrcItem;
 
 pub type R<T> = Result<T, String>;
@@ -16,6 +18,11 @@ pub fn err<T>(span: proc_macro2::Span, msg: impl std::fmt::Display) -> R<T> {
     Err(format!("{}:{}: {}", s.line, s.column + 1, msg))
 }
 
+// ---------------------------------------------------------------------------
+// 型
+// ---------------------------------------------------------------------------
+
+/// 解決済みの型。Copy にするため参照先は intern した `&'static Ty` で持つ。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Ty {
     I8,
@@ -31,37 +38,25 @@ pub enum Ty {
     Bool,
     Unit,
     Never,
+    /// `&T` (false) / `&mut T` (true)
+    Ref(bool, &'static Ty),
+    /// Program::structs の index
+    Struct(u32),
+}
+
+/// 型の intern 表。種類数はプログラム中の型の数で抑えられるので解放しない。
+pub fn intern(t: Ty) -> &'static Ty {
+    static TABLE: OnceLock<Mutex<HashSet<&'static Ty>>> = OnceLock::new();
+    let mut tab = TABLE.get_or_init(Default::default).lock().unwrap();
+    if let Some(&r) = tab.get(&t) {
+        return r;
+    }
+    let r: &'static Ty = Box::leak(Box::new(t));
+    tab.insert(r);
+    r
 }
 
 impl Ty {
-    pub fn parse(t: &syn::Type) -> R<Ty> {
-        Ok(match t {
-            syn::Type::Never(_) => Ty::Never,
-            syn::Type::Tuple(tt) if tt.elems.is_empty() => Ty::Unit,
-            syn::Type::Paren(p) => Ty::parse(&p.elem)?,
-            syn::Type::Path(p) if p.qself.is_none() => {
-                let Some(id) = p.path.get_ident() else {
-                    return err(t.span(), "unsupported type path");
-                };
-                match id.to_string().as_str() {
-                    "i8" => Ty::I8,
-                    "i16" => Ty::I16,
-                    "i32" => Ty::I32,
-                    "i64" => Ty::I64,
-                    "isize" => Ty::Isize,
-                    "u8" => Ty::U8,
-                    "u16" => Ty::U16,
-                    "u32" => Ty::U32,
-                    "u64" => Ty::U64,
-                    "usize" => Ty::Usize,
-                    "bool" => Ty::Bool,
-                    other => return err(t.span(), format!("unsupported type `{other}`")),
-                }
-            }
-            _ => return err(t.span(), "unsupported type"),
-        })
-    }
-
     pub fn from_suffix(s: &str) -> Option<Ty> {
         Some(match s {
             "i8" => Ty::I8,
@@ -78,26 +73,76 @@ impl Ty {
         })
     }
 
+    fn prim(s: &str) -> Option<Ty> {
+        Ty::from_suffix(s).or(match s {
+            "bool" => Some(Ty::Bool),
+            _ => None,
+        })
+    }
+
     pub fn is_int(self) -> bool {
-        !matches!(self, Ty::Bool | Ty::Unit | Ty::Never)
+        !matches!(self, Ty::Bool | Ty::Unit | Ty::Never | Ty::Ref(..) | Ty::Struct(_))
     }
 
     pub fn signed(self) -> bool {
         matches!(self, Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::Isize)
     }
 
+    /// スカラー (整数・bool・参照) のビット幅。struct / unit / never は 0。
     pub fn bits(self) -> u32 {
         match self {
             Ty::I8 | Ty::U8 | Ty::Bool => 8,
             Ty::I16 | Ty::U16 => 16,
             Ty::I32 | Ty::U32 => 32,
-            Ty::I64 | Ty::U64 | Ty::Isize | Ty::Usize => 64,
-            Ty::Unit | Ty::Never => 0,
+            Ty::I64 | Ty::U64 | Ty::Isize | Ty::Usize | Ty::Ref(..) => 64,
+            Ty::Unit | Ty::Never | Ty::Struct(_) => 0,
         }
     }
 }
 
-#[derive(Clone, Debug, Hash)]
+/// 名前未解決の型 (要約に保存する形)。struct は名前で持つので、
+/// アイテムの並び順が変わってもキャッシュが壊れない。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TySyn {
+    Prim(Ty),
+    Ref(bool, Box<TySyn>),
+    Named(String),
+}
+
+pub fn parse_tysyn(t: &syn::Type) -> R<TySyn> {
+    Ok(match t {
+        syn::Type::Never(_) => TySyn::Prim(Ty::Never),
+        syn::Type::Tuple(tt) if tt.elems.is_empty() => TySyn::Prim(Ty::Unit),
+        syn::Type::Paren(p) => parse_tysyn(&p.elem)?,
+        syn::Type::Group(g) => parse_tysyn(&g.elem)?,
+        // ライフタイムはコード生成に影響しないので消去する
+        syn::Type::Reference(r) => {
+            TySyn::Ref(r.mutability.is_some(), Box::new(parse_tysyn(&r.elem)?))
+        }
+        syn::Type::Path(p) if p.qself.is_none() => {
+            let Some(id) = p.path.get_ident() else {
+                return err(t.span(), "unsupported type path");
+            };
+            let s = id.to_string();
+            match Ty::prim(&s) {
+                Some(t) => TySyn::Prim(t),
+                None => TySyn::Named(s),
+            }
+        }
+        _ => return err(t.span(), "unsupported type"),
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SigSyn {
+    pub params: Vec<TySyn>,
+    pub ret: TySyn,
+    pub symbol: String,
+    pub is_extern: bool,
+    pub is_main: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct FnSig {
     pub params: Vec<Ty>,
     pub ret: Ty,
@@ -107,12 +152,24 @@ pub struct FnSig {
     pub is_main: bool,
 }
 
-/// アイテム 1 個分の要約 (キャッシュされる)。ここに入っている関数のシグネチャだけで
+pub struct StructDef {
+    pub name: String,
+    /// (名前, 型, オフセット)
+    pub fields: Vec<(String, Ty, u32)>,
+    pub size: u32,
+    pub align: u32,
+    /// 定義と、フィールドから推移的に届く struct の定義すべてのハッシュ (レイアウトが変わったら変わる)
+    pub deep: Key,
+}
+
+/// アイテム 1 個分の要約 (キャッシュされる)。ここに入っている情報だけで
 /// 他の関数のコード生成ができる。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Summary {
     /// (名前, シグネチャ)。fn アイテムなら 1 個、extern ブロックなら複数
-    pub fns: Vec<(String, FnSig)>,
+    pub fns: Vec<(String, SigSyn)>,
+    /// (名前, フィールド)。struct アイテムなら 1 個
+    pub structs: Vec<(String, Vec<(String, TySyn)>)>,
 }
 
 pub struct Program {
@@ -122,6 +179,8 @@ pub struct Program {
     pub sigs: Vec<FnSig>,
     /// ユーザ定義関数を定義しているアイテム番号 (extern は None)
     pub item_of: Vec<Option<u32>>,
+    pub structs: Vec<StructDef>,
+    pub struct_index: HashMap<String, u32>,
 }
 
 /// syn で 1 アイテムを parse する。エラー位置はファイル全体での行に補正する。
@@ -143,42 +202,126 @@ pub fn relocate_err(e: String, it: &SrcItem) -> String {
 }
 
 pub fn summarize(item: &syn::Item) -> R<Summary> {
-    let mut fns = vec![];
+    let mut sm = Summary::default();
     match item {
         syn::Item::Fn(f) => {
             let name = f.sig.ident.to_string();
             let is_main = name == "main";
             let sig = parse_sig(&f.sig, false, is_main)?;
-            if is_main && (!sig.params.is_empty() || sig.ret != Ty::Unit) {
+            if is_main && (!sig.params.is_empty() || sig.ret != TySyn::Prim(Ty::Unit)) {
                 return err(f.sig.span(), "`main` must be `fn main()`");
             }
-            fns.push((name, sig));
+            sm.fns.push((name, sig));
         }
         syn::Item::ForeignMod(m) => {
             for fi in &m.items {
                 let syn::ForeignItem::Fn(f) = fi else {
                     return err(fi.span(), "only fns are supported in extern blocks");
                 };
-                fns.push((f.sig.ident.to_string(), parse_sig(&f.sig, true, false)?));
+                sm.fns.push((f.sig.ident.to_string(), parse_sig(&f.sig, true, false)?));
             }
+        }
+        syn::Item::Struct(s) => {
+            only_lifetimes(&s.generics)?;
+            let syn::Fields::Named(nf) = &s.fields else {
+                return err(s.span(), "only structs with named fields are supported");
+            };
+            let mut fields = vec![];
+            for f in &nf.named {
+                let t = parse_tysyn(&f.ty)?;
+                fields.push((f.ident.as_ref().unwrap().to_string(), t));
+            }
+            sm.structs.push((s.ident.to_string(), fields));
         }
         _ => return err(item.span(), "unsupported item"),
     }
-    Ok(Summary { fns })
+    Ok(sm)
 }
 
 impl Program {
     pub fn build(items: &[SrcItem], sums: &[Summary]) -> R<Program> {
-        let mut p = Program { names: vec![], index: HashMap::new(), sigs: vec![], item_of: vec![] };
+        let mut p = Program {
+            names: vec![],
+            index: HashMap::new(),
+            sigs: vec![],
+            item_of: vec![],
+            structs: vec![],
+            struct_index: HashMap::new(),
+        };
+        // 1. struct 名を登録
+        let mut sdefs = vec![];
         for (ii, (it, sm)) in items.iter().zip(sums).enumerate() {
-            for (name, sig) in &sm.fns {
+            for (name, fields) in &sm.structs {
+                if p.struct_index.contains_key(name) {
+                    return Err(format!("{}:1: duplicate definition of `{name}`", it.line));
+                }
+                p.struct_index.insert(name.clone(), sdefs.len() as u32);
+                sdefs.push((ii, name.clone(), fields.clone()));
+            }
+        }
+        // 2. フィールド型を解決し、依存順にレイアウトを決める
+        p.structs = sdefs
+            .iter()
+            .map(|(_, n, _)| StructDef { name: n.clone(), fields: vec![], size: 0, align: 1, deep: 0 })
+            .collect();
+        let mut state = vec![0u8; sdefs.len()]; // 0 未処理, 1 処理中, 2 済み
+        for id in 0..sdefs.len() {
+            p.layout(id, &sdefs, items, &mut state)?;
+        }
+        // deep hash = 値・参照を問わずフィールドから推移的に届く全 struct の定義ハッシュ。
+        // 参照経由 (`&'a Other`) でもフィールドオフセットはコードに埋まるので含める。
+        let deeps: Vec<Key> = (0..sdefs.len())
+            .map(|id| {
+                let mut seen = vec![false; sdefs.len()];
+                let mut stack = vec![id];
+                let mut hs = vec![];
+                while let Some(i) = stack.pop() {
+                    if std::mem::replace(&mut seen[i], true) {
+                        continue;
+                    }
+                    hs.push(items[sdefs[i].0].hash);
+                    for &(_, mut t, _) in &p.structs[i].fields {
+                        while let Ty::Ref(_, inner) = t {
+                            t = *inner;
+                        }
+                        if let Ty::Struct(sid) = t {
+                            stack.push(sid as usize);
+                        }
+                    }
+                }
+                hs.sort_unstable();
+                let mut h = KeyHasher::new();
+                h.add(&hs);
+                h.finish()
+            })
+            .collect();
+        for (sd, d) in p.structs.iter_mut().zip(deeps) {
+            sd.deep = d;
+        }
+        // 3. 関数
+        for (ii, (it, sm)) in items.iter().zip(sums).enumerate() {
+            for (name, ss) in &sm.fns {
                 if p.index.contains_key(name) {
                     return Err(format!("{}:1: duplicate definition of `{name}`", it.line));
                 }
+                let mut params = vec![];
+                for t in &ss.params {
+                    params.push(p.resolve(t).map_err(|e| format!("{}:1: {e}", it.line))?);
+                }
+                let ret = p.resolve(&ss.ret).map_err(|e| format!("{}:1: {e}", it.line))?;
+                if ss.is_extern && params.iter().chain([&ret]).any(|t| matches!(t, Ty::Struct(_))) {
+                    return Err(format!("{}:1: passing structs by value to extern fns is not supported", it.line));
+                }
                 p.index.insert(name.clone(), p.names.len() as u32);
                 p.names.push(name.clone());
-                p.item_of.push((!sig.is_extern).then_some(ii as u32));
-                p.sigs.push(sig.clone());
+                p.item_of.push((!ss.is_extern).then_some(ii as u32));
+                p.sigs.push(FnSig {
+                    params,
+                    ret,
+                    symbol: ss.symbol.clone(),
+                    is_extern: ss.is_extern,
+                    is_main: ss.is_main,
+                });
             }
         }
         if !p.index.contains_key("main") {
@@ -187,18 +330,130 @@ impl Program {
         Ok(p)
     }
 
-    /// アイテム内の識別子のうち関数名に一致するもの (ソート済み)。
+    fn layout(
+        &mut self,
+        id: usize,
+        sdefs: &[(usize, String, Vec<(String, TySyn)>)],
+        items: &[SrcItem],
+        state: &mut [u8],
+    ) -> R<()> {
+        match state[id] {
+            2 => return Ok(()),
+            1 => return Err(format!("recursive struct `{}` has infinite size", sdefs[id].1)),
+            _ => {}
+        }
+        state[id] = 1;
+        let (ii, _, fields) = &sdefs[id];
+        let mut out = vec![];
+        let (mut off, mut align) = (0u32, 1u32);
+        for (fname, ft) in fields {
+            let t = self.resolve(ft).map_err(|e| format!("{}:1: {e}", items[*ii].line))?;
+            if let Ty::Struct(sid) = t {
+                self.layout(sid as usize, sdefs, items, state)?;
+            }
+            let (sz, al) = self.size_align(t);
+            off = off.next_multiple_of(al);
+            out.push((fname.clone(), t, off));
+            off += sz;
+            align = align.max(al);
+        }
+        let sd = &mut self.structs[id];
+        sd.fields = out;
+        sd.size = off.next_multiple_of(align);
+        sd.align = align;
+        state[id] = 2;
+        Ok(())
+    }
+
+    pub fn resolve(&self, t: &TySyn) -> R<Ty> {
+        Ok(match t {
+            TySyn::Prim(t) => *t,
+            TySyn::Ref(m, inner) => Ty::Ref(*m, intern(self.resolve(inner)?)),
+            TySyn::Named(n) => match self.struct_index.get(n) {
+                Some(&id) => Ty::Struct(id),
+                None => return Err(format!("cannot find type `{n}`")),
+            },
+        })
+    }
+
+    pub fn parse_ty(&self, t: &syn::Type) -> R<Ty> {
+        let ts = parse_tysyn(t)?;
+        self.resolve(&ts).or_else(|e| err(t.span(), e))
+    }
+
+    pub fn size_align(&self, t: Ty) -> (u32, u32) {
+        match t {
+            Ty::Struct(id) => {
+                let s = &self.structs[id as usize];
+                (s.size, s.align)
+            }
+            Ty::Unit | Ty::Never => (0, 1),
+            t => (t.bits() / 8, t.bits() / 8),
+        }
+    }
+
+    pub fn field(&self, sid: u32, name: &str) -> Option<(Ty, u32)> {
+        self.structs[sid as usize]
+            .fields
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|&(_, t, o)| (t, o))
+    }
+
+    /// エラーメッセージ用の型名
+    pub fn tn(&self, t: Ty) -> String {
+        match t {
+            Ty::Ref(false, i) => format!("&{}", self.tn(*i)),
+            Ty::Ref(true, i) => format!("&mut {}", self.tn(*i)),
+            Ty::Struct(id) => self.structs[id as usize].name.clone(),
+            Ty::Unit => "()".into(),
+            Ty::Never => "!".into(),
+            t => format!("{t:?}").to_lowercase(),
+        }
+    }
+
+    /// キャッシュキー用: 型を (struct は deep hash で) ハッシュする
+    pub fn hash_ty(&self, t: Ty, h: &mut KeyHasher) {
+        match t {
+            Ty::Ref(m, i) => {
+                h.add(&(100u8, m));
+                self.hash_ty(*i, h);
+            }
+            Ty::Struct(id) => h.add(&(101u8, self.structs[id as usize].deep)),
+            t => h.add(&ty_code(t)),
+        }
+    }
+
+    pub fn hash_sig(&self, id: u32, h: &mut KeyHasher) {
+        let s = &self.sigs[id as usize];
+        h.add(self.names[id as usize].as_str());
+        h.add(&(s.symbol.as_str(), s.is_extern, s.is_main, s.params.len()));
+        for &p in &s.params {
+            self.hash_ty(p, h);
+        }
+        self.hash_ty(s.ret, h);
+    }
+
+    /// アイテム内の識別子のうち関数名に一致するもの (ソート済み) と struct 名に一致するもの。
     /// ローカル変数による shadowing は無視した過大近似だが、
     /// キャッシュキーと到達可能性の両方にとって安全側である。
-    pub fn refs(&self, src: &str, it: &SrcItem) -> Vec<u32> {
-        let mut out: Vec<u32> = it
-            .idents
-            .iter()
-            .filter_map(|&(a, b)| self.index.get(&src[a as usize..b as usize]).copied())
-            .collect();
-        out.sort_unstable();
-        out.dedup();
-        out
+    pub fn refs(&self, src: &str, it: &SrcItem) -> (Vec<u32>, Vec<u32>) {
+        let mut fns = vec![];
+        let mut sts = vec![];
+        for &(a, b) in &it.idents {
+            let s = &src[a as usize..b as usize];
+            if let Some(&i) = self.index.get(s) {
+                fns.push(i);
+            }
+            if let Some(&i) = self.struct_index.get(s) {
+                sts.push(i);
+            }
+        }
+        for v in [&mut fns, &mut sts] {
+            v.sort_unstable();
+            v.dedup();
+        }
+        (fns, sts)
     }
 
     /// main から到達可能な関数 ID。
@@ -227,65 +482,117 @@ fn ty_code(t: Ty) -> u8 {
     TYS.iter().position(|&x| x == t).unwrap() as u8
 }
 
+fn put_str(out: &mut Vec<u8>, s: &str) {
+    out.push(s.len() as u8);
+    out.extend_from_slice(s.as_bytes());
+}
+
+fn put_ty(out: &mut Vec<u8>, t: &TySyn) {
+    match t {
+        TySyn::Prim(t) => out.push(ty_code(*t)),
+        TySyn::Ref(m, i) => {
+            out.push(13 + *m as u8);
+            put_ty(out, i);
+        }
+        TySyn::Named(n) => {
+            out.push(15);
+            put_str(out, n);
+        }
+    }
+}
+
+struct Rd<'a>(&'a [u8], usize);
+impl Rd<'_> {
+    fn u8(&mut self) -> Option<u8> {
+        let b = *self.0.get(self.1)?;
+        self.1 += 1;
+        Some(b)
+    }
+    fn str(&mut self) -> Option<String> {
+        let l = self.u8()? as usize;
+        let s = self.0.get(self.1..self.1 + l)?;
+        self.1 += l;
+        String::from_utf8(s.to_vec()).ok()
+    }
+    fn ty(&mut self) -> Option<TySyn> {
+        Some(match self.u8()? {
+            c @ 0..13 => TySyn::Prim(TYS[c as usize]),
+            c @ (13 | 14) => TySyn::Ref(c == 14, Box::new(self.ty()?)),
+            15 => TySyn::Named(self.str()?),
+            _ => return None,
+        })
+    }
+}
+
 impl Summary {
     pub fn encode(&self, out: &mut Vec<u8>) {
         out.push(self.fns.len() as u8);
         for (name, s) in &self.fns {
-            for st in [name, &s.symbol] {
-                out.push(st.len() as u8);
-                out.extend_from_slice(st.as_bytes());
-            }
+            put_str(out, name);
+            put_str(out, &s.symbol);
             out.push(s.is_extern as u8 | (s.is_main as u8) << 1);
-            out.push(ty_code(s.ret));
+            put_ty(out, &s.ret);
             out.push(s.params.len() as u8);
-            out.extend(s.params.iter().map(|&t| ty_code(t)));
+            for p in &s.params {
+                put_ty(out, p);
+            }
+        }
+        out.push(self.structs.len() as u8);
+        for (name, fields) in &self.structs {
+            put_str(out, name);
+            out.push(fields.len() as u8);
+            for (f, t) in fields {
+                put_str(out, f);
+                put_ty(out, t);
+            }
         }
     }
 
     pub fn decode(d: &[u8]) -> Option<Summary> {
-        let mut i = 0;
-        let mut next = |n: usize| -> Option<&[u8]> {
-            let r = d.get(i..i + n)?;
-            i += n;
-            Some(r)
-        };
-        let nf = next(1)?[0];
-        let mut fns = vec![];
-        for _ in 0..nf {
-            let mut strs = vec![];
-            for _ in 0..2 {
-                let l = next(1)?[0] as usize;
-                strs.push(String::from_utf8(next(l)?.to_vec()).ok()?);
-            }
-            let fl = next(1)?[0];
-            let ret = *TYS.get(next(1)?[0] as usize)?;
-            let np = next(1)?[0] as usize;
-            let params = next(np)?.iter().map(|&c| TYS.get(c as usize).copied()).collect::<Option<_>>()?;
-            let symbol = strs.pop()?;
-            let name = strs.pop()?;
-            fns.push((name, FnSig { params, ret, symbol, is_extern: fl & 1 != 0, is_main: fl & 2 != 0 }));
+        let mut r = Rd(d, 0);
+        let mut sm = Summary::default();
+        for _ in 0..r.u8()? {
+            let name = r.str()?;
+            let symbol = r.str()?;
+            let fl = r.u8()?;
+            let ret = r.ty()?;
+            let params = (0..r.u8()?).map(|_| r.ty()).collect::<Option<_>>()?;
+            sm.fns.push((name, SigSyn { params, ret, symbol, is_extern: fl & 1 != 0, is_main: fl & 2 != 0 }));
         }
-        Some(Summary { fns })
+        for _ in 0..r.u8()? {
+            let name = r.str()?;
+            let fields = (0..r.u8()?).map(|_| Some((r.str()?, r.ty()?))).collect::<Option<_>>()?;
+            sm.structs.push((name, fields));
+        }
+        Some(sm)
     }
 }
 
-fn parse_sig(sig: &syn::Signature, is_extern: bool, is_main: bool) -> R<FnSig> {
-    if !sig.generics.params.is_empty() {
-        return err(sig.generics.span(), "generics are not supported yet");
+/// ライフタイム引数だけなら許す (消去する)。型引数・const 引数はまだ未対応。
+fn only_lifetimes(g: &syn::Generics) -> R<()> {
+    for p in &g.params {
+        if !matches!(p, syn::GenericParam::Lifetime(_)) {
+            return err(p.span(), "generics are not supported yet (lifetimes only)");
+        }
     }
+    Ok(())
+}
+
+fn parse_sig(sig: &syn::Signature, is_extern: bool, is_main: bool) -> R<SigSyn> {
+    only_lifetimes(&sig.generics)?;
     if sig.variadic.is_some() {
         return err(sig.span(), "variadic functions are not supported");
     }
     let mut params = vec![];
     for a in &sig.inputs {
         match a {
-            syn::FnArg::Typed(pt) => params.push(Ty::parse(&pt.ty)?),
+            syn::FnArg::Typed(pt) => params.push(parse_tysyn(&pt.ty)?),
             syn::FnArg::Receiver(r) => return err(r.span(), "methods are not supported"),
         }
     }
     let ret = match &sig.output {
-        syn::ReturnType::Default => Ty::Unit,
-        syn::ReturnType::Type(_, t) => Ty::parse(t)?,
+        syn::ReturnType::Default => TySyn::Prim(Ty::Unit),
+        syn::ReturnType::Type(_, t) => parse_tysyn(t)?,
     };
     let name = sig.ident.to_string();
     let symbol = if is_extern || is_main {
@@ -294,11 +601,5 @@ fn parse_sig(sig: &syn::Signature, is_extern: bool, is_main: bool) -> R<FnSig> {
         // ローカルシンボル。短く保つことで .o / シンボル表を小さくする
         format!("_x{name}")
     };
-    Ok(FnSig {
-        params,
-        ret,
-        symbol,
-        is_extern,
-        is_main,
-    })
+    Ok(SigSyn { params, ret, symbol, is_extern, is_main })
 }

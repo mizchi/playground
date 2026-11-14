@@ -12,7 +12,8 @@ for i in range(n):
     k = (i * 7 + 3) % 13 + 1
     extra = variant if i == n // 2 else 0
     callee = f"f{i - 1}(x / 2 + {k})" if i > 0 else "x"
-    other = f" + f{i // 2}(x % {k + 1})" if i > 1 and i % 3 == 0 else ""
+    # 実行時間が指数的に増えないよう、2 本目の呼び出しは浅いところだけ
+    other = f" + f{i // 2}(x % {k + 1})" if 1 < i < 300 and i % 3 == 0 else ""
     print(f"""fn f{i}(x: u64) -> u64 {{
     let mut acc: u64 = {k + extra};
     let mut j = 0;

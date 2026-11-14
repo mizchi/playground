@@ -7,7 +7,7 @@ edition = "2024"
 [workspace]
 
 [dependencies]
-syn = { version = "2", default-features = false, features = ["full", "parsing", "printing"] }
+syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "visit"] }
 proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }
 cranelift-codegen = { version = "0.137", default-features = false, features = ["std", "host-arch", "unwind"] }
 cranelift-frontend = "0.137"
