@@ -25,6 +25,8 @@ enum Shape {
 
 struct Inf<'p> {
     prog: &'p Program,
+    /// impl の中なら self 型
+    self_sid: Option<u32>,
     parent: Vec<u32>,
     shape: Vec<Option<Shape>>,
     /// 整数リテラル由来 (決まらなければ i32 にしてよい) か
@@ -34,9 +36,12 @@ struct Inf<'p> {
     ret: u32,
 }
 
-pub fn infer(prog: &Program, f: &syn::ItemFn, ret: Ty) -> LetTypes {
+pub fn infer(prog: &Program, f: &syn::ItemFn, id: u32) -> LetTypes {
+    let sig = &prog.sigs[id as usize];
+    let ret = sig.ret;
     let mut s = Inf {
         prog,
+        self_sid: sig.impl_of,
         parent: vec![],
         shape: vec![],
         int_lit: vec![],
@@ -45,13 +50,16 @@ pub fn infer(prog: &Program, f: &syn::ItemFn, ret: Ty) -> LetTypes {
         ret: 0,
     };
     s.ret = s.known(ret);
-    for a in &f.sig.inputs {
-        if let syn::FnArg::Typed(pt) = a {
-            if let (Pat::Ident(pi), Ok(t)) = (&*pt.pat, prog.parse_ty(&pt.ty)) {
-                let v = s.known(t);
-                s.scopes[0].push((pi.ident.to_string(), v));
-            }
-        }
+    for (a, &t) in f.sig.inputs.iter().zip(&sig.params) {
+        let name = match a {
+            syn::FnArg::Receiver(_) => "self".to_string(),
+            syn::FnArg::Typed(pt) => match &*pt.pat {
+                Pat::Ident(pi) => pi.ident.to_string(),
+                _ => continue,
+            },
+        };
+        let v = s.known(t);
+        s.scopes[0].push((name, v));
     }
     let tail = s.block(&f.block);
     let ret = s.ret;
@@ -140,6 +148,22 @@ impl Inf<'_> {
             _ => self.var(),
         }
     }
+    /// 呼び出し: 実引数を仮引数型と単一化して戻り値型を返す。skip はレシーバの分
+    fn apply(&mut self, callee: Option<u32>, args: Vec<u32>, skip: usize) -> u32 {
+        match callee {
+            Some(id) => {
+                let sig = &self.prog.sigs[id as usize];
+                let (params, ret) = (sig.params[skip.min(sig.params.len())..].to_vec(), sig.ret);
+                for (a, p) in args.into_iter().zip(params) {
+                    let k = self.known(p);
+                    self.unify(a, k);
+                }
+                self.known(ret)
+            }
+            None => self.var(),
+        }
+    }
+
     fn lookup(&self, n: &str) -> Option<u32> {
         self.scopes
             .iter()
@@ -157,7 +181,7 @@ impl Inf<'_> {
             match st {
                 Stmt::Local(l) => {
                     let (pat, ann) = match &l.pat {
-                        Pat::Type(pt) => (&*pt.pat, self.prog.parse_ty(&pt.ty).ok()),
+                        Pat::Type(pt) => (&*pt.pat, self.prog.parse_ty(&pt.ty, self.self_sid).ok()),
                         p => (p, None),
                     };
                     let v = match &l.init {
@@ -229,7 +253,7 @@ impl Inf<'_> {
                 }
             }
             Expr::Struct(s) => {
-                let sid = s.path.get_ident().and_then(|id| self.prog.struct_index.get(&id.to_string()).copied());
+                let sid = self.prog.struct_by_path(&s.path, self.self_sid);
                 for fv in &s.fields {
                     let v = self.expr(&fv.expr);
                     if let (Some(sid), syn::Member::Named(id)) = (sid, &fv.member) {
@@ -309,30 +333,29 @@ impl Inf<'_> {
             Expr::Break(_) | Expr::Continue(_) => self.known(Ty::Never),
             Expr::Call(c) => {
                 let callee = match &*c.func {
-                    Expr::Path(p) => p
-                        .path
-                        .get_ident()
-                        .filter(|id| self.lookup(&id.to_string()).is_none())
-                        .and_then(|id| self.prog.index.get(&id.to_string()).copied()),
+                    Expr::Path(p) if p.path.get_ident().is_some_and(|id| self.lookup(&id.to_string()).is_some()) => None,
+                    Expr::Path(p) => self.prog.fn_by_path(&p.path, self.self_sid),
                     _ => None,
                 };
                 let args: Vec<u32> = c.args.iter().map(|a| self.expr(a)).collect();
-                match callee {
-                    Some(id) => {
-                        let sig = &self.prog.sigs[id as usize];
-                        let (params, ret) = (sig.params.clone(), sig.ret);
-                        for (a, p) in args.into_iter().zip(params) {
-                            let k = self.known(p);
-                            self.unify(a, k);
-                        }
-                        self.known(ret)
-                    }
-                    None => self.var(),
+                self.apply(callee, args, 0)
+            }
+            Expr::MethodCall(mc) => {
+                let r = self.expr(&mc.receiver);
+                let mut t = self.resolve(r);
+                while let Some(Ty::Ref(_, i)) = t {
+                    t = Some(*i);
                 }
+                let callee = match t {
+                    Some(Ty::Struct(sid)) => self.prog.method(sid, &mc.method.to_string()),
+                    _ => None,
+                };
+                let args: Vec<u32> = mc.args.iter().map(|a| self.expr(a)).collect();
+                self.apply(callee, args, 1)
             }
             Expr::Cast(c) => {
                 self.expr(&c.expr);
-                match self.prog.parse_ty(&c.ty) {
+                match self.prog.parse_ty(&c.ty, self.self_sid) {
                     Ok(t) => self.known(t),
                     Err(_) => self.var(),
                 }

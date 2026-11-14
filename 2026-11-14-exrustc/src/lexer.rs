@@ -11,9 +11,22 @@ pub struct SrcItem {
     pub end: usize,
     /// 1 始まりの開始行 (エラー位置の補正用)
     pub line: usize,
+    /// 正規化トークン列のハッシュ。impl のメンバはヘッダのハッシュも含む
     pub hash: Key,
     /// アイテム内の識別子トークン (byte range)。参照関係の構文的な過大近似に使う
     pub idents: Vec<(u32, u32)>,
+    pub kind: ItemKind,
+}
+
+/// `impl X { fn a() {} fn b() {} }` は 1 アイテムにせず、ヘッダ `impl X {` と
+/// メンバ (a, b) に分ける。メソッドを 1 つ編集しても、そのメソッドだけが変わったことになる。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ItemKind {
+    Normal,
+    /// `impl X {` まで
+    ImplHeader,
+    /// impl の中のアイテム。ヘッダの index を持つ
+    ImplMember(u32),
 }
 
 fn is_ident_start(c: u8) -> bool {
@@ -34,6 +47,8 @@ struct St<'a> {
     buf: Vec<u8>,
     /// 行番号はアイテム開始時だけ必要なので差分で数える
     line_cache: (usize, usize),
+    /// 今のアイテムで、トップレベルの最初の識別子をもう見たか (`impl` 判定用)
+    seen_ident: bool,
 }
 
 impl St<'_> {
@@ -70,9 +85,13 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
     let s = src.as_bytes();
     let n = s.len();
     let mut i = 0;
-    let mut items = vec![];
+    let mut items: Vec<SrcItem> = vec![];
     let mut depth: i32 = 0;
-    let mut st = St { s, cur: None, prev_ws: true, prev_punct: false, buf: Vec::with_capacity(4096), line_cache: (0, 1) };
+    let mut st = St { s, cur: None, prev_ws: true, prev_punct: false, buf: Vec::with_capacity(4096), line_cache: (0, 1), seen_ident: false };
+    // impl ブロックの中にいるときは、メンバの区切りを depth 1 で判定する
+    let mut base: i32 = 0;
+    let mut impl_header: Option<u32> = None;
+    let mut impl_pending = false;
     macro_rules! tok {
         ($a:expr, $b:expr, $k:expr) => {
             st.tok($a, $b, $k)
@@ -129,6 +148,14 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
                 i += 1;
             }
             tok!(start, i, 2u8);
+            if depth == 0 && !st.seen_ident {
+                let w = &s[start..i];
+                // `unsafe impl` に備えて unsafe は読み飛ばす
+                if w != b"unsafe" {
+                    st.seen_ident = true;
+                    impl_pending = w == b"impl";
+                }
+            }
             continue;
         }
         if c.is_ascii_digit() {
@@ -166,6 +193,16 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
         }
         // 記号 (1 byte ずつ。直前が空白かどうかもハッシュに入れて `&&` と `& &` を区別)
         i += 1;
+        // impl ブロックの閉じ括弧はどのアイテムにも属さない
+        if c == b'}' && impl_header.is_some() && depth == 1 {
+            if st.cur.is_some() {
+                return Err(format!("{}:1: unterminated item in impl block", st.line_at(start)));
+            }
+            depth = 0;
+            base = 0;
+            impl_header = None;
+            continue;
+        }
         tok!(start, i, 5u8);
         match c {
             b'(' | b'[' | b'{' => depth += 1,
@@ -177,13 +214,32 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
             }
             _ => {}
         }
-        if depth == 0 && (c == b';' || c == b'}') {
+        let header_end = c == b'{' && depth == 1 && impl_pending;
+        if header_end || (depth == base && (c == b';' || c == b'}')) {
             let (sp, ln, idents) = st.cur.take().unwrap();
             let mut h = KeyHasher::new();
+            let kind = if header_end {
+                ItemKind::ImplHeader
+            } else if let Some(hi) = impl_header {
+                // メンバのハッシュにはヘッダ (= self 型) を含める
+                h.add(&items[hi as usize].hash);
+                ItemKind::ImplMember(hi)
+            } else {
+                ItemKind::Normal
+            };
             h.add(&st.buf[..]);
             st.buf.clear();
-            items.push(SrcItem { start: sp, end: i, line: ln, hash: h.finish(), idents });
+            st.seen_ident = false;
+            if header_end {
+                impl_pending = false;
+                impl_header = Some(items.len() as u32);
+                base = 1;
+            }
+            items.push(SrcItem { start: sp, end: i, line: ln, hash: h.finish(), idents, kind });
         }
+    }
+    if impl_header.is_some() {
+        return Err("unterminated impl block".into());
     }
     if let Some((sp, ln, ..)) = st.cur {
         return Err(format!("{ln}:1: unterminated item starting here (byte {sp})"));
@@ -277,6 +333,26 @@ mod tests {
         let b = hashes("fn f() { 1; }\nfn g() { 3; }");
         assert_eq!(a[0], b[0]);
         assert_ne!(a[1], b[1]);
+    }
+
+    #[test]
+    fn impl_members_are_separate_items() {
+        let src = "struct S { x: i64 }\nimpl S {\n    fn a(&self) -> i64 { self.x }\n    fn b() {}\n}\nfn main() {}";
+        let it = split(src).unwrap();
+        let kinds: Vec<_> = it.iter().map(|i| i.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![ItemKind::Normal, ItemKind::ImplHeader, ItemKind::ImplMember(1), ItemKind::ImplMember(1), ItemKind::Normal]
+        );
+        assert_eq!(&src[it[2].start..it[2].end], "fn a(&self) -> i64 { self.x }");
+        assert_eq!(it[2].line, 3);
+        // メソッド b だけ編集すると a のハッシュは変わらない
+        let it2 = split(&src.replace("fn b() {}", "fn b() { 1; }")).unwrap();
+        assert_eq!(it[2].hash, it2[2].hash);
+        assert_ne!(it[3].hash, it2[3].hash);
+        // self 型が変わるとメンバ全部が変わる
+        let it3 = split(&src.replace("impl S", "impl T")).unwrap();
+        assert_ne!(it[2].hash, it3[2].hash);
     }
 
     #[test]

@@ -172,9 +172,10 @@ impl Worker {
                 loops: vec![],
                 ret: sig.ret,
                 is_main: sig.is_main,
+                self_sid: sig.impl_of,
                 sret: None,
                 frefs: HashMap::new(),
-                lets: crate::infer::infer(prog, f, sig.ret),
+                lets: crate::infer::infer(prog, f, id),
                 addr_taken: addr_taken(f),
             };
             cx.body(f, sig)?;
@@ -280,6 +281,8 @@ struct Cx<'a, 'p> {
     loops: Vec<Loop>,
     ret: Ty,
     is_main: bool,
+    /// impl の中なら self 型
+    self_sid: Option<u32>,
     /// struct を返す関数の、戻り値の書き込み先
     sret: Option<Value>,
     frefs: HashMap<u32, FuncRef>,
@@ -436,8 +439,10 @@ impl Cx<'_, '_> {
             self.sret = Some(params.remove(0));
         }
         for ((arg, v), &ty) in f.sig.inputs.iter().zip(params).zip(&sig.params) {
-            let syn::FnArg::Typed(pt) = arg else { unreachable!() };
-            let name = pat_name(&pt.pat)?;
+            let name = match arg {
+                syn::FnArg::Receiver(_) => "self".to_string(),
+                syn::FnArg::Typed(pt) => pat_name(&pt.pat)?,
+            };
             if let Ty::Struct(_) = ty {
                 // 呼び出し側がコピー済みなので、そのメモリをそのまま使う
                 self.scopes.last_mut().unwrap().push((name, Loc::Ptr(v), ty));
@@ -487,7 +492,7 @@ impl Cx<'_, '_> {
             match st {
                 Stmt::Local(l) => {
                     let (name, ann) = match &l.pat {
-                        Pat::Type(pt) => (pat_name(&pt.pat)?, Some(self.prog.parse_ty(&pt.ty)?)),
+                        Pat::Type(pt) => (pat_name(&pt.pat)?, Some(self.prog.parse_ty(&pt.ty, self.self_sid)?)),
                         p => (pat_name(p)?, self.lets.get(&crate::infer::let_key(l)).copied()),
                     };
                     let Some(init) = &l.init else {
@@ -543,7 +548,16 @@ impl Cx<'_, '_> {
                 .and_then(|id| self.lookup(&id.to_string()))
                 .map(|(_, t)| t),
             Expr::Call(c) => self.callee(&c.func).map(|(_, s)| s.ret),
-            Expr::Cast(c) => self.prog.parse_ty(&c.ty).ok(),
+            Expr::Cast(c) => self.prog.parse_ty(&c.ty, self.self_sid).ok(),
+            Expr::MethodCall(mc) => {
+                let mut t = self.peek(&mc.receiver)?;
+                while let Ty::Ref(_, i) = t {
+                    t = *i;
+                }
+                let Ty::Struct(sid) = t else { return None };
+                let id = self.prog.method(sid, &mc.method.to_string())?;
+                Some(self.prog.sigs[id as usize].ret)
+            }
             Expr::Paren(p) => self.peek(&p.expr),
             Expr::Group(g) => self.peek(&g.expr),
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => match self.peek(&u.expr)? {
@@ -560,11 +574,7 @@ impl Cx<'_, '_> {
                 let (Ty::Struct(sid), syn::Member::Named(id)) = (t, &f.member) else { return None };
                 self.prog.field(sid, &id.to_string()).map(|(t, _)| t)
             }
-            Expr::Struct(s) => s
-                .path
-                .get_ident()
-                .and_then(|id| self.prog.struct_index.get(&id.to_string()))
-                .map(|&sid| Ty::Struct(sid)),
+            Expr::Struct(s) => self.prog.struct_by_path(&s.path, self.self_sid).map(Ty::Struct),
             Expr::Binary(b) if is_cmp(&b.op) || matches!(b.op, BinOp::And(_) | BinOp::Or(_)) => {
                 Some(Ty::Bool)
             }
@@ -574,13 +584,15 @@ impl Cx<'_, '_> {
         }
     }
 
+    /// `f` / `S::f` / `Self::f` 形式の呼び出し先
     fn callee(&self, f: &Expr) -> Option<(u32, &FnSig)> {
         let Expr::Path(p) = f else { return None };
-        let id = p.path.get_ident()?.to_string();
-        if self.lookup(&id).is_some() {
-            return None;
+        if let Some(id) = p.path.get_ident() {
+            if self.lookup(&id.to_string()).is_some() {
+                return None; // ローカル変数 (関数ポインタは未対応)
+            }
         }
-        let &i = self.prog.index.get(&id)?;
+        let i = self.prog.fn_by_path(&p.path, self.self_sid)?;
         Some((i, &self.prog.sigs[i as usize]))
     }
 
@@ -815,8 +827,9 @@ impl Cx<'_, '_> {
                 Ok(self.dead())
             }
             Expr::Call(c) => self.call(c),
+            Expr::MethodCall(mc) => self.method_call(mc),
             Expr::Cast(c) => {
-                let to = self.prog.parse_ty(&c.ty)?;
+                let to = self.prog.parse_ty(&c.ty, self.self_sid)?;
                 let hint = self.peek(&c.expr).or(Some(Ty::I32));
                 let (v, from) = self.expr(&c.expr, hint)?;
                 if from == Ty::Never {
@@ -870,8 +883,7 @@ impl Cx<'_, '_> {
     }
 
     fn struct_lit(&mut self, s: &syn::ExprStruct) -> R<V> {
-        let Some(sid) = s.path.get_ident().and_then(|id| self.prog.struct_index.get(&id.to_string()).copied())
-        else {
+        let Some(sid) = self.prog.struct_by_path(&s.path, self.self_sid) else {
             return err(s.path.span(), "cannot find struct");
         };
         if s.rest.is_some() || s.dot2_token.is_some() {
@@ -906,42 +918,95 @@ impl Cx<'_, '_> {
     }
 
     fn call(&mut self, c: &syn::ExprCall) -> R<V> {
-        let Some((id, sig)) = self.callee(&c.func) else {
+        let Some((id, _)) = self.callee(&c.func) else {
             return err(c.func.span(), "only direct calls to named functions are supported");
         };
-        let sig = sig.clone();
-        if sig.params.len() != c.args.len() {
+        let args: Vec<&Expr> = c.args.iter().collect();
+        self.call_fn(id, None, &args, c.span())
+    }
+
+    /// `recv.m(args)`: レシーバを自動 deref して struct を見つけ、
+    /// メソッドの self 型に合わせて自動参照 (`&self` / `&mut self`) かコピー (`self`) で渡す
+    fn method_call(&mut self, mc: &syn::ExprMethodCall) -> R<V> {
+        if mc.turbofish.is_some() {
+            return err(mc.span(), "turbofish is not supported");
+        }
+        let mut p = if is_place_expr(&mc.receiver) {
+            self.place(&mc.receiver)?
+        } else {
+            match self.expr(&mc.receiver, None)? {
+                (_, Ty::Never) => return Ok((None, Ty::Never)),
+                (Some(a), t @ Ty::Struct(_)) => Place::Mem(a, 0, t),
+                (Some(v), Ty::Ref(_, i)) => Place::Mem(v, 0, *i),
+                (_, t) => {
+                    return err(mc.method.span(), format!("no method `{}` on type `{}`", mc.method, self.prog.tn(t)));
+                }
+            }
+        };
+        let (a, o, sid) = loop {
+            p = match p {
+                Place::Mem(a, o, Ty::Struct(sid)) => break (a, o, sid),
+                Place::Mem(a, o, Ty::Ref(_, i)) => {
+                    let ptr = self.b.ins().load(PTR, mf(), a, o);
+                    Place::Mem(ptr, 0, *i)
+                }
+                Place::Var(v, Ty::Ref(_, i)) => {
+                    let ptr = self.b.use_var(v);
+                    Place::Mem(ptr, 0, *i)
+                }
+                p => {
+                    let t = self.prog.tn(p.ty());
+                    return err(mc.method.span(), format!("no method `{}` on type `{t}`", mc.method));
+                }
+            }
+        };
+        let name = mc.method.to_string();
+        let sname = self.prog.structs[sid as usize].name.clone();
+        let Some(id) = self.prog.method(sid, &name) else {
+            return err(mc.method.span(), format!("no method named `{name}` found for `{sname}`"));
+        };
+        if !self.prog.sigs[id as usize].has_self {
             return err(
-                c.span(),
-                format!("expected {} arguments, found {}", sig.params.len(), c.args.len()),
+                mc.method.span(),
+                format!("`{sname}::{name}` is an associated function, not a method"),
             );
         }
-        let mut args = vec![];
+        // struct のアドレスを渡す: `&self` ならそのまま、`self` なら call_fn がコピーする
+        let recv = self.addr_plus(a, o);
+        let args: Vec<&Expr> = mc.args.iter().collect();
+        self.call_fn(id, Some(recv), &args, mc.span())
+    }
+
+    fn call_fn(&mut self, id: u32, recv: Option<Value>, args: &[&Expr], span: proc_macro2::Span) -> R<V> {
+        let sig = self.prog.sigs[id as usize].clone();
+        let skip = recv.is_some() as usize;
+        if sig.params.len() != args.len() + skip {
+            return err(
+                span,
+                format!("expected {} arguments, found {}", sig.params.len() - skip, args.len()),
+            );
+        }
+        let mut vals = vec![];
         let sret = if is_sret(&sig) {
             let a = self.temp(sig.ret);
-            args.push(a);
+            vals.push(a);
             Some(a)
         } else {
             None
         };
-        for (a, &pt) in c.args.iter().zip(&sig.params) {
+        if let Some(r) = recv {
+            self.push_arg(&mut vals, r, sig.params[0]);
+        }
+        for (a, &pt) in args.iter().zip(&sig.params[skip..]) {
             let (v, t) = self.expr(a, Some(pt))?;
             if t == Ty::Never {
                 return Ok((None, Ty::Never));
             }
             self.same(a.span(), t, pt)?;
-            let v = v.unwrap();
-            if let Ty::Struct(_) = pt {
-                // 値渡し: 呼び出し側でコピーしてから渡す
-                let tmp = self.temp(pt);
-                self.copy(tmp, v, pt);
-                args.push(tmp);
-            } else {
-                args.push(v);
-            }
+            self.push_arg(&mut vals, v.unwrap(), pt);
         }
         let f = self.fref(id);
-        let call = self.b.ins().call(f, &args);
+        let call = self.b.ins().call(f, &vals);
         if sig.ret == Ty::Never {
             self.b.ins().trap(TrapCode::unwrap_user(1));
             return Ok(self.dead());
@@ -951,6 +1016,17 @@ impl Cx<'_, '_> {
         }
         let r = self.b.inst_results(call).first().copied();
         Ok((r, sig.ret))
+    }
+
+    fn push_arg(&mut self, vals: &mut Vec<Value>, v: Value, pt: Ty) {
+        if let Ty::Struct(_) = pt {
+            // 値渡し: 呼び出し側でコピーしてから渡す
+            let tmp = self.temp(pt);
+            self.copy(tmp, v, pt);
+            vals.push(tmp);
+        } else {
+            vals.push(v);
+        }
     }
 
     fn convert(&mut self, v: Value, from: Ty, to: Ty) -> Value {

@@ -24,7 +24,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use cache::{Cache, Key, KeyHasher};
 use codegen::{Blob, RELOC_KINDS, Target, Worker};
 use front::{Program, Summary};
-use lexer::SrcItem;
+use lexer::{ItemKind, SrcItem};
 
 struct Opts {
     input: PathBuf,
@@ -159,13 +159,28 @@ fn run(o: &Opts) -> Result<(), String> {
         sum_keys.iter().map(|&k| cache.get(k).and_then(Summary::decode)).collect();
     let todo: Vec<usize> = (0..items.len()).filter(|&i| sums[i].is_none()).collect();
     let n_parsed = todo.len();
+    // impl ヘッダを先に要約する (メンバの `Self` を決めるのに必要)
+    for &ii in todo.iter().filter(|&&i| items[i].kind == ItemKind::ImplHeader) {
+        let it = &items[ii];
+        let item = front::parse_item(&src, it)?;
+        sums[ii] = Some(front::summarize(&item, None).map_err(|e| front::relocate_err(e, it))?);
+    }
+    let self_names: Vec<Option<String>> = items
+        .iter()
+        .map(|it| match it.kind {
+            ItemKind::ImplMember(h) => sums[h as usize].as_ref().unwrap().impl_self.clone(),
+            _ => None,
+        })
+        .collect();
+    let todo: Vec<usize> = todo.into_iter().filter(|&i| sums[i].is_none()).collect();
     let mut parsed: HashMap<usize, syn::Item> = HashMap::new();
     if todo.len() <= KEEP_PARSED {
         // インクリメンタル: その場で parse し、AST は codegen 用に取っておく
         for &ii in &todo {
             let it = &items[ii];
             let item = front::parse_item(&src, it)?;
-            sums[ii] = Some(front::summarize(&item).map_err(|e| front::relocate_err(e, it))?);
+            let sm = front::summarize(&item, self_names[ii].as_deref());
+            sums[ii] = Some(sm.map_err(|e| front::relocate_err(e, it))?);
             parsed.insert(ii, item);
         }
     } else {
@@ -173,7 +188,7 @@ fn run(o: &Opts) -> Result<(), String> {
         let done = par_map(o.jobs, &todo, |ii| {
             let it = &items[ii];
             let item = front::parse_item(&src, it)?;
-            front::summarize(&item).map_err(|e| front::relocate_err(e, it))
+            front::summarize(&item, self_names[ii].as_deref()).map_err(|e| front::relocate_err(e, it))
         })?;
         for (ii, sm) in todo.iter().zip(done) {
             sums[*ii] = Some(sm);
