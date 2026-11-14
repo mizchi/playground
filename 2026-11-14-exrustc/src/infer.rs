@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use syn::{BinOp, Expr, Lit, Pat, Stmt, UnOp};
 
-use crate::front::{Program, Ty, intern};
+use crate::front::{FnSig, Program, Ty, TyEnv, intern};
 
 pub type LetTypes = HashMap<usize, Ty>;
 
@@ -27,6 +27,7 @@ struct Inf<'p> {
     prog: &'p Program,
     /// impl の中なら self 型
     self_sid: Option<u32>,
+    env: &'p TyEnv,
     parent: Vec<u32>,
     shape: Vec<Option<Shape>>,
     /// 整数リテラル由来 (決まらなければ i32 にしてよい) か
@@ -36,12 +37,13 @@ struct Inf<'p> {
     ret: u32,
 }
 
-pub fn infer(prog: &Program, f: &syn::ItemFn, id: u32) -> LetTypes {
-    let sig = &prog.sigs[id as usize];
+/// sig はこの関数 (インスタンスなら型引数を入れた後) のシグネチャ、env は `Self` と型パラメータ
+pub fn infer(prog: &Program, f: &syn::ItemFn, sig: &FnSig, env: &TyEnv) -> LetTypes {
     let ret = sig.ret;
     let mut s = Inf {
         prog,
-        self_sid: sig.impl_of,
+        self_sid: env.self_sid,
+        env,
         parent: vec![],
         shape: vec![],
         int_lit: vec![],
@@ -149,16 +151,45 @@ impl Inf<'_> {
         }
     }
     /// 呼び出し: 実引数を仮引数型と単一化して戻り値型を返す。skip はレシーバの分
+    /// 型パラメータを含む型を、呼び出しごとの新しい型変数 (pv) で置き換えて作る
+    fn known_g(&mut self, t: Ty, pv: &mut Vec<Option<u32>>) -> u32 {
+        match t {
+            Ty::Param(i) => match pv[i as usize] {
+                Some(v) => v,
+                None => {
+                    let v = self.var();
+                    pv[i as usize] = Some(v);
+                    v
+                }
+            },
+            Ty::Ref(m, inner) => {
+                let i = self.known_g(*inner, pv);
+                self.with(Shape::Ref(m, i))
+            }
+            t => self.known(t),
+        }
+    }
+
+    /// 呼び出し: 実引数を仮引数型と単一化して戻り値型を返す。skip はレシーバの分、
+    /// self_ty はレシーバの型 (trait のデフォルトメソッドの Self を決める)
     fn apply(&mut self, callee: Option<u32>, args: Vec<u32>, skip: usize) -> u32 {
+        self.apply_self(callee, args, skip, None)
+    }
+
+    fn apply_self(&mut self, callee: Option<u32>, args: Vec<u32>, skip: usize, self_ty: Option<Ty>) -> u32 {
         match callee {
             Some(id) => {
                 let sig = &self.prog.sigs[id as usize];
                 let (params, ret) = (sig.params[skip.min(sig.params.len())..].to_vec(), sig.ret);
+                let mut pv: Vec<Option<u32>> = vec![None; sig.generics.len()];
+                if let (Some(t), true) = (self_ty, sig.trait_of.is_some()) {
+                    pv[0] = Some(self.known(t));
+                }
                 for (a, p) in args.into_iter().zip(params) {
-                    let k = self.known(p);
+                    let k = self.known_g(p, &mut pv);
                     self.unify(a, k);
                 }
-                self.known(ret)
+                self.known_g(ret, &mut pv)
             }
             None => self.var(),
         }
@@ -305,7 +336,7 @@ impl Inf<'_> {
             match st {
                 Stmt::Local(l) => {
                     let (pat, ann) = match &l.pat {
-                        Pat::Type(pt) => (&*pt.pat, self.prog.parse_ty(&pt.ty, self.self_sid).ok()),
+                        Pat::Type(pt) => (&*pt.pat, self.prog.parse_ty(&pt.ty, self.env).ok()),
                         p => (p, None),
                     };
                     let v = match &l.init {
@@ -522,15 +553,18 @@ impl Inf<'_> {
                     t = Some(*i);
                 }
                 let callee = match t {
-                    Some(Ty::Struct(sid)) => self.prog.method(sid, &mc.method.to_string()),
+                    Some(Ty::Struct(sid)) => {
+                        let n = mc.method.to_string();
+                        self.prog.method(sid, &n).or_else(|| self.prog.default_method(sid, &n))
+                    }
                     _ => None,
                 };
                 let args: Vec<u32> = mc.args.iter().map(|a| self.expr(a)).collect();
-                self.apply(callee, args, 1)
+                self.apply_self(callee, args, 1, t)
             }
             Expr::Cast(c) => {
                 self.expr(&c.expr);
-                match self.prog.parse_ty(&c.ty, self.self_sid) {
+                match self.prog.parse_ty(&c.ty, self.env) {
                     Ok(t) => self.known(t),
                     Err(_) => self.var(),
                 }

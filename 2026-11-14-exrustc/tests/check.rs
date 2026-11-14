@@ -13,3 +13,18 @@ fn reports_all_errors_and_recovers() {
     assert!(s.check(&fixed).is_empty());
     assert!(s.check(&fixed).is_empty());
 }
+
+/// 呼び出し元が「検査済み」でキャッシュに当たっても、ジェネリック関数の本体の型エラーは報告される
+/// (検査済みの印に、その関数が要求したインスタンスを保存して要求し直すため)
+#[test]
+fn generic_body_errors_with_cached_callers() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/traits.rs")).unwrap();
+    let mut s = Session::new(Options::default());
+    assert!(s.check(&src).is_empty());
+    let bad = src.replace("    a.area() + b.area()\n", "    a.area() + b.area() + true\n");
+    assert_ne!(bad, src);
+    let d = s.check(&bad);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].msg.contains("expected `i64`, found `bool`"), "{d:?}");
+    assert!(s.check(&src).is_empty());
+}

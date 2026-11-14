@@ -18,6 +18,18 @@ cargo build --release
 ./out/hello
 ```
 
+```bash
+./target/release/exrustc check examples/traits.rs
+```
+
+型検査だけを行い、全関数の診断を表示する。
+
+```bash
+./target/release/exrustc lsp
+```
+
+LSP サーバ（stdio）。対応は initialize / didOpen / didChange（全文同期）/ didClose / shutdown で、publishDiagnostics を返す。
+
 | オプション | 意味 |
 |---|---|
 | `-o PATH` | 出力パス。同じ場所に `PATH.o`、`PATH.exrc`（キャッシュ）、`PATH.link`（リンク行）を置く |
@@ -31,7 +43,11 @@ cargo build --release
 cargo test --release
 ```
 
-lexer の単体テストが走る。
+テスト一式が走る。
+- lexer の単体テスト
+- LSP の結合テスト（実バイナリを stdio で駆動）
+- check がエラー後も止まらないこと、キャッシュされた呼び出し元越しでもジェネリック本体のエラーを拾うこと
+- サイズ予算（`tests/budget.rs`）
 
 ```bash
 tests/compare.sh
@@ -45,6 +61,41 @@ python3 bench/run.py 1000 5000
 
 rustc との比較ベンチ。`bench/gen.py` が N 関数のソースを生成し、cold、no-op、1 関数編集の各ケースを測る。
 
+### 回帰監視（criterion + サイズ予算）
+
+```bash
+bench/regress.sh save
+```
+
+機能を足す前に、現在の状態をベースライン `main` として保存する。
+
+```bash
+bench/regress.sh
+```
+
+ベースラインと比べる。次のどれかがあれば失敗する。
+- criterion が「回帰」と判定したもの
+- サイズ予算（`bench/budget.txt`）の超過
+- rustc との出力差（`tests/compare.sh`）
+
+| ベンチ（`benches/compile.rs`、N=1000） | 何を見るか | 現在値 |
+|---|---|---:|
+| `lsp/did_change_1fn` | LSP 応答性：1 関数編集の didChange から publishDiagnostics まで | 5.3 ms |
+| `lsp/did_change_noop` | 内容が同じ didChange（保存など） | 0.3 ms |
+| `cold/lsp_did_open` | 初めて開いたとき（全関数を検査） | 53 ms |
+| `build/noop` | 無変更ビルド（リンク省略） | 9.7 ms |
+| `build/edit_1fn` | 1 関数編集ビルド（リンク込み） | 18 ms |
+| `cold/build` | キャッシュなしのビルド | 97 ms |
+| `front/lex` | 字句解析だけ（no-op の下限） | 2.2 ms |
+
+- 判定の閾値：5% 未満の変化は無視し（`noise_threshold`）、有意水準は 1% にしている。
+  cold 系は実行ごとに ±10% ぶれるので、閾値を 15% にしている。
+- サイズ予算は、バイナリ・`.o`・キャッシュ・LSP のメモリ上キャッシュを、例ごとに上限バイトで持つ。
+  意図して増やすなら `UPDATE_BUDGET=1`、新しい例を足しただけなら `UPDATE_BUDGET=new`（既存の上限は変えない）。
+- 実際に回帰検出が働いた例が 2 つある。どちらも予算を緩めず、要約の符号化を詰めて解決した。
+  - enum 追加で要約が 1 byte/アイテム増えた
+  - 検査済みの印が 4 byte/関数増えた
+
 ## 対応している言語サブセット
 
 rustc でもそのままコンパイルできる範囲に限っている。そのため、出力を rustc の結果と比較して検証できる（`tests/compare.sh`）。
@@ -53,8 +104,12 @@ rustc でもそのままコンパイルできる範囲に限っている。そ�
   - `fn`
   - `unsafe extern "C" { fn ...; }`
   - 名前付きフィールドの `struct`
-  - 固有 `impl`（`impl S { ... }`。複数に分けてもよい）。トレイトの impl はまだ不可
-  - ライフタイム引数だけのジェネリクス（`<'a>`）は可。ライフタイムは消去する
+  - `enum`。バリアントは unit / tuple / struct の 3 種類で、判別値 `A = 3` も書ける
+  - 固有 `impl`（`impl S { ... }`。複数に分けてもよい）
+  - `trait`：必須メソッドとデフォルトメソッド。`impl Trait for S` / enum
+  - `#[derive(Clone, Copy)]`（ビットコピーなので、境界の判定にだけ使う）
+  - ジェネリック関数：`fn f<T: A + B>(..)`、`where T: A`、turbofish `f::<T>(..)`。
+    呼び出し元で型引数を推論し、単相化する。ライフタイムは消去する
 - 型：
   - `i8`〜`i64`、`u8`〜`u64`、`isize`、`usize`、`bool`、`()`、`!`
   - `&T`、`&mut T`
@@ -70,11 +125,21 @@ rustc でもそのままコンパイルできる範囲に限っている。そ�
     - `S::new(..)` / `Self::new(..)` / `S::m(&x)`（UFCS）
   - struct リテラル（`S { x, y: e }`）、フィールドアクセス（参照越しは自動 deref）
   - `&e` / `&mut e`（一時値への参照も可）、`*e`
+  - enum の値（`E::A` / `E::B(x)` / `E::C { x }` / `Self::A`）、フィールドのない enum の `as` キャスト
+  - `match`、`if let`、`while let`、分解する `let`（`let S { x, y } = s;`）
+    - パターン：`_`、束縛、`x @ p`、リテラル、範囲（`1..=5` / `-5..0`）、`|`、バリアント、struct、`&p`、入れ子、ガード
+    - 参照を match したときのデフォルト束縛モード（`match self { E::A(x) => .. }` の x は `&T`）
+    - `|` の中での束縛は未対応
+  - trait メソッドの呼び出しは静的ディスパッチ：
+    - `x.m()` は固有メソッド → trait 実装 → デフォルトメソッドの順に探す
+    - `Trait::m(&x)` / `<S as Trait>::m(&x)` の形でも呼べる
 - 型推論は関数単位の単一化（`src/infer.rs`）。
   - 整数リテラルの型は、後ろの使用箇所から決める（`let mut i = 0; bump(&mut i)` のような参照越しの使用も含む）。
   - 決まらなければ `i32` にする。
-- 借用検査・可変性検査・ムーブ検査はしない。
+- 借用検査・可変性検査・ムーブ検査・match の網羅性検査はしない。
   rustc を通るプログラムなら意味は変わらない前提で、struct は常にコピーしている。
+  どの arm にも合わない場合は trap する。
+- 未対応：`dyn Trait`、ジェネリックな struct / enum / impl、トレイトの関連型。
 
 ### 値の表現と ABI（内部用）
 
@@ -124,9 +189,21 @@ src.rs ──lexer(自前)──▶ アイテム列 + 正規化ハッシュ
 | `src/codegen.rs` | syn AST から Cranelift IR への 1 パス lowering と型検査（place / スタックスロット / sret）。出力は `Blob` |
 | `src/cache.rs` | 1 ファイルキャッシュ（index + payload、tmp + rename で書き込む） |
 | `src/link.rs` | `cc -###` からリンク行を抽出して保存し、リンカを直接起動する |
-| `src/main.rs` | ドライバ、フェーズ計測、並列コード生成 |
+| `src/driver.rs` | `Session`：2 層キャッシュ（ディスク + メモリ）、check / build、インスタンスの作業リスト、並列化、.o 生成 |
+| `src/lsp.rs` | 最小の LSP サーバ（ドキュメントごとに Session を持つ） |
+| `src/main.rs` | CLI（build / check / lsp） |
 
 ### インクリメンタル性の要点
+
+（単相化について）
+- ジェネリック関数とデフォルトメソッドは、要求された（関数, 型引数）ごとにインスタンスになる。
+  キーは「元の関数のキー + 型引数（struct は deep hash）」。
+- インスタンスは作業リストで不動点まで処理する。キャッシュした呼び出し元の Blob には、インスタンス参照を（元の関数名, 型引数）で保存してある。そのため読み戻すと、必要なインスタンスがまた要求される。
+- 実測（examples/traits.rs、25 関数 / 11 インスタンス）：
+  - `total_area<T>` の本体を編集すると、再コンパイルはその 2 インスタンスだけ。
+  - デフォルトメソッド `score` の本体を編集すると、再コンパイルはそれを使う 2 型分だけ（上書きしている Rect は対象外）。
+- check（LSP）でも、検査済みの印に「その関数が要求したインスタンス」を入れてある。
+  そのため、呼び出し元がキャッシュに当たっても、ジェネリック本体の型エラーは報告される。
 
 1. **callee の本体を変えても caller は再コンパイルされない。**
    キーに入るのは参照先のシグネチャだけで、Blob は callee を名前で参照している（blaze の template と同じ考え方）。
@@ -213,8 +290,8 @@ rustc 側はほとんどが std 由来。
 ## 次にやること
 
 - **言語**
-  - トレイト（静的ディスパッチから）、配列とスライス、`match`、enum、タプル
-  - ジェネリクス（単相化。レイアウトをキーにして共有する）
+  - 配列とスライス、タプル、`dyn Trait`、ジェネリックな struct / enum
+  - 単相化をレイアウトでキーにして共有する（`Vec<A>` と `Vec<B>` を 1 つにする。blaze の polymorph）
   - 最小の自前 std（relax 方式）
 - **インクリメンタル**
   - α 正規化ハッシュ

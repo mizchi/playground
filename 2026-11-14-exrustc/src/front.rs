@@ -42,6 +42,8 @@ pub enum Ty {
     Ref(bool, &'static Ty),
     /// Program::structs の index
     Struct(u32),
+    /// ジェネリック関数の型パラメータ (FnSig::generics の index)。インスタンス化で具体型に置き換わる
+    Param(u8),
 }
 
 /// 型の intern 表。種類数はプログラム中の型の数で抑えられるので解放しない。
@@ -81,7 +83,7 @@ impl Ty {
     }
 
     pub fn is_int(self) -> bool {
-        !matches!(self, Ty::Bool | Ty::Unit | Ty::Never | Ty::Ref(..) | Ty::Struct(_))
+        !matches!(self, Ty::Bool | Ty::Unit | Ty::Never | Ty::Ref(..) | Ty::Struct(_) | Ty::Param(_))
     }
 
     pub fn signed(self) -> bool {
@@ -95,7 +97,7 @@ impl Ty {
             Ty::I16 | Ty::U16 => 16,
             Ty::I32 | Ty::U32 => 32,
             Ty::I64 | Ty::U64 | Ty::Isize | Ty::Usize | Ty::Ref(..) => 64,
-            Ty::Unit | Ty::Never | Ty::Struct(_) => 0,
+            Ty::Unit | Ty::Never | Ty::Struct(_) | Ty::Param(_) => 0,
         }
     }
 }
@@ -149,6 +151,14 @@ pub struct SigSyn {
     pub impl_of: Option<String>,
     /// 第 1 引数が self (メソッド呼び出し構文で呼べる)
     pub has_self: bool,
+    /// 型パラメータと、それぞれのトレイト境界。trait の中の関数は先頭に `Self` を持つ
+    pub generics: Vec<(String, Vec<String>)>,
+    /// trait の中で宣言された関数ならその trait 名
+    pub trait_of: Option<String>,
+    /// 本体があるか (trait の宣言だけの関数は false)
+    pub has_body: bool,
+    /// `impl Trait for S` の中の関数ならその trait 名
+    pub impl_trait: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +172,55 @@ pub struct FnSig {
     /// impl の中の関数なら self 型 (struct id)
     pub impl_of: Option<u32>,
     pub has_self: bool,
+    pub generics: Vec<(String, Vec<String>)>,
+    pub trait_of: Option<String>,
+    pub has_body: bool,
+    pub impl_trait: Option<String>,
+}
+
+impl FnSig {
+    /// 単相化が必要か (直接はコンパイルしない)
+    pub fn is_generic(&self) -> bool {
+        !self.generics.is_empty()
+    }
+}
+
+/// 関数本体の中で型名を解決するための環境 (`Self` と型パラメータ)
+#[derive(Clone, Debug, Default)]
+pub struct TyEnv {
+    pub self_sid: Option<u32>,
+    pub params: Vec<(String, Ty)>,
+}
+
+pub fn has_param(t: Ty) -> bool {
+    match t {
+        Ty::Param(_) => true,
+        Ty::Ref(_, i) => has_param(*i),
+        _ => false,
+    }
+}
+
+pub fn subst(t: Ty, args: &[Ty]) -> Ty {
+    match t {
+        Ty::Param(i) => args[i as usize],
+        Ty::Ref(m, i) => Ty::Ref(m, intern(subst(*i, args))),
+        t => t,
+    }
+}
+
+/// 仮引数型 pt (型パラメータを含む) と実引数型 at を突き合わせて型パラメータを解く
+pub fn match_ty(pt: Ty, at: Ty, sol: &mut [Option<Ty>]) -> bool {
+    match (pt, at) {
+        (Ty::Param(i), t) => match sol[i as usize] {
+            Some(prev) => prev == t,
+            None => {
+                sol[i as usize] = Some(t);
+                true
+            }
+        },
+        (Ty::Ref(_, a), Ty::Ref(_, b)) => match_ty(*a, *b, sol),
+        (a, b) => a == b,
+    }
 }
 
 /// enum のバリアント (要約に保存する形)
@@ -226,6 +285,28 @@ pub struct Summary {
     pub impl_self: Option<String>,
     /// (名前, バリアント)。enum アイテムなら 1 個
     pub enums: Vec<(String, Vec<VariantSyn>)>,
+    /// trait ヘッダならその名前
+    pub trait_decl: Option<String>,
+    /// `impl Trait for S` のヘッダなら trait 名
+    pub impl_trait: Option<String>,
+    /// `#[derive(..)]` された (型名, trait 名)。derive した trait は実装扱いにする
+    pub derives: Vec<(String, Vec<String>)>,
+}
+
+/// `#[derive(A, B)]` の名前
+fn derive_names(attrs: &[syn::Attribute]) -> Vec<String> {
+    let mut out = vec![];
+    for a in attrs {
+        if a.path().is_ident("derive") {
+            let _ = a.parse_nested_meta(|m| {
+                if let Some(id) = m.path.get_ident() {
+                    out.push(id.to_string());
+                }
+                Ok(())
+            });
+        }
+    }
+    out
 }
 
 pub struct Program {
@@ -239,6 +320,108 @@ pub struct Program {
     pub struct_index: HashMap<String, u32>,
     /// 名前の最後のセグメント → 関数 ID 群 (`len` → `A::len`, `B::len`)。参照の過大近似用
     pub by_last: HashMap<String, Vec<u32>>,
+    /// trait 名 → その trait で宣言された関数
+    pub traits: HashMap<String, Vec<u32>>,
+    /// (型, trait) の実装
+    pub impls: HashSet<(u32, String)>,
+}
+
+/// 単相化したインスタンス (ジェネリック関数 base に型引数 args を入れたもの)
+pub struct Inst {
+    pub base: u32,
+    pub args: Vec<Ty>,
+    pub sig: FnSig,
+}
+
+/// インスタンス表。関数 ID は Program の関数の後ろに続けて振る。
+/// コード生成中に (並列に) 要求されたものを pending に積み、ドライバが不動点まで処理する
+pub struct Insts {
+    pub n_fns: u32,
+    pub list: Vec<Inst>,
+    map: HashMap<(u32, Vec<Ty>), u32>,
+    pub pending: Vec<u32>,
+}
+
+impl Insts {
+    pub fn new(prog: &Program) -> Insts {
+        Insts { n_fns: prog.names.len() as u32, list: vec![], map: HashMap::new(), pending: vec![] }
+    }
+
+    pub fn get(&self, id: u32) -> Option<&Inst> {
+        id.checked_sub(self.n_fns).and_then(|i| self.list.get(i as usize))
+    }
+
+    /// インスタンスを要求する (なければ作り、pending に積む)。トレイト境界もここで確かめる
+    pub fn request(&mut self, prog: &Program, base: u32, args: Vec<Ty>) -> R<u32> {
+        if let Some(&id) = self.map.get(&(base, args.clone())) {
+            return Ok(id);
+        }
+        let b = &prog.sigs[base as usize];
+        if b.generics.len() != args.len() {
+            return Err(format!("`{}` takes {} type arguments", prog.names[base as usize], b.generics.len()));
+        }
+        for ((pn, bounds), &t) in b.generics.iter().zip(&args) {
+            for tr in bounds {
+                if !prog.implements(t, tr) {
+                    return Err(format!("the trait bound `{}: {tr}` is not satisfied (for `{pn}`)", prog.tn(t)));
+                }
+            }
+        }
+        let names: Vec<String> = args.iter().map(|&t| prog.tn(t)).collect();
+        let impl_of = if b.trait_of.is_some() {
+            match args[0] {
+                Ty::Struct(sid) => Some(sid),
+                _ => None,
+            }
+        } else {
+            b.impl_of
+        };
+        let sig = FnSig {
+            params: b.params.iter().map(|&t| subst(t, &args)).collect(),
+            ret: subst(b.ret, &args),
+            symbol: format!("{}<{}>", b.symbol, names.join(",")),
+            is_extern: false,
+            is_main: false,
+            impl_of,
+            has_self: b.has_self,
+            generics: vec![],
+            trait_of: None,
+            has_body: true,
+            impl_trait: None,
+        };
+        let id = self.n_fns + self.list.len() as u32;
+        self.list.push(Inst { base, args: args.clone(), sig });
+        self.map.insert((base, args), id);
+        self.pending.push(id);
+        Ok(id)
+    }
+
+    /// 関数 (またはインスタンス) id のシグネチャ
+    pub fn sig<'a>(&'a self, prog: &'a Program, id: u32) -> &'a FnSig {
+        match self.get(id) {
+            Some(i) => &i.sig,
+            None => &prog.sigs[id as usize],
+        }
+    }
+
+    /// 本体を持つ関数 (インスタンスなら元のジェネリック関数) の id
+    pub fn body_of(&self, id: u32) -> u32 {
+        self.get(id).map(|i| i.base).unwrap_or(id)
+    }
+
+    /// 本体を型検査するときの型環境
+    pub fn env(&self, prog: &Program, id: u32) -> TyEnv {
+        match self.get(id) {
+            Some(i) => {
+                let b = &prog.sigs[i.base as usize];
+                TyEnv {
+                    self_sid: i.sig.impl_of,
+                    params: b.generics.iter().map(|g| g.0.clone()).zip(i.args.iter().copied()).collect(),
+                }
+            }
+            None => TyEnv { self_sid: prog.sigs[id as usize].impl_of, params: vec![] },
+        }
+    }
 }
 
 /// syn で 1 アイテムを parse する。エラー位置はファイル全体での行に補正する。
@@ -251,7 +434,21 @@ pub fn parse_item(src: &str, it: &SrcItem) -> R<syn::Item> {
     };
     match it.kind {
         ItemKind::Normal => syn::parse_str::<syn::Item>(text).map_err(fix),
-        ItemKind::ImplHeader => syn::parse_str::<syn::Item>(&format!("{text}}}")).map_err(fix),
+        ItemKind::ImplHeader | ItemKind::TraitHeader => {
+            syn::parse_str::<syn::Item>(&format!("{text}}}")).map_err(fix)
+        }
+        ItemKind::TraitMember(_) => {
+            let f = parse_trait_member(src, it)?;
+            match f.default {
+                Some(block) => Ok(syn::Item::Fn(syn::ItemFn {
+                    attrs: f.attrs,
+                    vis: syn::Visibility::Inherited,
+                    sig: f.sig,
+                    block: Box::new(block),
+                })),
+                None => err(f.sig.span(), "trait method has no default body").map_err(|e| relocate_err(e, it)),
+            }
+        }
         ItemKind::ImplMember(_) => match syn::parse_str::<syn::ImplItem>(text).map_err(fix)? {
             syn::ImplItem::Fn(f) => Ok(syn::Item::Fn(syn::ItemFn {
                 attrs: f.attrs,
@@ -265,6 +462,38 @@ pub fn parse_item(src: &str, it: &SrcItem) -> R<syn::Item> {
     }
 }
 
+pub fn parse_trait_member(src: &str, it: &SrcItem) -> R<syn::TraitItemFn> {
+    let text = &src[it.start..it.end];
+    match syn::parse_str::<syn::TraitItem>(text) {
+        Ok(syn::TraitItem::Fn(f)) => Ok(f),
+        Ok(other) => err(other.span(), "only fns are supported in traits").map_err(|e| relocate_err(e, it)),
+        Err(e) => {
+            let s = e.span().start();
+            Err(format!("{}:{}: {e}", s.line + it.line - 1, s.column + 1))
+        }
+    }
+}
+
+/// アイテムを parse して要約する。owner は impl / trait のメンバのとき、その self 型 / trait 名。
+/// codegen でも使う AST (本体のある関数) があれば一緒に返す
+pub fn parse_and_summarize(src: &str, it: &SrcItem, owner: Option<(&str, Option<&str>)>) -> R<(Summary, Option<syn::Item>)> {
+    if let ItemKind::TraitMember(_) = it.kind {
+        let (tr, _) = owner.ok_or("trait member without trait")?;
+        let f = parse_trait_member(src, it)?;
+        let mut sig = parse_sig(&f.sig, false, false, Some("Self"), Some(tr), None).map_err(|e| relocate_err(e, it))?;
+        sig.has_body = f.default.is_some();
+        let sm = Summary { fns: vec![(format!("{tr}::{}", f.sig.ident), sig)], ..Default::default() };
+        let item = f.default.map(|block| {
+            syn::Item::Fn(syn::ItemFn { attrs: f.attrs, vis: syn::Visibility::Inherited, sig: f.sig, block: Box::new(block) })
+        });
+        return Ok((sm, item));
+    }
+    let item = parse_item(src, it)?;
+    let sm = summarize(&item, owner).map_err(|e| relocate_err(e, it))?;
+    let keep = matches!(item, syn::Item::Fn(_));
+    Ok((sm, keep.then_some(item)))
+}
+
 /// "L:C: msg" 形式のエラーの行をアイテム開始行だけずらす。
 pub fn relocate_err(e: String, it: &SrcItem) -> String {
     if let Some((l, rest)) = e.split_once(':') {
@@ -275,17 +504,28 @@ pub fn relocate_err(e: String, it: &SrcItem) -> String {
     e
 }
 
-/// `self_name` は impl のメンバのとき、その impl の self 型
-pub fn summarize(item: &syn::Item, self_name: Option<&str>) -> R<Summary> {
+/// `owner` は impl のメンバのとき (self 型, 実装している trait)
+pub fn summarize(item: &syn::Item, owner: Option<(&str, Option<&str>)>) -> R<Summary> {
     let mut sm = Summary::default();
     match item {
-        syn::Item::Fn(f) if self_name.is_some() => {
-            let sig = parse_sig(&f.sig, false, false, self_name)?;
-            sm.fns.push((format!("{}::{}", self_name.unwrap(), f.sig.ident), sig));
+        syn::Item::Fn(f) if owner.is_some() => {
+            let (sn, tr) = owner.unwrap();
+            let sig = parse_sig(&f.sig, false, false, Some(sn), None, tr)?;
+            sm.fns.push((format!("{sn}::{}", f.sig.ident), sig));
+        }
+        syn::Item::Trait(t) => {
+            only_lifetimes(&t.generics)?;
+            sm.trait_decl = Some(t.ident.to_string());
         }
         syn::Item::Impl(im) => {
-            if let Some((_, tr, _)) = &im.trait_ {
-                return err(tr.span(), "trait impls are not supported yet");
+            if let Some((bang, tr, _)) = &im.trait_ {
+                if bang.is_some() {
+                    return err(tr.span(), "negative impls are not supported");
+                }
+                let Some(id) = tr.get_ident() else {
+                    return err(tr.span(), "unsupported trait path");
+                };
+                sm.impl_trait = Some(id.to_string());
             }
             only_lifetimes(&im.generics)?;
             let syn::Type::Path(tp) = &*im.self_ty else {
@@ -299,7 +539,7 @@ pub fn summarize(item: &syn::Item, self_name: Option<&str>) -> R<Summary> {
         syn::Item::Fn(f) => {
             let name = f.sig.ident.to_string();
             let is_main = name == "main";
-            let sig = parse_sig(&f.sig, false, is_main, None)?;
+            let sig = parse_sig(&f.sig, false, is_main, None, None, None)?;
             if is_main && (!sig.params.is_empty() || sig.ret != TySyn::Prim(Ty::Unit)) {
                 return err(f.sig.span(), "`main` must be `fn main()`");
             }
@@ -310,7 +550,7 @@ pub fn summarize(item: &syn::Item, self_name: Option<&str>) -> R<Summary> {
                 let syn::ForeignItem::Fn(f) = fi else {
                     return err(fi.span(), "only fns are supported in extern blocks");
                 };
-                sm.fns.push((f.sig.ident.to_string(), parse_sig(&f.sig, true, false, None)?));
+                sm.fns.push((f.sig.ident.to_string(), parse_sig(&f.sig, true, false, None, None, None)?));
             }
         }
         syn::Item::Enum(e) => {
@@ -341,6 +581,10 @@ pub fn summarize(item: &syn::Item, self_name: Option<&str>) -> R<Summary> {
                 };
                 vs.push(VariantSyn { name: v.ident.to_string(), kind, fields, discr });
             }
+            let d = derive_names(&e.attrs);
+            if !d.is_empty() {
+                sm.derives.push((sn.clone(), d));
+            }
             sm.enums.push((sn, vs));
         }
         syn::Item::Struct(s) => {
@@ -352,6 +596,10 @@ pub fn summarize(item: &syn::Item, self_name: Option<&str>) -> R<Summary> {
             for f in &nf.named {
                 let t = parse_tysyn(&f.ty, Some(&s.ident.to_string()))?;
                 fields.push((f.ident.as_ref().unwrap().to_string(), t));
+            }
+            let d = derive_names(&s.attrs);
+            if !d.is_empty() {
+                sm.derives.push((s.ident.to_string(), d));
             }
             sm.structs.push((s.ident.to_string(), fields));
         }
@@ -370,6 +618,8 @@ impl Program {
             structs: vec![],
             struct_index: HashMap::new(),
             by_last: HashMap::new(),
+            traits: HashMap::new(),
+            impls: HashSet::new(),
         };
         // 1. struct / enum 名を登録
         let mut sdefs: Vec<(usize, String, AdtShape)> = vec![];
@@ -443,11 +693,12 @@ impl Program {
                 if p.index.contains_key(name) {
                     return Err(format!("{}:1: duplicate definition of `{name}`", it.line));
                 }
+                let gnames: Vec<&str> = ss.generics.iter().map(|g| g.0.as_str()).collect();
                 let mut params = vec![];
                 for t in &ss.params {
-                    params.push(p.resolve(t).map_err(|e| format!("{}:1: {e}", it.line))?);
+                    params.push(p.resolve_g(t, &gnames).map_err(|e| format!("{}:1: {e}", it.line))?);
                 }
-                let ret = p.resolve(&ss.ret).map_err(|e| format!("{}:1: {e}", it.line))?;
+                let ret = p.resolve_g(&ss.ret, &gnames).map_err(|e| format!("{}:1: {e}", it.line))?;
                 let impl_of = match &ss.impl_of {
                     Some(n) => match p.struct_index.get(n) {
                         Some(&sid) => Some(sid),
@@ -471,13 +722,107 @@ impl Program {
                     is_main: ss.is_main,
                     impl_of,
                     has_self: ss.has_self,
+                    generics: ss.generics.clone(),
+                    trait_of: ss.trait_of.clone(),
+                    has_body: ss.has_body,
+                    impl_trait: ss.impl_trait.clone(),
                 });
+                if let Some(tr) = &ss.trait_of {
+                    p.traits.entry(tr.clone()).or_default().push(p.names.len() as u32 - 1);
+                }
+            }
+            if let Some(tr) = &sm.trait_decl {
+                p.traits.entry(tr.clone()).or_default();
+            }
+        }
+        // 4. trait の実装 (impl ヘッダの要約から)
+        for (it, sm) in items.iter().zip(sums) {
+            let (Some(sn), Some(tr)) = (&sm.impl_self, &sm.impl_trait) else { continue };
+            let Some(&sid) = p.struct_index.get(sn) else {
+                return Err(format!("{}:1: cannot find type `{sn}`", it.line));
+            };
+            if !p.traits.contains_key(tr) {
+                return Err(format!("{}:1: cannot find trait `{tr}`", it.line));
+            }
+            if !p.impls.insert((sid, tr.clone())) {
+                return Err(format!("{}:1: conflicting implementations of trait `{tr}` for `{sn}`", it.line));
+            }
+        }
+        // derive は実装扱い (Clone / Copy など。中身は常にビットコピーなので本体は要らない)
+        for sm in sums {
+            for (tn, ds) in &sm.derives {
+                if let Some(&sid) = p.struct_index.get(tn) {
+                    for d in ds {
+                        p.impls.insert((sid, d.clone()));
+                    }
+                }
+            }
+        }
+        // 必須メソッドが実装されているか
+        for (sid, tr) in &p.impls {
+            let Some(decls) = p.traits.get(tr) else { continue }; // derive した組み込み trait
+            for &d in decls {
+                let m = p.names[d as usize].rsplit("::").next().unwrap();
+                if !p.sigs[d as usize].has_body && p.method(*sid, m).is_none() {
+                    return Err(format!(
+                        "not all trait items implemented, missing: `{m}` in `impl {tr} for {}`",
+                        p.structs[*sid as usize].name
+                    ));
+                }
             }
         }
         if !p.index.contains_key("main") {
             return Err("no `main` function".into());
         }
         Ok(p)
+    }
+
+    /// 型 t が trait tr を実装しているか
+    pub fn implements(&self, t: Ty, tr: &str) -> bool {
+        match t {
+            Ty::Struct(sid) => self.impls.contains(&(sid, tr.to_string())),
+            // 組み込み型はマーカー trait だけ
+            Ty::Ref(true, _) => tr == "Sized",
+            _ => matches!(tr, "Copy" | "Clone" | "Sized"),
+        }
+    }
+
+    /// struct sid に名前 name のメソッドが見つからないとき、実装している trait のデフォルトメソッド
+    pub fn default_method(&self, sid: u32, name: &str) -> Option<u32> {
+        let mut found = None;
+        for (s, tr) in &self.impls {
+            if *s != sid {
+                continue;
+            }
+            let Some(decls) = self.traits.get(tr) else { continue };
+            for &d in decls {
+                if self.sigs[d as usize].has_body && self.names[d as usize].rsplit("::").next() == Some(name) {
+                    found = Some(d);
+                }
+            }
+        }
+        found
+    }
+
+    /// TySyn → Ty。generics に含まれる名前は型パラメータになる
+    pub fn resolve_g(&self, t: &TySyn, generics: &[&str]) -> R<Ty> {
+        Ok(match t {
+            TySyn::Named(n) => match generics.iter().position(|g| g == n) {
+                Some(i) => Ty::Param(i as u8),
+                None => self.resolve(t)?,
+            },
+            TySyn::Ref(m, inner) => Ty::Ref(*m, intern(self.resolve_g(inner, generics)?)),
+            t => self.resolve(t)?,
+        })
+    }
+
+    /// Ty → TySyn (キャッシュにインスタンスを名前で書くため)
+    pub fn ty_syn(&self, t: Ty) -> TySyn {
+        match t {
+            Ty::Ref(m, i) => TySyn::Ref(m, Box::new(self.ty_syn(*i))),
+            Ty::Struct(id) => TySyn::Named(self.structs[id as usize].name.clone()),
+            t => TySyn::Prim(t),
+        }
     }
 
     fn layout(
@@ -591,11 +936,22 @@ impl Program {
         })
     }
 
-    /// `self_sid` は impl の中にいるときの self 型
-    pub fn parse_ty(&self, t: &syn::Type, self_sid: Option<u32>) -> R<Ty> {
-        let sn = self_sid.map(|s| self.structs[s as usize].name.as_str());
+    /// 関数本体の中の型を解決する (`Self` と型パラメータは env から)
+    pub fn parse_ty(&self, t: &syn::Type, env: &TyEnv) -> R<Ty> {
+        let sn = env.self_sid.map(|s| self.structs[s as usize].name.as_str());
         let ts = parse_tysyn(t, sn)?;
-        self.resolve(&ts).or_else(|e| err(t.span(), e))
+        self.resolve_env(&ts, env).or_else(|e| err(t.span(), e))
+    }
+
+    fn resolve_env(&self, t: &TySyn, env: &TyEnv) -> R<Ty> {
+        Ok(match t {
+            TySyn::Named(n) => match env.params.iter().find(|p| &p.0 == n) {
+                Some(&(_, ty)) => ty,
+                None => self.resolve(t)?,
+            },
+            TySyn::Ref(m, inner) => Ty::Ref(*m, intern(self.resolve_env(inner, env)?)),
+            t => self.resolve(t)?,
+        })
     }
 
     /// 型名として書かれたパス (`S` / `Self`) → struct id
@@ -609,7 +965,9 @@ impl Program {
 
     /// 関数として書かれたパス (`f` / `S::f` / `Self::f`) → 関数 ID
     pub fn fn_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
-        if p.leading_colon.is_some() || p.segments.iter().any(|s| !s.arguments.is_none()) {
+        // 最後のセグメントの turbofish (`f::<T>`) は呼び出し側で読む
+        let n = p.segments.len();
+        if p.leading_colon.is_some() || p.segments.iter().take(n.saturating_sub(1)).any(|s| !s.arguments.is_none()) {
             return None;
         }
         match p.segments.len() {
@@ -659,6 +1017,7 @@ impl Program {
             Ty::Struct(id) => self.structs[id as usize].name.clone(),
             Ty::Unit => "()".into(),
             Ty::Never => "!".into(),
+            Ty::Param(i) => format!("T{i}"),
             t => format!("{t:?}").to_lowercase(),
         }
     }
@@ -671,6 +1030,7 @@ impl Program {
                 self.hash_ty(*i, h);
             }
             Ty::Struct(id) => h.add(&(101u8, self.structs[id as usize].deep)),
+            Ty::Param(i) => h.add(&(102u8, i)),
             t => h.add(&ty_code(t)),
         }
     }
@@ -679,6 +1039,7 @@ impl Program {
         let s = &self.sigs[id as usize];
         h.add(self.names[id as usize].as_str());
         h.add(&(s.symbol.as_str(), s.is_extern, s.is_main, s.has_self, s.params.len()));
+        h.add(&(&s.generics, &s.trait_of, s.has_body, &s.impl_trait));
         for &p in &s.params {
             self.hash_ty(p, h);
         }
@@ -738,7 +1099,7 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
-fn put_ty(out: &mut Vec<u8>, t: &TySyn) {
+pub fn put_ty(out: &mut Vec<u8>, t: &TySyn) {
     match t {
         TySyn::Prim(t) => out.push(ty_code(*t)),
         TySyn::Ref(m, i) => {
@@ -750,6 +1111,14 @@ fn put_ty(out: &mut Vec<u8>, t: &TySyn) {
             put_str(out, n);
         }
     }
+}
+
+/// d[*pos..] から TySyn を 1 つ読む
+pub fn read_ty(d: &[u8], pos: &mut usize) -> Option<TySyn> {
+    let mut r = Rd(d, *pos);
+    let t = r.ty();
+    *pos = r.1;
+    t
 }
 
 struct Rd<'a>(&'a [u8], usize);
@@ -780,14 +1149,38 @@ impl Summary {
     pub fn encode(&self, out: &mut Vec<u8>) {
         let flags = !self.structs.is_empty() as u8
             | (self.impl_self.is_some() as u8) << 1
-            | (!self.enums.is_empty() as u8) << 2;
+            | (!self.enums.is_empty() as u8) << 2
+            | (self.trait_decl.is_some() as u8) << 3
+            | (self.impl_trait.is_some() as u8) << 4
+            | (!self.derives.is_empty() as u8) << 5;
         out.push(flags);
         out.push(self.fns.len() as u8);
         for (name, s) in &self.fns {
             put_str(out, name);
             put_str(out, &s.symbol);
-            out.push(s.is_extern as u8 | (s.is_main as u8) << 1 | (s.has_self as u8) << 2);
+            out.push(
+                s.is_extern as u8
+                    | (s.is_main as u8) << 1
+                    | (s.has_self as u8) << 2
+                    | (!s.generics.is_empty() as u8) << 3
+                    | (s.trait_of.is_some() as u8) << 4
+                    | (s.has_body as u8) << 5
+                    | (s.impl_trait.is_some() as u8) << 6,
+            );
             put_str(out, s.impl_of.as_deref().unwrap_or(""));
+            if !s.generics.is_empty() {
+                out.push(s.generics.len() as u8);
+                for (g, bs) in &s.generics {
+                    put_str(out, g);
+                    out.push(bs.len() as u8);
+                    for b in bs {
+                        put_str(out, b);
+                    }
+                }
+            }
+            for x in [&s.trait_of, &s.impl_trait].into_iter().flatten() {
+                put_str(out, x);
+            }
             put_ty(out, &s.ret);
             out.push(s.params.len() as u8);
             for p in &s.params {
@@ -796,6 +1189,19 @@ impl Summary {
         }
         if let Some(n) = &self.impl_self {
             put_str(out, n);
+        }
+        for x in [&self.trait_decl, &self.impl_trait].into_iter().flatten() {
+            put_str(out, x);
+        }
+        if !self.derives.is_empty() {
+            out.push(self.derives.len() as u8);
+            for (t, ds) in &self.derives {
+                put_str(out, t);
+                out.push(ds.len() as u8);
+                for d in ds {
+                    put_str(out, d);
+                }
+            }
         }
         if flags & 4 != 0 {
             out.push(self.enums.len() as u8);
@@ -838,6 +1244,16 @@ impl Summary {
             let symbol = r.str()?;
             let fl = r.u8()?;
             let impl_of = Some(r.str()?).filter(|s| !s.is_empty());
+            let mut generics = vec![];
+            if fl & 8 != 0 {
+                for _ in 0..r.u8()? {
+                    let g = r.str()?;
+                    let bs = (0..r.u8()?).map(|_| r.str()).collect::<Option<Vec<_>>>()?;
+                    generics.push((g, bs));
+                }
+            }
+            let trait_of = if fl & 16 != 0 { Some(r.str()?) } else { None };
+            let impl_trait = if fl & 64 != 0 { Some(r.str()?) } else { None };
             let ret = r.ty()?;
             let params = (0..r.u8()?).map(|_| r.ty()).collect::<Option<_>>()?;
             sm.fns.push((
@@ -850,11 +1266,28 @@ impl Summary {
                     is_main: fl & 2 != 0,
                     impl_of,
                     has_self: fl & 4 != 0,
+                    generics,
+                    trait_of,
+                    has_body: fl & 32 != 0,
+                    impl_trait,
                 },
             ));
         }
         if flags & 2 != 0 {
             sm.impl_self = Some(r.str()?);
+        }
+        if flags & 8 != 0 {
+            sm.trait_decl = Some(r.str()?);
+        }
+        if flags & 16 != 0 {
+            sm.impl_trait = Some(r.str()?);
+        }
+        if flags & 32 != 0 {
+            for _ in 0..r.u8()? {
+                let t = r.str()?;
+                let ds = (0..r.u8()?).map(|_| r.str()).collect::<Option<Vec<_>>>()?;
+                sm.derives.push((t, ds));
+            }
         }
         let ne = if flags & 4 != 0 { r.u8()? } else { 0 };
         for _ in 0..ne {
@@ -908,8 +1341,68 @@ fn only_lifetimes(g: &syn::Generics) -> R<()> {
     Ok(())
 }
 
-fn parse_sig(sig: &syn::Signature, is_extern: bool, is_main: bool, self_name: Option<&str>) -> R<SigSyn> {
-    only_lifetimes(&sig.generics)?;
+/// trait 境界 (`T: A + B` と where 節) を集める
+fn collect_generics(g: &syn::Generics, out: &mut Vec<(String, Vec<String>)>) -> R<()> {
+    let bound_names = |bs: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>| -> R<Vec<String>> {
+        let mut v = vec![];
+        for b in bs {
+            match b {
+                syn::TypeParamBound::Trait(t) => match t.path.get_ident() {
+                    Some(id) => v.push(id.to_string()),
+                    None => return err(t.span(), "unsupported trait bound"),
+                },
+                syn::TypeParamBound::Lifetime(_) => {}
+                _ => return err(b.span(), "unsupported bound"),
+            }
+        }
+        Ok(v)
+    };
+    for p in &g.params {
+        match p {
+            syn::GenericParam::Lifetime(_) => {}
+            syn::GenericParam::Type(tp) => out.push((tp.ident.to_string(), bound_names(&tp.bounds)?)),
+            syn::GenericParam::Const(c) => return err(c.span(), "const generics are not supported"),
+        }
+    }
+    if let Some(w) = &g.where_clause {
+        for pr in &w.predicates {
+            let syn::WherePredicate::Type(pt) = pr else { continue };
+            let syn::Type::Path(tp) = &pt.bounded_ty else {
+                return err(pt.span(), "unsupported where clause");
+            };
+            let Some(id) = tp.path.get_ident() else {
+                return err(pt.span(), "unsupported where clause");
+            };
+            let bs = bound_names(&pt.bounds)?;
+            match out.iter_mut().find(|g| *id == g.0) {
+                Some(g) => g.1.extend(bs),
+                None => return err(pt.span(), "where clause on an unknown type parameter"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// self_name: impl の self 型 (trait の中なら "Self")。trait_of: trait の中の宣言。impl_trait: `impl Tr for S` の中
+fn parse_sig(
+    sig: &syn::Signature,
+    is_extern: bool,
+    is_main: bool,
+    self_name: Option<&str>,
+    trait_of: Option<&str>,
+    impl_trait: Option<&str>,
+) -> R<SigSyn> {
+    let mut generics = vec![];
+    if let Some(tr) = trait_of {
+        generics.push(("Self".to_string(), vec![tr.to_string()]));
+    }
+    collect_generics(&sig.generics, &mut generics)?;
+    if is_extern && !generics.is_empty() {
+        return err(sig.generics.span(), "extern fns cannot be generic");
+    }
+    if is_main && !generics.is_empty() {
+        return err(sig.generics.span(), "`main` cannot be generic");
+    }
     if sig.variadic.is_some() {
         return err(sig.span(), "variadic functions are not supported");
     }
@@ -933,11 +1426,12 @@ fn parse_sig(sig: &syn::Signature, is_extern: bool, is_main: bool, self_name: Op
         syn::ReturnType::Type(_, t) => parse_tysyn(t, self_name)?,
     };
     let name = sig.ident.to_string();
-    let symbol = match self_name {
+    let symbol = match (trait_of, self_name) {
         _ if is_extern || is_main => name,
         // ローカルシンボル。短く保つことで .o / シンボル表を小さくする
-        Some(sn) => format!("_x{sn}.{name}"),
-        None => format!("_x{name}"),
+        (Some(tr), _) => format!("_x{tr}.{name}"),
+        (None, Some(sn)) => format!("_x{sn}.{name}"),
+        (None, None) => format!("_x{name}"),
     };
     Ok(SigSyn {
         params,
@@ -945,7 +1439,11 @@ fn parse_sig(sig: &syn::Signature, is_extern: bool, is_main: bool, self_name: Op
         symbol,
         is_extern,
         is_main,
-        impl_of: self_name.map(String::from),
+        impl_of: if trait_of.is_some() { None } else { self_name.map(String::from) },
         has_self,
+        generics,
+        trait_of: trait_of.map(String::from),
+        has_body: true,
+        impl_trait: impl_trait.map(String::from),
     })
 }

@@ -30,7 +30,9 @@ use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{BinOp, Expr, Lit, Pat, Stmt, UnOp};
 
-use crate::front::{FnSig, Program, R, Ty, err, intern};
+use std::sync::Mutex;
+
+use crate::front::{FnSig, Insts, Program, R, Ty, TyEnv, err, has_param, intern, match_ty, subst};
 
 /// ポインタ型 (x86-64 / AArch64 前提)
 const PTR: ir::Type = types::I64;
@@ -145,6 +147,8 @@ pub fn clif_sig(s: &FnSig, cc: CallConv) -> Signature {
 pub struct Worker {
     ctx: Context,
     fbc: FunctionBuilderContext,
+    /// 直前に lowering した関数が要求したインスタンス
+    requested: Vec<u32>,
 }
 
 impl Worker {
@@ -152,31 +156,40 @@ impl Worker {
         Worker {
             ctx: Context::new(),
             fbc: FunctionBuilderContext::new(),
+            requested: vec![],
         }
     }
 
     /// 型検査だけ (Cranelift IR まで作り、機械語は作らない)。LSP の check 用
-    pub fn check(&mut self, prog: &Program, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<()> {
-        self.lower_or_reset(prog, id, f, isa)
+    /// id は関数かインスタンス。インスタンスなら f は元のジェネリック関数の本体。
+    /// 本体の中で要求されたジェネリック関数のインスタンスは insts に積まれる
+    /// 返り値はこの関数が要求したインスタンス (検査済みの印と一緒に保存し、次回も要求し直すため)
+    pub fn check(&mut self, prog: &Program, insts: &Mutex<Insts>, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<Vec<u32>> {
+        self.lower_or_reset(prog, insts, id, f, isa)?;
+        Ok(std::mem::take(&mut self.requested))
     }
 
-    pub fn compile(&mut self, prog: &Program, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<Blob> {
-        self.lower_or_reset(prog, id, f, isa)?;
+    pub fn compile(&mut self, prog: &Program, insts: &Mutex<Insts>, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<Blob> {
+        self.lower_or_reset(prog, insts, id, f, isa)?;
         self.emit(prog, id, isa)
     }
 
     /// エラーで lowering を途中で抜けると FunctionBuilderContext が中途半端な状態で残るので、
     /// 作り直してから次の関数に使う (check は 1 つのエラーで止まらず全関数を見るため)
-    fn lower_or_reset(&mut self, prog: &Program, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<()> {
-        let r = self.lower(prog, id, f, isa);
+    fn lower_or_reset(&mut self, prog: &Program, insts: &Mutex<Insts>, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<()> {
+        let r = self.lower(prog, insts, id, f, isa);
         if r.is_err() {
             self.fbc = FunctionBuilderContext::new();
         }
         r
     }
 
-    fn lower(&mut self, prog: &Program, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<()> {
-        let sig = &prog.sigs[id as usize];
+    fn lower(&mut self, prog: &Program, insts: &Mutex<Insts>, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<()> {
+        let (sig, env) = {
+            let g = insts.lock().unwrap();
+            (g.sig(prog, id).clone(), g.env(prog, id))
+        };
+        let sig = &sig;
         let cc = isa.default_call_conv();
         self.ctx.clear();
         self.ctx.func.signature = clif_sig(sig, cc);
@@ -192,13 +205,18 @@ impl Worker {
                 loops: vec![],
                 ret: sig.ret,
                 is_main: sig.is_main,
-                self_sid: sig.impl_of,
+                self_sid: env.self_sid,
                 sret: None,
                 frefs: HashMap::new(),
-                lets: crate::infer::infer(prog, f, id),
+                lets: crate::infer::infer(prog, f, sig, &env),
                 addr_taken: addr_taken(f),
+                env,
+                insts,
+                requested: vec![],
             };
-            cx.body(f, sig)?;
+            let r = cx.body(f, sig);
+            self.requested = std::mem::take(&mut cx.requested);
+            r?;
             cx.b.seal_all_blocks();
             cx.b.finalize(isa.frontend_config());
         }
@@ -312,6 +330,10 @@ struct Cx<'a, 'p> {
     frefs: HashMap<u32, FuncRef>,
     lets: crate::infer::LetTypes,
     addr_taken: HashSet<String>,
+    /// `Self` と型パラメータ (インスタンスなら具体型)
+    env: TyEnv,
+    insts: &'p Mutex<Insts>,
+    requested: Vec<u32>,
 }
 
 fn is_place_expr(e: &Expr) -> bool {
@@ -535,7 +557,7 @@ impl Cx<'_, '_> {
                 }
                 Stmt::Local(l) => {
                     let (name, ann) = match &l.pat {
-                        Pat::Type(pt) => (pat_name(&pt.pat)?, Some(self.prog.parse_ty(&pt.ty, self.self_sid)?)),
+                        Pat::Type(pt) => (pat_name(&pt.pat)?, Some(self.prog.parse_ty(&pt.ty, &self.env)?)),
                         p => (pat_name(p)?, self.lets.get(&crate::infer::let_key(l)).copied()),
                     };
                     let Some(init) = &l.init else {
@@ -600,16 +622,17 @@ impl Cx<'_, '_> {
                 .get_ident()
                 .and_then(|id| self.lookup(&id.to_string()))
                 .map(|(_, t)| t),
-            Expr::Call(c) => self.callee(&c.func).map(|(_, s)| s.ret),
-            Expr::Cast(c) => self.prog.parse_ty(&c.ty, self.self_sid).ok(),
+            Expr::Call(c) => self.callee(&c.func).map(|(_, s)| s.ret).filter(|&t| !has_param(t)),
+            Expr::Cast(c) => self.prog.parse_ty(&c.ty, &self.env).ok(),
             Expr::MethodCall(mc) => {
                 let mut t = self.peek(&mc.receiver)?;
                 while let Ty::Ref(_, i) = t {
                     t = *i;
                 }
                 let Ty::Struct(sid) = t else { return None };
-                let id = self.prog.method(sid, &mc.method.to_string())?;
-                Some(self.prog.sigs[id as usize].ret)
+                let name = mc.method.to_string();
+                let id = self.prog.method(sid, &name).or_else(|| self.prog.default_method(sid, &name))?;
+                Some(subst(self.prog.sigs[id as usize].ret, &[Ty::Struct(sid)])).filter(|&t| !has_param(t))
             }
             Expr::Paren(p) => self.peek(&p.expr),
             Expr::Group(g) => self.peek(&g.expr),
@@ -644,6 +667,13 @@ impl Cx<'_, '_> {
     /// `f` / `S::f` / `Self::f` 形式の呼び出し先
     fn callee(&self, f: &Expr) -> Option<(u32, &FnSig)> {
         let Expr::Path(p) = f else { return None };
+        // `<T as Trait>::m` / `<T>::m`
+        if let Some(q) = &p.qself {
+            let Ok(Ty::Struct(sid)) = self.prog.parse_ty(&q.ty, &self.env) else { return None };
+            let m = p.path.segments.last()?.ident.to_string();
+            let i = self.prog.method(sid, &m).or_else(|| self.prog.default_method(sid, &m))?;
+            return Some((i, &self.prog.sigs[i as usize]));
+        }
         if let Some(id) = p.path.get_ident() {
             if self.lookup(&id.to_string()).is_some() {
                 return None; // ローカル変数 (関数ポインタは未対応)
@@ -653,11 +683,10 @@ impl Cx<'_, '_> {
         Some((i, &self.prog.sigs[i as usize]))
     }
 
-    fn fref(&mut self, id: u32) -> FuncRef {
+    fn fref(&mut self, id: u32, sig: &FnSig) -> FuncRef {
         if let Some(&f) = self.frefs.get(&id) {
             return f;
         }
-        let sig = &self.prog.sigs[id as usize];
         let sigref = self.b.import_signature(clif_sig(sig, self.cc));
         let name = self
             .b
@@ -897,7 +926,7 @@ impl Cx<'_, '_> {
             Expr::Call(c) => self.call(c),
             Expr::MethodCall(mc) => self.method_call(mc),
             Expr::Cast(c) => {
-                let to = self.prog.parse_ty(&c.ty, self.self_sid)?;
+                let to = self.prog.parse_ty(&c.ty, &self.env)?;
                 let hint = self.peek(&c.expr).or(Some(Ty::I32));
                 let (v, from) = self.expr(&c.expr, hint)?;
                 if from == Ty::Never {
@@ -1032,15 +1061,19 @@ impl Cx<'_, '_> {
             return err(c.func.span(), "only direct calls to named functions are supported");
         };
         let args: Vec<&Expr> = c.args.iter().collect();
-        self.call_fn(id, None, &args, c.span())
+        let tf = match &*c.func {
+            Expr::Path(p) => match &p.path.segments.last().unwrap().arguments {
+                syn::PathArguments::AngleBracketed(a) => Some(a),
+                _ => None,
+            },
+            _ => None,
+        };
+        self.call_fn(id, None, &args, tf, c.span())
     }
 
     /// `recv.m(args)`: レシーバを自動 deref して struct を見つけ、
     /// メソッドの self 型に合わせて自動参照 (`&self` / `&mut self`) かコピー (`self`) で渡す
     fn method_call(&mut self, mc: &syn::ExprMethodCall) -> R<V> {
-        if mc.turbofish.is_some() {
-            return err(mc.span(), "turbofish is not supported");
-        }
         let mut p = if is_place_expr(&mc.receiver) {
             self.place(&mc.receiver)?
         } else {
@@ -1072,7 +1105,8 @@ impl Cx<'_, '_> {
         };
         let name = mc.method.to_string();
         let sname = self.prog.structs[sid as usize].name.clone();
-        let Some(id) = self.prog.method(sid, &name) else {
+        // 固有メソッド / trait 実装のメソッド → なければ実装している trait のデフォルトメソッド
+        let Some(id) = self.prog.method(sid, &name).or_else(|| self.prog.default_method(sid, &name)) else {
             return err(mc.method.span(), format!("no method named `{name}` found for `{sname}`"));
         };
         if !self.prog.sigs[id as usize].has_self {
@@ -1083,40 +1117,116 @@ impl Cx<'_, '_> {
         }
         // struct のアドレスを渡す: `&self` ならそのまま、`self` なら call_fn がコピーする
         let recv = self.addr_plus(a, o);
+        let st = Ty::Struct(sid);
+        let recv_ty = match self.prog.sigs[id as usize].params[0] {
+            Ty::Ref(m, _) => Ty::Ref(m, intern(st)),
+            _ => st,
+        };
         let args: Vec<&Expr> = mc.args.iter().collect();
-        self.call_fn(id, Some(recv), &args, mc.span())
+        self.call_fn(id, Some((recv, recv_ty)), &args, mc.turbofish.as_ref(), mc.span())
     }
 
-    fn call_fn(&mut self, id: u32, recv: Option<Value>, args: &[&Expr], span: proc_macro2::Span) -> R<V> {
+    /// 型引数を解いて、呼ぶべき関数 (インスタンス / trait 実装) とそのシグネチャを決める
+    /// turbofish (`f::<A, B>`) で決まる型パラメータ
+    fn turbofish_sol(&self, sig: &FnSig, turbofish: Option<&syn::AngleBracketedGenericArguments>) -> R<Vec<Option<Ty>>> {
+        let mut sol: Vec<Option<Ty>> = vec![None; sig.generics.len()];
+        // trait メソッドは先頭が Self なので、turbofish はその後ろの型パラメータに当たる
+        let first = sig.trait_of.is_some() as usize;
+        if let Some(tf) = turbofish {
+            for (i, a) in tf.args.iter().enumerate() {
+                let syn::GenericArgument::Type(t) = a else {
+                    return err(a.span(), "only type arguments are supported");
+                };
+                if let Some(slot) = sol.get_mut(first + i) {
+                    *slot = Some(self.prog.parse_ty(t, &self.env)?);
+                }
+            }
+        }
+        Ok(sol)
+    }
+
+    fn resolve_call(&mut self, id: u32, arg_tys: &[Ty], mut sol: Vec<Option<Ty>>, span: proc_macro2::Span) -> R<(u32, FnSig)> {
         let sig = self.prog.sigs[id as usize].clone();
+        if !sig.is_generic() {
+            return Ok((id, sig));
+        }
+        for (&pt, &at) in sig.params.iter().zip(arg_tys) {
+            if !match_ty(pt, at, &mut sol) {
+                return err(span, format!("mismatched types: expected `{}`, found `{}`", self.prog.tn(pt), self.prog.tn(at)));
+            }
+        }
+        let Some(args) = sol.iter().copied().collect::<Option<Vec<Ty>>>() else {
+            let i = sol.iter().position(|s| s.is_none()).unwrap();
+            return err(span, format!("cannot infer type parameter `{}`", sig.generics[i].0));
+        };
+        // trait の関数を `Tr::m(&x)` で呼んだら、実装があればそちらへ静的ディスパッチ
+        if sig.trait_of.is_some() {
+            if let Ty::Struct(sid) = args[0] {
+                let m = self.prog.names[id as usize].rsplit("::").next().unwrap().to_string();
+                if let Some(imp) = self.prog.method(sid, &m) {
+                    return Ok((imp, self.prog.sigs[imp as usize].clone()));
+                }
+            }
+            if !sig.has_body {
+                return err(span, format!("`{}` has no implementation for `{}`", self.prog.names[id as usize], self.prog.tn(args[0])));
+            }
+        }
+        let mut g = self.insts.lock().unwrap();
+        let iid = g.request(self.prog, id, args).or_else(|e| err(span, e))?;
+        self.requested.push(iid);
+        Ok((iid, g.sig(self.prog, iid).clone()))
+    }
+
+    fn call_fn(
+        &mut self,
+        id: u32,
+        recv: Option<(Value, Ty)>,
+        args: &[&Expr],
+        turbofish: Option<&syn::AngleBracketedGenericArguments>,
+        span: proc_macro2::Span,
+    ) -> R<V> {
+        let sig0 = self.prog.sigs[id as usize].clone();
         let skip = recv.is_some() as usize;
-        if sig.params.len() != args.len() + skip {
+        if sig0.params.len() != args.len() + skip {
             return err(
                 span,
-                format!("expected {} arguments, found {}", sig.params.len() - skip, args.len()),
+                format!("expected {} arguments, found {}", sig0.params.len() - skip, args.len()),
             );
         }
-        let mut vals = vec![];
+        // 実引数を先に評価する (ジェネリックなら型を見てから呼び先を決める)。
+        // 型パラメータは turbofish → 前の引数の順に分かった分だけ、後の引数の期待型に使う
+        let mut sol = self.turbofish_sol(&sig0, turbofish)?;
+        let mut vals: Vec<(Value, Ty, proc_macro2::Span)> = vec![];
+        if let Some((r, rt)) = recv {
+            match_ty(sig0.params[0], rt, &mut sol);
+            vals.push((r, rt, span));
+        }
+        for (a, &pt) in args.iter().zip(&sig0.params[skip..]) {
+            let exp = partial_subst(pt, &sol).filter(|&t| !has_param(t));
+            let (v, t) = self.expr(a, exp)?;
+            if t == Ty::Never {
+                return Ok((None, Ty::Never));
+            }
+            match_ty(pt, t, &mut sol);
+            vals.push((v.unwrap(), t, a.span()));
+        }
+        let arg_tys: Vec<Ty> = vals.iter().map(|v| v.1).collect();
+        let sol0 = self.turbofish_sol(&sig0, turbofish)?;
+        let (target, sig) = self.resolve_call(id, &arg_tys, sol0, span)?;
+        let mut cv = vec![];
         let sret = if is_sret(&sig) {
             let a = self.temp(sig.ret);
-            vals.push(a);
+            cv.push(a);
             Some(a)
         } else {
             None
         };
-        if let Some(r) = recv {
-            self.push_arg(&mut vals, r, sig.params[0]);
+        for ((v, t, sp), &pt) in vals.into_iter().zip(&sig.params) {
+            self.same(sp, t, pt)?;
+            self.push_arg(&mut cv, v, pt);
         }
-        for (a, &pt) in args.iter().zip(&sig.params[skip..]) {
-            let (v, t) = self.expr(a, Some(pt))?;
-            if t == Ty::Never {
-                return Ok((None, Ty::Never));
-            }
-            self.same(a.span(), t, pt)?;
-            self.push_arg(&mut vals, v.unwrap(), pt);
-        }
-        let f = self.fref(id);
-        let call = self.b.ins().call(f, &vals);
+        let f = self.fref(target, &sig);
+        let call = self.b.ins().call(f, &cv);
         if sig.ret == Ty::Never {
             self.b.ins().trap(TrapCode::unwrap_user(1));
             return Ok(self.dead());
@@ -1815,6 +1925,15 @@ fn is_simple_let(p: &Pat) -> bool {
         Pat::Type(pt) => is_simple_let(&pt.pat),
         _ => false,
     }
+}
+
+/// 分かっている型パラメータだけ置き換える (分からないものは Param のまま)
+fn partial_subst(t: Ty, sol: &[Option<Ty>]) -> Option<Ty> {
+    Some(match t {
+        Ty::Param(i) => sol.get(i as usize).copied().flatten().unwrap_or(t),
+        Ty::Ref(m, i) => Ty::Ref(m, intern(partial_subst(*i, sol)?)),
+        t => t,
+    })
 }
 
 fn has_bindings(p: &Pat) -> bool {

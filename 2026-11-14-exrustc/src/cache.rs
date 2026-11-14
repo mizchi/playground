@@ -12,7 +12,10 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
+use std::sync::Mutex;
+
 use crate::codegen::{Blob, BlobReloc, Target};
+use crate::front::{Insts, Program};
 
 const MAGIC: &[u8; 8] = b"EXRC0001";
 
@@ -141,22 +144,37 @@ impl Cache {
     }
 }
 
-pub fn encode_blob(b: &Blob, names: &[String], out: &mut Vec<u8>) {
+/// 機械語 + リロケーションを書く。呼び先がインスタンスなら (元の関数名, 型引数) で書くので、
+/// 次のビルドでインスタンス番号が変わっても読み戻せる
+pub fn encode_blob(b: &Blob, prog: &Program, insts: &Insts, out: &mut Vec<u8>) {
     out.extend_from_slice(&b.align.to_le_bytes());
     out.extend_from_slice(&(b.code.len() as u32).to_le_bytes());
     out.extend_from_slice(&b.code);
     out.extend_from_slice(&(b.relocs.len() as u32).to_le_bytes());
+    let put_name = |out: &mut Vec<u8>, id: u32| {
+        let n = prog.names[id as usize].as_bytes();
+        out.extend_from_slice(&(n.len() as u16).to_le_bytes());
+        out.extend_from_slice(n);
+    };
     for r in &b.relocs {
         out.extend_from_slice(&r.offset.to_le_bytes());
         out.push(r.kind);
         out.extend_from_slice(&r.addend.to_le_bytes());
         match r.target {
-            Target::Func(id) => {
-                out.push(0);
-                let n = names[id as usize].as_bytes();
-                out.extend_from_slice(&(n.len() as u16).to_le_bytes());
-                out.extend_from_slice(n);
-            }
+            Target::Func(id) => match insts.get(id) {
+                None => {
+                    out.push(0);
+                    put_name(out, id);
+                }
+                Some(inst) => {
+                    out.push(2);
+                    put_name(out, inst.base);
+                    out.push(inst.args.len() as u8);
+                    for &t in &inst.args {
+                        crate::front::put_ty(out, &prog.ty_syn(t));
+                    }
+                }
+            },
             Target::SelfOffset(o) => {
                 out.push(1);
                 out.extend_from_slice(&o.to_le_bytes());
@@ -165,7 +183,51 @@ pub fn encode_blob(b: &Blob, names: &[String], out: &mut Vec<u8>) {
     }
 }
 
-pub fn decode_blob(d: &[u8], name_to_id: &HashMap<String, u32>) -> Option<Blob> {
+/// インスタンスの列を (元の関数名, 型引数) で書く (check の「検査済み」の印に付ける)
+/// 空なら何も書かない (大半の関数はインスタンスを要求しないので、印は 0 byte のまま)
+pub fn encode_insts(ids: &[u32], prog: &Program, insts: &Insts, out: &mut Vec<u8>) {
+    if ids.is_empty() {
+        return;
+    }
+    out.extend_from_slice(&(ids.len() as u32).to_le_bytes());
+    for &id in ids {
+        let inst = insts.get(id).unwrap();
+        let n = prog.names[inst.base as usize].as_bytes();
+        out.extend_from_slice(&(n.len() as u16).to_le_bytes());
+        out.extend_from_slice(n);
+        out.push(inst.args.len() as u8);
+        for &t in &inst.args {
+            crate::front::put_ty(out, &prog.ty_syn(t));
+        }
+    }
+}
+
+/// encode_insts の逆。各インスタンスを insts に要求し直す。読めなければ false
+pub fn request_insts(d: &[u8], prog: &Program, insts: &Mutex<Insts>) -> bool {
+    let mut r = Rd(d, 0);
+    let Some(n) = r.u32() else { return d.is_empty() };
+    for _ in 0..n {
+        let ok = (|| {
+            let len = r.u16()? as usize;
+            let name = std::str::from_utf8(r.take(len)?).ok()?;
+            let id = *prog.index.get(name)?;
+            let na = r.u8()? as usize;
+            let mut args = Vec::with_capacity(na);
+            for _ in 0..na {
+                let ts = crate::front::read_ty(r.0, &mut r.1)?;
+                args.push(prog.resolve(&ts).ok()?);
+            }
+            insts.lock().unwrap().request(prog, id, args).ok()
+        })();
+        if ok.is_none() {
+            return false;
+        }
+    }
+    true
+}
+
+/// encode_blob の逆。インスタンスへの参照は insts に要求し直す (pending に積まれる)
+pub fn decode_blob(d: &[u8], prog: &Program, insts: &Mutex<Insts>) -> Option<Blob> {
     let mut r = Rd(d, 0);
     let align = r.u32()?;
     let n = r.u32()? as usize;
@@ -176,11 +238,23 @@ pub fn decode_blob(d: &[u8], name_to_id: &HashMap<String, u32>) -> Option<Blob> 
         let offset = r.u32()?;
         let kind = r.u8()?;
         let addend = r.u64()? as i64;
-        let target = match r.u8()? {
-            0 => {
+        let tag = r.u8()?;
+        let target = match tag {
+            0 | 2 => {
                 let len = r.u16()? as usize;
                 let name = std::str::from_utf8(r.take(len)?).ok()?;
-                Target::Func(*name_to_id.get(name)?)
+                let id = *prog.index.get(name)?;
+                if tag == 0 {
+                    Target::Func(id)
+                } else {
+                    let na = r.u8()? as usize;
+                    let mut args = Vec::with_capacity(na);
+                    for _ in 0..na {
+                        let ts = crate::front::read_ty(r.0, &mut r.1)?;
+                        args.push(prog.resolve(&ts).ok()?);
+                    }
+                    Target::Func(insts.lock().unwrap().request(prog, id, args).ok()?)
+                }
             }
             1 => Target::SelfOffset(r.u32()?),
             _ => return None,

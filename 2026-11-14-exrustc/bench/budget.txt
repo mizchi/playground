@@ -15,3 +15,6 @@ methods.object_bytes 7005
 structs.binary_bytes 7266
 structs.cache_bytes 5075
 structs.object_bytes 6048
+traits.binary_bytes 7660
+traits.cache_bytes 7819
+traits.object_bytes 8677

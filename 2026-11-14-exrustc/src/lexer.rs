@@ -27,6 +27,10 @@ pub enum ItemKind {
     ImplHeader,
     /// impl の中のアイテム。ヘッダの index を持つ
     ImplMember(u32),
+    /// `trait X {` まで
+    TraitHeader,
+    /// trait の中のアイテム (デフォルト実装のない宣言も含む)
+    TraitMember(u32),
 }
 
 fn is_ident_start(c: u8) -> bool {
@@ -92,6 +96,8 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
     let mut base: i32 = 0;
     let mut impl_header: Option<u32> = None;
     let mut impl_pending = false;
+    // ブロックが trait か impl か
+    let mut is_trait = false;
     macro_rules! tok {
         ($a:expr, $b:expr, $k:expr) => {
             st.tok($a, $b, $k)
@@ -153,7 +159,8 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
                 // `unsafe impl` に備えて unsafe は読み飛ばす
                 if w != b"unsafe" {
                     st.seen_ident = true;
-                    impl_pending = w == b"impl";
+                    impl_pending = w == b"impl" || w == b"trait";
+                    is_trait = w == b"trait";
                 }
             }
             continue;
@@ -219,11 +226,11 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
             let (sp, ln, idents) = st.cur.take().unwrap();
             let mut h = KeyHasher::new();
             let kind = if header_end {
-                ItemKind::ImplHeader
+                if is_trait { ItemKind::TraitHeader } else { ItemKind::ImplHeader }
             } else if let Some(hi) = impl_header {
-                // メンバのハッシュにはヘッダ (= self 型) を含める
+                // メンバのハッシュにはヘッダ (= self 型 / trait 名) を含める
                 h.add(&items[hi as usize].hash);
-                ItemKind::ImplMember(hi)
+                if is_trait { ItemKind::TraitMember(hi) } else { ItemKind::ImplMember(hi) }
             } else {
                 ItemKind::Normal
             };

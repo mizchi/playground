@@ -20,7 +20,9 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::cache::{self, Cache, Key, KeyHasher};
 use crate::codegen::{self, Blob, RELOC_KINDS, Target, Worker};
-use crate::front::{self, Program, Summary};
+use std::sync::Mutex;
+
+use crate::front::{self, Insts, Program, Summary};
 use crate::lexer::{self, ItemKind, SrcItem};
 use crate::link;
 
@@ -226,34 +228,36 @@ impl Session {
                 sums[ii] = Some(Summary::default());
             }
         };
-        // impl ヘッダを先に要約する (メンバの `Self` を決めるのに必要)
-        for &ii in todo.iter().filter(|&&i| items[i].kind == ItemKind::ImplHeader) {
-            let it = &items[ii];
-            let r = front::parse_item(src, it)
-                .and_then(|item| front::summarize(&item, None).map_err(|e| front::relocate_err(e, it)));
+        // impl / trait ヘッダを先に要約する (メンバの `Self` / trait 名を決めるのに必要)
+        let is_header = |k: ItemKind| matches!(k, ItemKind::ImplHeader | ItemKind::TraitHeader);
+        for &ii in todo.iter().filter(|&&i| is_header(items[i].kind)) {
+            let r = front::parse_and_summarize(src, &items[ii], None).map(|x| x.0);
             record(ii, r, &mut sums);
         }
-        let self_names: Vec<Option<String>> = items
+        // メンバの所有者: impl なら (self 型, 実装する trait)、trait なら (trait 名, None)
+        let owners: Vec<Option<(String, Option<String>)>> = items
             .iter()
             .map(|it| match it.kind {
-                ItemKind::ImplMember(h) => sums[h as usize].as_ref().unwrap().impl_self.clone(),
+                ItemKind::ImplMember(h) => {
+                    let hs = sums[h as usize].as_ref().unwrap();
+                    hs.impl_self.clone().map(|n| (n, hs.impl_trait.clone()))
+                }
+                ItemKind::TraitMember(h) => sums[h as usize].as_ref().unwrap().trait_decl.clone().map(|n| (n, None)),
                 _ => None,
             })
             .collect();
+        let owner = |ii: usize| owners[ii].as_ref().map(|(a, b)| (a.as_str(), b.as_deref()));
         let todo: Vec<usize> = todo.into_iter().filter(|&i| sums[i].is_none()).collect();
         let mut parsed: HashMap<usize, syn::Item> = HashMap::new();
         if todo.len() <= KEEP_PARSED {
             // インクリメンタル: その場で parse し、AST は codegen 用に取っておく
             for &ii in &todo {
-                let it = &items[ii];
-                match front::parse_item(src, it) {
-                    Ok(item) => {
-                        let sm = front::summarize(&item, self_names[ii].as_deref())
-                            .map_err(|e| front::relocate_err(e, it));
-                        if sm.is_ok() {
+                match front::parse_and_summarize(src, &items[ii], owner(ii)) {
+                    Ok((sm, item)) => {
+                        if let Some(item) = item {
                             parsed.insert(ii, item);
                         }
-                        record(ii, sm, &mut sums);
+                        record(ii, Ok(sm), &mut sums);
                     }
                     Err(e) => record(ii, Err(e), &mut sums),
                 }
@@ -261,10 +265,7 @@ impl Session {
         } else {
             // cold: 並列に parse して要約だけ持ち帰る (AST は !Send なのでスレッド内で捨てる)
             let done = par_map(self.opts.jobs, &todo, 32, |ii| {
-                let it = &items[ii];
-                Ok(front::parse_item(src, it).and_then(|item| {
-                    front::summarize(&item, self_names[ii].as_deref()).map_err(|e| front::relocate_err(e, it))
-                }))
+                Ok(front::parse_and_summarize(src, &items[ii], owner(ii)).map(|x| x.0))
             })?;
             for (ii, r) in todo.iter().zip(done) {
                 record(*ii, r, &mut sums);
@@ -310,6 +311,28 @@ impl Session {
         h.finish()
     }
 
+    /// 関数かインスタンスのキー。インスタンスは元の関数のキー + 型引数 (struct は deep hash)
+    fn key_of(a: &Analysis, insts: &Mutex<Insts>, id: u32, base: Key) -> Key {
+        let g = insts.lock().unwrap();
+        let k = Self::fn_key(a, g.body_of(id) as usize, base);
+        match g.get(id) {
+            None => k,
+            Some(inst) => {
+                let mut h = KeyHasher::new();
+                h.add(&(k, 7u8));
+                for &t in &inst.args {
+                    a.prog.hash_ty(t, &mut h);
+                }
+                h.finish()
+            }
+        }
+    }
+
+    /// 直接コンパイルする関数か (ジェネリック関数・本体のない trait 宣言は除く)
+    fn concrete(p: &Program, id: usize) -> bool {
+        p.item_of[id].is_some() && !p.sigs[id].is_generic() && p.sigs[id].has_body
+    }
+
     /// 型検査だけを行い、全診断を返す (LSP 用)。到達しない関数も検査する。
     /// 検査に通った関数は「OK」の印をキャッシュし、次回は parse もしない。
     pub fn check(&mut self, src: &str) -> Vec<Diagnostic> {
@@ -330,24 +353,36 @@ impl Session {
         let mut base = KeyHasher::new();
         base.add(&(self.cid, 2u8));
         let base = base.finish();
-        // 検査済みの印がない関数だけ検査する
-        let mut todo = vec![];
-        for id in 0..a.prog.names.len() {
-            if a.prog.item_of[id].is_none() {
-                continue;
+        // 検査済みの印がない関数だけ検査する。ジェネリック関数は、要求されたインスタンスごとに検査する
+        let insts = Mutex::new(Insts::new(&a.prog));
+        let mut ids: Vec<u32> = (0..a.prog.names.len()).filter(|&i| Self::concrete(&a.prog, i)).map(|i| i as u32).collect();
+        let mut parsed = std::mem::take(&mut a.parsed);
+        while !ids.is_empty() {
+            let mut todo = vec![];
+            for &id in &ids {
+                let k = Self::key_of(&a, &insts, id, base);
+                // 検査済みなら、その関数が要求するインスタンスだけ要求し直す
+                let hit = match self.get(k) {
+                    Some(d) => cache::request_insts(d, &a.prog, &insts),
+                    None => false,
+                };
+                if !hit {
+                    todo.push((id, k));
+                }
             }
-            let k = Self::fn_key(&a, id, base);
-            if self.get(k).is_none() {
-                todo.push((id as u32, k));
+            let tids: Vec<u32> = todo.iter().map(|&(id, _)| id).collect();
+            let results = check_all(&self.opts, src, &a.items, &a.prog, &insts, &tids, std::mem::take(&mut parsed), &self.isa);
+            for ((_, k), r) in todo.into_iter().zip(results) {
+                match r {
+                    Ok(req) => {
+                        let mut b = vec![];
+                        cache::encode_insts(&req, &a.prog, &insts.lock().unwrap(), &mut b);
+                        self.put(k, b);
+                    }
+                    Err(e) => errs.push(e),
+                }
             }
-        }
-        let ids: Vec<u32> = todo.iter().map(|&(id, _)| id).collect();
-        let results = check_all(&self.opts, src, &a.items, &a.prog, &ids, std::mem::take(&mut a.parsed), &self.isa);
-        for ((_, k), r) in todo.into_iter().zip(results) {
-            match r {
-                Ok(()) => self.put(k, vec![]),
-                Err(e) => errs.push(e),
-            }
+            ids = std::mem::take(&mut insts.lock().unwrap().pending);
         }
         errs
     }
@@ -376,41 +411,51 @@ impl Session {
         base.add(self.isa.triple().to_string().as_str());
         base.add(&(self.opts.opt, self.opts.fast_regalloc));
         let base = base.finish();
-        let mut keys: Vec<Key> = vec![0; a.prog.names.len()];
-        let mut user_live = vec![];
-        for id in 0..a.prog.names.len() {
-            if a.prog.item_of[id].is_some() && live[id] {
-                user_live.push(id as u32);
-                keys[id] = Self::fn_key(&a, id, base);
-            }
-        }
+        let user_live: Vec<u32> =
+            (0..a.prog.names.len()).filter(|&i| live[i] && Self::concrete(&a.prog, i)).map(|i| i as u32).collect();
         let n_user = a.prog.item_of.iter().filter(|i| i.is_some()).count();
         tm.lap("plan", format!("{} live fns, {} unreachable skipped", user_live.len(), n_user - user_live.len()));
 
+        // 関数 → (キャッシュ or コンパイル)。その途中で要求されたインスタンスを、不動点まで同じように処理する
+        let insts = Mutex::new(Insts::new(&a.prog));
         let mut blobs: HashMap<u32, Blob> = HashMap::new();
-        let mut misses = vec![];
-        for &id in &user_live {
-            let k = keys[id as usize];
-            match self.get(k).and_then(|d| cache::decode_blob(d, &a.prog.index)) {
-                Some(b) => {
-                    blobs.insert(id, b);
+        let mut parsed = std::mem::take(&mut a.parsed);
+        let mut n_hit = 0;
+        let mut n_compiled = 0;
+        let mut wave = user_live.clone();
+        while !wave.is_empty() {
+            let mut misses = vec![];
+            let mut keys = HashMap::new();
+            for &id in &wave {
+                let k = Self::key_of(&a, &insts, id, base);
+                keys.insert(id, k);
+                match self.get(k).and_then(|d| cache::decode_blob(d, &a.prog, &insts)) {
+                    Some(b) => {
+                        n_hit += 1;
+                        blobs.insert(id, b);
+                    }
+                    None => misses.push(id),
                 }
-                None => misses.push(id),
             }
+            let compiled =
+                compile_all(&self.opts, src, &a.items, &a.prog, &insts, &misses, std::mem::take(&mut parsed), &self.isa)?;
+            n_compiled += misses.len();
+            for (id, b) in compiled {
+                let mut buf = vec![];
+                cache::encode_blob(&b, &a.prog, &insts.lock().unwrap(), &mut buf);
+                self.put(keys[&id], buf);
+                blobs.insert(id, b);
+            }
+            wave = std::mem::take(&mut insts.lock().unwrap().pending);
+            wave.retain(|id| !blobs.contains_key(id));
         }
-        tm.lap("cache", format!("{} hit / {} miss", blobs.len(), misses.len()));
+        let insts = insts.into_inner().unwrap();
+        tm.lap(
+            "codegen",
+            format!("{n_hit} hit / {n_compiled} compiled ({} generic instances)", insts.list.len()),
+        );
 
-        let parsed = std::mem::take(&mut a.parsed);
-        let compiled = compile_all(&self.opts, src, &a.items, &a.prog, &misses, parsed, &self.isa)?;
-        for (id, b) in compiled {
-            let mut buf = vec![];
-            cache::encode_blob(&b, &a.prog.names, &mut buf);
-            self.put(keys[id as usize], buf);
-            blobs.insert(id, b);
-        }
-        tm.lap("codegen", format!("{} fns", misses.len()));
-
-        let obj = emit_object(&a.prog, &live, &user_live, &blobs, self.isa.clone())?;
+        let obj = emit_object(&a.prog, &insts, &live, &user_live, &blobs, self.isa.clone())?;
         let mut oh = KeyHasher::new();
         oh.add(&obj[..]);
         oh.add(&self.opts.linker); // リンカを変えたら再リンク
@@ -437,8 +482,8 @@ impl Session {
         let _ = &a.sums;
         let _ = &a.sum_keys;
         Ok(BuildReport {
-            fns_live: user_live.len(),
-            fns_compiled: misses.len(),
+            fns_live: user_live.len() + insts.list.len(),
+            fns_compiled: n_compiled,
             items_parsed: a.n_parsed,
             object_bytes: obj.len(),
             linked,
@@ -517,30 +562,35 @@ where
     Ok(all.into_iter().map(|(_, t)| t).collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_one(
     w: &mut Worker,
     src: &str,
     items: &[SrcItem],
     prog: &Program,
+    insts: &Mutex<Insts>,
     id: u32,
     pre: Option<syn::Item>,
     isa: &dyn TargetIsa,
 ) -> Result<Blob, String> {
-    let it = &items[prog.item_of[id as usize].unwrap() as usize];
+    let body = insts.lock().unwrap().body_of(id);
+    let it = &items[prog.item_of[body as usize].unwrap() as usize];
     let item = match pre {
         Some(i) => i,
         None => front::parse_item(src, it)?,
     };
     let syn::Item::Fn(f) = item else { unreachable!() };
-    w.compile(prog, id, &f, isa).map_err(|e| front::relocate_err(e, it))
+    w.compile(prog, insts, id, &f, isa).map_err(|e| front::relocate_err(e, it))
     // f (AST) はここで捨てる: 同時に生きている AST は常に 1 関数分だけ
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_all(
     o: &Options,
     src: &str,
     items: &[SrcItem],
     prog: &Program,
+    insts: &Mutex<Insts>,
     misses: &[u32],
     mut parsed: HashMap<usize, syn::Item>,
     isa: &OwnedTargetIsa,
@@ -553,8 +603,9 @@ fn compile_all(
         return misses
             .iter()
             .map(|&id| {
-                let pre = parsed.remove(&(prog.item_of[id as usize].unwrap() as usize));
-                Ok((id, compile_one(&mut w, src, items, prog, id, pre, &**isa)?))
+                let body = insts.lock().unwrap().body_of(id);
+                let pre = parsed.remove(&(prog.item_of[body as usize].unwrap() as usize));
+                Ok((id, compile_one(&mut w, src, items, prog, insts, id, pre, &**isa)?))
             })
             .collect();
     }
@@ -575,7 +626,7 @@ fn compile_all(
                             break;
                         }
                         for &id in &misses[i..(i + 8).min(misses.len())] {
-                            out.push((id, compile_one(&mut w, src, items, prog, id, None, &*isa)?));
+                            out.push((id, compile_one(&mut w, src, items, prog, insts, id, None, &*isa)?));
                         }
                     }
                     Ok(out)
@@ -591,30 +642,33 @@ fn compile_all(
 }
 
 /// 型検査だけを (ミスが多ければ並列に) 行う。結果は ids と同じ順
+#[allow(clippy::too_many_arguments)]
 fn check_all(
     o: &Options,
     src: &str,
     items: &[SrcItem],
     prog: &Program,
+    insts: &Mutex<Insts>,
     ids: &[u32],
     mut parsed: HashMap<usize, syn::Item>,
     isa: &OwnedTargetIsa,
-) -> Vec<Result<(), String>> {
-    let one = |w: &mut Worker, id: u32, pre: Option<syn::Item>| -> Result<(), String> {
-        let it = &items[prog.item_of[id as usize].unwrap() as usize];
+) -> Vec<Result<Vec<u32>, String>> {
+    let body = |id: u32| insts.lock().unwrap().body_of(id);
+    let one = |w: &mut Worker, id: u32, pre: Option<syn::Item>| -> Result<Vec<u32>, String> {
+        let it = &items[prog.item_of[body(id) as usize].unwrap() as usize];
         let item = match pre {
             Some(i) => i,
             None => front::parse_item(src, it)?,
         };
-        let syn::Item::Fn(f) = item else { return Ok(()) };
-        w.check(prog, id, &f, &**isa).map_err(|e| front::relocate_err(e, it))
+        let syn::Item::Fn(f) = item else { return Ok(vec![]) };
+        w.check(prog, insts, id, &f, &**isa).map_err(|e| front::relocate_err(e, it))
     };
     if ids.len() <= KEEP_PARSED {
         let mut w = Worker::new();
         return ids
             .iter()
             .map(|&id| {
-                let pre = parsed.remove(&(prog.item_of[id as usize].unwrap() as usize));
+                let pre = parsed.remove(&(prog.item_of[body(id) as usize].unwrap() as usize));
                 one(&mut w, id, pre)
             })
             .collect();
@@ -627,12 +681,13 @@ fn check_all(
         let mut w = Worker::new();
         Ok(ids[st..(st + chunk).min(ids.len())].iter().map(|&id| one(&mut w, id, None)).collect::<Vec<_>>())
     })
-    .map(|v: Vec<Vec<Result<(), String>>>| v.into_iter().flatten().collect())
+    .map(|v: Vec<Vec<Result<Vec<u32>, String>>>| v.into_iter().flatten().collect())
     .unwrap_or_else(|e| vec![Err(e)])
 }
 
 fn emit_object(
     prog: &Program,
+    insts: &Insts,
     live: &[bool],
     user_live: &[u32],
     blobs: &HashMap<u32, Blob>,
@@ -646,7 +701,8 @@ fn emit_object(
     let mut m = ObjectModule::new(b);
     let mut ids = HashMap::new();
     for (i, sig) in prog.sigs.iter().enumerate() {
-        if !live[i] {
+        // ジェネリック関数そのものは ABI を持たない (インスタンスだけを置く)
+        if !live[i] || sig.is_generic() || !sig.has_body {
             continue;
         }
         let linkage = if sig.is_extern {
@@ -661,7 +717,17 @@ fn emit_object(
             .map_err(|e| e.to_string())?;
         ids.insert(i as u32, id);
     }
-    for &uid in user_live {
+    // インスタンスはシンボル名順に並べる (登録順は並列実行で変わるが、.o は決定的にしたい)
+    let mut order: Vec<u32> = (0..insts.list.len() as u32).map(|i| insts.n_fns + i).collect();
+    order.sort_by(|a, b| insts.get(*a).unwrap().sig.symbol.cmp(&insts.get(*b).unwrap().sig.symbol));
+    for &iid in &order {
+        let sig = &insts.get(iid).unwrap().sig;
+        let id = m
+            .declare_function(&sig.symbol, Linkage::Local, &codegen::clif_sig(sig, cc))
+            .map_err(|e| e.to_string())?;
+        ids.insert(iid, id);
+    }
+    for &uid in user_live.iter().chain(&order) {
         let blob = &blobs[&uid];
         let fid = ids[&uid];
         let relocs: Vec<ModuleReloc> = blob
