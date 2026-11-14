@@ -164,6 +164,34 @@ pub struct FnSig {
     pub has_self: bool,
 }
 
+/// enum のバリアント (要約に保存する形)
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct VariantSyn {
+    pub name: String,
+    pub kind: VariantKind,
+    pub fields: Vec<(String, TySyn)>,
+    pub discr: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VariantKind {
+    Unit,
+    /// `V(a, b)`。フィールド名は "0", "1", ...
+    Tuple,
+    /// `V { x, y }`
+    Struct,
+}
+
+pub struct VariantDef {
+    pub name: String,
+    pub kind: VariantKind,
+    /// (名前, 型, enum 先頭からのオフセット)
+    pub fields: Vec<(String, Ty, u32)>,
+    pub discr: i64,
+}
+
+/// struct と enum (名前付きの集約型) の定義。enum も同じ表に入れることで、
+/// コピー・引数渡し・impl・deep hash などの処理を struct と共有する。
 pub struct StructDef {
     pub name: String,
     /// (名前, 型, オフセット)
@@ -172,6 +200,18 @@ pub struct StructDef {
     pub align: u32,
     /// 定義と、フィールドから推移的に届く struct の定義すべてのハッシュ (レイアウトが変わったら変わる)
     pub deep: Key,
+    /// enum ならバリアント (struct なら空)
+    pub variants: Vec<VariantDef>,
+    pub is_enum: bool,
+    /// enum のタグの型 (U8 か I32)。オフセット 0 に置く
+    pub tag: Ty,
+}
+
+/// レイアウト計算の入力
+#[derive(Clone)]
+enum AdtShape {
+    Struct(Vec<(String, TySyn)>),
+    Enum(Vec<VariantSyn>),
 }
 
 /// アイテム 1 個分の要約 (キャッシュされる)。ここに入っている情報だけで
@@ -184,6 +224,8 @@ pub struct Summary {
     pub structs: Vec<(String, Vec<(String, TySyn)>)>,
     /// impl ヘッダなら self 型の名前
     pub impl_self: Option<String>,
+    /// (名前, バリアント)。enum アイテムなら 1 個
+    pub enums: Vec<(String, Vec<VariantSyn>)>,
 }
 
 pub struct Program {
@@ -271,6 +313,36 @@ pub fn summarize(item: &syn::Item, self_name: Option<&str>) -> R<Summary> {
                 sm.fns.push((f.sig.ident.to_string(), parse_sig(&f.sig, true, false, None)?));
             }
         }
+        syn::Item::Enum(e) => {
+            only_lifetimes(&e.generics)?;
+            let sn = e.ident.to_string();
+            let mut vs = vec![];
+            for v in &e.variants {
+                let (kind, fields) = match &v.fields {
+                    syn::Fields::Unit => (VariantKind::Unit, vec![]),
+                    syn::Fields::Unnamed(u) => {
+                        let mut fs = vec![];
+                        for (i, f) in u.unnamed.iter().enumerate() {
+                            fs.push((i.to_string(), parse_tysyn(&f.ty, Some(&sn))?));
+                        }
+                        (VariantKind::Tuple, fs)
+                    }
+                    syn::Fields::Named(nf) => {
+                        let mut fs = vec![];
+                        for f in &nf.named {
+                            fs.push((f.ident.as_ref().unwrap().to_string(), parse_tysyn(&f.ty, Some(&sn))?));
+                        }
+                        (VariantKind::Struct, fs)
+                    }
+                };
+                let discr = match &v.discriminant {
+                    None => None,
+                    Some((_, ex)) => Some(const_int(ex)?),
+                };
+                vs.push(VariantSyn { name: v.ident.to_string(), kind, fields, discr });
+            }
+            sm.enums.push((sn, vs));
+        }
         syn::Item::Struct(s) => {
             only_lifetimes(&s.generics)?;
             let syn::Fields::Named(nf) = &s.fields else {
@@ -299,21 +371,35 @@ impl Program {
             struct_index: HashMap::new(),
             by_last: HashMap::new(),
         };
-        // 1. struct 名を登録
-        let mut sdefs = vec![];
+        // 1. struct / enum 名を登録
+        let mut sdefs: Vec<(usize, String, AdtShape)> = vec![];
         for (ii, (it, sm)) in items.iter().zip(sums).enumerate() {
-            for (name, fields) in &sm.structs {
+            let adts = sm
+                .structs
+                .iter()
+                .map(|(n, f)| (n, AdtShape::Struct(f.clone())))
+                .chain(sm.enums.iter().map(|(n, v)| (n, AdtShape::Enum(v.clone()))));
+            for (name, shape) in adts {
                 if p.struct_index.contains_key(name) {
                     return Err(format!("{}:1: duplicate definition of `{name}`", it.line));
                 }
                 p.struct_index.insert(name.clone(), sdefs.len() as u32);
-                sdefs.push((ii, name.clone(), fields.clone()));
+                sdefs.push((ii, name.clone(), shape));
             }
         }
         // 2. フィールド型を解決し、依存順にレイアウトを決める
         p.structs = sdefs
             .iter()
-            .map(|(_, n, _)| StructDef { name: n.clone(), fields: vec![], size: 0, align: 1, deep: 0 })
+            .map(|(_, n, sh)| StructDef {
+                name: n.clone(),
+                fields: vec![],
+                size: 0,
+                align: 1,
+                deep: 0,
+                variants: vec![],
+                is_enum: matches!(sh, AdtShape::Enum(_)),
+                tag: Ty::U8,
+            })
             .collect();
         let mut state = vec![0u8; sdefs.len()]; // 0 未処理, 1 処理中, 2 済み
         for id in 0..sdefs.len() {
@@ -331,7 +417,9 @@ impl Program {
                         continue;
                     }
                     hs.push(items[sdefs[i].0].hash);
-                    for &(_, mut t, _) in &p.structs[i].fields {
+                    let sd = &p.structs[i];
+                    let vf = sd.variants.iter().flat_map(|v| v.fields.iter());
+                    for &(_, mut t, _) in sd.fields.iter().chain(vf) {
                         while let Ty::Ref(_, inner) = t {
                             t = *inner;
                         }
@@ -395,36 +483,101 @@ impl Program {
     fn layout(
         &mut self,
         id: usize,
-        sdefs: &[(usize, String, Vec<(String, TySyn)>)],
+        sdefs: &[(usize, String, AdtShape)],
         items: &[SrcItem],
         state: &mut [u8],
     ) -> R<()> {
         match state[id] {
             2 => return Ok(()),
-            1 => return Err(format!("recursive struct `{}` has infinite size", sdefs[id].1)),
+            1 => return Err(format!("recursive type `{}` has infinite size", sdefs[id].1)),
             _ => {}
         }
         state[id] = 1;
-        let (ii, _, fields) = &sdefs[id];
-        let mut out = vec![];
-        let (mut off, mut align) = (0u32, 1u32);
-        for (fname, ft) in fields {
-            let t = self.resolve(ft).map_err(|e| format!("{}:1: {e}", items[*ii].line))?;
-            if let Ty::Struct(sid) = t {
-                self.layout(sid as usize, sdefs, items, state)?;
+        let (ii, _, shape) = &sdefs[id];
+        let line = items[*ii].line;
+        // フィールド列を (先頭 0 からの) 構造体として並べる
+        let mut lay = |this: &mut Program, fields: &[(String, TySyn)]| -> R<(Vec<(String, Ty, u32)>, u32, u32)> {
+            let mut out = vec![];
+            let (mut off, mut align) = (0u32, 1u32);
+            for (fname, ft) in fields {
+                let t = this.resolve(ft).map_err(|e| format!("{line}:1: {e}"))?;
+                if let Ty::Struct(sid) = t {
+                    this.layout(sid as usize, sdefs, items, state)?;
+                }
+                let (sz, al) = this.size_align(t);
+                off = off.next_multiple_of(al);
+                out.push((fname.clone(), t, off));
+                off += sz;
+                align = align.max(al);
             }
-            let (sz, al) = self.size_align(t);
-            off = off.next_multiple_of(al);
-            out.push((fname.clone(), t, off));
-            off += sz;
-            align = align.max(al);
+            Ok((out, off, align))
+        };
+        match shape {
+            AdtShape::Struct(fields) => {
+                let (out, size, align) = lay(self, fields)?;
+                let sd = &mut self.structs[id];
+                sd.fields = out;
+                sd.size = size.next_multiple_of(align);
+                sd.align = align;
+            }
+            AdtShape::Enum(vs) => {
+                // タグ (判別値) は先頭、ペイロードは全バリアントで共有する領域に置く
+                let mut discrs = vec![];
+                let mut next = 0i64;
+                for v in vs {
+                    let d = v.discr.unwrap_or(next);
+                    if discrs.contains(&d) {
+                        return Err(format!("{line}:1: discriminant value `{d}` assigned more than once"));
+                    }
+                    discrs.push(d);
+                    next = d + 1;
+                }
+                let tag = if discrs.iter().all(|&d| (0..=255).contains(&d)) { Ty::U8 } else { Ty::I32 };
+                let tag_size = tag.bits() / 8;
+                let mut laid = vec![];
+                let (mut pmax, mut palign) = (0u32, 1u32);
+                for v in vs {
+                    let (f, sz, al) = lay(self, &v.fields)?;
+                    pmax = pmax.max(sz);
+                    palign = palign.max(al);
+                    laid.push(f);
+                }
+                let poff = tag_size.next_multiple_of(palign);
+                let align = palign.max(tag_size);
+                let sd = &mut self.structs[id];
+                sd.tag = tag;
+                sd.variants = vs
+                    .iter()
+                    .zip(laid)
+                    .zip(discrs)
+                    .map(|((v, f), d)| VariantDef {
+                        name: v.name.clone(),
+                        kind: v.kind,
+                        fields: f.into_iter().map(|(n, t, o)| (n, t, o + poff)).collect(),
+                        discr: d,
+                    })
+                    .collect();
+                sd.size = (poff + pmax).next_multiple_of(align);
+                sd.align = align;
+            }
         }
-        let sd = &mut self.structs[id];
-        sd.fields = out;
-        sd.size = off.next_multiple_of(align);
-        sd.align = align;
         state[id] = 2;
         Ok(())
+    }
+
+    /// `E::V` / `Self::V` → (enum id, バリアント番号)
+    pub fn variant_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<(u32, usize)> {
+        if p.segments.len() != 2 || p.segments.iter().any(|s| !s.arguments.is_none()) {
+            return None;
+        }
+        let tn = p.segments[0].ident.to_string();
+        let sid = if tn == "Self" { self_sid? } else { *self.struct_index.get(&tn)? };
+        let sd = &self.structs[sid as usize];
+        if !sd.is_enum {
+            return None;
+        }
+        let vn = p.segments[1].ident.to_string();
+        sd.variants.iter().position(|v| v.name == vn).map(|vi| (sid, vi))
     }
 
     pub fn resolve(&self, t: &TySyn) -> R<Ty> {
@@ -623,7 +776,12 @@ impl Rd<'_> {
 }
 
 impl Summary {
+    /// 先頭 1 byte のフラグで、空の節は書かない (要約は全アイテム分メモリ・ディスクに載るので小さく保つ)
     pub fn encode(&self, out: &mut Vec<u8>) {
+        let flags = !self.structs.is_empty() as u8
+            | (self.impl_self.is_some() as u8) << 1
+            | (!self.enums.is_empty() as u8) << 2;
+        out.push(flags);
         out.push(self.fns.len() as u8);
         for (name, s) in &self.fns {
             put_str(out, name);
@@ -636,8 +794,31 @@ impl Summary {
                 put_ty(out, p);
             }
         }
-        put_str(out, self.impl_self.as_deref().unwrap_or(""));
-        out.push(self.structs.len() as u8);
+        if let Some(n) = &self.impl_self {
+            put_str(out, n);
+        }
+        if flags & 4 != 0 {
+            out.push(self.enums.len() as u8);
+        }
+        for (name, vs) in &self.enums {
+            put_str(out, name);
+            out.push(vs.len() as u8);
+            for v in vs {
+                put_str(out, &v.name);
+                out.push(v.kind as u8 | (v.discr.is_some() as u8) << 4);
+                if let Some(d) = v.discr {
+                    out.extend_from_slice(&d.to_le_bytes());
+                }
+                out.push(v.fields.len() as u8);
+                for (f, t) in &v.fields {
+                    put_str(out, f);
+                    put_ty(out, t);
+                }
+            }
+        }
+        if flags & 1 != 0 {
+            out.push(self.structs.len() as u8);
+        }
         for (name, fields) in &self.structs {
             put_str(out, name);
             out.push(fields.len() as u8);
@@ -651,6 +832,7 @@ impl Summary {
     pub fn decode(d: &[u8]) -> Option<Summary> {
         let mut r = Rd(d, 0);
         let mut sm = Summary::default();
+        let flags = r.u8()?;
         for _ in 0..r.u8()? {
             let name = r.str()?;
             let symbol = r.str()?;
@@ -671,13 +853,48 @@ impl Summary {
                 },
             ));
         }
-        sm.impl_self = Some(r.str()?).filter(|s| !s.is_empty());
-        for _ in 0..r.u8()? {
+        if flags & 2 != 0 {
+            sm.impl_self = Some(r.str()?);
+        }
+        let ne = if flags & 4 != 0 { r.u8()? } else { 0 };
+        for _ in 0..ne {
+            let name = r.str()?;
+            let mut vs = vec![];
+            for _ in 0..r.u8()? {
+                let vname = r.str()?;
+                let k = r.u8()?;
+                let kind = [VariantKind::Unit, VariantKind::Tuple, VariantKind::Struct].get((k & 15) as usize).copied()?;
+                let discr = if k & 16 != 0 {
+                    let mut b = [0u8; 8];
+                    for x in &mut b {
+                        *x = r.u8()?;
+                    }
+                    Some(i64::from_le_bytes(b))
+                } else {
+                    None
+                };
+                let fields = (0..r.u8()?).map(|_| Some((r.str()?, r.ty()?))).collect::<Option<_>>()?;
+                vs.push(VariantSyn { name: vname, kind, fields, discr });
+            }
+            sm.enums.push((name, vs));
+        }
+        let ns = if flags & 1 != 0 { r.u8()? } else { 0 };
+        for _ in 0..ns {
             let name = r.str()?;
             let fields = (0..r.u8()?).map(|_| Some((r.str()?, r.ty()?))).collect::<Option<_>>()?;
             sm.structs.push((name, fields));
         }
         Some(sm)
+    }
+}
+
+/// 判別値などの整数定数式 (リテラルと単項マイナスだけ)
+fn const_int(e: &syn::Expr) -> R<i64> {
+    match e {
+        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. }) => i.base10_parse::<i64>().map_err(|e| e.to_string()),
+        syn::Expr::Unary(syn::ExprUnary { op: syn::UnOp::Neg(_), expr, .. }) => Ok(-const_int(expr)?),
+        syn::Expr::Paren(p) => const_int(&p.expr),
+        _ => err(e.span(), "only integer literals are supported as discriminants"),
     }
 }
 

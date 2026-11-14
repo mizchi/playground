@@ -157,12 +157,22 @@ impl Worker {
 
     /// 型検査だけ (Cranelift IR まで作り、機械語は作らない)。LSP の check 用
     pub fn check(&mut self, prog: &Program, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<()> {
-        self.lower(prog, id, f, isa)
+        self.lower_or_reset(prog, id, f, isa)
     }
 
     pub fn compile(&mut self, prog: &Program, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<Blob> {
-        self.lower(prog, id, f, isa)?;
+        self.lower_or_reset(prog, id, f, isa)?;
         self.emit(prog, id, isa)
+    }
+
+    /// エラーで lowering を途中で抜けると FunctionBuilderContext が中途半端な状態で残るので、
+    /// 作り直してから次の関数に使う (check は 1 つのエラーで止まらず全関数を見るため)
+    fn lower_or_reset(&mut self, prog: &Program, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<()> {
+        let r = self.lower(prog, id, f, isa);
+        if r.is_err() {
+            self.fbc = FunctionBuilderContext::new();
+        }
+        r
     }
 
     fn lower(&mut self, prog: &Program, id: u32, f: &syn::ItemFn, isa: &dyn TargetIsa) -> R<()> {
@@ -509,6 +519,20 @@ impl Cx<'_, '_> {
         for (i, st) in blk.stmts.iter().enumerate() {
             let last = i + 1 == n;
             match st {
+                Stmt::Local(l) if !is_simple_let(&l.pat) => {
+                    // 分解する let (`let S { x, y } = s;`): 反駁不能パターンとして束縛だけ行う
+                    let Some(init) = &l.init else {
+                        return err(l.span(), "`let` without initializer is not supported");
+                    };
+                    if init.diverge.is_some() {
+                        return err(l.span(), "`let ... else` is not supported");
+                    }
+                    let Some(place) = self.scrutinee(&init.expr)? else {
+                        diverged = true;
+                        continue;
+                    };
+                    self.pat_bind(&l.pat, place, BindMode::Move)?;
+                }
                 Stmt::Local(l) => {
                     let (name, ann) = match &l.pat {
                         Pat::Type(pt) => (pat_name(&pt.pat)?, Some(self.prog.parse_ty(&pt.ty, self.self_sid)?)),
@@ -561,6 +585,16 @@ impl Cx<'_, '_> {
                 Lit::Byte(_) => Some(Ty::U8),
                 _ => None,
             },
+            Expr::Path(p) if p.path.segments.len() == 2 => {
+                self.prog.variant_by_path(&p.path, self.self_sid).map(|v| Ty::Struct(v.0))
+            }
+            Expr::Call(c) if matches!(&*c.func, Expr::Path(p) if p.path.segments.len() == 2) => {
+                let Expr::Path(p) = &*c.func else { unreachable!() };
+                match self.prog.variant_by_path(&p.path, self.self_sid) {
+                    Some((sid, _)) => Some(Ty::Struct(sid)),
+                    None => self.callee(&c.func).map(|(_, s)| s.ret),
+                }
+            }
             Expr::Path(p) => p
                 .path
                 .get_ident()
@@ -593,7 +627,11 @@ impl Cx<'_, '_> {
                 let (Ty::Struct(sid), syn::Member::Named(id)) = (t, &f.member) else { return None };
                 self.prog.field(sid, &id.to_string()).map(|(t, _)| t)
             }
-            Expr::Struct(s) => self.prog.struct_by_path(&s.path, self.self_sid).map(Ty::Struct),
+            Expr::Struct(s) => self
+                .prog
+                .struct_by_path(&s.path, self.self_sid)
+                .or_else(|| self.prog.variant_by_path(&s.path, self.self_sid).map(|v| v.0))
+                .map(Ty::Struct),
             Expr::Binary(b) if is_cmp(&b.op) || matches!(b.op, BinOp::And(_) | BinOp::Or(_)) => {
                 Some(Ty::Bool)
             }
@@ -723,6 +761,16 @@ impl Cx<'_, '_> {
                 self.block(&b.block, expected)
             }
             Expr::Unsafe(u) => self.block(&u.block, expected),
+            Expr::Path(p) if p.path.segments.len() == 2 => {
+                let Some((sid, vi)) = self.prog.variant_by_path(&p.path, self.self_sid) else {
+                    return err(p.span(), "cannot find value (paths other than enum variants are not supported)");
+                };
+                if self.prog.structs[sid as usize].variants[vi].kind != crate::front::VariantKind::Unit {
+                    return err(p.span(), "this variant has fields: use `E::V(..)` or `E::V { .. }`");
+                }
+                self.variant_value(sid, vi, &[])
+            }
+            Expr::Match(m) => self.match_(m, expected),
             Expr::Path(_) | Expr::Field(_) => {
                 let p = self.place(e)?;
                 Ok(self.read(p))
@@ -747,6 +795,7 @@ impl Cx<'_, '_> {
                 Ok((None, Ty::Unit))
             }
             Expr::If(i) => self.if_(i, expected),
+            Expr::While(w) if matches!(&*w.cond, Expr::Let(_)) => self.while_let(w),
             Expr::While(w) => {
                 if w.label.is_some() {
                     return err(w.span(), "loop labels are not supported");
@@ -854,6 +903,15 @@ impl Cx<'_, '_> {
                 if from == Ty::Never {
                     return Ok((None, Ty::Never));
                 }
+                // フィールドのない enum → 整数: タグ (= 判別値) を読む
+                if let Ty::Struct(sid) = from {
+                    let sd = &self.prog.structs[sid as usize];
+                    if to.is_int() && sd.is_enum && sd.variants.iter().all(|v| v.fields.is_empty()) {
+                        let tag = sd.tag;
+                        let t = self.b.ins().load(clif_ty(tag).unwrap(), mf(), v.unwrap(), 0);
+                        return Ok((Some(self.convert(t, tag, to)), to));
+                    }
+                }
                 if !to.is_int() || !(from.is_int() || from == Ty::Bool) {
                     return err(
                         c.span(),
@@ -902,6 +960,29 @@ impl Cx<'_, '_> {
     }
 
     fn struct_lit(&mut self, s: &syn::ExprStruct) -> R<V> {
+        if let Some((sid, vi)) = self.prog.variant_by_path(&s.path, self.self_sid) {
+            let v = &self.prog.structs[sid as usize].variants[vi];
+            if v.kind != crate::front::VariantKind::Struct {
+                return err(s.path.span(), "this variant is not a struct-like variant");
+            }
+            let mut args = vec![];
+            for fv in &s.fields {
+                let syn::Member::Named(fid) = &fv.member else {
+                    return err(fv.member.span(), "expected a field name");
+                };
+                let Some(fi) = v.fields.iter().position(|f| f.0 == fid.to_string()) else {
+                    return err(fid.span(), format!("variant `{}` has no field named `{fid}`", v.name));
+                };
+                if args.iter().any(|&(i, _)| i == fi) {
+                    return err(fid.span(), format!("field `{fid}` specified more than once"));
+                }
+                args.push((fi, &fv.expr));
+            }
+            if args.len() != v.fields.len() || s.rest.is_some() {
+                return err(s.span(), format!("missing fields in initializer of `{}`", v.name));
+            }
+            return self.variant_value(sid, vi, &args);
+        }
         let Some(sid) = self.prog.struct_by_path(&s.path, self.self_sid) else {
             return err(s.path.span(), "cannot find struct");
         };
@@ -937,6 +1018,16 @@ impl Cx<'_, '_> {
     }
 
     fn call(&mut self, c: &syn::ExprCall) -> R<V> {
+        if let Expr::Path(p) = &*c.func {
+            if let Some((sid, vi)) = self.prog.variant_by_path(&p.path, self.self_sid) {
+                let v = &self.prog.structs[sid as usize].variants[vi];
+                if v.kind != crate::front::VariantKind::Tuple || v.fields.len() != c.args.len() {
+                    return err(c.span(), format!("variant `{}` takes {} fields", v.name, v.fields.len()));
+                }
+                let args: Vec<(usize, &Expr)> = c.args.iter().enumerate().collect();
+                return self.variant_value(sid, vi, &args);
+            }
+        }
         let Some((id, _)) = self.callee(&c.func) else {
             return err(c.func.span(), "only direct calls to named functions are supported");
         };
@@ -1068,7 +1159,8 @@ impl Cx<'_, '_> {
                 let ty = Ty::from_suffix(i.suffix())
                     .or(expected.filter(|t| t.is_int()))
                     .unwrap_or(Ty::I32);
-                let n: u128 = i.base10_parse().map_err(|e| e.to_string())?;
+                // 負のリテラル (パターンの `-1` など) も来るので i128 で読む
+                let n: i128 = i.base10_parse().map_err(|e| e.to_string())?;
                 let v = self.b.ins().iconst(clif_ty(ty).unwrap(), n as u64 as i64);
                 Ok((Some(v), ty))
             }
@@ -1217,6 +1309,9 @@ impl Cx<'_, '_> {
     }
 
     fn if_(&mut self, i: &syn::ExprIf, expected: Option<Ty>) -> R<V> {
+        if let Expr::Let(l) = &*i.cond {
+            return self.if_let(i, l, expected);
+        }
         let (c, ct) = self.expr(&i.cond, Some(Ty::Bool))?;
         self.same(i.cond.span(), ct, Ty::Bool)?;
         let Some(c) = c else { return Ok((None, Ty::Never)) };
@@ -1273,6 +1368,464 @@ impl Cx<'_, '_> {
             None => self.b.ins().jump(merge, &[]),
         };
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum BindMode {
+    /// 値として束縛 (struct / enum はコピー)
+    Move,
+    /// 参照を match したときのデフォルト束縛モード: フィールドへの参照として束縛
+    Ref(bool),
+}
+
+impl Cx<'_, '_> {
+    // --- enum の値 ------------------------------------------------------
+
+    /// 一時領域にタグと各フィールドを書いて enum の値を作る。args は (フィールド番号, 式)
+    fn variant_value(&mut self, sid: u32, vi: usize, args: &[(usize, &Expr)]) -> R<V> {
+        let t = Ty::Struct(sid);
+        let a = self.temp(t);
+        let sd = &self.prog.structs[sid as usize];
+        let (tag, discr) = (sd.tag, sd.variants[vi].discr);
+        let tv = self.b.ins().iconst(clif_ty(tag).unwrap(), discr);
+        self.b.ins().store(mf(), tv, a, 0);
+        for &(fi, e) in args {
+            let (_, fty, off) = self.prog.structs[sid as usize].variants[vi].fields[fi].clone();
+            let (v, vt) = self.expr(e, Some(fty))?;
+            if vt == Ty::Never {
+                return Ok((None, Ty::Never));
+            }
+            self.same(e.span(), vt, fty)?;
+            self.write(Place::Mem(a, off as i32, fty), v);
+        }
+        Ok((Some(a), t))
+    }
+
+    // --- match / if let / while let --------------------------------------
+
+    /// match 対象を place にする。値なら一時変数に置く。None は発散
+    fn scrutinee(&mut self, e: &Expr) -> R<Option<Place>> {
+        if is_place_expr(e) {
+            return Ok(Some(self.place(e)?));
+        }
+        let (v, t) = self.expr(e, None)?;
+        Ok(match (v, t) {
+            (_, Ty::Never) => None,
+            (Some(a), Ty::Struct(_)) => Some(Place::Mem(a, 0, t)),
+            (Some(v), t) => {
+                let var = self.b.declare_var(clif_ty(t).unwrap());
+                self.b.def_var(var, v);
+                Some(Place::Var(var, t))
+            }
+            (None, t) => Some(Place::Zst(t)),
+        })
+    }
+
+    fn match_(&mut self, m: &syn::ExprMatch, expected: Option<Ty>) -> R<V> {
+        let Some(place) = self.scrutinee(&m.expr)? else { return Ok((None, Ty::Never)) };
+        let merge = self.b.create_block();
+        let mut result_ty: Option<Ty> = None;
+        let mut param: Option<Value> = None;
+        // 各 arm を上から順に試す (判定 → 束縛 → ガード → 本体)
+        for arm in &m.arms {
+            let next = self.b.create_block();
+            self.pat_test(&arm.pat, place, next)?;
+            self.scopes.push(vec![]);
+            self.pat_bind(&arm.pat, place, BindMode::Move)?;
+            if let Some((_, g)) = &arm.guard {
+                let (c, ct) = self.expr(g, Some(Ty::Bool))?;
+                self.same(g.span(), ct, Ty::Bool)?;
+                if let Some(c) = c {
+                    self.require(c, next);
+                }
+            }
+            let (v, t) = self.expr(&arm.body, result_ty.or(expected))?;
+            self.scopes.pop();
+            self.finish_arm(v, t, merge, &mut result_ty, &mut param, arm.body.span())?;
+            self.b.switch_to_block(next);
+        }
+        // どの arm にも合わない (rustc が網羅性を保証するので到達しない)
+        self.b.ins().trap(TrapCode::unwrap_user(2));
+        self.b.switch_to_block(merge);
+        Ok(match result_ty {
+            None => (None, Ty::Never),
+            Some(t) => (param, t),
+        })
+    }
+
+    fn if_let(&mut self, i: &syn::ExprIf, l: &syn::ExprLet, expected: Option<Ty>) -> R<V> {
+        let Some(place) = self.scrutinee(&l.expr)? else { return Ok((None, Ty::Never)) };
+        let else_blk = self.b.create_block();
+        let merge = self.b.create_block();
+        let mut result_ty: Option<Ty> = None;
+        let mut param: Option<Value> = None;
+        self.pat_test(&l.pat, place, else_blk)?;
+        self.scopes.push(vec![]);
+        self.pat_bind(&l.pat, place, BindMode::Move)?;
+        let (tv, tt) = self.block(&i.then_branch, expected)?;
+        self.scopes.pop();
+        self.finish_arm(tv, tt, merge, &mut result_ty, &mut param, i.then_branch.span())?;
+        self.b.switch_to_block(else_blk);
+        let (ev, et) = match &i.else_branch {
+            Some((_, e)) => self.expr(e, result_ty.or(expected))?,
+            None => (None, Ty::Unit),
+        };
+        self.finish_arm(ev, et, merge, &mut result_ty, &mut param, i.span())?;
+        self.b.switch_to_block(merge);
+        Ok(match result_ty {
+            None => (None, Ty::Never),
+            Some(t) => (param, t),
+        })
+    }
+
+    fn while_let(&mut self, w: &syn::ExprWhile) -> R<V> {
+        if w.label.is_some() {
+            return err(w.span(), "loop labels are not supported");
+        }
+        let Expr::Let(l) = &*w.cond else { unreachable!() };
+        let header = self.b.create_block();
+        let exit = self.b.create_block();
+        self.b.ins().jump(header, &[]);
+        self.b.switch_to_block(header);
+        // 毎回 match 対象を評価し直す
+        let Some(place) = self.scrutinee(&l.expr)? else { return Ok((None, Ty::Never)) };
+        self.pat_test(&l.pat, place, exit)?;
+        self.scopes.push(vec![]);
+        self.pat_bind(&l.pat, place, BindMode::Move)?;
+        self.loops.push(Loop { cont: header, brk: exit, breaks: 0 });
+        let (_, bt) = self.block(&w.body, Some(Ty::Unit))?;
+        self.loops.pop();
+        self.scopes.pop();
+        if bt != Ty::Never {
+            self.same(w.body.span(), bt, Ty::Unit)?;
+            self.b.ins().jump(header, &[]);
+        } else {
+            self.b.ins().trap(TrapCode::unwrap_user(1));
+        }
+        self.b.switch_to_block(exit);
+        Ok((None, Ty::Unit))
+    }
+
+    fn no_variant_msg(&self, p: &syn::Path) -> String {
+        let segs: Vec<String> = p.segments.iter().map(|s| s.ident.to_string()).collect();
+        match segs.as_slice() {
+            [t, v] => format!("no variant named `{v}` in `{t}`"),
+            _ => "unsupported path pattern (only enum variants)".into(),
+        }
+    }
+
+    /// cond が偽なら fail へ。真なら新しいブロックで続ける
+    fn require(&mut self, cond: Value, fail: Block) {
+        let next = self.b.create_block();
+        self.b.ins().brif(cond, next, &[], fail, &[]);
+        self.b.switch_to_block(next);
+    }
+
+    /// 参照に対して参照でないパターンを当てるときは自動で deref し、束縛モードを Ref にする
+    fn pat_deref(&mut self, mut p: Place, mut mode: BindMode) -> (Place, BindMode) {
+        loop {
+            let (ptr, m, inner) = match p {
+                Place::Var(v, Ty::Ref(m, i)) => (self.b.use_var(v), m, *i),
+                Place::Mem(a, o, Ty::Ref(m, i)) => (self.b.ins().load(PTR, mf(), a, o), m, *i),
+                _ => return (p, mode),
+            };
+            mode = match mode {
+                BindMode::Ref(false) => BindMode::Ref(false),
+                _ => BindMode::Ref(m),
+            };
+            p = Place::Mem(ptr, 0, inner);
+        }
+    }
+
+    fn field_place(p: Place, fty: Ty, off: u32) -> Place {
+        match p {
+            Place::Mem(a, o, _) => Place::Mem(a, o + off as i32, fty),
+            _ => unreachable!("aggregates always live in memory"),
+        }
+    }
+
+    /// パターンの判定値 (リテラル / 範囲の端) を place の型で作る
+    fn pat_const(&mut self, e: &Expr, t: Ty) -> R<Value> {
+        let Expr::Lit(l) = e else {
+            return err(e.span(), "only literals are supported in range patterns");
+        };
+        let (v, vt) = self.lit(&l.lit, Some(t))?;
+        self.same(l.span(), vt, t)?;
+        Ok(v.unwrap())
+    }
+
+    /// enum のタグが vi のバリアントか調べる
+    fn test_variant(&mut self, p: Place, sid: u32, vi: usize, span: proc_macro2::Span, fail: Block) -> R<()> {
+        if p.ty() != Ty::Struct(sid) {
+            let got = self.prog.tn(p.ty());
+            return err(span, format!("mismatched types: expected `{got}`, found `{}`", self.prog.tn(Ty::Struct(sid))));
+        }
+        let sd = &self.prog.structs[sid as usize];
+        if sd.variants.len() == 1 {
+            return Ok(()); // バリアントが 1 つなら判定不要
+        }
+        let (tag, discr) = (sd.tag, sd.variants[vi].discr);
+        let Place::Mem(a, o, _) = p else { unreachable!() };
+        let tv = self.b.ins().load(clif_ty(tag).unwrap(), mf(), a, o);
+        let d = self.b.ins().iconst(clif_ty(tag).unwrap(), discr);
+        let c = self.b.ins().icmp(IntCC::Equal, tv, d);
+        self.require(c, fail);
+        Ok(())
+    }
+
+    /// パターン列 (`V(a, .., z)`) とフィールド列の対応 (`..` は途中を飛ばす)
+    fn tuple_fields<'e>(
+        elems: impl Iterator<Item = &'e Pat>,
+        nfields: usize,
+        span: proc_macro2::Span,
+    ) -> R<Vec<(usize, &'e Pat)>> {
+        let elems: Vec<&Pat> = elems.collect();
+        let rest = elems.iter().position(|p| matches!(p, Pat::Rest(_)));
+        let n_named = elems.len() - rest.is_some() as usize;
+        if n_named > nfields || (rest.is_none() && n_named != nfields) {
+            return err(span, format!("this pattern has {n_named} fields, but the corresponding variant has {nfields}"));
+        }
+        let mut out = vec![];
+        for (i, p) in elems.iter().enumerate() {
+            match rest {
+                Some(r) if i == r => {}
+                Some(r) if i > r => out.push((nfields - (elems.len() - i), *p)),
+                _ => out.push((i, *p)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// パターンの判定だけをする (合わなければ fail へ飛ぶ)。束縛は pat_bind で行う
+    fn pat_test(&mut self, pat: &Pat, p: Place, fail: Block) -> R<()> {
+        match pat {
+            Pat::Wild(_) | Pat::Rest(_) => Ok(()),
+            Pat::Ident(pi) => match &pi.subpat {
+                Some((_, sub)) => self.pat_test(sub, p, fail),
+                None => Ok(()),
+            },
+            Pat::Paren(pp) => self.pat_test(&pp.pat, p, fail),
+            Pat::Type(pt) => self.pat_test(&pt.pat, p, fail),
+            Pat::Reference(r) => {
+                let Ty::Ref(_, _) = p.ty() else {
+                    return err(r.span(), format!("mismatched types: `{}` is not a reference", self.prog.tn(p.ty())));
+                };
+                let (q, _) = self.pat_deref_once(p);
+                self.pat_test(&r.pat, q, fail)
+            }
+            Pat::Or(o) => {
+                let ok = self.b.create_block();
+                let n = o.cases.len();
+                for (i, case) in o.cases.iter().enumerate() {
+                    let nf = if i + 1 == n { fail } else { self.b.create_block() };
+                    self.pat_test(case, p, nf)?;
+                    self.b.ins().jump(ok, &[]);
+                    if i + 1 != n {
+                        self.b.switch_to_block(nf);
+                    }
+                }
+                self.b.switch_to_block(ok);
+                Ok(())
+            }
+            _ => {
+                let (p, _) = self.pat_deref(p, BindMode::Move);
+                let t = p.ty();
+                match pat {
+                    Pat::Lit(l) => {
+                        let (v, _) = self.read(p);
+                        let (c, ct) = self.lit(&l.lit, Some(t))?;
+                        self.same(l.span(), ct, t)?;
+                        if !(t.is_int() || t == Ty::Bool) {
+                            return err(l.span(), "literal patterns need an integer or bool");
+                        }
+                        let cond = self.b.ins().icmp(IntCC::Equal, v.unwrap(), c.unwrap());
+                        self.require(cond, fail);
+                        Ok(())
+                    }
+                    Pat::Range(r) => {
+                        if !t.is_int() {
+                            return err(r.span(), "range patterns need an integer");
+                        }
+                        let (v, _) = self.read(p);
+                        let v = v.unwrap();
+                        let s = t.signed();
+                        if let Some(lo) = &r.start {
+                            let lo = self.pat_const(lo, t)?;
+                            let cc = if s { IntCC::SignedGreaterThanOrEqual } else { IntCC::UnsignedGreaterThanOrEqual };
+                            let c = self.b.ins().icmp(cc, v, lo);
+                            self.require(c, fail);
+                        }
+                        if let Some(hi) = &r.end {
+                            let hi = self.pat_const(hi, t)?;
+                            let cc = match (&r.limits, s) {
+                                (syn::RangeLimits::Closed(_), true) => IntCC::SignedLessThanOrEqual,
+                                (syn::RangeLimits::Closed(_), false) => IntCC::UnsignedLessThanOrEqual,
+                                (_, true) => IntCC::SignedLessThan,
+                                (_, false) => IntCC::UnsignedLessThan,
+                            };
+                            let c = self.b.ins().icmp(cc, v, hi);
+                            self.require(c, fail);
+                        }
+                        Ok(())
+                    }
+                    Pat::Path(pp) => {
+                        let Some((sid, vi)) = self.prog.variant_by_path(&pp.path, self.self_sid) else {
+                            return err(pp.span(), self.no_variant_msg(&pp.path));
+                        };
+                        self.test_variant(p, sid, vi, pp.span(), fail)
+                    }
+                    Pat::TupleStruct(ts) => {
+                        let Some((sid, vi)) = self.prog.variant_by_path(&ts.path, self.self_sid) else {
+                            return err(ts.path.span(), self.no_variant_msg(&ts.path));
+                        };
+                        self.test_variant(p, sid, vi, ts.span(), fail)?;
+                        let fields = self.prog.structs[sid as usize].variants[vi].fields.clone();
+                        for (fi, sub) in Self::tuple_fields(ts.elems.iter(), fields.len(), ts.span())? {
+                            let (_, fty, off) = fields[fi];
+                            self.pat_test(sub, Self::field_place(p, fty, off), fail)?;
+                        }
+                        Ok(())
+                    }
+                    Pat::Struct(ps) => {
+                        let fields = self.struct_pat_fields(ps, p, Some(fail))?;
+                        for (sub, fp) in fields {
+                            self.pat_test(sub, fp, fail)?;
+                        }
+                        Ok(())
+                    }
+                    _ => err(pat.span(), "unsupported pattern"),
+                }
+            }
+        }
+    }
+
+    fn pat_deref_once(&mut self, p: Place) -> (Place, bool) {
+        match p {
+            Place::Var(v, Ty::Ref(m, i)) => (Place::Mem(self.b.use_var(v), 0, *i), m),
+            Place::Mem(a, o, Ty::Ref(m, i)) => (Place::Mem(self.b.ins().load(PTR, mf(), a, o), 0, *i), m),
+            p => (p, false),
+        }
+    }
+
+    /// `S { a, b: p, .. }` / `E::V { a, .. }` の各フィールドの (サブパターン, place)。
+    /// fail があればバリアントの判定もする
+    fn struct_pat_fields<'e>(
+        &mut self,
+        ps: &'e syn::PatStruct,
+        p: Place,
+        fail: Option<Block>,
+    ) -> R<Vec<(&'e Pat, Place)>> {
+        let fields: Vec<(String, Ty, u32)> = if let Some((sid, vi)) = self.prog.variant_by_path(&ps.path, self.self_sid) {
+            if let Some(fail) = fail {
+                self.test_variant(p, sid, vi, ps.span(), fail)?;
+            }
+            self.prog.structs[sid as usize].variants[vi].fields.clone()
+        } else if let Some(sid) = self.prog.struct_by_path(&ps.path, self.self_sid) {
+            self.same(ps.span(), Ty::Struct(sid), p.ty())?;
+            self.prog.structs[sid as usize].fields.clone()
+        } else {
+            return err(ps.path.span(), "cannot find struct or variant");
+        };
+        let mut out = vec![];
+        for fp in &ps.fields {
+            let syn::Member::Named(fid) = &fp.member else {
+                return err(fp.member.span(), "expected a field name");
+            };
+            let Some(&(_, fty, off)) = fields.iter().find(|f| f.0 == fid.to_string()) else {
+                return err(fid.span(), format!("no field `{fid}`"));
+            };
+            out.push((&*fp.pat, Self::field_place(p, fty, off)));
+        }
+        if ps.rest.is_none() && out.len() != fields.len() {
+            return err(ps.span(), "pattern does not mention all fields (add `..`)");
+        }
+        Ok(out)
+    }
+
+    /// 判定に通った後で、パターン中の名前を束縛する
+    fn pat_bind(&mut self, pat: &Pat, p: Place, mode: BindMode) -> R<()> {
+        match pat {
+            Pat::Wild(_) | Pat::Rest(_) | Pat::Lit(_) | Pat::Range(_) | Pat::Path(_) => Ok(()),
+            Pat::Ident(pi) => {
+                if let Some((_, sub)) = &pi.subpat {
+                    self.pat_bind(sub, p, mode)?;
+                }
+                let name = pi.ident.to_string();
+                let mode = match pi.by_ref {
+                    Some(_) => BindMode::Ref(pi.mutability.is_some()),
+                    None => mode,
+                };
+                match mode {
+                    BindMode::Move => {
+                        let (v, t) = self.read(p);
+                        self.bind(name, t, v);
+                    }
+                    BindMode::Ref(m) => {
+                        let Place::Mem(a, o, t) = p else {
+                            return err(pi.span(), "cannot bind by reference here");
+                        };
+                        let addr = self.addr_plus(a, o);
+                        self.bind(name, Ty::Ref(m, intern(t)), Some(addr));
+                    }
+                }
+                Ok(())
+            }
+            Pat::Paren(pp) => self.pat_bind(&pp.pat, p, mode),
+            Pat::Type(pt) => self.pat_bind(&pt.pat, p, mode),
+            Pat::Reference(r) => {
+                let (q, _) = self.pat_deref_once(p);
+                self.pat_bind(&r.pat, q, BindMode::Move)
+            }
+            Pat::Or(o) => {
+                if o.cases.iter().any(has_bindings) {
+                    return err(o.span(), "bindings inside `|` patterns are not supported yet");
+                }
+                Ok(())
+            }
+            Pat::TupleStruct(ts) => {
+                let (p, mode) = self.pat_deref(p, mode);
+                let Some((sid, vi)) = self.prog.variant_by_path(&ts.path, self.self_sid) else {
+                    return err(ts.path.span(), "cannot find tuple variant");
+                };
+                let fields = self.prog.structs[sid as usize].variants[vi].fields.clone();
+                for (fi, sub) in Self::tuple_fields(ts.elems.iter(), fields.len(), ts.span())? {
+                    let (_, fty, off) = fields[fi];
+                    self.pat_bind(sub, Self::field_place(p, fty, off), mode)?;
+                }
+                Ok(())
+            }
+            Pat::Struct(ps) => {
+                let (p, mode) = self.pat_deref(p, mode);
+                for (sub, fp) in self.struct_pat_fields(ps, p, None)? {
+                    self.pat_bind(sub, fp, mode)?;
+                }
+                Ok(())
+            }
+            _ => err(pat.span(), "unsupported pattern"),
+        }
+    }
+}
+
+/// `let x` / `let mut x` / `let x: T` / `let _` のような単純な let か
+fn is_simple_let(p: &Pat) -> bool {
+    match p {
+        Pat::Ident(pi) => pi.subpat.is_none() && pi.by_ref.is_none(),
+        Pat::Wild(_) => true,
+        Pat::Type(pt) => is_simple_let(&pt.pat),
+        _ => false,
+    }
+}
+
+fn has_bindings(p: &Pat) -> bool {
+    match p {
+        Pat::Ident(_) => true,
+        Pat::Paren(pp) => has_bindings(&pp.pat),
+        Pat::Reference(r) => has_bindings(&r.pat),
+        Pat::Or(o) => o.cases.iter().any(has_bindings),
+        Pat::TupleStruct(ts) => ts.elems.iter().any(has_bindings),
+        Pat::Struct(ps) => ps.fields.iter().any(|f| has_bindings(&f.pat)),
+        _ => false,
     }
 }
 

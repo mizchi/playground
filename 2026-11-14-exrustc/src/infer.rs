@@ -164,6 +164,130 @@ impl Inf<'_> {
         }
     }
 
+    fn lit_var(&mut self, l: &Lit) -> u32 {
+        match l {
+            Lit::Int(i) => match Ty::from_suffix(i.suffix()) {
+                Some(t) => self.known(t),
+                None => {
+                    let v = self.var();
+                    self.int_lit[v as usize] = true;
+                    v
+                }
+            },
+            Lit::Bool(_) => self.known(Ty::Bool),
+            Lit::Byte(_) => self.known(Ty::U8),
+            _ => self.var(),
+        }
+    }
+
+    /// 参照型の変数を辿って中身へ。参照を通ったら束縛モードを Ref にする
+    fn auto_deref(&mut self, mut v: u32, mut mode: Option<bool>) -> (u32, Option<bool>) {
+        loop {
+            let r = self.find(v);
+            match self.shape[r as usize] {
+                Some(Shape::Ref(m, i)) => {
+                    v = i;
+                    mode = Some(if mode == Some(false) { false } else { m });
+                }
+                _ => return (v, mode),
+            }
+        }
+    }
+
+    fn bind_name(&mut self, name: String, v: u32, mode: Option<bool>) {
+        let v = match mode {
+            Some(m) => self.with(Shape::Ref(m, v)),
+            None => v,
+        };
+        self.scopes.last_mut().unwrap().push((name, v));
+    }
+
+    /// パターンを型変数 v に当て、束縛を今のスコープに入れる
+    fn pat(&mut self, pat: &Pat, v: u32, mode: Option<bool>) {
+        match pat {
+            Pat::Ident(pi) => {
+                if let Some((_, sub)) = &pi.subpat {
+                    self.pat(sub, v, mode);
+                }
+                let mode = if pi.by_ref.is_some() { Some(pi.mutability.is_some()) } else { mode };
+                self.bind_name(pi.ident.to_string(), v, mode);
+            }
+            Pat::Paren(p) => self.pat(&p.pat, v, mode),
+            Pat::Type(p) => self.pat(&p.pat, v, mode),
+            Pat::Reference(r) => {
+                let i = self.deref(v);
+                self.pat(&r.pat, i, None);
+            }
+            Pat::Or(o) => {
+                for c in &o.cases {
+                    self.pat(c, v, mode);
+                }
+            }
+            Pat::Lit(l) => {
+                let (v, _) = self.auto_deref(v, mode);
+                let e = self.lit_var(&l.lit);
+                self.unify(v, e);
+            }
+            Pat::Range(r) => {
+                let (v, _) = self.auto_deref(v, mode);
+                for e in r.start.iter().chain(r.end.iter()) {
+                    let e = self.expr(e);
+                    self.unify(v, e);
+                }
+            }
+            Pat::Path(pp) => {
+                let (v, _) = self.auto_deref(v, mode);
+                if let Some((sid, _)) = self.prog.variant_by_path(&pp.path, self.self_sid) {
+                    let k = self.known(Ty::Struct(sid));
+                    self.unify(v, k);
+                }
+            }
+            Pat::TupleStruct(ts) => {
+                let (v, mode) = self.auto_deref(v, mode);
+                let Some((sid, vi)) = self.prog.variant_by_path(&ts.path, self.self_sid) else { return };
+                let k = self.known(Ty::Struct(sid));
+                self.unify(v, k);
+                let fts: Vec<Ty> = self.prog.structs[sid as usize].variants[vi].fields.iter().map(|f| f.1).collect();
+                let elems: Vec<&Pat> = ts.elems.iter().collect();
+                let rest = elems.iter().position(|p| matches!(p, Pat::Rest(_)));
+                for (i, p) in elems.iter().enumerate() {
+                    let fi = match rest {
+                        Some(r) if i == r => continue,
+                        Some(r) if i > r => fts.len().wrapping_sub(elems.len() - i),
+                        _ => i,
+                    };
+                    if let Some(&ft) = fts.get(fi) {
+                        let k = self.known(ft);
+                        self.pat(p, k, mode);
+                    }
+                }
+            }
+            Pat::Struct(ps) => {
+                let (v, mode) = self.auto_deref(v, mode);
+                let (sid, fields): (u32, Vec<(String, Ty)>) =
+                    if let Some((sid, vi)) = self.prog.variant_by_path(&ps.path, self.self_sid) {
+                        let f = &self.prog.structs[sid as usize].variants[vi].fields;
+                        (sid, f.iter().map(|f| (f.0.clone(), f.1)).collect())
+                    } else if let Some(sid) = self.prog.struct_by_path(&ps.path, self.self_sid) {
+                        (sid, self.prog.structs[sid as usize].fields.iter().map(|f| (f.0.clone(), f.1)).collect())
+                    } else {
+                        return;
+                    };
+                let k = self.known(Ty::Struct(sid));
+                self.unify(v, k);
+                for fp in &ps.fields {
+                    if let syn::Member::Named(id) = &fp.member {
+                        if let Some((_, ft)) = fields.iter().find(|f| f.0 == id.to_string()) {
+                            let k = self.known(*ft);
+                            self.pat(&fp.pat, k, mode);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn lookup(&self, n: &str) -> Option<u32> {
         self.scopes
             .iter()
@@ -193,8 +317,11 @@ impl Inf<'_> {
                         self.unify(v, k);
                     }
                     self.lets.push((let_key(l), v));
-                    if let Pat::Ident(pi) = pat {
-                        self.scopes.last_mut().unwrap().push((pi.ident.to_string(), v));
+                    match pat {
+                        Pat::Ident(pi) if pi.subpat.is_none() => {
+                            self.scopes.last_mut().unwrap().push((pi.ident.to_string(), v))
+                        }
+                        p => self.pat(p, v, None),
                     }
                 }
                 Stmt::Expr(e, semi) => {
@@ -213,23 +340,36 @@ impl Inf<'_> {
     fn expr(&mut self, e: &Expr) -> u32 {
         use BinOp::*;
         match e {
-            Expr::Lit(l) => match &l.lit {
-                Lit::Int(i) => match Ty::from_suffix(i.suffix()) {
-                    Some(t) => self.known(t),
-                    None => {
-                        let v = self.var();
-                        self.int_lit[v as usize] = true;
-                        v
-                    }
-                },
-                Lit::Bool(_) => self.known(Ty::Bool),
-                Lit::Byte(_) => self.known(Ty::U8),
-                _ => self.var(),
-            },
+            Expr::Lit(l) => self.lit_var(&l.lit),
             Expr::Paren(p) => self.expr(&p.expr),
             Expr::Group(g) => self.expr(&g.expr),
             Expr::Block(b) => self.block(&b.block),
             Expr::Unsafe(u) => self.block(&u.block),
+            Expr::Path(p) if p.path.segments.len() == 2 => match self.prog.variant_by_path(&p.path, self.self_sid) {
+                Some((sid, _)) => self.known(Ty::Struct(sid)),
+                None => self.var(),
+            },
+            Expr::Match(m) => {
+                let sv = self.expr(&m.expr);
+                let r = self.var();
+                for arm in &m.arms {
+                    self.scopes.push(vec![]);
+                    self.pat(&arm.pat, sv, None);
+                    if let Some((_, g)) = &arm.guard {
+                        self.expr(g);
+                    }
+                    let t = self.expr(&arm.body);
+                    self.unify(r, t);
+                    self.scopes.pop();
+                }
+                r
+            }
+            Expr::Let(l) => {
+                // if let / while let の条件。束縛は呼び出し側のスコープに入れる
+                let sv = self.expr(&l.expr);
+                self.pat(&l.pat, sv, None);
+                self.known(Ty::Bool)
+            }
             Expr::Path(p) => match p.path.get_ident().and_then(|id| self.lookup(&id.to_string())) {
                 Some(v) => v,
                 None => self.var(),
@@ -251,6 +391,24 @@ impl Inf<'_> {
                     syn::Member::Named(id) => self.field(b, &id.to_string()),
                     syn::Member::Unnamed(_) => self.var(),
                 }
+            }
+            Expr::Struct(s) if self.prog.variant_by_path(&s.path, self.self_sid).is_some() => {
+                let (sid, vi) = self.prog.variant_by_path(&s.path, self.self_sid).unwrap();
+                for fv in &s.fields {
+                    let v = self.expr(&fv.expr);
+                    if let syn::Member::Named(id) = &fv.member {
+                        let ft = self.prog.structs[sid as usize].variants[vi]
+                            .fields
+                            .iter()
+                            .find(|f| f.0 == id.to_string())
+                            .map(|f| f.1);
+                        if let Some(ft) = ft {
+                            let k = self.known(ft);
+                            self.unify(v, k);
+                        }
+                    }
+                }
+                self.known(Ty::Struct(sid))
             }
             Expr::Struct(s) => {
                 let sid = self.prog.struct_by_path(&s.path, self.self_sid);
@@ -302,8 +460,11 @@ impl Inf<'_> {
                 self.known(Ty::Unit)
             }
             Expr::If(i) => {
+                // if let の束縛は then 節だけで見える
+                self.scopes.push(vec![]);
                 self.expr(&i.cond);
                 let t = self.block(&i.then_branch);
+                self.scopes.pop();
                 match &i.else_branch {
                     Some((_, e)) => {
                         let e = self.expr(e);
@@ -314,8 +475,10 @@ impl Inf<'_> {
                 }
             }
             Expr::While(w) => {
+                self.scopes.push(vec![]);
                 self.expr(&w.cond);
                 self.block(&w.body);
+                self.scopes.pop();
                 self.known(Ty::Unit)
             }
             Expr::Loop(l) => {
@@ -332,6 +495,18 @@ impl Inf<'_> {
             }
             Expr::Break(_) | Expr::Continue(_) => self.known(Ty::Never),
             Expr::Call(c) => {
+                if let Expr::Path(p) = &*c.func {
+                    if let Some((sid, vi)) = self.prog.variant_by_path(&p.path, self.self_sid) {
+                        let fts: Vec<Ty> =
+                            self.prog.structs[sid as usize].variants[vi].fields.iter().map(|f| f.1).collect();
+                        for (a, ft) in c.args.iter().zip(fts) {
+                            let v = self.expr(a);
+                            let k = self.known(ft);
+                            self.unify(v, k);
+                        }
+                        return self.known(Ty::Struct(sid));
+                    }
+                }
                 let callee = match &*c.func {
                     Expr::Path(p) if p.path.get_ident().is_some_and(|id| self.lookup(&id.to_string()).is_some()) => None,
                     Expr::Path(p) => self.prog.fn_by_path(&p.path, self.self_sid),

@@ -1,6 +1,6 @@
 //! サイズ予算テスト: バイナリ・キャッシュ・LSP のメモリ上キャッシュが予算 (bench/budget.txt) を超えたら失敗する。
 //! 意図して増やしたときは `UPDATE_BUDGET=1 cargo test --release --test budget` で予算を書き直す
-//! (現在値 + 5% の余裕で書かれる)。
+//! (現在値 + 5% の余裕で書かれる)。新しい例を足しただけなら `UPDATE_BUDGET=new` で、既存の上限を変えずに追加する。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -43,8 +43,22 @@ fn measure() -> BTreeMap<String, u64> {
 #[test]
 fn sizes_within_budget() {
     let now = measure();
-    if std::env::var_os("UPDATE_BUDGET").is_some() {
-        let body: String = now.iter().map(|(k, v)| format!("{k} {}\n", v + v / 20)).collect();
+    if let Some(mode) = std::env::var_os("UPDATE_BUDGET") {
+        // UPDATE_BUDGET=new なら既存の上限はそのまま、新しい項目だけ足す
+        let old: BTreeMap<String, u64> = std::fs::read_to_string(BUDGET)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .filter_map(|l| l.split_once(' ').map(|(k, v)| (k.to_string(), v.trim().parse().unwrap())))
+            .collect();
+        let keep_old = mode == "new";
+        let body: String = now
+            .iter()
+            .map(|(k, v)| match old.get(k) {
+                Some(o) if keep_old => format!("{k} {o}\n"),
+                _ => format!("{k} {}\n", v + v / 20),
+            })
+            .collect();
         std::fs::write(BUDGET, format!("# 名前 上限バイト (UPDATE_BUDGET=1 で再生成: 現在値 + 5%)\n{body}")).unwrap();
         return;
     }

@@ -1,4 +1,7 @@
 # 名前 上限バイト (UPDATE_BUDGET=1 で再生成: 現在値 + 5%)
+enums.binary_bytes 10264
+enums.cache_bytes 8491
+enums.object_bytes 8937
 gen1000.binary_bytes 443545
 gen1000.cache_bytes 537575
 gen1000.object_bytes 634418
