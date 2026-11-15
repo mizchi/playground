@@ -356,6 +356,13 @@ bench/regress.sh
 - メソッド：
   - 自動 deref と自動参照、UFCS（`S::m(&x)` / `Trait::m(&x)` / `<S as Trait>::m(&x)`）
   - 静的ディスパッチ。固有メソッド → trait 実装 → デフォルトメソッドの順に探す
+- 浮動小数点 `f32` / `f64`：
+  - 四則演算・`%`・比較・`as` キャスト（整数への変換は rustc と同じ飽和）、`1.5` / `1e-3` / `2.0f32` リテラル
+  - メソッド：`sqrt` / `abs` / `floor` / `ceil` / `round` / `trunc` / `powi` / `powf` / `exp` / `ln` / `sin` / `cos` / `atan2` / `hypot` / `mul_add` / `max` / `min`（NaN を無視）/ `total_cmp` / `is_nan` / `to_bits` など（超越関数は libm）
+  - 定数：`f64::MAX` / `EPSILON` / `NAN` / `INFINITY` / `consts::PI` など。`f64::sqrt(x)` のパス呼び出し
+  - 書式化は rustc と同じ桁：最短表現（往復で同じ値になる最短の桁、`{:?}` は指数が -5 以下か 16 以上で `1e-7` 形式）、`{:.N}`（正確な 10 進展開から偶数丸め）。10 進変換は 1e9 進の多倍長で正確に行う
+  - `"1.5".parse::<f64>()`（strtod、`ParseFloatError`）
+  - `examples/float_fuzz.rs` の 6000 行（乱数のビット列の Display / Debug / `{:.N}` / parse）が rustc と一致する
 - panic：
   - `#[panic_handler]` があればそれを呼ぶ（範囲外アクセス・`unwrap`・`assert!`・`panic!` など）
   - なければ trap する
@@ -394,10 +401,10 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
 
 - `Box<[T]>`、`Box::into_raw` などの Box の関数（`new` 以外）
 - `String + &str` / `Vec` のスライスメソッドの一部（prelude に書いたもの以外。`&v` を `&[T]` にすれば組み込みのスライスメソッドは使える）
-- イテレータの制限：`rev`（値として。`for` の中なら可）、`DoubleEndedIterator` / `ExactSizeIterator`、`peekable` / `flat_map` / `step_by`、`collect` は `Vec<T>` / `String` / `HashMap<K, V>` だけ、`sum` / `product` は整数だけ
+- イテレータの制限：`rev`（値として。`for` の中なら可）、`DoubleEndedIterator` / `ExactSizeIterator`、`peekable` / `flat_map` / `step_by`、`collect` は `Vec<T>` / `String` / `HashMap<K, V>` だけ
 - 関連型の制限：trait の関連型は `Self::X` / `T::X` / `<T as Tr>::X` の形だけ。関連型に境界（`type Item: Copy;`）は付けられない
 - 書式化の制限：`{:e}`、`{:p}`、`impl Debug for S` の手書きで `f.debug_struct(..)` などのビルダー、`Formatter` のフラグを読むメソッド（`f.alternate()` など）、`format_args!`
-- 比較の制限：浮動小数点がないので `partial_cmp` は常に `Some`。`Ord::cmp(&a, &b)` の UFCS。BinaryHeap の `drain` / `retain` / `peek_mut`。`extend` は Vec / BinaryHeap だけ（HashMap / String の `extend`、一般の `IntoIterator` 境界はない）
+- 比較の制限：`partial_cmp` は浮動小数点の NaN 以外では常に `Some`。`Ord::cmp(&a, &b)` の UFCS。BinaryHeap の `drain` / `retain` / `peek_mut`。`extend` は Vec / BinaryHeap だけ（HashMap / String の `extend`、一般の `IntoIterator` 境界はない）
 - HashMap の制限：`HashSet`、`BTreeMap`、`HashMap::from([..])`、`retain` / `drain`、キーに `impl Hash` を手書きすること
 - Drop の制限
   - panic では drop しない（unwind しない）
@@ -409,7 +416,7 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
   - Fn / FnMut / FnOnce を区別しない（`FnMut` のクロージャを `&dyn Fn` にしてもエラーにならない）
   - ローカル変数をキャプチャするクロージャを `impl Fn` で返すこと（引数のキャプチャだけ対応）
 - `dyn` の制限：`Self` やジェネリクスを使うメソッド（object safe でないもの）は dyn 経由で呼べない。`dyn A + B` は不可
-- 浮動小数点
+- 浮動小数点の制限：`{:e}` 書式
 - 128 bit 整数
 - 別ファイルのモジュール（`mod x;`）。1 ファイルの中のモジュールは平らにするので、別のモジュールに同じ名前のアイテムがあるとぶつかる
 - `macro_rules!` の制限：衛生 (hygiene) はない（展開はテキストの置き換え）。`$x:expr` などは次の区切りまでのトークン列として取る近似
@@ -586,7 +593,7 @@ rustc 側はほとんどが std 由来。
 
 - **言語**
   - モジュール、`DoubleEndedIterator`（値としての `rev`）、`HashSet` / `BTreeMap`
-  - 浮動小数点、オーバーフロー検査（debug ビルドの rustc と同じ panic）
+  - 128 bit 整数、オーバーフロー検査（debug ビルドの rustc と同じ panic）
   - 単相化をレイアウトでキーにして共有する（`Vec<A>` と `Vec<B>` を 1 つにする。blaze の polymorph）
   - 最小の自前 std（relax 方式）
 - **インクリメンタル**

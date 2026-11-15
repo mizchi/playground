@@ -18,7 +18,7 @@
 use std::collections::{HashMap, HashSet};
 
 use cranelift_codegen::control::ControlPlane;
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
     self, AbiParam, Block, ExtFuncData, ExternalName, FuncRef, InstBuilder, MemFlagsData,
     Signature, StackSlot, StackSlotData, StackSlotKind, TrapCode, UserExternalName, UserFuncName,
@@ -110,6 +110,8 @@ fn clif_ty(t: Ty) -> Option<ir::Type> {
         // 集約型 (struct / enum / 配列 / fat pointer) は値としてはアドレス
         t if t.is_agg() => PTR,
         Ty::Ref(..) | Ty::Ptr(..) => PTR,
+        Ty::F32 => types::F32,
+        Ty::F64 => types::F64,
         t => match t.bits() {
             0 => return None,
             8 => types::I8,
@@ -994,6 +996,14 @@ impl Cx<'_, '_> {
 
     fn peek_syn(&self, e: &Expr) -> Option<Ty> {
         match e {
+            // `f64::NAN` / `std::f64::consts::PI` / `PI` (use したもの)
+            Expr::Path(p)
+                if p.path.segments.len() >= 2
+                    && p.path.segments.iter().any(|s| s.ident == "f64" || s.ident == "f32")
+                    && p.path.segments.last().is_some_and(|s| s.ident.to_string().chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())) =>
+            {
+                Some(if p.path.segments.iter().any(|s| s.ident == "f32") { Ty::F32 } else { Ty::F64 })
+            }
             Expr::Path(p) if p.path.segments.len() == 2 && self.const_of(p).is_some() => {
                 Some(self.prog.consts[self.const_of(p)? as usize].ty)
             }
@@ -1009,6 +1019,9 @@ impl Cx<'_, '_> {
                     .map(|f| f.1)
             }
             Expr::Lit(l) => match &l.lit {
+                Lit::Int(i) if i.suffix() == "f32" => Some(Ty::F32),
+                Lit::Int(i) if i.suffix() == "f64" => Some(Ty::F64),
+                Lit::Float(f) => Some(if f.suffix() == "f32" { Ty::F32 } else { Ty::F64 }),
                 Lit::Int(i) => Ty::from_suffix(i.suffix()),
                 Lit::Bool(_) => Some(Ty::Bool),
                 Lit::Byte(_) => Some(Ty::U8),
@@ -1056,7 +1069,8 @@ impl Cx<'_, '_> {
                 .path
                 .get_ident()
                 .and_then(|id| self.lookup(&id.to_string()))
-                .map(|(_, t)| t),
+                .map(|(_, t)| t)
+                .or_else(|| self.float_const_name(p).map(|_| Ty::F64)),
             Expr::Call(c) => self
                 .callee(&c.func)
                 .map(|(_, s)| s.ret)
@@ -1254,7 +1268,16 @@ impl Cx<'_, '_> {
                                 let t = Ty::Struct(sid);
                                 Ok(Place::Mem(self.temp(t), 0, t))
                             }
-                            _ => err(p.span(), format!("cannot find value `{id}`")),
+                            // `use std::f64::consts::PI;` してからの `PI`
+                            _ => match self.float_const_name(p) {
+                                Some(x) => {
+                                    let v = self.b.ins().f64const(x);
+                                    let var = self.b.declare_var(types::F64);
+                                    self.b.def_var(var, v);
+                                    Ok(Place::Var(var, Ty::F64))
+                                }
+                                None => err(p.span(), format!("cannot find value `{id}`")),
+                            },
                         },
                     },
                 }
@@ -1720,7 +1743,10 @@ impl Cx<'_, '_> {
                     self.same(c.span(), t, to)?;
                     return Ok((v, t));
                 }
-                let hint = self.peek(&c.expr).or(Some(Ty::I32));
+                let hint = self.peek(&c.expr).or(match &*c.expr {
+                    Expr::Lit(syn::ExprLit { lit: Lit::Float(_), .. }) => Some(Ty::F64),
+                    _ => Some(Ty::I32),
+                });
                 let (v, from) = self.expr(&c.expr, hint)?;
                 if from == Ty::Never {
                     return Ok((None, Ty::Never));
@@ -1753,6 +1779,54 @@ impl Cx<'_, '_> {
                             .load(clif_ty(tag).unwrap(), mf(), v.unwrap(), 0);
                         return Ok((Some(self.convert(t, tag, to)), to));
                     }
+                }
+                // 浮動小数点が関わるキャスト (Rust の `as` と同じく、浮動小数点 → 整数は飽和し NaN は 0)
+                if from.is_float() || to.is_float() {
+                    let v = v.unwrap();
+                    let r = match (from.is_float(), to.is_float()) {
+                        (true, true) if from == to => v,
+                        (true, true) if to == Ty::F64 => self.b.ins().fpromote(types::F64, v),
+                        (true, true) => self.b.ins().fdemote(types::F32, v),
+                        (false, true) if from.is_int() => {
+                            let w = if from.bits() < 32 { self.convert(v, from, if from.signed() { Ty::I32 } else { Ty::U32 }) } else { v };
+                            let ft = clif_ty(to).unwrap();
+                            if from.signed() { self.b.ins().fcvt_from_sint(ft, w) } else { self.b.ins().fcvt_from_uint(ft, w) }
+                        }
+                        (true, false) if to.is_int() => {
+                            // 64 bit に飽和させてから、狭い型は範囲に切り詰める
+                            let wide = if to.signed() {
+                                self.b.ins().fcvt_to_sint_sat(types::I64, v)
+                            } else {
+                                self.b.ins().fcvt_to_uint_sat(types::I64, v)
+                            };
+                            if to.bits() == 64 {
+                                wide
+                            } else {
+                                let (lo, hi): (i64, i64) = match to {
+                                    Ty::I8 => (i8::MIN as i64, i8::MAX as i64),
+                                    Ty::I16 => (i16::MIN as i64, i16::MAX as i64),
+                                    Ty::I32 => (i32::MIN as i64, i32::MAX as i64),
+                                    Ty::U8 => (0, u8::MAX as i64),
+                                    Ty::U16 => (0, u16::MAX as i64),
+                                    _ => (0, u32::MAX as i64),
+                                };
+                                let c = if to.signed() {
+                                    let a = self.b.ins().iconst(types::I64, lo);
+                                    let m = self.b.ins().smax(wide, a);
+                                    let b2 = self.b.ins().iconst(types::I64, hi);
+                                    self.b.ins().smin(m, b2)
+                                } else {
+                                    let b2 = self.b.ins().iconst(types::I64, hi);
+                                    self.b.ins().umin(wide, b2)
+                                };
+                                self.b.ins().ireduce(clif_ty(to).unwrap(), c)
+                            }
+                        }
+                        _ => {
+                            return err(c.span(), format!("unsupported cast `{}` as `{}`", self.prog.tn(from), self.prog.tn(to)));
+                        }
+                    };
+                    return Ok((Some(r), to));
                 }
                 // 整数 ⇔ char / bool → 整数 (char には u8 からだけ)
                 let ok = (to.is_int() && (from.is_int() || matches!(from, Ty::Bool | Ty::Char)))
@@ -3041,6 +3115,30 @@ impl Cx<'_, '_> {
 
     fn lit(&mut self, l: &Lit, expected: Option<Ty>) -> R<V> {
         match l {
+            // 浮動小数点: `1.5` / `2e3` / `1.0f32` / `1f64` (と、浮動小数点が期待される整数リテラル)
+            Lit::Float(_) | Lit::Int(_)
+                if matches!(l, Lit::Float(_))
+                    || matches!(l, Lit::Int(i) if matches!(i.suffix(), "f32" | "f64"))
+                    || (matches!(l, Lit::Int(i) if i.suffix().is_empty()) && expected.is_some_and(|t| t.is_float())) =>
+            {
+                let (digits, suffix) = match l {
+                    Lit::Float(f) => (f.base10_digits().to_string(), f.suffix().to_string()),
+                    Lit::Int(i) => (i.base10_digits().to_string(), i.suffix().to_string()),
+                    _ => unreachable!(),
+                };
+                let ty = match suffix.as_str() {
+                    "f32" => Ty::F32,
+                    "f64" => Ty::F64,
+                    _ => expected.filter(|t| t.is_float()).unwrap_or(Ty::F64),
+                };
+                let x: f64 = digits.parse().map_err(|e: std::num::ParseFloatError| e.to_string())?;
+                let v = if ty == Ty::F32 {
+                    self.b.ins().f32const(x as f32)
+                } else {
+                    self.b.ins().f64const(x)
+                };
+                Ok((Some(v), ty))
+            }
             Lit::Int(i) => {
                 let ty = Ty::from_suffix(i.suffix())
                     .or(expected.filter(|t| t.is_int()))
@@ -3097,6 +3195,7 @@ impl Cx<'_, '_> {
         let Some(v) = v else { return Ok((None, t)) };
         match u.op {
             UnOp::Neg(_) if t.is_int() && t.signed() => Ok((Some(self.b.ins().ineg(v)), t)),
+            UnOp::Neg(_) if t.is_float() => Ok((Some(self.b.ins().fneg(v)), t)),
             UnOp::Not(_) if t == Ty::Bool => Ok((Some(self.b.ins().bxor_imm_u(v, 1)), t)),
             UnOp::Not(_) if t.is_int() => Ok((Some(self.b.ins().bnot(v)), t)),
             _ => err(
@@ -3224,7 +3323,7 @@ impl Cx<'_, '_> {
         let cmp = is_cmp(&b.op);
         // `x * 10` (x: &i64): リテラルの型は参照の中身
         let deref_num = |t: Option<Ty>| match t {
-            Some(Ty::Ref(_, i)) if i.is_int() => Some(*i),
+            Some(Ty::Ref(_, i)) if i.is_int() || i.is_float() => Some(*i),
             t => t,
         };
         let hint = deref_num(hint);
@@ -3246,7 +3345,7 @@ impl Cx<'_, '_> {
         let (mut l, mut lt, mut r, mut rt) = (l, lt, r, rt);
         // `i32 + &i32` など: 整数への参照は値にしてから計算する (core の `impl Add<&i32> for i32` 相当)
         if let (Ty::Ref(_, a), Ty::Ref(_, c)) = (lt, rt) {
-            if a == c && (a.is_int() || matches!(a, Ty::Char | Ty::Bool)) && !is_shift {
+            if a == c && (a.is_int() || a.is_float() || matches!(a, Ty::Char | Ty::Bool)) && !is_shift {
                 let ct = clif_ty(*a).unwrap();
                 l = self.b.ins().load(ct, mf(), l, 0);
                 r = self.b.ins().load(ct, mf(), r, 0);
@@ -3255,12 +3354,12 @@ impl Cx<'_, '_> {
             }
         }
         if !matches!(b.op, Eq(_) | Ne(_)) || !lt.is_agg() {
-            if let (true, Ty::Ref(_, i)) = (lt.is_int(), rt) {
+            if let (true, Ty::Ref(_, i)) = (lt.is_int() || lt.is_float(), rt) {
                 if *i == lt {
                     r = self.b.ins().load(clif_ty(lt).unwrap(), mf(), r, 0);
                     rt = lt;
                 }
-            } else if let (Ty::Ref(_, i), true) = (lt, rt.is_int()) {
+            } else if let (Ty::Ref(_, i), true) = (lt, rt.is_int() || rt.is_float()) {
                 if *i == rt && !is_shift {
                     l = self.b.ins().load(clif_ty(rt).unwrap(), mf(), l, 0);
                     lt = rt;
@@ -3304,7 +3403,7 @@ impl Cx<'_, '_> {
             }
         }
         // タプル・struct・enum・配列・スライス・Vec などの大小比較: 型ごとの glue (__exr_cmp)
-        if matches!(b.op, Lt(_) | Le(_) | Gt(_) | Ge(_)) && !(lt.is_int() || matches!(lt, Ty::Bool | Ty::Char)) {
+        if matches!(b.op, Lt(_) | Le(_) | Gt(_) | Ge(_)) && !(lt.is_int() || lt.is_float() || matches!(lt, Ty::Bool | Ty::Char)) {
             self.same(b.right.span(), rt, lt)?;
             let (la, t) = self.ord_addr(l, lt);
             let (ra, _) = self.ord_addr(r, rt);
@@ -3328,6 +3427,18 @@ impl Cx<'_, '_> {
                     e
                 };
                 return Ok((Some(e), Ty::Bool));
+            }
+            // 浮動小数点の比較 (NaN は == / < などで false、!= で true)
+            if lt.is_float() {
+                let cc = match b.op {
+                    Eq(_) => FloatCC::Equal,
+                    Ne(_) => FloatCC::NotEqual,
+                    Lt(_) => FloatCC::LessThan,
+                    Le(_) => FloatCC::LessThanOrEqual,
+                    Gt(_) => FloatCC::GreaterThan,
+                    _ => FloatCC::GreaterThanOrEqual,
+                };
+                return Ok((Some(self.b.ins().fcmp(cc, l, r)), Ty::Bool));
             }
             if !(lt.is_int() || matches!(lt, Ty::Bool | Ty::Char | Ty::Ptr(..))) {
                 return err(
@@ -3386,6 +3497,7 @@ impl Cx<'_, '_> {
             t if t.is_int() || matches!(t, Ty::Bool | Ty::Char | Ty::Ptr(..)) => {
                 Ok(self.b.ins().icmp(IntCC::Equal, a, b))
             }
+            t if t.is_float() => Ok(self.b.ins().fcmp(FloatCC::Equal, a, b)),
             // `&str` / `&[T]`: 長さと中身で比べる
             Ty::Ref(_, Ty::Str | Ty::Slice(_)) => {
                 let e = match t {
@@ -3537,6 +3649,22 @@ impl Cx<'_, '_> {
             });
         }
         self.same(b.right.span(), rt, lt)?;
+        if lt.is_float() {
+            let ins = self.b.ins();
+            return Ok(match op {
+                Add(_) => ins.fadd(l, r),
+                Sub(_) => ins.fsub(l, r),
+                Mul(_) => ins.fmul(l, r),
+                Div(_) => ins.fdiv(l, r),
+                // (Cranelift に剰余はないので libm の fmod)
+                Rem(_) => {
+                    let f = if lt == Ty::F32 { "__exr_fmodf" } else { "__exr_fmod" };
+                    let (v, _) = self.call_named(f, vec![], &[(l, lt), (r, lt)], b.span())?;
+                    v.unwrap()
+                }
+                _ => return err(b.span(), format!("unsupported operator for `{}`", self.prog.tn(lt))),
+            });
+        }
         let bool_ok = matches!(op, BitAnd(_) | BitOr(_) | BitXor(_));
         if !(lt.is_int() || (lt == Ty::Bool && bool_ok)) {
             return err(
@@ -4134,6 +4262,7 @@ impl Cx<'_, '_> {
             // &str は [u8] と同じ表現
             Ty::Ref(_, Ty::Str) => return self.str_method(mc),
             Ty::Ptr(_, t) => return self.ptr_method(mc, rt, *t),
+            t if t.is_float() => return self.float_method(mc, t),
             t if t.is_int() || t == Ty::Bool || t == Ty::Char => {
                 let r = self.int_method(mc, t)?;
                 // char の `is_alphabetic` / `to_digit` など: prelude の `__exr_char_<m>`
@@ -5580,6 +5709,11 @@ impl Cx<'_, '_> {
             }
             self.prog.match_ty(sig0.ret, f.ret, &mut sol);
         }
+        for (i, g) in sig0.generics.iter().enumerate() {
+            if g.0 == "G" && sol[i].is_none() {
+                sol[i] = Some(Ty::Unit);
+            }
+        }
         let (target, sig) = if sig0.is_generic() {
             if let Some(i) = sol.iter().position(|s| s.is_none()) {
                 return err(
@@ -5617,6 +5751,35 @@ impl Cx<'_, '_> {
             .iter()
             .map(|s| s.ident.to_string())
             .collect();
+        // `f64::MAX` / `f64::consts::PI` / `std::f64::consts::E` など
+        let fl = segs.iter().position(|s| s == "f64" || s == "f32");
+        if let Some(i) = fl {
+            let t = if segs[i] == "f32" { Ty::F32 } else { Ty::F64 };
+            let name = segs.last().unwrap().as_str();
+            let x: Option<f64> = match name {
+                "MAX" => Some(if t == Ty::F32 { f32::MAX as f64 } else { f64::MAX }),
+                "MIN" => Some(if t == Ty::F32 { f32::MIN as f64 } else { f64::MIN }),
+                "MIN_POSITIVE" => Some(if t == Ty::F32 { f32::MIN_POSITIVE as f64 } else { f64::MIN_POSITIVE }),
+                "EPSILON" => Some(if t == Ty::F32 { f32::EPSILON as f64 } else { f64::EPSILON }),
+                "INFINITY" => Some(f64::INFINITY),
+                "NEG_INFINITY" => Some(f64::NEG_INFINITY),
+                "NAN" => Some(f64::NAN),
+                "PI" => Some(std::f64::consts::PI),
+                "E" => Some(std::f64::consts::E),
+                "TAU" => Some(std::f64::consts::TAU),
+                "SQRT_2" => Some(std::f64::consts::SQRT_2),
+                "LN_2" => Some(std::f64::consts::LN_2),
+                "LN_10" => Some(std::f64::consts::LN_10),
+                "FRAC_PI_2" => Some(std::f64::consts::FRAC_PI_2),
+                "FRAC_PI_4" => Some(std::f64::consts::FRAC_PI_4),
+                "FRAC_1_SQRT_2" => Some(std::f64::consts::FRAC_1_SQRT_2),
+                _ => None,
+            };
+            if let Some(x) = x {
+                let v = if t == Ty::F32 { self.b.ins().f32const(x as f32) } else { self.b.ins().f64const(x) };
+                return Ok((Some(v), t));
+            }
+        }
         if segs.len() == 2 {
             if let Some(t) = crate::front::Ty::from_suffix(&segs[0]).or(if segs[0] == "char" {
                 Some(Ty::Char)
@@ -5645,6 +5808,13 @@ impl Cx<'_, '_> {
 
     /// 1 セグメントのパスが (ローカル変数でない) const なら、その index
     fn const_of(&self, p: &syn::ExprPath) -> Option<u32> {
+        // (速い判定: 複数セグメントのパスで、最後の名前の const がなければ const ではない)
+        if p.path.segments.len() >= 2 {
+            let last = p.path.segments.last()?.ident.to_string();
+            if !self.prog.const_by_last.contains_key(&last) && !self.prog.const_index.contains_key(&last) {
+                return None;
+            }
+        }
         // `geometry::UNIT` / `crate::m::N`: モジュールの部分を外して引く
         if p.qself.is_none() && p.path.segments.len() >= 2 {
             if let Some(q) = self.prog.strip_mods(&p.path) {
@@ -7265,7 +7435,7 @@ impl Cx<'_, '_> {
     /// 値として書けるか (`{}` なら Display、`{:?}` なら Debug を実装しているか)
     fn fmt_ok(&self, t: Ty, debug: bool) -> bool {
         match t {
-            t if t.is_int() || matches!(t, Ty::Bool | Ty::Char | Ty::Str) => true,
+            t if t.is_int() || t.is_float() || matches!(t, Ty::Bool | Ty::Char | Ty::Str) => true,
             Ty::Unit => debug,
             Ty::Ref(_, i) | Ty::Box(i) => self.fmt_ok(*i, debug),
             Ty::Array(e, _) | Ty::Slice(e) => debug && self.fmt_ok(*e, debug),
@@ -7543,6 +7713,13 @@ impl Cx<'_, '_> {
                     (v64, self.b.ins().iconst(types::I8, 0))
                 };
                 self.call_named("__exr_fmt_int", vec![Ty::Unit], &[(f, fref), (mag, Ty::U64), (neg, Ty::Bool)], span)?;
+            }
+            t if t.is_float() => {
+                let v = self.b.ins().load(clif_ty(t).unwrap(), mf(), x, 0);
+                let v = if t == Ty::F32 { self.b.ins().fpromote(types::F64, v) } else { v };
+                let is32 = self.b.ins().iconst(types::I8, (t == Ty::F32) as i64);
+                let dbg = self.b.ins().iconst(types::I8, debug as i64);
+                self.call_named("__exr_fmt_float", vec![Ty::Unit], &[(f, fref), (v, Ty::F64), (is32, Ty::Bool), (dbg, Ty::Bool)], span)?;
             }
             Ty::Bool => {
                 let v = self.b.ins().load(types::I8, mf(), x, 0);
@@ -7877,7 +8054,7 @@ impl Cx<'_, '_> {
 
     /// `__exr_cmp::<t>(a, b)` (a, b は t の値のアドレス) → -1 / 0 / 1 の i32
     fn cmp_call(&mut self, a: Value, b: Value, t: Ty) -> R<Value> {
-        if t.is_int() || matches!(t, Ty::Bool | Ty::Char | Ty::Unit | Ty::Ptr(..)) {
+        if t.is_int() || t.is_float() || matches!(t, Ty::Bool | Ty::Char | Ty::Unit | Ty::Ptr(..)) {
             return self.cmp_at(a, b, t);
         }
         // glue がなければその場で展開する
@@ -7975,6 +8152,17 @@ impl Cx<'_, '_> {
                 let x = self.b.ins().load(ct, mf(), a, 0);
                 let y = self.b.ins().load(ct, mf(), b, 0);
                 self.cmp_scalar(x, y, t.signed())
+            }
+            // (NaN はどちらとも等しい扱い: partial_cmp の None の代わり)
+            t if t.is_float() => {
+                let ct = clif_ty(t).unwrap();
+                let x = self.b.ins().load(ct, mf(), a, 0);
+                let y = self.b.ins().load(ct, mf(), b, 0);
+                let l = self.b.ins().fcmp(FloatCC::LessThan, x, y);
+                let g = self.b.ins().fcmp(FloatCC::GreaterThan, x, y);
+                let l = self.b.ins().uextend(types::I32, l);
+                let g = self.b.ins().uextend(types::I32, g);
+                self.b.ins().isub(g, l)
             }
             Ty::Ref(_, Ty::Str | Ty::Slice(_)) => {
                 let e = match t {
@@ -8826,5 +9014,241 @@ impl Cx<'_, '_> {
         })?;
         self.same(p.span(), vt, t)?;
         Ok((v, t))
+    }
+}
+
+// --- 浮動小数点のメソッド ---------------------------------------------------------
+
+impl Cx<'_, '_> {
+    /// f32 / f64 の組み込みメソッド (命令になるものは命令、ほかは libm)
+    fn float_method(&mut self, mc: &syn::ExprMethodCall, t: Ty) -> R<Option<V>> {
+        let name = mc.method.to_string();
+        let _ = clif_ty(t);
+        let f32 = t == Ty::F32;
+        let lib1 = [
+            "exp", "exp2", "ln", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh",
+            "tanh", "asinh", "acosh", "atanh", "cbrt", "round", "exp_m1", "ln_1p",
+        ];
+        let lib2 = ["powf", "atan2", "hypot"];
+        let known = [
+            "sqrt", "abs", "floor", "ceil", "trunc", "fract", "mul_add", "copysign", "min", "max", "is_nan",
+            "is_finite", "is_infinite", "is_sign_negative", "is_sign_positive", "signum", "to_bits", "recip",
+            "to_degrees", "to_radians", "clamp", "powi", "log", "total_cmp", "abs_sub", "is_normal",
+        ];
+        if !(known.contains(&name.as_str()) || lib1.contains(&name.as_str()) || lib2.contains(&name.as_str())) {
+            return Ok(None);
+        }
+        // 受け手 (参照なら中身)
+        let (a, at) = if matches!(self.peek(&mc.receiver), Some(Ty::Ref(..))) {
+            self.expr(&mc.receiver, None)?
+        } else {
+            self.expr(&mc.receiver, Some(t))?
+        };
+        let Some(mut a) = a else { return Ok(Some((None, Ty::Never))) };
+        let mut at = at;
+        while let Ty::Ref(_, i) = at {
+            a = self.b.ins().load(clif_ty(*i).unwrap_or(PTR), mf(), a, 0);
+            at = *i;
+        }
+        let args: Vec<&Expr> = mc.args.iter().collect();
+        let arg = |this: &mut Self, i: usize, want: Ty| -> R<Value> {
+            let Some(e) = args.get(i) else {
+                return err(mc.span(), format!("`{name}` needs an argument"));
+            };
+            let (v, vt) = this.expr(e, Some(want))?;
+            let mut v = v.unwrap();
+            let mut vt = vt;
+            while let Ty::Ref(_, i) = vt {
+                v = this.b.ins().load(clif_ty(*i).unwrap_or(PTR), mf(), v, 0);
+                vt = *i;
+            }
+            this.same(e.span(), vt, want)?;
+            Ok(v)
+        };
+        let span = mc.span();
+        let libm = |this: &mut Self, f: &str, vals: Vec<Value>| -> R<Value> {
+            let n = format!("__exr_{f}{}", if f32 { "f" } else { "" });
+            let a: Vec<(Value, Ty)> = vals.into_iter().map(|v| (v, t)).collect();
+            let (r, _) = this.call_named(&n, vec![], &a, span)?;
+            Ok(r.unwrap())
+        };
+        let fc = |this: &mut Self, x: f64| -> Value {
+            if f32 { this.b.ins().f32const(x as f32) } else { this.b.ins().f64const(x) }
+        };
+        let r: V = match name.as_str() {
+            "sqrt" => (Some(self.b.ins().sqrt(a)), t),
+            "abs" => (Some(self.b.ins().fabs(a)), t),
+            "floor" => (Some(self.b.ins().floor(a)), t),
+            "ceil" => (Some(self.b.ins().ceil(a)), t),
+            "trunc" => (Some(self.b.ins().trunc(a)), t),
+            "fract" => {
+                let tr = self.b.ins().trunc(a);
+                (Some(self.b.ins().fsub(a, tr)), t)
+            }
+            "mul_add" => {
+                let b = arg(self, 0, t)?;
+                let c = arg(self, 1, t)?;
+                (Some(self.b.ins().fma(a, b, c)), t)
+            }
+            "copysign" => {
+                let b = arg(self, 0, t)?;
+                (Some(self.b.ins().fcopysign(a, b)), t)
+            }
+            "recip" => {
+                let one = fc(self, 1.0);
+                (Some(self.b.ins().fdiv(one, a)), t)
+            }
+            "to_degrees" => {
+                let k = fc(self, if f32 { (180.0f32 / std::f32::consts::PI) as f64 } else { 180.0 / std::f64::consts::PI });
+                (Some(self.b.ins().fmul(a, k)), t)
+            }
+            "to_radians" => {
+                let v = if f32 {
+                    let k = fc(self, (std::f32::consts::PI / 180.0) as f64);
+                    self.b.ins().fmul(a, k)
+                } else {
+                    let k = fc(self, std::f64::consts::PI / 180.0);
+                    self.b.ins().fmul(a, k)
+                };
+                (Some(v), t)
+            }
+            // Rust の max / min: 片方が NaN ならもう片方
+            "max" | "min" => {
+                let b = arg(self, 0, t)?;
+                let cc = if name == "max" { FloatCC::GreaterThan } else { FloatCC::LessThan };
+                let pick_a = self.b.ins().fcmp(cc, a, b);
+                let b_nan = self.b.ins().fcmp(FloatCC::Unordered, b, b);
+                let use_a = self.b.ins().bor(pick_a, b_nan);
+                (Some(self.b.ins().select(use_a, a, b)), t)
+            }
+            "clamp" => {
+                let lo = arg(self, 0, t)?;
+                let hi = arg(self, 1, t)?;
+                let l = self.b.ins().fcmp(FloatCC::LessThan, a, lo);
+                let x = self.b.ins().select(l, lo, a);
+                let g = self.b.ins().fcmp(FloatCC::GreaterThan, x, hi);
+                (Some(self.b.ins().select(g, hi, x)), t)
+            }
+            "is_nan" => (Some(self.b.ins().fcmp(FloatCC::Unordered, a, a)), Ty::Bool),
+            "is_infinite" => {
+                let ab = self.b.ins().fabs(a);
+                let inf = fc(self, f64::INFINITY);
+                (Some(self.b.ins().fcmp(FloatCC::Equal, ab, inf)), Ty::Bool)
+            }
+            "is_finite" => {
+                let ab = self.b.ins().fabs(a);
+                let inf = fc(self, f64::INFINITY);
+                (Some(self.b.ins().fcmp(FloatCC::LessThan, ab, inf)), Ty::Bool)
+            }
+            "is_normal" => {
+                let ab = self.b.ins().fabs(a);
+                let inf = fc(self, f64::INFINITY);
+                let mp = fc(self, if f32 { f32::MIN_POSITIVE as f64 } else { f64::MIN_POSITIVE });
+                let c1 = self.b.ins().fcmp(FloatCC::LessThan, ab, inf);
+                let c2 = self.b.ins().fcmp(FloatCC::GreaterThanOrEqual, ab, mp);
+                (Some(self.b.ins().band(c1, c2)), Ty::Bool)
+            }
+            "is_sign_negative" | "is_sign_positive" => {
+                let it = if f32 { types::I32 } else { types::I64 };
+                let bits = self.b.ins().bitcast(it, MemFlagsData::new(), a);
+                let c = if name == "is_sign_negative" { IntCC::SignedLessThan } else { IntCC::SignedGreaterThanOrEqual };
+                (Some(self.b.ins().icmp_imm_s(c, bits, 0)), Ty::Bool)
+            }
+            "to_bits" => {
+                let it = if f32 { types::I32 } else { types::I64 };
+                (Some(self.b.ins().bitcast(it, MemFlagsData::new(), a)), if f32 { Ty::U32 } else { Ty::U64 })
+            }
+            // NaN は NaN、それ以外は符号つきの 1
+            "signum" => {
+                let one = fc(self, 1.0);
+                let s1 = self.b.ins().fcopysign(one, a);
+                let nan = self.b.ins().fcmp(FloatCC::Unordered, a, a);
+                (Some(self.b.ins().select(nan, a, s1)), t)
+            }
+            "powi" => {
+                let n = arg(self, 0, Ty::I32)?;
+                let f = if f32 { "__exr_powif" } else { "__exr_powi" };
+                let (r, _) = self.call_named(f, vec![Ty::Unit], &[(a, t), (n, Ty::I32)], span)?;
+                (r, t)
+            }
+            "abs_sub" => {
+                let b = arg(self, 0, t)?;
+                let d = self.b.ins().fsub(a, b);
+                let z = fc(self, 0.0);
+                let g = self.b.ins().fcmp(FloatCC::GreaterThan, d, z);
+                (Some(self.b.ins().select(g, d, z)), t)
+            }
+            // log(base) = ln(x) / ln(base)
+            "log" => {
+                let b = arg(self, 0, t)?;
+                let la = libm(self, "log", vec![a])?;
+                let lb = libm(self, "log", vec![b])?;
+                (Some(self.b.ins().fdiv(la, lb)), t)
+            }
+            "total_cmp" => {
+                // ビット列を全順序の整数にして比べる
+                let b = arg(self, 0, t)?;
+                let it = if f32 { types::I32 } else { types::I64 };
+                let sh = if f32 { 31 } else { 63 };
+                let key = |this: &mut Self, v: Value| -> Value {
+                    let bits = this.b.ins().bitcast(it, MemFlagsData::new(), v);
+                    let s = this.b.ins().sshr_imm_s(bits, sh);
+                    let m = this.b.ins().ushr_imm_u(s, 1);
+                    this.b.ins().bxor(bits, m)
+                };
+                let ka = key(self, a);
+                let kb = key(self, b);
+                let c = self.cmp_scalar(ka, kb, true);
+                let (o, ot) = self.call_named("__exr_ordering", vec![Ty::Unit], &[(c, Ty::I32)], span)?;
+                (o, ot)
+            }
+            n if lib2.contains(&n) => {
+                let b = arg(self, 0, t)?;
+                let f = if n == "powf" { "pow" } else { n };
+                (Some(libm(self, f, vec![a, b])?), t)
+            }
+            n => {
+                let f = match n {
+                    "ln" => "log",
+                    "exp_m1" => "expm1",
+                    "ln_1p" => "log1p",
+                    m => m,
+                };
+                (Some(libm(self, f, vec![a])?), t)
+            }
+        };
+        Ok(Some(r))
+    }
+}
+
+impl Cx<'_, '_> {
+    /// `use std::f64::consts::PI;` で取り込んだ定数の名前 (ローカル変数でも const でもないとき)
+    fn float_const_name(&self, p: &syn::ExprPath) -> Option<f64> {
+        use std::f64::consts as c;
+        let id = p.path.get_ident()?;
+        // (速い判定から: 名前は大文字だけ)
+        let n = id.to_string();
+        if !n.bytes().all(|b| b.is_ascii_uppercase() || b == b'_' || b.is_ascii_digit()) || n.len() < 1 {
+            return None;
+        }
+        if self.lookup(&n).is_some() || self.prog.const_index.contains_key(&n) {
+            return None;
+        }
+        Some(match n.as_str() {
+            "PI" => c::PI,
+            "E" => c::E,
+            "TAU" => c::TAU,
+            "SQRT_2" => c::SQRT_2,
+            "LN_2" => c::LN_2,
+            "LN_10" => c::LN_10,
+            "FRAC_PI_2" => c::FRAC_PI_2,
+            "FRAC_PI_3" => c::FRAC_PI_3,
+            "FRAC_PI_4" => c::FRAC_PI_4,
+            "FRAC_PI_6" => c::FRAC_PI_6,
+            "FRAC_1_SQRT_2" => c::FRAC_1_SQRT_2,
+            "LOG2_E" => c::LOG2_E,
+            "LOG10_E" => c::LOG10_E,
+            _ => return None,
+        })
     }
 }

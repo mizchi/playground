@@ -2545,6 +2545,788 @@ fn __exr_fmt_int<G>(f: &mut Formatter, mag: u64, neg: bool) {
     }
 }
 
+// --- 浮動小数点 (libm と glibc の ecvt_r / fcvt_r / strtod を使う) ---
+
+// libm (f64 と f32)
+unsafe extern "C" {
+    #[link_name = "fmod"]
+    fn __exr_fmod(a: f64, b: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "fmodf"]
+    fn __exr_fmodf(a: f32, b: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "pow"]
+    fn __exr_pow(a: f64, b: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "powf"]
+    fn __exr_powf(a: f32, b: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "exp"]
+    fn __exr_exp(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "expf"]
+    fn __exr_expf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "exp2"]
+    fn __exr_exp2(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "exp2f"]
+    fn __exr_exp2f(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "log"]
+    fn __exr_log(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "logf"]
+    fn __exr_logf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "log10"]
+    fn __exr_log10(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "log10f"]
+    fn __exr_log10f(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "log2"]
+    fn __exr_log2(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "log2f"]
+    fn __exr_log2f(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "sin"]
+    fn __exr_sin(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "sinf"]
+    fn __exr_sinf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "cos"]
+    fn __exr_cos(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "cosf"]
+    fn __exr_cosf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "tan"]
+    fn __exr_tan(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "tanf"]
+    fn __exr_tanf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "asin"]
+    fn __exr_asin(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "asinf"]
+    fn __exr_asinf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "acos"]
+    fn __exr_acos(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "acosf"]
+    fn __exr_acosf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "atan"]
+    fn __exr_atan(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "atanf"]
+    fn __exr_atanf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "atan2"]
+    fn __exr_atan2(a: f64, b: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "atan2f"]
+    fn __exr_atan2f(a: f32, b: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "sinh"]
+    fn __exr_sinh(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "sinhf"]
+    fn __exr_sinhf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "cosh"]
+    fn __exr_cosh(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "coshf"]
+    fn __exr_coshf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "tanh"]
+    fn __exr_tanh(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "tanhf"]
+    fn __exr_tanhf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "asinh"]
+    fn __exr_asinh(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "asinhf"]
+    fn __exr_asinhf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "acosh"]
+    fn __exr_acosh(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "acoshf"]
+    fn __exr_acoshf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "atanh"]
+    fn __exr_atanh(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "atanhf"]
+    fn __exr_atanhf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "cbrt"]
+    fn __exr_cbrt(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "cbrtf"]
+    fn __exr_cbrtf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "hypot"]
+    fn __exr_hypot(a: f64, b: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "hypotf"]
+    fn __exr_hypotf(a: f32, b: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "round"]
+    fn __exr_round(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "roundf"]
+    fn __exr_roundf(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "expm1"]
+    fn __exr_expm1(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "expm1f"]
+    fn __exr_expm1f(a: f32) -> f32;
+}
+unsafe extern "C" {
+    #[link_name = "log1p"]
+    fn __exr_log1p(a: f64) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "log1pf"]
+    fn __exr_log1pf(a: f32) -> f32;
+}
+
+
+unsafe extern "C" {
+    #[link_name = "strtod"]
+    fn __exr_strtod(s: *const u8, end: *mut *mut u8) -> f64;
+}
+unsafe extern "C" {
+    #[link_name = "strtof"]
+    fn __exr_strtof(s: *const u8, end: *mut *mut u8) -> f32;
+}
+
+// x (有限・正) の正確な 10 進展開: 桁 (末尾の 0 なし) と小数点の位置 (値 = 0.D × 10^dp)。
+// x = m × 2^e を 10^9 進の多倍長整数で m × 2^e または m × 5^-e (と小数点の移動) として計算する
+fn __exr_exact_digits<G>(x: f64, out: &mut Vec<u8>) -> i32 {
+    let bits = x.to_bits();
+    let eb = ((bits >> 52) & 0x7FF) as i32;
+    let fr = bits & 0xFFFFFFFFFFFFF;
+    let (m, mut e) = if eb == 0 { (fr, -1074) } else { (fr | 0x10000000000000, eb - 1075) };
+    let mut limbs: Vec<u64> = Vec::new();
+    let mut v = m;
+    while v > 0 {
+        limbs.push(v % 1000000000);
+        v /= 1000000000;
+    }
+    let mut shift = 0;
+    if e < 0 {
+        shift = -e;
+    }
+    while e != 0 {
+        let k: u64 = if e > 0 {
+            let s = if e > 29 { 29 } else { e };
+            e -= s;
+            1u64 << s
+        } else {
+            let s = if -e > 13 { 13 } else { -e };
+            let mut p = 1u64;
+            let mut i = 0;
+            while i < s {
+                p *= 5;
+                i += 1;
+            }
+            e += s;
+            p
+        };
+        let mut carry = 0u64;
+        let mut i = 0;
+        while i < limbs.len {
+            let t = limbs[i] * k + carry;
+            limbs[i] = t % 1000000000;
+            carry = t / 1000000000;
+            i += 1;
+        }
+        while carry > 0 {
+            limbs.push(carry % 1000000000);
+            carry /= 1000000000;
+        }
+    }
+    out.clear();
+    let mut i = limbs.len;
+    let mut first = true;
+    while i > 0 {
+        i -= 1;
+        let l = limbs[i];
+        let mut d = [0u8; 9];
+        let mut t = l;
+        let mut k = 0;
+        while k < 9 {
+            d[8 - k] = b'0' + (t % 10) as u8;
+            t /= 10;
+            k += 1;
+        }
+        let mut st = 0;
+        if first {
+            while st < 8 && d[st] == b'0' {
+                st += 1;
+            }
+            first = false;
+        }
+        while st < 9 {
+            out.push(d[st]);
+            st += 1;
+        }
+    }
+    let dp = out.len as i32 - shift;
+    while out.len > 1 && out[out.len - 1] == b'0' {
+        out.len -= 1;
+    }
+    dp
+}
+
+// 桁 d を n 桁に丸める (偶数への丸め。正確な値の残りの桁で判定)。繰り上がって桁が増えたら dp を 1 増やす
+// (half_up: ちょうど真ん中なら切り上げ (いちばん短い表現)。false なら偶数へ ({:.N}))
+fn __exr_round_digits<G>(d: &mut Vec<u8>, n: usize, dp: &mut i32, half_up: bool) {
+    if d.len <= n {
+        return;
+    }
+    let next = d[n];
+    let mut tail_nonzero = false;
+    let mut i = n + 1;
+    while i < d.len {
+        if d[i] != b'0' {
+            tail_nonzero = true;
+        }
+        i += 1;
+    }
+    let up = if half_up {
+        next >= b'5'
+    } else if n == 0 {
+        next > b'5' || (next == b'5' && tail_nonzero)
+    } else {
+        next > b'5' || (next == b'5' && (tail_nonzero || (d[n - 1] - b'0') % 2 == 1))
+    };
+    d.len = n;
+    if up {
+        let mut k = n;
+        loop {
+            if k == 0 {
+                d.insert(0, b'1');
+                *dp += 1;
+                break;
+            }
+            k -= 1;
+            if d[k] == b'9' {
+                d[k] = b'0';
+            } else {
+                d[k] += 1;
+                break;
+            }
+        }
+    }
+    if d.len == 0 {
+        d.push(b'0');
+    }
+    while d.len > 1 && d[d.len - 1] == b'0' {
+        d.len -= 1;
+    }
+}
+
+// 元に戻せるいちばん短い桁 (strtod / strtof で確かめる)
+fn __exr_float_digits<G>(x: f64, is32: bool, out: &mut Vec<u8>) -> i32 {
+    let mut exact: Vec<u8> = Vec::new();
+    let dp0 = __exr_exact_digits::<()>(x, &mut exact);
+    let max = if is32 { 9 } else { 17 };
+    let mut nd = 1;
+    loop {
+        out.clear();
+        let mut i = 0;
+        while i < exact.len {
+            out.push(exact[i]);
+            i += 1;
+        }
+        let mut dp = dp0;
+        __exr_round_digits::<()>(out, nd, &mut dp, true);
+        // "0.<桁>e<dp>" にして読み戻す
+        let mut t: Vec<u8> = Vec::new();
+        t.push(b'0');
+        t.push(b'.');
+        let mut i = 0;
+        while i < out.len {
+            t.push(out[i]);
+            i += 1;
+        }
+        t.push(b'e');
+        let mut ev = dp;
+        if ev < 0 {
+            t.push(b'-');
+            ev = -ev;
+        }
+        let mut ds = [0u8; 8];
+        let mut nds = 0;
+        loop {
+            ds[nds] = b'0' + (ev % 10) as u8;
+            nds += 1;
+            ev /= 10;
+            if ev == 0 {
+                break;
+            }
+        }
+        while nds > 0 {
+            nds -= 1;
+            t.push(ds[nds]);
+        }
+        t.push(0);
+        let ok = if is32 {
+            unsafe { __exr_strtof(t.ptr as *const u8, 0usize as *mut *mut u8) == x as f32 }
+        } else {
+            unsafe { __exr_strtod(t.ptr as *const u8, 0usize as *mut *mut u8) == x }
+        };
+        if ok || nd >= max {
+            return dp;
+        }
+        nd += 1;
+    }
+}
+
+// `{}` / `{:?}` / `{:.N}` (Rust と同じ: Display は指数を使わず、Debug は 1e16 以上と 1e-5 未満を指数にし、整数なら `.0` を付ける)
+fn __exr_fmt_float<G>(f: &mut Formatter, x: f64, is32: bool, debug: bool) {
+    let mut s = String::new();
+    let neg = x.is_sign_negative();
+    let a = if neg { -x } else { x };
+    if x != x {
+        __exr_pad::<()>(f, "NaN", 2);
+        return;
+    }
+    if neg {
+        s.push('-');
+    } else if f.plus {
+        s.push('+');
+    }
+    let prefix = s.len();
+    if a == 1.0 / 0.0 {
+        s.push_str("inf");
+    } else if f.has_prec {
+        // 小数点以下 prec 桁に偶数丸め
+        let mut d: Vec<u8> = Vec::new();
+        let mut dp = 0;
+        if a != 0.0 {
+            dp = __exr_exact_digits::<()>(a, &mut d);
+            let keep = dp + f.prec as i32;
+            if keep < 0 {
+                d.clear();
+                d.push(b'0');
+                dp = 0;
+            } else {
+                __exr_round_digits::<()>(&mut d, keep as usize, &mut dp, false);
+            }
+        } else {
+            d.push(b'0');
+        }
+        if d.len == 1 && d[0] == b'0' {
+            dp = 1;
+        }
+        if dp <= 0 {
+            s.push('0');
+        } else {
+            let mut i = 0;
+            while i < dp as usize {
+                s.push(if i < d.len { d[i] as char } else { '0' });
+                i += 1;
+            }
+        }
+        if f.prec > 0 {
+            s.push('.');
+            let mut k = 0;
+            while k < f.prec {
+                let idx = dp + k as i32;
+                s.push(if idx >= 0 && (idx as usize) < d.len { d[idx as usize] as char } else { '0' });
+                k += 1;
+            }
+        }
+    } else if a == 0.0 {
+        s.push_str(if debug { "0.0" } else { "0" });
+    } else {
+        let mut d: Vec<u8> = Vec::new();
+        let decpt = __exr_float_digits::<()>(a, is32, &mut d);
+        let n = d.len;
+        let e = decpt - 1;
+        if debug && (e < -4 || e >= 16) {
+            s.push(d[0] as char);
+            if n > 1 {
+                s.push('.');
+                let mut i = 1;
+                while i < n {
+                    s.push(d[i] as char);
+                    i += 1;
+                }
+            }
+            s.push('e');
+            let mut t = String::new();
+            let mut v = if e < 0 { -e } else { e };
+            if e < 0 {
+                s.push('-');
+            }
+            loop {
+                t.push((b'0' + (v % 10) as u8) as char);
+                v /= 10;
+                if v == 0 {
+                    break;
+                }
+            }
+            let tb = t.as_bytes();
+            let mut i = tb.len();
+            while i > 0 {
+                i -= 1;
+                s.push(tb[i] as char);
+            }
+        } else if decpt <= 0 {
+            s.push_str("0.");
+            let mut z = -decpt;
+            while z > 0 {
+                s.push('0');
+                z -= 1;
+            }
+            let mut i = 0;
+            while i < n {
+                s.push(d[i] as char);
+                i += 1;
+            }
+        } else if n <= decpt as usize {
+            let mut i = 0;
+            while i < n {
+                s.push(d[i] as char);
+                i += 1;
+            }
+            let mut z = decpt as usize - n;
+            while z > 0 {
+                s.push('0');
+                z -= 1;
+            }
+            if debug {
+                s.push_str(".0");
+            }
+        } else {
+            let mut i = 0;
+            while i < n {
+                if i == decpt as usize {
+                    s.push('.');
+                }
+                s.push(d[i] as char);
+                i += 1;
+            }
+        }
+    }
+    // `{:08.2}`: 符号の後ろを 0 で埋める
+    if f.zero && f.width > s.len() {
+        let mut t = String::new();
+        let sb = s.as_bytes();
+        let mut i = 0;
+        while i < prefix {
+            t.push(sb[i] as char);
+            i += 1;
+        }
+        let mut z = f.width - s.len();
+        while z > 0 {
+            t.push('0');
+            z -= 1;
+        }
+        while i < sb.len() {
+            t.push(sb[i] as char);
+            i += 1;
+        }
+        f.buf.push_str(t.as_str());
+    } else {
+        __exr_pad::<()>(f, s.as_str(), 2);
+    }
+}
+
+// `s.parse::<f64>()` (Rust の文法を確かめてから strtod で読む)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseFloatError {
+    kind: FloatErrorKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloatErrorKind {
+    Empty,
+    Invalid,
+}
+
+impl Display for ParseFloatError {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        f.pad(match self.kind {
+            FloatErrorKind::Empty => "cannot parse float from empty string",
+            FloatErrorKind::Invalid => "invalid float literal",
+        })
+    }
+}
+
+fn __exr_parse_float<G>(s: &str, is32: bool) -> Result<f64, ParseFloatError> {
+    let b = s.as_bytes();
+    if b.len() == 0 {
+        return Err(ParseFloatError { kind: FloatErrorKind::Empty });
+    }
+    let mut i = 0;
+    if b[0] == b'+' || b[0] == b'-' {
+        i = 1;
+    }
+    let rest = __exr_sub::<()>(unsafe { s.as_ptr().add(i) }, b.len() - i);
+    let word = __exr_ieq::<()>(rest, "inf") || __exr_ieq::<()>(rest, "infinity") || __exr_ieq::<()>(rest, "nan");
+    if !word {
+        let mut digits = 0;
+        while i < b.len() && b[i] >= b'0' && b[i] <= b'9' {
+            i += 1;
+            digits += 1;
+        }
+        if i < b.len() && b[i] == b'.' {
+            i += 1;
+            while i < b.len() && b[i] >= b'0' && b[i] <= b'9' {
+                i += 1;
+                digits += 1;
+            }
+        }
+        if digits == 0 {
+            return Err(ParseFloatError { kind: FloatErrorKind::Invalid });
+        }
+        if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+            i += 1;
+            if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+                i += 1;
+            }
+            let st = i;
+            while i < b.len() && b[i] >= b'0' && b[i] <= b'9' {
+                i += 1;
+            }
+            if i == st {
+                return Err(ParseFloatError { kind: FloatErrorKind::Invalid });
+            }
+        }
+        if i != b.len() {
+            return Err(ParseFloatError { kind: FloatErrorKind::Invalid });
+        }
+    }
+    let mut t = Vec::with_capacity(b.len() + 1);
+    t.extend_from_slice(b);
+    t.push(0u8);
+    let v = if is32 {
+        unsafe { __exr_strtof(t.ptr as *const u8, 0usize as *mut *mut u8) as f64 }
+    } else {
+        unsafe { __exr_strtod(t.ptr as *const u8, 0usize as *mut *mut u8) }
+    };
+    Ok(v)
+}
+
+fn __exr_ieq<G>(a: &str, b: &str) -> bool {
+    let x = a.as_bytes();
+    let y = b.as_bytes();
+    if x.len() != y.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < x.len() {
+        let c = if x[i] >= b'A' && x[i] <= b'Z' { x[i] + 32 } else { x[i] };
+        if c != y[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+impl __FromStr for f64 {
+    type Err = ParseFloatError;
+    fn __from_str(s: &str) -> Result<f64, ParseFloatError> {
+        __exr_parse_float::<()>(s, false)
+    }
+}
+impl __FromStr for f32 {
+    type Err = ParseFloatError;
+    fn __from_str(s: &str) -> Result<f32, ParseFloatError> {
+        match __exr_parse_float::<()>(s, true) {
+            Ok(v) => Ok(v as f32),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+// `f64::max` などを関数の値として使うとき (`fold(f64::MIN, f64::max)` / `f64::sqrt(x)`)
+fn __exr_f64_max<G>(a: f64, b: f64) -> f64 {
+    a.max(b)
+}
+fn __exr_f64_min<G>(a: f64, b: f64) -> f64 {
+    a.min(b)
+}
+fn __exr_f64_abs<G>(a: f64) -> f64 {
+    a.abs()
+}
+fn __exr_f64_sqrt<G>(a: f64) -> f64 {
+    a.sqrt()
+}
+fn __exr_f64_floor<G>(a: f64) -> f64 {
+    a.floor()
+}
+fn __exr_f64_ceil<G>(a: f64) -> f64 {
+    a.ceil()
+}
+fn __exr_f64_round<G>(a: f64) -> f64 {
+    a.round()
+}
+fn __exr_f64_trunc<G>(a: f64) -> f64 {
+    a.trunc()
+}
+fn __exr_f64_exp<G>(a: f64) -> f64 {
+    a.exp()
+}
+fn __exr_f64_ln<G>(a: f64) -> f64 {
+    a.ln()
+}
+fn __exr_f64_sin<G>(a: f64) -> f64 {
+    a.sin()
+}
+fn __exr_f64_cos<G>(a: f64) -> f64 {
+    a.cos()
+}
+fn __exr_f64_tan<G>(a: f64) -> f64 {
+    a.tan()
+}
+fn __exr_f64_signum<G>(a: f64) -> f64 {
+    a.signum()
+}
+fn __exr_f32_max<G>(a: f32, b: f32) -> f32 {
+    a.max(b)
+}
+fn __exr_f32_min<G>(a: f32, b: f32) -> f32 {
+    a.min(b)
+}
+fn __exr_f32_abs<G>(a: f32) -> f32 {
+    a.abs()
+}
+fn __exr_f32_sqrt<G>(a: f32) -> f32 {
+    a.sqrt()
+}
+fn __exr_f32_floor<G>(a: f32) -> f32 {
+    a.floor()
+}
+fn __exr_f32_ceil<G>(a: f32) -> f32 {
+    a.ceil()
+}
+fn __exr_f32_round<G>(a: f32) -> f32 {
+    a.round()
+}
+fn __exr_f32_trunc<G>(a: f32) -> f32 {
+    a.trunc()
+}
+fn __exr_f32_exp<G>(a: f32) -> f32 {
+    a.exp()
+}
+fn __exr_f32_ln<G>(a: f32) -> f32 {
+    a.ln()
+}
+fn __exr_f32_sin<G>(a: f32) -> f32 {
+    a.sin()
+}
+fn __exr_f32_cos<G>(a: f32) -> f32 {
+    a.cos()
+}
+fn __exr_f32_tan<G>(a: f32) -> f32 {
+    a.tan()
+}
+fn __exr_f32_signum<G>(a: f32) -> f32 {
+    a.signum()
+}
+
+// powi: compiler-rt の __powidf2 と同じく 2 乗を繰り返す
+fn __exr_powi<G>(a: f64, n: i32) -> f64 {
+    let neg = n < 0;
+    let mut m = if neg { -(n as i64) } else { n as i64 };
+    let mut a = a;
+    let mut r = 1.0;
+    loop {
+        if m & 1 != 0 {
+            r = r * a;
+        }
+        m /= 2;
+        if m == 0 {
+            break;
+        }
+        a = a * a;
+    }
+    if neg { 1.0 / r } else { r }
+}
+
+fn __exr_powif<G>(a: f32, n: i32) -> f32 {
+    let neg = n < 0;
+    let mut m = if neg { -(n as i64) } else { n as i64 };
+    let mut a = a;
+    let mut r: f32 = 1.0;
+    loop {
+        if m & 1 != 0 {
+            r = r * a;
+        }
+        m /= 2;
+        if m == 0 {
+            break;
+        }
+        a = a * a;
+    }
+    if neg { 1.0 / r } else { r }
+}
+
 fn __exr_fmt_bool<G>(f: &mut Formatter, b: bool) {
     __exr_fmt_str::<()>(f, if b { "true" } else { "false" });
 }
@@ -4799,7 +5581,8 @@ impl Display for ParseIntError {
 }
 
 pub trait __FromStr {
-    fn __from_str(s: &str) -> Result<Self, ParseIntError>;
+    type Err;
+    fn __from_str(s: &str) -> Result<Self, Self::Err>;
 }
 
 // 符号と絶対値 (u64) に読む。max は正の上限、neg_max は負の絶対値の上限
@@ -4845,6 +5628,7 @@ fn __exr_parse_int<G>(s: &str, signed: bool, max: u64, neg_max: u64) -> Result<(
 }
 
 impl __FromStr for i8 {
+    type Err = ParseIntError;
     fn __from_str(s: &str) -> Result<i8, ParseIntError> {
         match __exr_parse_int::<()>(s, true, 127, 128) {
             Ok((n, v)) => Ok(if n { (v as i8).wrapping_neg() } else { v as i8 }),
@@ -4853,6 +5637,7 @@ impl __FromStr for i8 {
     }
 }
 impl __FromStr for i16 {
+    type Err = ParseIntError;
     fn __from_str(s: &str) -> Result<i16, ParseIntError> {
         match __exr_parse_int::<()>(s, true, 32767, 32768) {
             Ok((n, v)) => Ok(if n { (v as i16).wrapping_neg() } else { v as i16 }),
@@ -4861,6 +5646,7 @@ impl __FromStr for i16 {
     }
 }
 impl __FromStr for i32 {
+    type Err = ParseIntError;
     fn __from_str(s: &str) -> Result<i32, ParseIntError> {
         match __exr_parse_int::<()>(s, true, 2147483647, 2147483648) {
             Ok((n, v)) => Ok(if n { (v as i32).wrapping_neg() } else { v as i32 }),
@@ -4869,6 +5655,7 @@ impl __FromStr for i32 {
     }
 }
 impl __FromStr for i64 {
+    type Err = ParseIntError;
     fn __from_str(s: &str) -> Result<i64, ParseIntError> {
         match __exr_parse_int::<()>(s, true, 9223372036854775807, 9223372036854775808) {
             Ok((n, v)) => Ok(if n { (v as i64).wrapping_neg() } else { v as i64 }),
@@ -4877,6 +5664,7 @@ impl __FromStr for i64 {
     }
 }
 impl __FromStr for isize {
+    type Err = ParseIntError;
     fn __from_str(s: &str) -> Result<isize, ParseIntError> {
         match __exr_parse_int::<()>(s, true, 9223372036854775807, 9223372036854775808) {
             Ok((n, v)) => Ok(if n { (v as isize).wrapping_neg() } else { v as isize }),
@@ -4885,6 +5673,7 @@ impl __FromStr for isize {
     }
 }
 impl __FromStr for u8 {
+    type Err = ParseIntError;
     fn __from_str(s: &str) -> Result<u8, ParseIntError> {
         match __exr_parse_int::<()>(s, false, 255, 0) {
             Ok((_, v)) => Ok(v as u8),
@@ -4893,6 +5682,7 @@ impl __FromStr for u8 {
     }
 }
 impl __FromStr for u16 {
+    type Err = ParseIntError;
     fn __from_str(s: &str) -> Result<u16, ParseIntError> {
         match __exr_parse_int::<()>(s, false, 65535, 0) {
             Ok((_, v)) => Ok(v as u16),
@@ -4901,6 +5691,7 @@ impl __FromStr for u16 {
     }
 }
 impl __FromStr for u32 {
+    type Err = ParseIntError;
     fn __from_str(s: &str) -> Result<u32, ParseIntError> {
         match __exr_parse_int::<()>(s, false, 4294967295, 0) {
             Ok((_, v)) => Ok(v as u32),
@@ -4909,6 +5700,7 @@ impl __FromStr for u32 {
     }
 }
 impl __FromStr for u64 {
+    type Err = ParseIntError;
     fn __from_str(s: &str) -> Result<u64, ParseIntError> {
         match __exr_parse_int::<()>(s, false, 18446744073709551615, 0) {
             Ok((_, v)) => Ok(v),
@@ -4917,6 +5709,7 @@ impl __FromStr for u64 {
     }
 }
 impl __FromStr for usize {
+    type Err = ParseIntError;
     fn __from_str(s: &str) -> Result<usize, ParseIntError> {
         match __exr_parse_int::<()>(s, false, 18446744073709551615, 0) {
             Ok((_, v)) => Ok(v as usize),
@@ -4925,7 +5718,7 @@ impl __FromStr for usize {
     }
 }
 
-fn __exr_str_parse<T: __FromStr>(s: &str) -> Result<T, ParseIntError> {
+fn __exr_str_parse<T: __FromStr>(s: &str) -> Result<T, T::Err> {
     <T as __FromStr>::__from_str(s)
 }
 

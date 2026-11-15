@@ -42,6 +42,9 @@ pub enum Ty {
     Never,
     /// Unicode のスカラー値 (32 bit)
     Char,
+    /// 浮動小数点 (IEEE 754)
+    F32,
+    F64,
     /// `&T` (false) / `&mut T` (true)
     Ref(bool, &'static Ty),
     /// Program::structs の index
@@ -193,8 +196,14 @@ impl Ty {
         Ty::from_suffix(s).or(match s {
             "bool" => Some(Ty::Bool),
             "char" => Some(Ty::Char),
+            "f32" => Some(Ty::F32),
+            "f64" => Some(Ty::F64),
             _ => None,
         })
+    }
+
+    pub fn is_float(self) -> bool {
+        matches!(self, Ty::F32 | Ty::F64)
     }
 
     pub fn is_int(self) -> bool {
@@ -222,8 +231,8 @@ impl Ty {
         match self {
             Ty::I8 | Ty::U8 | Ty::Bool => 8,
             Ty::I16 | Ty::U16 => 16,
-            Ty::I32 | Ty::U32 | Ty::Char => 32,
-            Ty::I64 | Ty::U64 | Ty::Isize | Ty::Usize | Ty::Ptr(..) | Ty::Fn(_) => 64,
+            Ty::I32 | Ty::U32 | Ty::Char | Ty::F32 => 32,
+            Ty::I64 | Ty::U64 | Ty::Isize | Ty::Usize | Ty::Ptr(..) | Ty::Fn(_) | Ty::F64 => 64,
             Ty::Ref(..) | Ty::Box(_) if self.is_fat() => 0,
             Ty::Ref(..) | Ty::Box(_) => 64,
             Ty::Unit
@@ -1926,6 +1935,10 @@ impl Program {
             Ty::Ptr(..) | Ty::Ref(..) => {
                 matches!(tr, "Copy" | "Clone" | "Sized" | "PartialEq" | "Eq")
             }
+            Ty::F32 | Ty::F64 => matches!(
+                tr,
+                "Copy" | "Clone" | "Sized" | "PartialEq" | "PartialOrd" | "Default" | "Debug" | "Display"
+            ) || self.prim_impls.contains(&(t, tr.to_string())),
             t if t.is_int() || matches!(t, Ty::Bool | Ty::Char) => {
                 matches!(
                     tr,
@@ -2730,6 +2743,13 @@ impl Program {
             }
             2 => {
                 let ty = p.segments[0].ident.to_string();
+                // `f64::max` / `f64::sqrt` (関数として): prelude の `__exr_f64_*`、`i32::max` は core::cmp::max
+                if ty == "f64" || ty == "f32" {
+                    return self.index.get(&format!("__exr_{ty}_{}", p.segments[1].ident)).copied();
+                }
+                if Ty::from_suffix(&ty).is_some() && matches!(p.segments[1].ident.to_string().as_str(), "max" | "min") {
+                    return self.index.get(&format!("__core_{}", p.segments[1].ident)).copied();
+                }
                 // `char::from_digit(d, 10)` / `char::from_u32(x)` / `char::from(b)`: prelude の `__exr_char_*`
                 if ty == "char" {
                     let m = p.segments[1].ident.to_string();
@@ -2929,6 +2949,7 @@ impl Program {
         let mut sts = vec![];
         let mut cs = vec![];
         let has_consts = !self.const_index.is_empty();
+        let has_assoc = !self.const_by_last.is_empty();
         for &(a, b) in &it.idents {
             let s = &src[a as usize..b as usize];
             // `for` はイテレータなら名前を書かずに next を呼ぶ
@@ -2943,8 +2964,10 @@ impl Program {
                 if let Some(&i) = self.const_index.get(s) {
                     cs.push(i);
                 }
-                if let Some(ids) = self.const_by_last.get(s) {
-                    cs.extend_from_slice(ids);
+                if has_assoc {
+                    if let Some(ids) = self.const_by_last.get(s) {
+                        cs.extend_from_slice(ids);
+                    }
                 }
             }
         }
@@ -2976,6 +2999,8 @@ impl Program {
             // (書式化の部品と Display / Debug の impl も、codegen が名前を書かずに呼ぶ)
             matches!(s.impl_trait.as_deref(), Some("Drop"))
                 || (s.has_self && self.names[i as usize].ends_with("::eq"))
+                // (libm などの prelude の extern は codegen が名前を書かずに呼ぶ。宣言だけなのでコードは増えない)
+                || (s.is_extern && self.names[i as usize].starts_with("__exr_"))
                 // (演算子 `a + b` は codegen が `a.add(b)` にする)
                 || (s.has_self
                     && matches!(
@@ -3006,7 +3031,7 @@ impl Program {
 
 // --- Summary のシリアライズ ------------------------------------------------
 
-const TYS: [Ty; 14] = [
+const TYS: [Ty; 16] = [
     Ty::I8,
     Ty::I16,
     Ty::I32,
@@ -3021,6 +3046,8 @@ const TYS: [Ty; 14] = [
     Ty::Unit,
     Ty::Never,
     Ty::Char,
+    Ty::F32,
+    Ty::F64,
 ];
 
 fn ty_code(t: Ty) -> u8 {
@@ -3091,7 +3118,7 @@ impl Enc for TySyn {
     }
     fn dec(r: &mut Rd) -> Option<Self> {
         Some(match r.u8()? {
-            c @ 0..14 => TySyn::Prim(TYS[c as usize]),
+            c @ 0..16 => TySyn::Prim(TYS[c as usize]),
             c @ (20 | 21) => TySyn::Ref(c == 21, Box::new(TySyn::dec(r)?)),
             22 => TySyn::Named(String::dec(r)?),
             23 => TySyn::App(String::dec(r)?, Vec::dec(r)?),

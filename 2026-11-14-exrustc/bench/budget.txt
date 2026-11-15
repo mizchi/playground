@@ -38,6 +38,12 @@ dyn_trait.object_bytes 9903
 enums.binary_bytes 10264
 enums.cache_bytes 8491
 enums.object_bytes 8937
+float_fuzz.binary_bytes 27451
+float_fuzz.cache_bytes 44765
+float_fuzz.object_bytes 42705
+floats.binary_bytes 72492
+floats.cache_bytes 132371
+floats.object_bytes 125470
 fn_ptr_box.binary_bytes 11634
 fn_ptr_box.cache_bytes 14430
 fn_ptr_box.object_bytes 15783
@@ -57,7 +63,7 @@ iter_vec_more.binary_bytes 96910
 iter_vec_more.cache_bytes 178390
 iter_vec_more.object_bytes 181120
 iterators.binary_bytes 45981
-iterators.cache_bytes 81747
+iterators.cache_bytes 85905
 iterators.object_bytes 86091
 lsp1000.mem_bytes 20843
 macros.binary_bytes 37136

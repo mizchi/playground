@@ -100,6 +100,8 @@ struct Inf<'p> {
     shape: Vec<Option<Shape>>,
     /// 整数リテラル由来 (決まらなければ i32 にしてよい) か
     int_lit: Vec<bool>,
+    /// 接尾辞のない浮動小数点リテラルの型変数 (決まらなければ f64)
+    float_lit: Vec<bool>,
     scopes: Vec<Vec<(String, u32)>>,
     lets: Vec<(usize, u32)>,
     ret: u32,
@@ -112,6 +114,8 @@ struct Inf<'p> {
     keep: Vec<Vec<Expr>>,
     /// 囲んでいるループ / ラベル付きブロック: (ラベル, 値の型, ブロックか, break があったか)
     brk: Vec<(Option<String>, u32, bool, bool)>,
+    /// 後で解く関連型 (基になる型の変数, 名前, 結果の変数)
+    assoc_later: Vec<(u32, String, u32)>,
     /// 0 でなければ式の型を記録しない (一時的に parse したノードの推論中)
     no_record: u32,
     /// `it.collect()` の (受け手, 結果): 最後に結果が Vec<T> / HashMap<K, V> なら Item と単一化する
@@ -143,6 +147,7 @@ pub fn infer_full(
         parent: vec![],
         shape: vec![],
         int_lit: vec![],
+        float_lit: vec![],
         scopes: vec![vec![]],
         lets: vec![],
         ret: 0,
@@ -151,6 +156,7 @@ pub fn infer_full(
         pending: vec![],
         keep: vec![],
         brk: vec![],
+        assoc_later: vec![],
         no_record: 0,
         collects: vec![],
     };
@@ -184,6 +190,7 @@ pub fn infer_full(
     let ret = s.ret;
     s.unify(tail, ret);
     s.finish_collects();
+    s.finish_assocs();
     let lets = std::mem::take(&mut s.lets);
     let r = s.resolve(ret);
     let ps = pvars.into_iter().map(|v| s.resolve(v)).collect();
@@ -201,6 +208,7 @@ impl Inf<'_> {
         self.parent.push(self.parent.len() as u32);
         self.shape.push(None);
         self.int_lit.push(false);
+        self.float_lit.push(false);
         self.parent.len() as u32 - 1
     }
     fn with(&mut self, sh: Shape) -> u32 {
@@ -288,6 +296,7 @@ impl Inf<'_> {
     fn link(&mut self, from: u32, to: u32) {
         self.parent[from as usize] = to;
         self.int_lit[to as usize] |= self.int_lit[from as usize];
+        self.float_lit[to as usize] |= self.float_lit[from as usize];
     }
     fn unify(&mut self, a: u32, b: u32) {
         let (a, b) = (self.find(a), self.find(b));
@@ -568,6 +577,7 @@ impl Inf<'_> {
                 self.prog.instantiate(b, args).ok().map(Ty::Struct)
             }
             Some(Shape::Clo(..)) => None,
+            None if self.float_lit[r as usize] => Some(Ty::F64),
             None if self.int_lit[r as usize] => Some(Ty::I32),
             None => None,
         }
@@ -730,7 +740,15 @@ impl Inf<'_> {
             Ty::Assoc(a) => {
                 let b = self.known_g(a.base, pv);
                 let name = a.name.clone();
-                self.assoc_var(b, &name).unwrap_or_else(|| self.var())
+                match self.assoc_var(b, &name) {
+                    Some(v) => v,
+                    // (`T::Err` の T がまだ分からない: 最後に解く)
+                    None => {
+                        let v = self.var();
+                        self.assoc_later.push((b, name, v));
+                        v
+                    }
+                }
             }
             t => self.with(Shape::Known(t)),
         }
@@ -824,6 +842,18 @@ impl Inf<'_> {
 
     fn lit_var(&mut self, l: &Lit) -> u32 {
         match l {
+            Lit::Int(i) if matches!(i.suffix(), "f32" | "f64") => {
+                self.known(if i.suffix() == "f32" { Ty::F32 } else { Ty::F64 })
+            }
+            Lit::Float(f) => match f.suffix() {
+                "f32" => self.known(Ty::F32),
+                "f64" => self.known(Ty::F64),
+                _ => {
+                    let v = self.var();
+                    self.float_lit[v as usize] = true;
+                    v
+                }
+            },
             Lit::Int(i) => match Ty::from_suffix(i.suffix()) {
                 Some(t) => self.known(t),
                 None => {
@@ -866,6 +896,18 @@ impl Inf<'_> {
             Ty::Ref(_, i) => elem_of(*i).map(|e| Ty::Ref(false, intern(e))),
             Ty::Array(e, _) => Some(Ty::Ref(false, e)),
             t => elem_of(t).or_else(|| self.prog.assoc_of(t, "Item")),
+        }
+    }
+
+    fn finish_assocs(&mut self) {
+        for _ in 0..2 {
+            let ls = std::mem::take(&mut self.assoc_later);
+            for (b, name, v) in ls {
+                match self.assoc_var(b, &name) {
+                    Some(a) => self.unify(a, v),
+                    None => self.assoc_later.push((b, name, v)),
+                }
+            }
         }
     }
 
@@ -1781,6 +1823,16 @@ impl Inf<'_> {
                 let r = self.expr(&mc.receiver);
                 let rv = self.deref_expr(r);
                 let args: Vec<u32> = mc.args.iter().map(|a| self.expr(a)).collect();
+                // (String::as_bytes など、struct が同じ名前のメソッドを持つならそれ)
+                let root = self.find(rv);
+                let sid = match self.shape[root as usize] {
+                    Some(Shape::Known(Ty::Struct(sid))) => Some(sid),
+                    Some(Shape::Adt(b, _, _)) => Some(b),
+                    _ => None,
+                };
+                if let Some(id) = sid.and_then(|s| self.prog.method(s, &mc.method.to_string())) {
+                    return self.apply_recv(Some(id), args, rv);
+                }
                 self.scalar_method(mc, r, rv, args)
             }
             Expr::MethodCall(mc) => {
@@ -1937,6 +1989,25 @@ impl Inf<'_> {
                     return self.apply_helper(id, mc, args);
                 }
             }
+        }
+        // 浮動小数点のメソッド (bool を返すもの / ビット列 / Ordering 以外は同じ型)
+        if let Some(t) = recv_ty.filter(|t| t.is_float()) {
+            return match name.as_str() {
+                "is_nan" | "is_finite" | "is_infinite" | "is_sign_negative" | "is_sign_positive" | "is_normal" => {
+                    self.known(Ty::Bool)
+                }
+                "to_bits" => self.known(if t == Ty::F32 { Ty::U32 } else { Ty::U64 }),
+                "total_cmp" => match self.prog.struct_index.get("Ordering") {
+                    Some(&o) => self.known(Ty::Struct(o)),
+                    None => self.var(),
+                },
+                _ => {
+                    for a in args {
+                        let _ = a;
+                    }
+                    self.known(t)
+                }
+            };
         }
         // &str
         if let Some(Shape::Known(Ty::Str)) = self.shape[root as usize] {

@@ -349,7 +349,7 @@ fn owner(h: usize) -> Option<&'static str> {
                         | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" | "Rev" | "StepBy" | "Peekable"
                         | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks"
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
-                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" => Some(w),
+                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,
@@ -403,7 +403,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             "find", "position", "nth", "zip", "chain", "take", "skip", "take_while", "copied",
             "cloned", "format", "print", "println", "eprint", "eprintln", "write", "writeln",
             "split", "split_whitespace", "lines", "trim", "starts_with", "ends_with", "contains",
-            "clamp", "from_u32", "char", "join", "concat", "drain", "default",
+            "clamp", "from_u32", "char", "join", "concat", "drain", "default", "f64", "f32",
         ]);
         // (先頭の 1 byte, 長さ) ごとの候補。prelude の名前が増えても 1 識別子あたりの比較は 0〜1 回
         let mut t: Vec<Vec<&'static str>> = vec![vec![]; 256 * 32];
@@ -593,6 +593,69 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     for (m, f) in [("windows", "__exr_slice_windows"), ("chunks", "__exr_slice_chunks"), ("to_vec", "__exr_slice_to_vec")] {
         if need.contains(m) {
             need.extend([f, "Iterator", "next"]);
+        }
+    }
+    // 浮動小数点: 書式化・powi・libm の宣言 (f64 / f32 の名前か、`1.5` のようなリテラルがあるとき)
+    // (`fn f64(..)` のような関数の名前は数えない: 型の位置 (`: f64` / `as f64` / `f64::` など) だけ)
+    let float_named = (need.contains("f64") || need.contains("f32")) && {
+        let b = user_src.as_bytes();
+        ["f64", "f32"].iter().any(|w| {
+            user_src.match_indices(w).any(|(i, _)| {
+                let after = b.get(i + 3).copied().unwrap_or(b' ');
+                let before_ident = i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+                let after_ident = after.is_ascii_alphanumeric() || after == b'_';
+                let mut j = i;
+                while j > 0 && b[j - 1] == b' ' {
+                    j -= 1;
+                }
+                let after_fn = j >= 2 && &b[j - 2..j] == b"fn";
+                !before_ident && !after_ident && after != b'(' && !after_fn
+            })
+        })
+    };
+    let float_lit = !float_named && {
+        let b = user_src.as_bytes();
+        // (文字列リテラルの中 (`"{:8.3}"` など) は数えない)
+        let mut in_str = false;
+        let mut found = false;
+        for i in 1..b.len().saturating_sub(1) {
+            match b[i] {
+                b'"' if b[i - 1] != b'\\' && b[i - 1] != b'\'' => in_str = !in_str,
+                b'.' if !in_str && b[i - 1].is_ascii_digit() && b[i + 1].is_ascii_digit() => {
+                    found = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        found
+    };
+    if float_named || float_lit {
+        need.extend(["__exr_fmt_float", "__exr_powi", "__exr_powif", "__exr_ordering"]);
+        // (`f64::max` などのパス: 名前の後ろが一致する wrapper)
+        for (a, bb) in [("f64", "__exr_f64_"), ("f32", "__exr_f32_")] {
+            if user_src.contains(&format!("{a}::")) {
+                for (_, name, _) in items() {
+                    if let Some(n) = name.as_deref() {
+                        if let Some(m) = n.strip_prefix(bb) {
+                            if user_src.contains(&format!("{a}::{m}")) {
+                                need.insert(n);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (_, name, _) in items() {
+            if let Some(n) = name.as_deref() {
+                if n.starts_with("__exr_") && matches!(n.trim_start_matches("__exr_").trim_end_matches('f'),
+                    "fmod" | "pow" | "exp" | "exp2" | "log" | "log10" | "log2" | "sin" | "cos" | "tan" | "asin" | "acos"
+                    | "atan" | "atan2" | "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" | "cbrt" | "hypot"
+                    | "round" | "expm1" | "log1p")
+                {
+                    need.insert(n);
+                }
+            }
         }
     }
     // `x.extend(arg)`: codegen が arg を into_iter / iter にし、要素が参照なら __extend_ref を呼ぶ

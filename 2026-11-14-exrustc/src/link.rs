@@ -32,7 +32,8 @@ pub fn pick(requested: Option<&str>) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("linker not found: {cands:?}"))
 }
 
-const DRIVER_FLAGS: &[&str] = &["-no-pie", "-s", "-Wl,--gc-sections", "-Wl,--build-id=none"];
+// (libm は浮動小数点の関数を使うときだけ要る: --as-needed で使わなければリンクしない)
+const DRIVER_FLAGS: &[&str] = &["-no-pie", "-s", "-Wl,--gc-sections", "-Wl,--build-id=none", "-Wl,--as-needed", "-lm"];
 
 /// `cc -###` の出力から collect2 の引数を取り出し、プラグイン関連を除いたものを返す。
 fn driver_args(obj: &Path, out: &Path) -> Result<Vec<String>, String> {
