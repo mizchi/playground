@@ -297,7 +297,7 @@ impl Worker {
                 self_sid: env.self_sid,
                 sret: None,
                 frefs: HashMap::new(),
-                lets: crate::infer::infer_full(prog, f, sig, &env, &extra, Some(sig.ret)).0,
+                lets: crate::infer::infer_ctx(prog, f, sig, &env, &extra, Some(sig.ret), Some((root, base_k))).0,
                 addr_taken: taken,
                 caps,
                 root,
@@ -2192,7 +2192,7 @@ impl Cx<'_, '_> {
                 .map(|(n, c)| (n.clone(), c.1))
                 .collect();
             let (_, r, ps) =
-                crate::infer::infer_full(prog, &f, &sig, &env, &extra, sol[ri].or(partial_ret));
+                crate::infer::infer_ctx(prog, &f, &sig, &env, &extra, sol[ri].or(partial_ret), Some((self.root, k + 1)));
             if sol[ri].is_none() {
                 sol[ri] = r;
             }

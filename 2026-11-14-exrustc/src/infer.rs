@@ -138,6 +138,12 @@ struct Inf<'p> {
     collects: Vec<(u32, u32)>,
     /// 次の apply_recv に渡すメソッド呼び出しの turbofish
     turbofish: Option<*const syn::AngleBracketedGenericArguments>,
+    /// クロージャの型を解くための文脈: (根の関数, closure_key → 前順の番号)
+    clo_ctx: Option<(u32, crate::fxhash::FxMap<(usize, usize), u32>)>,
+    /// (根の関数, 最初の番号, 本体): クロージャに出会ったら clo_ctx を作る
+    clo_root: Option<(u32, u32, *const syn::Block)>,
+    /// Shape::Clo の st → (クロージャの関数 id, キャプチャの型変数, 注釈のない引数の位置)
+    clo_info: crate::fxhash::FxMap<u32, (u32, Vec<u32>, Vec<usize>)>,
 }
 
 /// sig はこの関数 (インスタンスなら型引数を入れた後) のシグネチャ、env は `Self` と型パラメータ
@@ -158,6 +164,20 @@ pub fn infer_full(
     extra: &[(String, Ty)],
     ret: Option<Ty>,
 ) -> Full {
+    infer_ctx(prog, f, sig, env, extra, ret, None)
+}
+
+/// root = (根の関数, f の本体の最初のクロージャの前順の番号): 本体のクロージャの型 (struct) まで解く
+pub fn infer_ctx(
+    prog: &Program,
+    f: &syn::ItemFn,
+    sig: &FnSig,
+    env: &TyEnv,
+    extra: &[(String, Ty)],
+    ret: Option<Ty>,
+    root: Option<(u32, u32)>,
+) -> Full {
+    let clo_root = root.map(|(r, base)| (r, base, &*f.block as *const syn::Block));
     let mut s = Inf {
         prog,
         self_sid: env.self_sid,
@@ -179,6 +199,9 @@ pub fn infer_full(
         pos_record: 0,
         collects: vec![],
         turbofish: None,
+        clo_ctx: None,
+        clo_root,
+        clo_info: Default::default(),
     };
     s.ret = match ret {
         // 一部だけ分かっている型 (`Result<?, u8>`): 型パラメータの所を型変数にする
@@ -596,7 +619,27 @@ impl Inf<'_> {
                 }
                 self.prog.instantiate(b, args).ok().map(Ty::Struct)
             }
-            Some(Shape::Clo(..)) => None,
+            Some(Shape::Clo(st, n)) => {
+                // クロージャの struct: 親の型引数 + キャプチャ + 注釈のない引数 + 戻り値
+                let (fid, caps, free) = self.clo_info.get(&st)?.clone();
+                let cd = self.prog.closures.get(&fid)?;
+                let (n_parent, by_move, sid) = (cd.n_parent, cd.by_move, cd.sid);
+                let mut args = vec![];
+                for i in 0..n_parent {
+                    args.push(self.env.params.get(i)?.1);
+                }
+                for cv in caps {
+                    let t = self.resolve(cv)?;
+                    args.push(if by_move { t } else { Ty::Ptr(true, intern(t)) });
+                }
+                for i in free {
+                    let pv = self.adt_args[st as usize + i];
+                    args.push(self.resolve(pv)?);
+                }
+                let rv = self.adt_args[(st + n) as usize];
+                args.push(self.resolve(rv)?);
+                self.prog.instantiate(sid, args).ok().map(Ty::Struct)
+            }
             None if self.float_lit[r as usize] => Some(Ty::F64),
             None if self.int_lit[r as usize] => Some(Ty::I32),
             None => None,
@@ -1957,6 +2000,34 @@ impl Inf<'_> {
                     syn::ReturnType::Default => self.var(),
                 };
                 self.adt_args.extend(vs.iter().copied().chain([rv]));
+                // (クロージャの struct を後で解けるように、キャプチャの型変数を覚えておく)
+                if self.clo_ctx.is_none() {
+                    if let Some((r, base, b)) = self.clo_root.take() {
+                        let mut m = crate::fxhash::FxMap::default();
+                        // SAFETY: b は infer の間生きている関数の本体を指す
+                        for (i, cl) in crate::closure::closures_of(unsafe { &*b }).iter().enumerate() {
+                            m.insert(crate::closure::closure_key(cl), base + i as u32);
+                        }
+                        self.clo_ctx = Some((r, m));
+                    }
+                }
+                if let Some((root, keys)) = &self.clo_ctx {
+                    if let Some(fid) = keys.get(&crate::closure::closure_key(c)).and_then(|k| self.prog.closure_by.get(&(*root, *k))) {
+                        if let Some(cd) = self.prog.closures.get(fid) {
+                            let caps: Option<Vec<u32>> = cd.captures.iter().map(|n| self.lookup(n)).collect();
+                            let free: Vec<usize> = c
+                                .inputs
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, p)| crate::closure::param(p).1.is_none())
+                                .map(|(i, _)| i)
+                                .collect();
+                            if let Some(caps) = caps {
+                                self.clo_info.insert(st, (*fid, caps, free));
+                            }
+                        }
+                    }
+                }
                 // codegen がクロージャの型引数を決めるのに使う: 引数 (パターンのアドレス) と戻り値 (式のアドレス)
                 if self.no_record == 0 {
                     for (p, &v) in c.inputs.iter().zip(&vs) {

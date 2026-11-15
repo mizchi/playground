@@ -381,7 +381,7 @@ fn nonliteral_to_string(src: &str) -> bool {
 /// これらの名前が現れたら Iterator を使っているとみなす
 const ITER_NAMES: &[&str] = &[
     "Iterator", "next", "map", "filter", "filter_map", "collect", "sum", "product", "count",
-    "fold", "for_each", "any", "all", "find", "position", "rposition", "partition", "nth", "zip", "chain", "take", "skip",
+    "fold", "for_each", "any", "all", "find", "position", "rposition", "partition", "cycle", "nth", "zip", "chain", "take", "skip",
     "take_while", "copied", "cloned", "into_iter", "flat_map", "flatten", "step_by", "peekable", "skip_while", "scan",
     "inspect",
 ];
@@ -713,6 +713,9 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     }
     if user_src.contains(".or_default()") {
         need.extend(["or_default", "__exr_default"]);
+    }
+    if need.contains("cycle") {
+        need.extend(["Cycle", "__exr_clone"]);
     }
     if user_src.contains("process::exit") {
         need.insert("process_exit");

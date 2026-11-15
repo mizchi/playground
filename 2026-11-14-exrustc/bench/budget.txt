@@ -54,7 +54,7 @@ gen1000.binary_bytes 443545
 gen1000.cache_bytes 537575
 gen1000.object_bytes 634418
 hashmap.binary_bytes 55288
-hashmap.cache_bytes 95493
+hashmap.cache_bytes 100606
 hashmap.object_bytes 93450
 hello.binary_bytes 6451
 hello.cache_bytes 3202

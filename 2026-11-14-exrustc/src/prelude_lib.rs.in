@@ -1688,6 +1688,10 @@ pub trait Iterator {
             }
         }
     }
+    // 終わったら最初から (元のイテレータを複製しておく)
+    fn cycle(self) -> Cycle<Self> {
+        Cycle { orig: __exr_clone(&self), cur: self }
+    }
     // (前から全部見て、最後に当たった位置)
     fn rposition<P: FnMut(Self::Item) -> bool>(&mut self, p: P) -> Option<usize> {
         let mut p = p;
@@ -2100,6 +2104,24 @@ impl<I: Iterator, U, B> Iterator for Flatten<I, U, B> {
                     self.cur = Some(u);
                 }
                 None => return None,
+            }
+        }
+    }
+}
+
+pub struct Cycle<I> {
+    orig: I,
+    cur: I,
+}
+
+impl<I: Iterator> Iterator for Cycle<I> {
+    type Item = I::Item;
+    fn next(&mut self) -> Option<I::Item> {
+        match self.cur.next() {
+            Some(x) => Some(x),
+            None => {
+                self.cur = __exr_clone(&self.orig);
+                self.cur.next()
             }
         }
     }
