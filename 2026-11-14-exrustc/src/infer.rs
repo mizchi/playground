@@ -1987,8 +1987,18 @@ impl Inf<'_> {
             }
             Expr::Continue(_) => self.known(Ty::Never),
             Expr::Call(c) if self.prog.prim_method_call(c, self.self_sid).is_some() => {
+                // (作り直した式は推論の終わりまで keep に持ち (後回しのクロージャが指す)、アドレスでは記録しない:
+                //  捨てた後のアドレスが codegen の作るノードと重なると別の式の型を引いてしまう。位置で記録する)
                 let e = self.prog.prim_method_call(c, self.self_sid).unwrap();
-                self.expr(&e)
+                let ki = self.keep.len();
+                self.keep.push(vec![e]);
+                let x: *const Expr = &self.keep[ki][0];
+                self.no_record += 1;
+                self.pos_record += 1;
+                let v = self.expr(unsafe { &*x });
+                self.pos_record -= 1;
+                self.no_record -= 1;
+                v
             }
             Expr::Call(c) => {
                 if let Expr::Path(p) = &*c.func {
