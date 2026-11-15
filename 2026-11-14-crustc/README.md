@@ -10,6 +10,51 @@
 
 設計の元にした blaze / relax / wild の調査は [NOTES.md](NOTES.md) にまとめた。
 
+## 現状（2026-11-15、`python3 bench/vs_rustc.py`）
+
+同じソースを同じ手順（cold → no-op → 1 か所編集）で crustc と rustc 1.97.0 でビルドし、残るディスク・バイナリ（strip 後）・実行時間を比べた。
+crustc のリンカは wild 0.10.0。どの組み合わせでも出力は rustc `-O` と一致した。全結果（no-op を含む）は `bench/vs_rustc_result.md`。
+
+| プログラム | 設定 | cold ms | edit ms | disk KiB | binary KiB (strip) | run ms（rustc -O 比） |
+|---|---|---:|---:|---:|---:|---:|
+| gen1000 | crustc | 118 | 28 | 104.9 | 520.9 | 12（4.97x） |
+|  | crustc -O | 169 | 30 | 93.9 | 273.3 | 6（2.58x） |
+|  | rustc -Cincremental | 827 | 417 | 22156.3 | 1043.4 | 9（3.78x） |
+|  | rustc -O | 11448 | - | 0.0 | 382.4 | 2（1.00x） |
+| fib | crustc | 24 | 4 | 19.0 | 18.8 | 99（3.87x） |
+|  | crustc -O | 34 | 5 | 16.0 | 13.8 | 73（2.85x） |
+|  | rustc -Cincremental | 127 | 97 | 312.4 | 335.6 | 95（3.73x） |
+|  | rustc -O | 111 | - | 0.0 | 334.6 | 25（1.00x） |
+| hashmap | crustc | 37 | 6 | 35.1 | 27.3 | 218（1.91x） |
+|  | crustc -O | 41 | 6 | 29.3 | 18.9 | 176（1.55x） |
+|  | rustc -Cincremental | 211 | 107 | 2632.2 | 373.7 | 732（6.43x） |
+|  | rustc -O | 280 | - | 0.0 | 347.8 | 114（1.00x） |
+| matmul | crustc | 53 | 8 | 47.6 | 44.1 | 245（7.20x） |
+|  | crustc -O | 60 | 8 | 39.0 | 26.9 | 77（2.26x） |
+|  | rustc -Cincremental | 158 | 121 | 2671.3 | 378.4 | 746（21.99x） |
+|  | rustc -O | 234 | - | 0.0 | 361.0 | 34（1.00x） |
+| nbody | crustc | 37 | 8 | 37.2 | 40.9 | 442（7.12x） |
+|  | crustc -O | 47 | 6 | 29.3 | 23.3 | 92（1.48x） |
+|  | rustc -Cincremental | 149 | 106 | 2226.5 | 365.9 | 1231（19.85x） |
+|  | rustc -O | 177 | - | 0.0 | 363.9 | 62（1.00x） |
+| sieve | crustc | 28 | 5 | 21.0 | 21.5 | 348（3.26x） |
+|  | crustc -O | 32 | 4 | 17.5 | 15.0 | 252（2.36x） |
+|  | rustc -Cincremental | 142 | 98 | 1475.6 | 340.4 | 432（4.04x） |
+|  | rustc -O | 163 | - | 0.0 | 335.0 | 107（1.00x） |
+| sort | crustc | 42 | 7 | 40.7 | 46.4 | 252（1.33x） |
+|  | crustc -O | 51 | 8 | 32.3 | 30.0 | 195（1.03x） |
+|  | rustc -Cincremental | 174 | 113 | 3102.2 | 384.9 | 1983（10.45x） |
+|  | rustc -O | 281 | - | 0.0 | 348.0 | 190（1.00x） |
+| strings | crustc | 38 | 7 | 41.3 | 33.7 | 113（3.32x） |
+|  | crustc -O | 52 | 6 | 33.7 | 22.3 | 73（2.17x） |
+|  | rustc -Cincremental | 172 | 102 | 2198.4 | 357.3 | 121（3.57x） |
+|  | rustc -O | 187 | - | 0.0 | 339.8 | 34（1.00x） |
+
+- 1 か所編集の再ビルドは rustc の incremental の 13〜24 倍速い（gen1000 で 28 ms 対 417 ms）。
+- 残すディスク（crustc はキャッシュ + 圧縮した `.o`、rustc は incremental ディレクトリ）は 1/16〜1/210（gen1000 で 105 KiB 対 22156 KiB）。
+- バイナリは、小さいプログラムでは rustc の 1/8〜1/18（rustc は std を静的にリンクする）。gen1000 は debug の検査の分だけ rustc `-O` より大きい。
+- 実行時間は、crustc の debug ビルドが rustc の debug ビルドより速いものが多い（gen1000 と fib を除く）。crustc `-O` は rustc `-O` の 1.0〜2.9 倍（sort は同じ）。
+
 ## 動かし方
 
 ```bash
@@ -32,7 +77,7 @@ LSP サーバ（stdio）。対応は initialize / didOpen / didChange（全文�
 
 | オプション | 意味 |
 |---|---|
-| `-o PATH` | 出力パス。同じ場所に `PATH.o`、`PATH.crcache`（キャッシュ）、`PATH.link`（リンク行）を置く |
+| `-o PATH` | 出力パス。同じ場所に `PATH.o`（`.text` などを zstd で圧縮した ELF。次のビルドの機械語の置き場）、`PATH.crcache`（キャッシュ）、`PATH.link`（リンク行）を置く |
 | `-O` | Cranelift の `speed_and_size` と backtracking regalloc を使う。既定は `none` + `single_pass` |
 | `--linker=wild\|mold\|lld\|bfd\|PATH` | リンカを選ぶ。既定は PATH にある順に wild > mold > ld.lld > ld |
 | `--time` | フェーズごとの時間とピーク RSS を表示する |
@@ -60,6 +105,23 @@ python3 bench/run.py 1000 5000
 ```
 
 rustc との比較ベンチ。`bench/gen.py` が N 関数のソースを生成し、cold、no-op、1 関数編集の各ケースを測る。
+
+```bash
+python3 bench/vs_rustc.py
+```
+
+本物の rustc との比較（上の「現状」の表）。gen1000 と `bench/rt/*.rs`（fib / hashmap / matmul / nbody / sieve / sort / strings）を、
+crustc（debug / `-O`）と rustc（`-Cincremental` / `-O`）でビルドし、cold・no-op・1 か所編集の時間、ディスク、バイナリ、実行時間を表にする。
+`NAME` を並べればそのプログラムだけ。`python3 bench/runtime.py` は実行時間とバイナリだけを比べる軽い版。
+
+```bash
+tests/probe.sh
+```
+
+よく使う機能の小さいプログラム（`tests/probe/*.rs`、81 本）を rustc と比べ、通った数を出す。
+
+環境変数：`CRUSTC_DUMP_PRELUDE=1` は付けた prelude を stderr に出す。`CRUSTC_NO_STRIP=1` は出力のシンボルを残す（callgrind などで関数名を見るため）。
+`CRUSTC_BENCH_LINKER` は criterion のベンチのリンカを固定する。
 
 ### 回帰監視（criterion + サイズ予算）
 
@@ -637,7 +699,7 @@ src.rs ──lexer(自前)──▶ アイテム列 + 正規化ハッシュ
    - cold 時（要約のミスが 33 件以上）は、要約用の parse を並列にし、AST は持ち帰らない。
      全部保持すると、5000 関数では syn の AST だけでピーク RSS が 162MB になっていた。持ち帰らない形にして 35MB になった。
 
-## 結果
+## 結果（ここから下は作業の記録。数値はそれぞれの時点のもの。最新は上の「現状」）
 
 環境は Linux x86-64 のクラウドコンテナ（4 コア相当）。rustc 1.97.0、wild 0.10.0、Cranelift 0.137。
 `bench/gen.py` が生成する「N 個の関数 + 相互呼び出し」のプログラムで測った。どのツールの出力も rustc の実行結果と一致した。
