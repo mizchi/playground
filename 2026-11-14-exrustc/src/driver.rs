@@ -715,6 +715,12 @@ fn with_prelude<'a>(
     src: &'a str,
     cache: &mut crate::prelude::SelectCache,
 ) -> Result<(std::borrow::Cow<'a, str>, Vec<SrcItem>), String> {
+    let orig = src;
+    // `macro_rules!` を展開し (展開は 1 行に収めて後ろの行番号を変えない)、`mod m { .. }` は平らにする
+    let expanded = crate::macros::expand(src)?;
+    let src: &str = expanded.as_deref().unwrap_or(src);
+    let flat = lexer::flatten_modules(src).or(expanded.clone());
+    let src: &str = flat.as_deref().unwrap_or(src);
     let mut items = lexer::split(src)?;
     let extra = crate::prelude::select_with(src, &items, cache);
     // (デバッグ用: 付けた prelude をソースの後ろに続く行番号つきで stderr に出す)
@@ -726,7 +732,13 @@ fn with_prelude<'a>(
     }
     if extra.is_empty() {
         // prelude を使わなければソースはそのまま (コピーしない)
-        return Ok((std::borrow::Cow::Borrowed(src), items));
+        return Ok((
+            match &flat {
+                Some(f) => std::borrow::Cow::Owned(f.clone()),
+                None => std::borrow::Cow::Borrowed(orig),
+            },
+            items,
+        ));
     }
     let base = src.len() + 1;
     let lines = src.bytes().filter(|&c| c == b'\n').count() + 1;

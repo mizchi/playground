@@ -2681,7 +2681,9 @@ impl Cx<'_, '_> {
 
     /// プリミティブ型への trait 実装のメソッド (`impl Tr for u32` の `x.m()`)
     fn prim_trait_method(&mut self, mc: &syn::ExprMethodCall) -> R<Option<V>> {
-        let Some(mut t) = self.peek(&mc.receiver) else {
+        // (接尾辞のない整数リテラル `5.d()` は i32)
+        let lit_int = matches!(strip_paren(&mc.receiver), Expr::Lit(syn::ExprLit { lit: Lit::Int(i), .. }) if i.suffix().is_empty());
+        let Some(mut t) = self.peek(&mc.receiver).or(lit_int.then_some(Ty::I32)) else {
             return Ok(None);
         };
         while let Ty::Ref(_, i) = t {
@@ -2695,7 +2697,7 @@ impl Cx<'_, '_> {
             return Ok(None);
         };
         // 受け手: 値ならそのまま、&self ならメモリに置いてそのアドレス
-        let (v, vt) = self.expr(&mc.receiver, None)?;
+        let (v, vt) = self.expr(&mc.receiver, lit_int.then_some(t))?;
         let mut v = v.unwrap();
         let mut vt = vt;
         while let Ty::Ref(_, i) = vt {
@@ -5643,6 +5645,19 @@ impl Cx<'_, '_> {
 
     /// 1 セグメントのパスが (ローカル変数でない) const なら、その index
     fn const_of(&self, p: &syn::ExprPath) -> Option<u32> {
+        // `geometry::UNIT` / `crate::m::N`: モジュールの部分を外して引く
+        if p.qself.is_none() && p.path.segments.len() >= 2 {
+            if let Some(q) = self.prog.strip_mods(&p.path) {
+                let qe = syn::ExprPath { attrs: vec![], qself: None, path: q };
+                if let Some(ci) = self.const_of_inner(&qe) {
+                    return Some(ci);
+                }
+            }
+        }
+        self.const_of_inner(p)
+    }
+
+    fn const_of_inner(&self, p: &syn::ExprPath) -> Option<u32> {
         // 関連定数 `S::N` / `Self::N` / `T::N` (T は型引数) / trait の既定値 `Tr::N`
         if p.qself.is_none() && p.path.segments.len() == 2 {
             let (a, n) = (p.path.segments[0].ident.to_string(), p.path.segments[1].ident.to_string());

@@ -2583,6 +2583,14 @@ impl Program {
     /// `Some` / `None` / `Ok` / `Err` は (prelude の) Option / Result のバリアント。
     /// ジェネリックな enum なら、返る id はジェネリックな定義 (呼び出し側でインスタンスにする)
     pub fn variant_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<(u32, usize)> {
+        if let Some(r) = self.variant_by_path_inner(p, self_sid) {
+            return Some(r);
+        }
+        let q = self.strip_mods(p)?;
+        self.variant_by_path_inner(&q, self_sid)
+    }
+
+    fn variant_by_path_inner(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<(u32, usize)> {
         let segs: Vec<&syn::PathSegment> = p.segments.iter().collect();
         // `core::option::Option::Some` などは最後の 2 つで見る
         let segs = if segs.len() > 2
@@ -2646,7 +2654,37 @@ impl Program {
     }
 
     /// 型名として書かれたパス (`S` / `Self`) → struct id
+    /// モジュールのパスの先頭 (`crate::` / `self::` / `super::` / 小文字のモジュール名) を外す。
+    /// モジュールは平らにしてあるので、アイテムは最後の名前で引ける (`geo::inner::k` → `k`、`geo::P::new` → `P::new`)
+    pub fn strip_mods(&self, p: &syn::Path) -> Option<syn::Path> {
+        let mut k = 0;
+        let n = p.segments.len();
+        while k + 1 < n {
+            let s = p.segments[k].ident.to_string();
+            let module = matches!(s.as_str(), "crate" | "self" | "super")
+                || (s.starts_with(|c: char| c.is_ascii_lowercase())
+                    && !matches!(s.as_str(), "std" | "core" | "alloc" | "str" | "char" | "bool")
+                    && Ty::prim(&s).is_none()
+                    && !self.struct_index.contains_key(&s)
+                    && p.segments[k].arguments.is_none());
+            if !module {
+                break;
+            }
+            k += 1;
+        }
+        if k == 0 {
+            return None;
+        }
+        let mut q = p.clone();
+        q.leading_colon = None;
+        q.segments = p.segments.iter().skip(k).cloned().collect();
+        Some(q)
+    }
+
     pub fn struct_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
+        if p.segments.len() > 1 {
+            return self.struct_by_path(&self.strip_mods(p)?, self_sid);
+        }
         let id = p.get_ident()?.to_string();
         if id == "Self" {
             return self_sid;
@@ -2656,6 +2694,14 @@ impl Program {
 
     /// 関数として書かれたパス (`f` / `S::f` / `Self::f`) → 関数 ID
     pub fn fn_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
+        if let Some(r) = self.fn_by_path_inner(p, self_sid) {
+            return Some(r);
+        }
+        let q = self.strip_mods(p)?;
+        self.fn_by_path_inner(&q, self_sid)
+    }
+
+    fn fn_by_path_inner(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
         // 最後のセグメントの turbofish (`f::<T>`) は呼び出し側で読む
         let n = p.segments.len();
         if p.leading_colon.is_some()

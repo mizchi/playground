@@ -501,3 +501,184 @@ mod tests {
         assert_eq!(it.len(), 2);
     }
 }
+
+/// 1 ファイルの中のモジュール `mod name { .. }` を平らにする: `mod name {` (と前の `pub` / 属性) と
+/// 対応する `}` を空白で塗りつぶし、中のアイテムをトップレベルのアイテムにする (バイト位置と行は変えない)。
+/// `#[cfg(test)] mod tests { .. }` はまるごと消す。モジュールのパス (`geo::f`) は名前解決が先頭を読み飛ばす。
+/// モジュールがなければ None
+pub fn flatten_modules(src: &str) -> Option<String> {
+    if !src.contains("mod") {
+        return None;
+    }
+    let s = src.as_bytes();
+    let n = s.len();
+    // (種類, 開始, 終了): 0 = 識別子, 1 = 記号 1 文字, 2 = リテラル
+    let mut toks: Vec<(u8, usize, usize)> = vec![];
+    let mut i = 0;
+    while i < n {
+        let c = s[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c == b'/' && i + 1 < n && s[i + 1] == b'/' {
+            while i < n && s[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == b'/' && i + 1 < n && s[i + 1] == b'*' {
+            let mut d = 0;
+            while i < n {
+                if s[i] == b'/' && i + 1 < n && s[i + 1] == b'*' {
+                    d += 1;
+                    i += 2;
+                } else if s[i] == b'*' && i + 1 < n && s[i + 1] == b'/' {
+                    d -= 1;
+                    i += 2;
+                    if d == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if let Some(end) = string_lit(s, i) {
+            toks.push((2, i, end));
+            i = end;
+            continue;
+        }
+        if is_ident_start(c) {
+            let st = i;
+            while i < n && is_ident_cont(s[i]) {
+                i += 1;
+            }
+            toks.push((0, st, i));
+            continue;
+        }
+        if c == b'\'' {
+            // 文字リテラル (ライフタイムは識別子の続きとして読む)
+            let st = i;
+            if i + 1 < n && s[i + 1] == b'\\' {
+                i += 2;
+                while i < n && s[i] != b'\'' {
+                    i += 1;
+                }
+                i += 1;
+                toks.push((2, st, i.min(n)));
+                continue;
+            }
+            let l = utf8_len(s.get(i + 1).copied().unwrap_or(0));
+            if i + 1 + l < n && s[i + 1 + l] == b'\'' {
+                i += 2 + l;
+                toks.push((2, st, i));
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        toks.push((1, i, i + 1));
+        i += 1;
+    }
+    let tok = |k: usize| -> &[u8] { &s[toks[k].1..toks[k].2] };
+    // 対応する閉じ括弧のトークン位置
+    let matching = |k: usize| -> Option<usize> {
+        let (open, close) = match tok(k) {
+            b"{" => (b"{", b"}"),
+            b"[" => (b"[", b"]"),
+            b"(" => (b"(", b")"),
+            _ => return None,
+        };
+        let mut d = 0;
+        for j in k..toks.len() {
+            if toks[j].0 == 1 {
+                if tok(j) == open {
+                    d += 1;
+                } else if tok(j) == close {
+                    d -= 1;
+                    if d == 0 {
+                        return Some(j);
+                    }
+                }
+            }
+        }
+        None
+    };
+    let mut out = s.to_vec();
+    let blank = |out: &mut Vec<u8>, a: usize, b: usize| {
+        for x in &mut out[a..b] {
+            if *x != b'\n' {
+                *x = b' ';
+            }
+        }
+    };
+    let mut changed = false;
+    let mut k = 0;
+    while k + 2 < toks.len() {
+        if !(toks[k].0 == 0 && tok(k) == b"mod" && toks[k + 1].0 == 0 && tok(k + 2) == b"{") {
+            k += 1;
+            continue;
+        }
+        let Some(close) = matching(k + 2) else { return None };
+        // 前の `pub` / `pub(crate)` と属性 `#[..]` も含める
+        let mut st = k;
+        let mut is_test = false;
+        loop {
+            if st >= 1 && toks[st - 1].0 == 0 && tok(st - 1) == b"pub" {
+                st -= 1;
+                continue;
+            }
+            if st >= 1 && tok(st - 1) == b")" {
+                // `pub(crate)`
+                let mut j = st - 1;
+                while j > 0 && tok(j) != b"(" {
+                    j -= 1;
+                }
+                if j >= 1 && tok(j - 1) == b"pub" {
+                    st = j - 1;
+                    continue;
+                }
+            }
+            if st >= 1 && tok(st - 1) == b"]" {
+                let mut j = st - 1;
+                let mut d = 0;
+                loop {
+                    if tok(j) == b"]" {
+                        d += 1;
+                    } else if tok(j) == b"[" {
+                        d -= 1;
+                        if d == 0 {
+                            break;
+                        }
+                    }
+                    if j == 0 {
+                        break;
+                    }
+                    j -= 1;
+                }
+                if j >= 1 && tok(j - 1) == b"#" {
+                    let attr = &s[toks[j].1..toks[st - 1].2];
+                    let a = String::from_utf8_lossy(attr);
+                    if a.contains("cfg") && a.contains("test") {
+                        is_test = true;
+                    }
+                    st = j - 1;
+                    continue;
+                }
+            }
+            break;
+        }
+        changed = true;
+        if is_test {
+            blank(&mut out, toks[st].1, toks[close].2);
+            k = close + 1;
+        } else {
+            blank(&mut out, toks[st].1, toks[k + 2].2);
+            blank(&mut out, toks[close].1, toks[close].2);
+            k += 3;
+        }
+    }
+    changed.then(|| String::from_utf8(out).unwrap_or_default())
+}

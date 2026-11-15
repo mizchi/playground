@@ -1222,6 +1222,11 @@ impl Inf<'_> {
                     None => self.var(),
                 }
             }
+            // `format!(..)`: String
+            Expr::Macro(m) if m.mac.path.is_ident("format") && self.prog.struct_index.contains_key("String") => {
+                let ss = self.prog.struct_index["String"];
+                self.known(Ty::Struct(ss))
+            }
             // `vec![a, b]` / `vec![x; n]`: Vec<要素の型>
             Expr::Macro(m)
                 if m.mac.path.is_ident("vec") && self.prog.struct_index.contains_key("Vec") =>

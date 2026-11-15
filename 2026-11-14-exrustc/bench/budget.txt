@@ -60,9 +60,15 @@ iterators.binary_bytes 45981
 iterators.cache_bytes 81747
 iterators.object_bytes 86091
 lsp1000.mem_bytes 20843
+macros.binary_bytes 37136
+macros.cache_bytes 72347
+macros.object_bytes 64738
 methods.binary_bytes 7232
 methods.cache_bytes 6072
 methods.object_bytes 7005
+modules.binary_bytes 19068
+modules.cache_bytes 33818
+modules.object_bytes 35246
 nostd_calc.binary_bytes 13952
 nostd_calc.cache_bytes 13394
 nostd_calc.object_bytes 13650
