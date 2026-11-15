@@ -117,6 +117,7 @@ fn clif_ty(t: Ty) -> Option<ir::Type> {
             8 => types::I8,
             16 => types::I16,
             32 => types::I32,
+            128 => types::I128,
             _ => types::I64,
         },
     })
@@ -1004,6 +1005,18 @@ impl Cx<'_, '_> {
             {
                 Some(if p.path.segments.iter().any(|s| s.ident == "f32") { Ty::F32 } else { Ty::F64 })
             }
+            // `u64::MAX` / `i128::MIN` / `u32::BITS`
+            Expr::Path(p)
+                if p.path.segments.len() == 2
+                    && matches!(p.path.segments[1].ident.to_string().as_str(), "MAX" | "MIN" | "BITS")
+                    && Ty::from_suffix(&p.path.segments[0].ident.to_string()).is_some() =>
+            {
+                if p.path.segments[1].ident == "BITS" {
+                    Some(Ty::U32)
+                } else {
+                    Ty::from_suffix(&p.path.segments[0].ident.to_string())
+                }
+            }
             Expr::Path(p) if p.path.segments.len() == 2 && self.const_of(p).is_some() => {
                 Some(self.prog.consts[self.const_of(p)? as usize].ty)
             }
@@ -1783,6 +1796,22 @@ impl Cx<'_, '_> {
                 // 浮動小数点が関わるキャスト (Rust の `as` と同じく、浮動小数点 → 整数は飽和し NaN は 0)
                 if from.is_float() || to.is_float() {
                     let v = v.unwrap();
+                    let span = c.span();
+                    // 128 bit 整数 ⇔ 浮動小数点は prelude の関数 (Cranelift にない)
+                    if from.bits() == 128 && to.is_float() {
+                        let sg = self.b.ins().iconst(types::I8, from.signed() as i64);
+                        let single = self.b.ins().iconst(types::I8, (to == Ty::F32) as i64);
+                        let (r, _) = self.call_named("__exr_u128_to_f", vec![Ty::Unit], &[(v, Ty::U128), (sg, Ty::Bool), (single, Ty::Bool)], span)?;
+                        let r = r.unwrap();
+                        let r = if to == Ty::F32 { self.b.ins().fdemote(types::F32, r) } else { r };
+                        return Ok((Some(r), to));
+                    }
+                    if from.is_float() && to.bits() == 128 {
+                        let w = if from == Ty::F32 { self.b.ins().fpromote(types::F64, v) } else { v };
+                        let sg = self.b.ins().iconst(types::I8, to.signed() as i64);
+                        let (r, _) = self.call_named("__exr_f_to_u128", vec![Ty::Unit], &[(w, Ty::F64), (sg, Ty::Bool)], span)?;
+                        return Ok((r, to));
+                    }
                     let r = match (from.is_float(), to.is_float()) {
                         (true, true) if from == to => v,
                         (true, true) if to == Ty::F64 => self.b.ins().fpromote(types::F64, v),
@@ -3144,8 +3173,8 @@ impl Cx<'_, '_> {
                     .or(expected.filter(|t| t.is_int()))
                     .unwrap_or(Ty::I32);
                 // 負のリテラル (パターンの `-1` など) も来るので i128 で読む
-                let n: i128 = i.base10_parse().map_err(|e| e.to_string())?;
-                let v = self.b.ins().iconst(clif_ty(ty).unwrap(), n as u64 as i64);
+                let n = i.base10_parse::<i128>().or_else(|_| i.base10_parse::<u128>().map(|v| v as i128)).map_err(|e| e.to_string())?;
+                let v = self.int_const(ty, n);
                 Ok((Some(v), ty))
             }
             Lit::Bool(b) => Ok((
@@ -3177,6 +3206,35 @@ impl Cx<'_, '_> {
                 ))
             }
             _ => err(l.span(), "unsupported literal"),
+        }
+    }
+
+    /// 128 bit の除算・剰余 (prelude の関数)
+    fn div128(&mut self, l: Value, r: Value, t: Ty, rem: bool, span: proc_macro2::Span) -> R<Value> {
+        let f = if t.signed() { "__exr_sdiv128" } else { "__exr_udiv128" };
+        let rv = self.b.ins().iconst(types::I8, rem as i64);
+        let (v, _) = self.call_named(f, vec![Ty::Unit], &[(l, t), (r, t), (rv, Ty::Bool)], span)?;
+        Ok(v.unwrap())
+    }
+
+    /// iconst (I128 は 64 bit から符号拡張する。Cranelift の iconst は 64 bit まで)
+    fn iconst_t(&mut self, ct: ir::Type, x: i64) -> Value {
+        if ct == types::I128 {
+            let v = self.b.ins().iconst(types::I64, x);
+            self.b.ins().sextend(types::I128, v)
+        } else {
+            self.b.ins().iconst(ct, x)
+        }
+    }
+
+    /// 整数の定数 (128 bit は 64 bit の 2 つをつなぐ)
+    fn int_const(&mut self, ty: Ty, n: i128) -> Value {
+        if ty.bits() == 128 {
+            let lo = self.b.ins().iconst(types::I64, n as u64 as i64);
+            let hi = self.b.ins().iconst(types::I64, (n >> 64) as u64 as i64);
+            self.b.ins().iconcat(lo, hi)
+        } else {
+            self.b.ins().iconst(clif_ty(ty).unwrap(), n as u64 as i64)
         }
     }
 
@@ -3673,6 +3731,10 @@ impl Cx<'_, '_> {
             );
         }
         let s = lt.signed();
+        // 128 bit の除算は Cranelift にないので prelude の関数
+        if lt.bits() == 128 && matches!(op, Div(_) | Rem(_)) {
+            return self.div128(l, r, lt, matches!(op, Rem(_)), b.span());
+        }
         let ins = self.b.ins();
         Ok(match op {
             Add(_) => ins.iadd(l, r),
@@ -4725,7 +4787,7 @@ impl Cx<'_, '_> {
                 (Some(self.b.ins().isub(hi, lo)), ut)
             }
             "signum" => {
-                let z = self.b.ins().iconst(ct, 0);
+                let z = self.iconst_t(ct, 0);
                 let gt = self.b.ins().icmp(IntCC::SignedGreaterThan, a, z);
                 let lt = self.b.ins().icmp(IntCC::SignedLessThan, a, z);
                 let g = self.b.ins().uextend(ct, gt);
@@ -4785,7 +4847,7 @@ impl Cx<'_, '_> {
                 let r = self.b.declare_var(ct);
                 let bv = self.b.declare_var(ct);
                 let ev = self.b.declare_var(types::I32);
-                let one = self.b.ins().iconst(ct, 1);
+                let one = self.iconst_t(ct, 1);
                 self.b.def_var(r, one);
                 self.b.def_var(bv, a);
                 self.b.def_var(ev, e0);
@@ -4844,8 +4906,13 @@ impl Cx<'_, '_> {
                         } else {
                             zero
                         };
-                        let one = self.b.ins().iconst(ct, 1);
+                        let one = self.iconst_t(ct, 1);
                         let safe = self.b.ins().select(bad, one, b);
+                        if t.bits() == 128 {
+                            let span = mc.span();
+                            let q = self.div128(a, safe, t, name == "checked_rem", span)?;
+                            (q, bad)
+                        } else {
                         let ins = self.b.ins();
                         let q = match (name.as_str(), s) {
                             ("checked_div", true) => ins.sdiv(a, safe),
@@ -4854,6 +4921,7 @@ impl Cx<'_, '_> {
                             _ => ins.urem(a, safe),
                         };
                         (q, bad)
+                        }
                     }
                 };
                 let ot = {
@@ -5788,7 +5856,7 @@ impl Cx<'_, '_> {
             }) {
                 if let Some(v) = crate::front::prim_assoc_const(t, &segs[1]) {
                     let t = if segs[1] == "BITS" { Ty::U32 } else { t };
-                    let c = self.b.ins().iconst(clif_ty(t).unwrap(), v as i64);
+                    let c = self.int_const(t, v);
                     return Ok((Some(c), t));
                 }
             }
@@ -7695,6 +7763,18 @@ impl Cx<'_, '_> {
         let str_ref = Ty::Ref(false, intern(Ty::Str));
         let me = if debug { "__exr_debug" } else { "__exr_display" };
         match t {
+            t if t.bits() == 128 => {
+                let v = self.b.ins().load(types::I128, mf(), x, 0);
+                let (mag, neg) = if t.signed() {
+                    let z = self.int_const(t, 0);
+                    let neg = self.b.ins().icmp(IntCC::SignedLessThan, v, z);
+                    let n = self.b.ins().ineg(v);
+                    (self.b.ins().select(neg, n, v), neg)
+                } else {
+                    (v, self.b.ins().iconst(types::I8, 0))
+                };
+                self.call_named("__exr_fmt_int128", vec![Ty::Unit], &[(f, fref), (mag, Ty::U128), (neg, Ty::Bool)], span)?;
+            }
             t if t.is_int() => {
                 let ct = clif_ty(t).unwrap();
                 let v = self.b.ins().load(ct, mf(), x, 0);
@@ -7946,9 +8026,15 @@ impl Cx<'_, '_> {
             t if t.is_int() || matches!(t, Ty::Bool | Ty::Char) => {
                 let ct = clif_ty(t).unwrap();
                 let v = self.b.ins().load(ct, mf(), x, 0);
-                let v = if ct == types::I64 { v } else { self.b.ins().uextend(types::I64, v) };
                 let z = self.b.ins().iconst(types::I64, 0);
-                self.mix(z, v)
+                if ct == types::I128 {
+                    let (lo, hi) = self.b.ins().isplit(v);
+                    let h = self.mix(z, lo);
+                    self.mix(h, hi)
+                } else {
+                    let v = if ct == types::I64 { v } else { self.b.ins().uextend(types::I64, v) };
+                    self.mix(z, v)
+                }
             }
             Ty::Str => self.call_named("__exr_hash_bytes", vec![Ty::Unit], &[(x, u8s)], span)?.0.unwrap(),
             Ty::Ref(_, Ty::Str) => self.call_named("__exr_hash_bytes", vec![Ty::Unit], &[(x, u8s)], span)?.0.unwrap(),

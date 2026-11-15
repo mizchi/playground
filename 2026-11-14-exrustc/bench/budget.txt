@@ -59,6 +59,9 @@ hashmap.object_bytes 93450
 hello.binary_bytes 6451
 hello.cache_bytes 3202
 hello.object_bytes 4132
+int128.binary_bytes 82177
+int128.cache_bytes 153424
+int128.object_bytes 143908
 iter_vec_more.binary_bytes 96910
 iter_vec_more.cache_bytes 178390
 iter_vec_more.object_bytes 181120

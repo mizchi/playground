@@ -154,6 +154,8 @@ fn make_isa(o: &Options) -> OwnedTargetIsa {
     f.set("is_pic", "true").unwrap();
     // 開発ビルドではアンウィンド情報不要 (panic/unwind をまだ持たない)
     f.set("unwind_info", "false").unwrap();
+    // i128 の引数と戻り値 (SysV と同じく 2 レジスタ)
+    f.set("enable_llvm_abi_extensions", "true").unwrap();
     cranelift_native::builder()
         .unwrap()
         .finish(settings::Flags::new(f))

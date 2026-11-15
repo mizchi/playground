@@ -363,6 +363,11 @@ bench/regress.sh
   - 書式化は rustc と同じ桁：最短表現（往復で同じ値になる最短の桁、`{:?}` は指数が -5 以下か 16 以上で `1e-7` 形式）、`{:.N}`（正確な 10 進展開から偶数丸め）。10 進変換は 1e9 進の多倍長で正確に行う
   - `"1.5".parse::<f64>()`（strtod、`ParseFloatError`）
   - `examples/float_fuzz.rs` の 6000 行（乱数のビット列の Display / Debug / `{:.N}` / parse）が rustc と一致する
+- 128 bit 整数 `i128` / `u128`：
+  - 算術・比較・シフト・ビット演算は Cranelift の I128（引数と戻り値は `enable_llvm_abi_extensions` で SysV と同じ 2 レジスタ）
+  - 除算・剰余、浮動小数点との変換（丸めは 1 回）、書式化（`{}` / `{:x}` / `{:b}` / 幅など）、`parse` は prelude の関数
+  - `checked_*` / `wrapping_*` / `pow` / `count_ones` / `MAX` / `MIN`、HashMap のキー、derive
+  - `examples/int128.rs` の乱数による照合（3000 組の四則演算・シフト・比較）が rustc と一致する
 - panic：
   - `#[panic_handler]` があればそれを呼ぶ（範囲外アクセス・`unwrap`・`assert!`・`panic!` など）
   - なければ trap する
@@ -417,7 +422,6 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
   - ローカル変数をキャプチャするクロージャを `impl Fn` で返すこと（引数のキャプチャだけ対応）
 - `dyn` の制限：`Self` やジェネリクスを使うメソッド（object safe でないもの）は dyn 経由で呼べない。`dyn A + B` は不可
 - 浮動小数点の制限：`{:e}` 書式
-- 128 bit 整数
 - 別ファイルのモジュール（`mod x;`）。1 ファイルの中のモジュールは平らにするので、別のモジュールに同じ名前のアイテムがあるとぶつかる
 - `macro_rules!` の制限：衛生 (hygiene) はない（展開はテキストの置き換え）。`$x:expr` などは次の区切りまでのトークン列として取る近似
 - イテレータのアダプタ（`for` の中で直接使う形以外）
@@ -593,7 +597,7 @@ rustc 側はほとんどが std 由来。
 
 - **言語**
   - モジュール、`DoubleEndedIterator`（値としての `rev`）、`HashSet` / `BTreeMap`
-  - 128 bit 整数、オーバーフロー検査（debug ビルドの rustc と同じ panic）
+  - オーバーフロー検査（debug ビルドの rustc と同じ panic）
   - 単相化をレイアウトでキーにして共有する（`Vec<A>` と `Vec<B>` を 1 つにする。blaze の polymorph）
   - 最小の自前 std（relax 方式）
 - **インクリメンタル**

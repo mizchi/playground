@@ -40,6 +40,9 @@ pub enum Ty {
     Bool,
     Unit,
     Never,
+    /// 128 bit 整数
+    I128,
+    U128,
     /// Unicode のスカラー値 (32 bit)
     Char,
     /// 浮動小数点 (IEEE 754)
@@ -188,6 +191,8 @@ impl Ty {
             "u32" => Ty::U32,
             "u64" => Ty::U64,
             "usize" => Ty::Usize,
+            "i128" => Ty::I128,
+            "u128" => Ty::U128,
             _ => return None,
         })
     }
@@ -219,11 +224,13 @@ impl Ty {
                 | Ty::U32
                 | Ty::U64
                 | Ty::Usize
+                | Ty::I128
+                | Ty::U128
         )
     }
 
     pub fn signed(self) -> bool {
-        matches!(self, Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::Isize)
+        matches!(self, Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::Isize | Ty::I128)
     }
 
     /// スカラー (整数・bool・参照) のビット幅。struct / unit / never は 0。
@@ -233,6 +240,7 @@ impl Ty {
             Ty::I16 | Ty::U16 => 16,
             Ty::I32 | Ty::U32 | Ty::Char | Ty::F32 => 32,
             Ty::I64 | Ty::U64 | Ty::Isize | Ty::Usize | Ty::Ptr(..) | Ty::Fn(_) | Ty::F64 => 64,
+            Ty::I128 | Ty::U128 => 128,
             Ty::Ref(..) | Ty::Box(_) if self.is_fat() => 0,
             Ty::Ref(..) | Ty::Box(_) => 64,
             Ty::Unit
@@ -720,10 +728,11 @@ pub fn prim_assoc_const(t: Ty, name: &str) -> Option<i128> {
     let bits = t.bits();
     Some(match (name, t.signed()) {
         ("BITS", _) => bits as i128,
-        ("MAX", true) => (1i128 << (bits - 1)) - 1,
-        ("MIN", true) => -(1i128 << (bits - 1)),
+        // (u128::MAX はビット列として持つ: -1)
+        ("MAX", true) => (u128::MAX >> (129 - bits)) as i128,
+        ("MIN", true) => -((u128::MAX >> (129 - bits)) as i128) - 1,
         ("MAX", false) if t == Ty::Char => 0x10FFFF,
-        ("MAX", false) => (1i128 << bits) - 1,
+        ("MAX", false) => (u128::MAX >> (128 - bits)) as i128,
         ("MIN", false) => 0,
         _ => return None,
     })
@@ -2105,7 +2114,7 @@ impl Program {
         use syn::{BinOp, Expr, Lit, UnOp};
         Ok(match e {
             Expr::Lit(l) => match &l.lit {
-                Lit::Int(i) => i.base10_parse().map_err(|e| e.to_string())?,
+                Lit::Int(i) => i.base10_parse::<i128>().or_else(|_| i.base10_parse::<u128>().map(|v| v as i128)).map_err(|e| e.to_string())?,
                 Lit::Bool(b) => b.value as i128,
                 Lit::Byte(b) => b.value() as i128,
                 Lit::Char(c) => c.value() as i128,
@@ -3031,7 +3040,7 @@ impl Program {
 
 // --- Summary のシリアライズ ------------------------------------------------
 
-const TYS: [Ty; 16] = [
+const TYS: [Ty; 18] = [
     Ty::I8,
     Ty::I16,
     Ty::I32,
@@ -3048,6 +3057,8 @@ const TYS: [Ty; 16] = [
     Ty::Char,
     Ty::F32,
     Ty::F64,
+    Ty::I128,
+    Ty::U128,
 ];
 
 fn ty_code(t: Ty) -> u8 {
@@ -3118,7 +3129,7 @@ impl Enc for TySyn {
     }
     fn dec(r: &mut Rd) -> Option<Self> {
         Some(match r.u8()? {
-            c @ 0..16 => TySyn::Prim(TYS[c as usize]),
+            c @ 0..18 => TySyn::Prim(TYS[c as usize]),
             c @ (20 | 21) => TySyn::Ref(c == 21, Box::new(TySyn::dec(r)?)),
             22 => TySyn::Named(String::dec(r)?),
             23 => TySyn::App(String::dec(r)?, Vec::dec(r)?),

@@ -349,7 +349,7 @@ fn owner(h: usize) -> Option<&'static str> {
                         | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" | "Rev" | "StepBy" | "Peekable"
                         | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks"
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
-                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" => Some(w),
+                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,
@@ -403,7 +403,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             "find", "position", "nth", "zip", "chain", "take", "skip", "take_while", "copied",
             "cloned", "format", "print", "println", "eprint", "eprintln", "write", "writeln",
             "split", "split_whitespace", "lines", "trim", "starts_with", "ends_with", "contains",
-            "clamp", "from_u32", "char", "join", "concat", "drain", "default", "f64", "f32",
+            "clamp", "from_u32", "char", "join", "concat", "drain", "default", "f64", "f32", "i128", "u128",
         ]);
         // (先頭の 1 byte, 長さ) ごとの候補。prelude の名前が増えても 1 識別子あたりの比較は 0〜1 回
         let mut t: Vec<Vec<&'static str>> = vec![vec![]; 256 * 32];
@@ -594,6 +594,14 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         if need.contains(m) {
             need.extend([f, "Iterator", "next"]);
         }
+    }
+    // checked_* は Option を返す
+    if user_src.contains("checked_") {
+        need.insert("Option");
+    }
+    // 128 bit 整数: 除算と書式化
+    if need.contains("i128") || need.contains("u128") {
+        need.extend(["__exr_udiv128", "__exr_sdiv128", "__exr_fmt_int128", "__exr_u128_to_f", "__exr_f_to_u128"]);
     }
     // 浮動小数点: 書式化・powi・libm の宣言 (f64 / f32 の名前か、`1.5` のようなリテラルがあるとき)
     // (`fn f64(..)` のような関数の名前は数えない: 型の位置 (`: f64` / `as f64` / `f64::` など) だけ)
