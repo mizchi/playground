@@ -193,7 +193,8 @@ pub fn encode_blob(b: &Blob, prog: &Program, insts: &Insts, out: &mut Vec<u8>) {
         out.extend_from_slice(d);
     }
     // vtable と panic の trap の表は (ほとんどの関数にはないので) あるときだけ書く
-    if !b.vtables.is_empty() || !b.traps.is_empty() {
+    let tail = !b.vtables.is_empty() || !b.traps.is_empty() || b.line_base.is_some();
+    if tail {
         out.extend_from_slice(&(b.vtables.len() as u32).to_le_bytes());
         for vt in &b.vtables {
             out.extend_from_slice(&(vt.len() as u32).to_le_bytes());
@@ -202,7 +203,7 @@ pub fn encode_blob(b: &Blob, prog: &Program, insts: &Insts, out: &mut Vec<u8>) {
             }
         }
     }
-    if !b.traps.is_empty() {
+    if !b.traps.is_empty() || b.line_base.is_some() {
         out.extend_from_slice(&(b.traps.len() as u32).to_le_bytes());
         // (1 か所 8 byte: オフセット 20 bit | メッセージ番号 + 1 13 bit | 種類・行・列 31 bit。表と同じ形)
         for &(o, i, m) in &b.traps {
@@ -210,6 +211,9 @@ pub fn encode_blob(b: &Blob, prog: &Program, insts: &Insts, out: &mut Vec<u8>) {
             let w = ((o as u64) << 44) | (m1 << 31) | (i as u64 & 0x7FFF_FFFF);
             out.extend_from_slice(&w.to_le_bytes());
         }
+    }
+    if let Some(lb) = b.line_base {
+        out.extend_from_slice(&lb.to_le_bytes());
     }
 }
 
@@ -366,6 +370,7 @@ pub fn decode_blob(d: &[u8], prog: &Program, insts: &Mutex<Insts>) -> Option<Blo
             traps.push(((w >> 44) as u32, (w & 0x7FFF_FFFF) as u32, m1.wrapping_sub(1)));
         }
     }
+    let line_base = if r.1 < r.0.len() { Some(r.u32()?) } else { None };
     Some(Blob {
         align,
         code,
@@ -373,5 +378,6 @@ pub fn decode_blob(d: &[u8], prog: &Program, insts: &Mutex<Insts>) -> Option<Blo
         datas,
         vtables,
         traps,
+        line_base,
     })
 }

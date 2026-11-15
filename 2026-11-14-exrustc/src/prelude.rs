@@ -551,7 +551,8 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         chain |= c;
         cache.map.insert(it.hash, (names, c));
     }
-    if need.is_empty() {
+    // (std のプログラムは panic のハンドラを必ず使うので、何も使わなくても prelude を付ける)
+    if need.is_empty() && user_src.contains("no_std") {
         return String::new();
     }
     // 書式化のマクロ: Formatter と書き出しの関数一式 (codegen が名前を書かずに呼ぶ)
@@ -560,6 +561,8 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         .any(|n| need.contains(n))
         || nonliteral_to_string(user_src)
         || panic_with_args(user_src)
+        // (assert_eq! / assert_ne! は失敗したとき left / right を {:?} で出す。no_std は panic_handler を呼ぶだけ)
+        || ((user_src.contains("assert_eq!(") || user_src.contains("assert_ne!(")) && !user_src.contains("no_std"))
     {
         need.extend(FMT_NAMES.iter().copied());
     }

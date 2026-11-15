@@ -57,6 +57,9 @@ pub struct Blob {
     pub vtables: Vec<Vec<u32>>,
     /// panic の trap の場所: (関数の中のオフセット, 種類・行・列, メッセージ (datas の index。なければ u32::MAX))
     pub traps: Vec<(u32, u32, u32)>,
+    /// 場所 (行) を機械語やデータに書き込んだなら、そのときのアイテムの開始行 - 1。
+    /// キャッシュから読むときに今の開始行と違えばコンパイルし直す (行がずれたら場所も変わる)
+    pub line_base: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -175,6 +178,9 @@ pub struct Worker {
     datas: Vec<Vec<u8>>,
     vtables: Vec<Vec<u32>>,
     traps: Vec<(u32, u32)>,
+    /// 次にコンパイルする関数のアイテムの開始行 - 1 (span の行はアイテムの中の行なので足す)
+    pub line_base: u32,
+    loc_used: bool,
 }
 
 /// panic の trap の最初のコード (1〜4 はほかの trap)。関数ごとに 245 か所まで場所を覚える
@@ -195,6 +201,8 @@ impl Worker {
             datas: vec![],
             vtables: vec![],
             traps: vec![],
+            line_base: 0,
+            loc_used: false,
         }
     }
 
@@ -308,6 +316,8 @@ impl Worker {
                     && (prog.item_of.get(body_id as usize).copied().flatten().is_some_and(|i| i < prog.prelude_from)
                         || f.attrs.iter().any(|a| a.path().is_ident("rustc_inherit_overflow_checks"))),
                 traps: vec![],
+                line_base: self.line_base,
+                loc_used: false,
                 index_panic_block: None,
                 caller_loc: matches!(
                     prog.names.get(body_id as usize).map(|n| n.as_str()),
@@ -359,6 +369,7 @@ impl Worker {
             self.datas = std::mem::take(&mut cx.datas);
             self.vtables = std::mem::take(&mut cx.vtables);
             self.traps = std::mem::take(&mut cx.traps);
+            self.loc_used = cx.loc_used;
             r?;
             cx.b.seal_all_blocks();
             cx.b.finalize(isa.frontend_config());
@@ -414,6 +425,7 @@ impl Worker {
             datas: std::mem::take(&mut self.datas),
             vtables: std::mem::take(&mut self.vtables),
             traps,
+            line_base: self.loc_used.then_some(self.line_base),
         })
     }
 }
@@ -444,6 +456,17 @@ fn addr_taken(f: &syn::ItemFn) -> (HashSet<String>, Vec<(usize, usize)>) {
         }
         // (マクロの引数の中のクロージャも、要約と同じ順に数える)
         fn visit_macro(&mut self, m: &'ast syn::Macro) {
+            // (`assert_eq!(a, b)` は `let l = &(a);` に展開して値を出すので、a と b の変数は借用される)
+            if ["assert_eq", "assert_ne", "debug_assert_eq", "debug_assert_ne"].iter().any(|n| m.path.is_ident(n)) {
+                use syn::punctuated::Punctuated;
+                if let Ok(es) = m.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated) {
+                    for e in es.iter().take(2) {
+                        if let Some(n) = root(e) {
+                            self.0.insert(n);
+                        }
+                    }
+                }
+            }
             for e in crate::closure::macro_exprs(m) {
                 self.visit_expr(&e);
             }
@@ -527,6 +550,9 @@ struct Cx<'a, 'p> {
     overflow_checks: bool,
     /// panic の trap の情報 (trap コード 5 + k が k 番目): (種類・行・列, メッセージの datas の index)
     traps: Vec<(u32, u32)>,
+    /// アイテムの開始行 - 1 と、場所を書き込んだか
+    line_base: u32,
+    loc_used: bool,
     /// 添字の範囲外で panic する (関数で共有する) ブロック
     index_panic_block: Option<Block>,
     /// `Option::unwrap` などの本体 (#[track_caller] 相当: panic の場所は呼んだ側)
@@ -995,13 +1021,34 @@ impl Cx<'_, '_> {
                                 .filter(|t| !matches!(t, Ty::Slice(_) | Ty::Str | Ty::Dyn(_))),
                         ),
                     };
+                    // (assert_eq! の展開: 右の値の型は左と同じ (`assert_eq!(o, None)`))
+                    // (文字列のリテラルは除く: `String` と `"x"` は型が違ったまま比べる)
+                    let hintable = |e: &Expr| {
+                        let e = match e {
+                            Expr::Reference(r) => match &*r.expr {
+                                Expr::Paren(p) => &*p.expr,
+                                e => e,
+                            },
+                            e => e,
+                        };
+                        !matches!(e, Expr::Lit(syn::ExprLit { lit: Lit::Str(_), .. }) | Expr::Array(_))
+                    };
+                    let other = match name.as_str() {
+                        "__exr_r" => Some("__exr_l"),
+                        "__exr_l" => Some("__exr_r"),
+                        _ => None,
+                    };
+                    let hint = match (&l.init, other) {
+                        (Some(i), Some(o)) if ann.is_none() && hintable(&i.expr) => self.lookup(o).map(|x| x.1),
+                        _ => None,
+                    };
                     let Some(init) = &l.init else {
                         return err(l.span(), "`let` without initializer is not supported");
                     };
                     if init.diverge.is_some() {
                         return err(l.span(), "`let ... else` is not supported");
                     }
-                    let (v, t) = self.expr(&init.expr, ann)?;
+                    let (v, t) = self.expr(&init.expr, ann.or(hint))?;
                     if t == Ty::Never {
                         diverged = true;
                         continue;
@@ -2030,7 +2077,16 @@ impl Cx<'_, '_> {
             }
         }
         let fn_item = matches!(&*r.expr, Expr::Path(p) if self.fn_item(p).is_some());
-        if is_place_expr(&r.expr) && !fn_item {
+        // (`&None` などのバリアント・定数の名前は場所でなく一時値)
+        let not_var = |e: &Expr| matches!(e, Expr::Path(p) if p.path.get_ident().is_some_and(|i| {
+            let n = i.to_string();
+            self.lookup(&n).is_none() && !self.prog.const_index.contains_key(&n)
+        }));
+        let inner = match &*r.expr {
+            Expr::Paren(p) => &*p.expr,
+            e => e,
+        };
+        if is_place_expr(&r.expr) && !fn_item && !not_var(inner) {
             return match self.place(&r.expr)? {
                 Place::Mem(a, o, t) => Ok((Some(self.addr_plus(a, o)), Ty::Ref(m, intern(t)))),
                 Place::Zst(t) => {
@@ -2796,8 +2852,8 @@ impl Cx<'_, '_> {
             && self.prog.panic_handler.is_none()
         {
             if let Some(&ci) = self.prog.const_index.get("__EXR_CALLER") {
-                let st = mc.method.span().start();
-                let v = self.b.ins().iconst(types::I64, ((st.line as i64) << 16) | (st.column as i64 + 1));
+                let (l, c) = self.loc(mc.method.span());
+                let v = self.b.ins().iconst(types::I64, ((l as i64) << 16) | c as i64);
                 let a = self.symbol_addr(NS_STATIC, ci);
                 self.b.ins().store(mf(), v, a, 0);
             }
@@ -6217,16 +6273,23 @@ impl Cx<'_, '_> {
 
     /// panic の trap のコードを 1 つ取り、場所 (種類・行・列) とメッセージを覚える (表は .o に置き、
     /// main が登録したハンドラが発生したアドレスで引く)。数が多すぎれば場所なしのコード 4
+    /// span の (ファイルの中の行, 1 始まりの列)
+    fn loc(&mut self, span: proc_macro2::Span) -> (u32, u32) {
+        self.loc_used = true;
+        let st = span.start();
+        (st.line as u32 + self.line_base, st.column as u32 + 1)
+    }
+
     fn trap_site(&mut self, kind: u8, span: proc_macro2::Span, msg: Option<String>) -> TrapCode {
         let k = self.traps.len();
         if k >= TRAP_SITE_MAX {
             return TrapCode::unwrap_user(4);
         }
-        let st = span.start();
         let info = if self.caller_loc {
             (kind as u32) << 27
         } else {
-            ((kind as u32) << 27) | ((st.line.min(0xFFFF) as u32) << 11) | ((st.column + 1).min(0x7FF) as u32)
+            let (l, c) = self.loc(span);
+            ((kind as u32) << 27) | (l.min(0xFFFF) << 11) | c.min(0x7FF)
         };
         let m = match msg {
             Some(m) => {
@@ -6379,12 +6442,12 @@ impl Cx<'_, '_> {
                 let Some(e) = args.first() else {
                     return err(mac.span(), "`dbg!()` without arguments is not supported");
                 };
-                let st = e.span().start();
+                let (sl, sc) = self.loc(e.span());
                 let text = {
                     use quote::ToTokens;
                     e.to_token_stream().to_string()
                 };
-                let head = format!("[main.rs:{}:{}] {} = ", st.line, st.column + 1, text);
+                let head = format!("[src/main.rs:{sl}:{sc}] {} = ", text);
                 let ex: Expr = syn::parse_quote!({
                     let __exr_dbg = #e;
                     eprintln!("{}{:#?}", #head, __exr_dbg);
@@ -6427,8 +6490,7 @@ impl Cx<'_, '_> {
                             if let Some(s) = s {
                                 let pre = if head.is_empty() { String::new() } else { format!("{head}: ") };
                                 let pv = self.str_const(&pre);
-                                let span = mac.span().start();
-                                let (sl, sc) = if self.caller_loc { (0, 0) } else { (span.line as i64, span.column as i64 + 1) };
+                                let (sl, sc) = if self.caller_loc { (0, 0) } else { let (l, c) = self.loc(mac.span()); (l as i64, c as i64) };
                                 let l = self.b.ins().iconst(types::I32, sl);
                                 let c = self.b.ins().iconst(types::I32, sc);
                                 let sref = Ty::Ref(false, intern(Ty::Str));
@@ -6477,6 +6539,46 @@ impl Cx<'_, '_> {
                 }
                 // `a == b` / `a != b` として比べる (構造的な比較・手書きの eq・String と &str も)
                 let (a, b) = (&args[0], &args[1]);
+                // 書式化が使えれば、rustc と同じく left / right の値 ({:?}) も出す (a と b は 1 回だけ評価する)
+                if self.prog.panic_handler.is_none() && self.prog.index.contains_key("__exr_panic_fmt") {
+                    let op = if name.ends_with("_eq") { "==" } else { "!=" };
+                    let (l, c) = if self.caller_loc { (0u32, 0u32) } else { self.loc(mac.span()) };
+                    let cmp: Expr = if name.ends_with("_eq") {
+                        syn::parse_quote!(*__exr_l == *__exr_r)
+                    } else {
+                        syn::parse_quote!(*__exr_l != *__exr_r)
+                    };
+                    let fail: Expr = if args.len() > 2 {
+                        let fmt = format!("assertion `left {op} right` failed: {{}}\n  left: {{:?}}\n right: {{:?}}");
+                        let rest = &args[2..];
+                        syn::parse_quote!({
+                            let __exr_m = format!(#(#rest),*);
+                            __exr_panic_fmt::<()>("", &format!(#fmt, __exr_m, __exr_l, __exr_r), #l, #c);
+                        })
+                    } else {
+                        let fmt = format!("assertion `left {op} right` failed\n  left: {{:?}}\n right: {{:?}}");
+                        syn::parse_quote!({
+                            __exr_panic_fmt::<()>("", &format!(#fmt, __exr_l, __exr_r), #l, #c);
+                        })
+                    };
+                    // (左が数のリテラルで右がそうでなければ、右を先に評価して左の型を右から決める (`assert_eq!(2, n)`))
+                    let num_lit = |e: &Expr| matches!(e, Expr::Lit(syn::ExprLit { lit: Lit::Int(_) | Lit::Float(_), .. }));
+                    let e: Expr = if num_lit(a) && !num_lit(b) {
+                        syn::parse_quote!({
+                            let __exr_r = &(#b);
+                            let __exr_l = &(#a);
+                            if !(#cmp) #fail
+                        })
+                    } else {
+                        syn::parse_quote!({
+                            let __exr_l = &(#a);
+                            let __exr_r = &(#b);
+                            if !(#cmp) #fail
+                        })
+                    };
+                    self.expr(&e, Some(Ty::Unit))?;
+                    return Ok((None, Ty::Unit));
+                }
                 let e: Expr = if name.ends_with("_eq") {
                     syn::parse_quote!((#a) == (#b))
                 } else {
@@ -6569,9 +6671,9 @@ impl Cx<'_, '_> {
                 pb
             }
         };
-        let st = span.start();
-        let ln = self.b.ins().iconst(types::I32, st.line as i64);
-        let cl = self.b.ins().iconst(types::I32, st.column as i64 + 1);
+        let (sl, sc) = self.loc(span);
+        let ln = self.b.ins().iconst(types::I32, sl as i64);
+        let cl = self.b.ins().iconst(types::I32, sc as i64);
         let cont = self.b.create_block();
         self.b.ins().brif(ok, cont, &[], pb, &[len.into(), i.into(), ln.into(), cl.into()]);
         self.b.switch_to_block(cont);

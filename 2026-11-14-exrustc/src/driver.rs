@@ -568,9 +568,15 @@ impl Session {
             for &id in &wave {
                 let k = Self::key_of(&a, &insts, id, base);
                 keys.insert(id, k);
+                // (場所を書き込んだ関数は、アイテムの開始行が変わっていたら使わない)
+                let lb = {
+                    let body = insts.lock().unwrap().body_of(id);
+                    a.prog.item_of[body as usize].map(|i| a.items[i as usize].line as u32 - 1)
+                };
                 match self
                     .get(k)
                     .and_then(|d| cache::decode_blob(d, &a.prog, &insts))
+                    .filter(|b| b.line_base.is_none() || b.line_base == lb)
                 {
                     Some(b) => {
                         n_hit += 1;
@@ -838,6 +844,7 @@ fn compile_one(
         unreachable!()
     };
     let f = front::fn_ast(prog, f, body);
+    w.line_base = it.line as u32 - 1;
     w.compile(prog, insts, id, &f, isa)
         .map_err(|e| front::relocate_err(e, it))
     // f (AST) はここで捨てる: 同時に生きている AST は常に 1 関数分だけ
