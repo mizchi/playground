@@ -2595,11 +2595,15 @@ impl Program {
         // `Box::new` が呼ぶアロケータと drop が呼ぶ free (prelude にあるのは Box / Drop が使われたときだけ)
         stack.extend(self.index.get(crate::prelude::BOX_ALLOC).copied());
         stack.extend(self.index.get(crate::prelude::BOX_FREE).copied());
-        // `impl Drop` の drop は drop glue から (名前を書かずに) 呼ばれる
-        stack.extend(
-            (0..self.names.len() as u32)
-                .filter(|&i| self.sigs[i as usize].impl_trait.as_deref() == Some("Drop")),
-        );
+        // `vec![..]` / `"..".to_string()` は名前を書かずに Vec の realloc / String::from を使う
+        stack.extend(self.index.get("__exr_realloc").copied());
+        stack.extend(self.index.get("String::from").copied());
+        // `impl Drop` の drop は drop glue から、メソッド `eq` は `==` から (名前を書かずに) 呼ばれる
+        stack.extend((0..self.names.len() as u32).filter(|&i| {
+            let s = &self.sigs[i as usize];
+            s.impl_trait.as_deref() == Some("Drop")
+                || (s.has_self && self.names[i as usize].ends_with("::eq"))
+        }));
         while let Some(i) = stack.pop() {
             if std::mem::replace(&mut seen[i as usize], true) {
                 continue;

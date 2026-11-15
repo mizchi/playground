@@ -347,6 +347,23 @@ impl Inf<'_> {
                     self.unify(p, k);
                 }
             }
+            // `&Vec<T>` を `&[T]` に渡す (強制変換): 要素の型だけ単一化する
+            (Some(Shape::Slc(x)), Some(Shape::Adt(vb, st, 1)))
+            | (Some(Shape::Adt(vb, st, 1)), Some(Shape::Slc(x)))
+                if self.is_vec(vb) =>
+            {
+                let y = self.adt_args[st as usize];
+                self.unify(x, y)
+            }
+            (Some(Shape::Slc(x)), Some(Shape::Known(Ty::Struct(sid))))
+            | (Some(Shape::Known(Ty::Struct(sid))), Some(Shape::Slc(x)))
+                if self.is_vec(self.prog.base_of(sid)) =>
+            {
+                if let Some(&a) = self.prog.structs[sid as usize].args.first() {
+                    let k = self.known(a);
+                    self.unify(x, k);
+                }
+            }
             // `&[T; N]` を `&[T]` に渡す (強制変換): 要素の型だけ単一化する
             (Some(Shape::Slc(x)), Some(Shape::Arr(y, _)))
             | (Some(Shape::Arr(y, _)), Some(Shape::Slc(x))) => self.unify(x, y),
@@ -529,6 +546,12 @@ impl Inf<'_> {
     fn expr_peek_elem(&mut self, e: &Expr) -> Option<u32> {
         // 受け手は後でもう一度 expr() されるが、同じ式なので型変数は単一化されて一致する
         let v = self.expr(e);
+        // (Vec は prelude のメソッドを持つので、配列・スライスの組み込みメソッドには回さない)
+        let d = self.deref_expr(v);
+        let r = self.find(d);
+        if !matches!(self.shape[r as usize], Some(Shape::Arr(..)) | Some(Shape::Slc(_))) {
+            return None;
+        }
         self.elem_of(v)
     }
 
@@ -538,8 +561,20 @@ impl Inf<'_> {
         let r = self.find(v);
         match self.shape[r as usize] {
             Some(Shape::Arr(e, _)) | Some(Shape::Slc(e)) => Some(e),
+            // Vec<T> も添字・for で T を取り出せる
+            Some(Shape::Known(Ty::Struct(sid))) if self.is_vec(self.prog.base_of(sid)) => {
+                let a = *self.prog.structs[sid as usize].args.first()?;
+                Some(self.known(a))
+            }
+            Some(Shape::Adt(b, st, l)) if self.is_vec(b) && l == 1 => {
+                Some(self.adt_args[st as usize])
+            }
             _ => None,
         }
+    }
+
+    fn is_vec(&self, base: u32) -> bool {
+        self.prog.struct_index.get("Vec") == Some(&base)
     }
 
     /// Option<t> の型変数
@@ -926,6 +961,33 @@ impl Inf<'_> {
     fn expr_inner(&mut self, e: &Expr) -> u32 {
         use BinOp::*;
         match e {
+            // `vec![a, b]` / `vec![x; n]`: Vec<要素の型>
+            Expr::Macro(m)
+                if m.mac.path.is_ident("vec") && self.prog.struct_index.contains_key("Vec") =>
+            {
+                use syn::parse::Parser;
+                let el = self.var();
+                let rep = (|input: syn::parse::ParseStream| {
+                    let x: Expr = input.parse()?;
+                    let _: syn::Token![;] = input.parse()?;
+                    let n: Expr = input.parse()?;
+                    Ok((x, n))
+                })
+                .parse2(m.mac.tokens.clone());
+                let xs: Vec<Expr> = match rep {
+                    Ok((x, _)) => vec![x],
+                    Err(_) => syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated
+                        .parse2(m.mac.tokens.clone())
+                        .map(|v| v.into_iter().collect())
+                        .unwrap_or_default(),
+                };
+                for x in &xs {
+                    let v = self.expr(x);
+                    self.unify(el, v);
+                }
+                let vb = self.prog.struct_index["Vec"];
+                self.adt(vb, vec![el])
+            }
             Expr::Lit(l) => self.lit_var(&l.lit),
             Expr::Paren(p) => self.expr(&p.expr),
             Expr::Group(g) => self.expr(&g.expr),

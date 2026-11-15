@@ -1198,6 +1198,23 @@ impl Cx<'_, '_> {
                 return Ok((Some(fat), want));
             }
         }
+        // `&Vec<T>` → `&[T]`、`&String` → `&str`
+        if let (Some(want @ Ty::Ref(m2, Ty::Slice(_) | Ty::Str)), Some(v), Ty::Ref(m1, Ty::Struct(sid))) =
+            (expected, v, t)
+        {
+            if m1 || !m2 {
+                if let Some((fat, ft)) = self.deref_to_slice(v, *sid, m2) {
+                    let ok = match (want, ft) {
+                        (Ty::Ref(_, Ty::Str), Ty::Ref(_, Ty::Str)) => true,
+                        (Ty::Ref(_, Ty::Slice(we)), Ty::Ref(_, Ty::Slice(fe))) => fe == we,
+                        _ => false,
+                    };
+                    if ok {
+                        return Ok((Some(fat), want));
+                    }
+                }
+            }
+        }
         // `&mut T` → `&T` (`Box<T>` も `&mut T` なのでここで `&T` になる)
         if let (Some(want @ Ty::Ref(false, wi)), Ty::Ref(true, gi)) = (expected, t) {
             if wi == gi {
@@ -2474,8 +2491,19 @@ impl Cx<'_, '_> {
             if t == Ty::Never {
                 return Ok((None, Ty::Never));
             }
-            // ジェネリックな `&[T]` に `&[U; N]` を渡したら、型を解く前にスライスにする
+            // ジェネリックな `&[T]` に `&[U; N]` / `&Vec<U>` を渡したら、型を解く前にスライスにする
             let mut v = v;
+            if let (Ty::Ref(pm, Ty::Slice(_) | Ty::Str), Ty::Ref(am, Ty::Struct(sid)), Some(val)) = (pt, t, v) {
+                if am || !pm {
+                    if let Some((fat, ft)) = self.deref_to_slice(val, *sid, pm) {
+                        let want_str = matches!(pt, Ty::Ref(_, Ty::Str));
+                        if want_str == matches!(ft, Ty::Ref(_, Ty::Str)) {
+                            v = Some(fat);
+                            t = ft;
+                        }
+                    }
+                }
+            }
             if let (Ty::Ref(pm, Ty::Slice(_)), Ty::Ref(am, Ty::Array(e, n)), Some(val)) = (pt, t, v)
             {
                 if am || !pm {
@@ -2700,7 +2728,9 @@ impl Cx<'_, '_> {
                 .or_else(|| self.peek(&b.right))
                 .or(expected)
         };
-        let (l, lt) = self.expr(&b.left, hint)?;
+        // 比較は参照で比べるのでムーブしない (一時値は文の終わりまで所有する)
+        let cmp = is_cmp(&b.op);
+        let (l, lt) = self.operand(&b.left, hint, cmp)?;
         let Some(l) = l else {
             return Ok((None, Ty::Never));
         };
@@ -2709,11 +2739,25 @@ impl Cx<'_, '_> {
         } else {
             Some(lt)
         };
-        let (r, rt) = self.expr(&b.right, rhint.or(Some(lt)))?;
+        let (r, rt) = self.operand(&b.right, rhint.or(Some(lt)), cmp)?;
         let Some(r) = r else {
             return Ok((None, Ty::Never));
         };
 
+        // `String == &str` / `&str == String`: String を &str にして比べる
+        let (mut l, mut lt, mut r, mut rt) = (l, lt, r, rt);
+        let str_ref = Ty::Ref(false, intern(Ty::Str));
+        if matches!(b.op, Eq(_) | Ne(_)) && lt != rt {
+            if let (Ty::Struct(sid), true) = (lt, rt == str_ref) {
+                if let Some((f, ft)) = self.deref_to_slice(l, sid, false) {
+                    (l, lt) = (f, ft);
+                }
+            } else if let (true, Ty::Struct(sid)) = (lt == str_ref, rt) {
+                if let Some((f, ft)) = self.deref_to_slice(r, sid, false) {
+                    (r, rt) = (f, ft);
+                }
+            }
+        }
         if is_cmp(&b.op) {
             self.same(b.right.span(), rt, lt)?;
             // 集約型の == / != : 手書きの eq があればそれ、なければ構造的に比べる (derive(PartialEq) 相当)
@@ -2756,12 +2800,21 @@ impl Cx<'_, '_> {
     fn agg_eq(&mut self, a: Value, b: Value, t: Ty, span: proc_macro2::Span) -> R<Value> {
         if let Ty::Struct(sid) = t {
             if let Some(id) = self.prog.method(sid, "eq") {
-                let sig = self.prog.sigs[id as usize].clone();
-                if !sig.is_generic() {
-                    let f = self.fref(id, &sig);
-                    let call = self.b.ins().call(f, &[a, b]);
-                    return Ok(self.b.inst_results(call)[0]);
-                }
+                let sig0 = self.prog.sigs[id as usize].clone();
+                let (fid, sig) = if sig0.is_generic() {
+                    // ジェネリックな impl の eq (`impl<T: PartialEq> Vec<T>`): インスタンスにする
+                    let mut sol = vec![None; sig0.generics.len()];
+                    if let Some(st) = sig0.self_ty {
+                        self.prog.match_ty(st, t, &mut sol);
+                    }
+                    let r = Ty::Ref(false, intern(t));
+                    self.resolve_call(id, &[r, r], sol, None, span)?
+                } else {
+                    (id, sig0)
+                };
+                let f = self.fref(fid, &sig);
+                let call = self.b.ins().call(f, &[a, b]);
+                return Ok(self.b.inst_results(call)[0]);
             }
         }
         self.eq_at(a, b, t, span)
@@ -2773,6 +2826,51 @@ impl Cx<'_, '_> {
             Ty::Unit => Ok(one(self)),
             t if t.is_int() || matches!(t, Ty::Bool | Ty::Char | Ty::Ptr(..)) => {
                 Ok(self.b.ins().icmp(IntCC::Equal, a, b))
+            }
+            // `&str` / `&[T]`: 長さと中身で比べる
+            Ty::Ref(_, Ty::Str | Ty::Slice(_)) => {
+                let e = match t {
+                    Ty::Ref(_, Ty::Slice(e)) => **e,
+                    _ => Ty::U8,
+                };
+                let (es, _) = self.prog.size_align(e);
+                let pa = self.b.ins().load(PTR, mf(), a, 0);
+                let la = self.b.ins().load(types::I64, mf(), a, 8);
+                let pb = self.b.ins().load(PTR, mf(), b, 0);
+                let lb = self.b.ins().load(types::I64, mf(), b, 8);
+                let done = self.b.create_block();
+                let res = self.b.append_block_param(done, types::I8);
+                let head = self.b.create_block();
+                let body = self.b.create_block();
+                let i = self.b.declare_var(types::I64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                self.b.def_var(i, z);
+                let zero8 = self.b.ins().iconst(types::I8, 0);
+                let same_len = self.b.ins().icmp(IntCC::Equal, la, lb);
+                self.b.ins().brif(same_len, head, &[], done, &[zero8.into()]);
+                self.b.switch_to_block(head);
+                let iv = self.b.use_var(i);
+                let more = self.b.ins().icmp(IntCC::UnsignedLessThan, iv, la);
+                let one8 = self.b.ins().iconst(types::I8, 1);
+                self.b.ins().brif(more, body, &[], done, &[one8.into()]);
+                self.b.switch_to_block(body);
+                let off = self.b.ins().imul_imm_s(iv, es as i64);
+                let xa = self.b.ins().iadd(pa, off);
+                let xb = self.b.ins().iadd(pb, off);
+                let (x, y) = match clif_ty(e) {
+                    Some(ct) if !e.is_agg() => (
+                        self.b.ins().load(ct, mf(), xa, 0),
+                        self.b.ins().load(ct, mf(), xb, 0),
+                    ),
+                    _ => (xa, xb),
+                };
+                let eq = self.eq_at(x, y, e, span)?;
+                let next = self.b.ins().iadd_imm_s(iv, 1);
+                self.b.def_var(i, next);
+                let zero8 = self.b.ins().iconst(types::I8, 0);
+                self.b.ins().brif(eq, head, &[], done, &[zero8.into()]);
+                self.b.switch_to_block(done);
+                Ok(res)
             }
             // 参照は指す先の値で比べる
             Ty::Ref(_, inner) if !t.is_fat() => {
@@ -3137,6 +3235,13 @@ impl Cx<'_, '_> {
                     let len = self.b.ins().load(types::I64, mf(), a, o + 8);
                     return Ok((base, len, **t));
                 }
+                // Vec<T>: (ptr, len) フィールド
+                Place::Mem(a, o, Ty::Struct(sid)) if self.vec_fields(sid).is_some() => {
+                    let (po, lo, t) = self.vec_fields(sid).unwrap();
+                    let base = self.b.ins().load(PTR, mf(), a, o + po as i32);
+                    let len = self.b.ins().load(types::I64, mf(), a, o + lo as i32);
+                    return Ok((base, len, t));
+                }
                 Place::Mem(a, o, Ty::Ref(_, i) | Ty::Box(i)) => {
                     let ptr = self.b.ins().load(PTR, mf(), a, o);
                     Place::Mem(ptr, 0, *i)
@@ -3484,11 +3589,17 @@ impl Cx<'_, '_> {
                 Some(self.b.ins().load(PTR, mf(), fat, 0)),
                 Ty::Ptr(false, intern(Ty::U8)),
             ),
+            // `"..".to_string()` / `to_owned()` は prelude の String::from
+            "to_string" | "to_owned" => {
+                return self
+                    .call_named("String::from", vec![], &[(fat, Ty::Ref(false, intern(Ty::Str)))], mc.span())
+                    .map(Some);
+            }
             m => {
                 return err(
                     mc.method.span(),
                     format!(
-                        "no method `{m}` on `&str` (supported: len, is_empty, as_bytes, as_ptr)"
+                        "no method `{m}` on `&str` (supported: len, is_empty, as_bytes, as_ptr, to_string)"
                     ),
                 );
             }
@@ -3925,9 +4036,21 @@ impl Cx<'_, '_> {
                 _ => {}
             }
         }
-        // 値で回す (`for x in arr`): 要素は x にムーブするので、配列は drop しない
-        if mode.is_none() && self.needs_drop(elem) {
-            self.mark_moved(base_e);
+        // 値で回す (`for x in arr`): 要素は x にムーブするので、配列は drop しない。
+        // Vec なら長さを 0 にしておき、バッファの解放だけを Vec の drop に任せる
+        if mode.is_none() {
+            let vec = match self.peek(base_e) {
+                Some(Ty::Struct(sid)) => self.vec_fields(sid),
+                _ => None,
+            };
+            if let (Some((_, lo, _)), true) = (vec, is_place_expr(base_e)) {
+                if let Place::Mem(a, o, _) = self.place(base_e)? {
+                    let z = self.b.ins().iconst(types::I64, 0);
+                    self.b.ins().store(mf(), z, a, o + lo as i32);
+                }
+            } else if self.needs_drop(elem) {
+                self.mark_moved(base_e);
+            }
         }
         let i = self.b.declare_var(types::I64);
         let start = if rev {
@@ -4145,6 +4268,78 @@ impl Cx<'_, '_> {
         self.dead()
     }
 
+    /// `vec![a, b, c]` / `vec![x; n]`: Vec::with_capacity と push に展開する
+    fn vec_macro(&mut self, mac: &syn::Macro, expected: Option<Ty>) -> R<V> {
+        use syn::parse::Parser;
+        let span = mac.span();
+        let mut elem = match expected {
+            Some(Ty::Struct(sid)) => self.vec_fields(sid).map(|f| f.2),
+            _ => None,
+        };
+        let repeat = (|input: syn::parse::ParseStream| {
+            let x: Expr = input.parse()?;
+            let _: syn::Token![;] = input.parse()?;
+            let n: Expr = input.parse()?;
+            Ok((x, n))
+        })
+        .parse2(mac.tokens.clone());
+        if let Ok((x, n)) = repeat {
+            let (xv, xt) = self.expr(&x, elem)?;
+            let (nv, nt) = self.expr(&n, Some(Ty::Usize))?;
+            self.same(n.span(), nt, Ty::Usize)?;
+            if self.needs_drop(xt) {
+                return err(x.span(), "`vec![x; n]` needs a `Copy` element");
+            }
+            let nv = nv.unwrap();
+            let (v, vt) = self.call_named("Vec::with_capacity", vec![xt], &[(nv, Ty::Usize)], span)?;
+            let v = v.unwrap();
+            // for i in 0..n { v.push(x) }
+            let i = self.b.declare_var(types::I64);
+            let z = self.b.ins().iconst(types::I64, 0);
+            self.b.def_var(i, z);
+            let head = self.b.create_block();
+            let body = self.b.create_block();
+            let done = self.b.create_block();
+            self.b.ins().jump(head, &[]);
+            self.b.switch_to_block(head);
+            let iv = self.b.use_var(i);
+            let more = self.b.ins().icmp(IntCC::UnsignedLessThan, iv, nv);
+            self.b.ins().brif(more, body, &[], done, &[]);
+            self.b.switch_to_block(body);
+            if let Some(xv) = xv {
+                self.call_named("Vec::push", vec![xt], &[(v, Ty::Ref(true, intern(vt))), (xv, xt)], span)?;
+            }
+            let next = self.b.ins().iadd_imm_s(iv, 1);
+            self.b.def_var(i, next);
+            self.b.ins().jump(head, &[]);
+            self.b.switch_to_block(done);
+            return Ok((Some(v), vt));
+        }
+        let args = self.macro_args(mac)?;
+        let mut vals = vec![];
+        for a in &args {
+            let (v, t) = self.expr(a, elem)?;
+            if t == Ty::Never {
+                return Ok((None, Ty::Never));
+            }
+            match elem {
+                Some(e) => self.same(a.span(), t, e)?,
+                None => elem = Some(t),
+            }
+            vals.push(v);
+        }
+        let Some(e) = elem else {
+            return err(span, "type annotations needed for an empty `vec![]`");
+        };
+        let n = self.b.ins().iconst(types::I64, vals.len() as i64);
+        let (v, vt) = self.call_named("Vec::with_capacity", vec![e], &[(n, Ty::Usize)], span)?;
+        let v = v.unwrap();
+        for x in vals.into_iter().flatten() {
+            self.call_named("Vec::push", vec![e], &[(v, Ty::Ref(true, intern(vt))), (x, e)], span)?;
+        }
+        Ok((Some(v), vt))
+    }
+
     fn macro_args(&self, mac: &syn::Macro) -> R<Vec<Expr>> {
         use syn::parse::Parser;
         let p = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated;
@@ -4163,6 +4358,7 @@ impl Cx<'_, '_> {
             .map(|s| s.ident.to_string())
             .unwrap_or_default();
         match name.as_str() {
+            "vec" => self.vec_macro(mac, expected),
             "panic" | "unreachable" | "todo" | "unimplemented" => Ok(self.panic_call()),
             "assert" | "debug_assert" => {
                 let args = self.macro_args(mac)?;
@@ -4386,6 +4582,29 @@ impl Cx<'_, '_> {
             let ptr = self.b.inst_results(call)[0];
             self.write(Place::Mem(ptr, 0, t), v);
             return Ok(Some((Some(ptr), Ty::Box(intern(t)))));
+        }
+        // `core::slice::from_raw_parts(p, n)` / `_mut` と `core::str::from_utf8_unchecked(b)`
+        if matches!(name.as_str(), "from_raw_parts" | "from_raw_parts_mut" | "from_utf8_unchecked")
+            && !(p.path.segments.len() == 1 && self.prog.index.contains_key(&name))
+        {
+            if name == "from_utf8_unchecked" {
+                let u8s = Ty::Ref(false, intern(Ty::Slice(intern(Ty::U8))));
+                let (v, t) = self.expr(&c.args[0], Some(u8s))?;
+                self.same(c.args[0].span(), t, u8s)?;
+                return Ok(Some((v, Ty::Ref(false, intern(Ty::Str)))));
+            }
+            if c.args.len() != 2 {
+                return err(c.span(), format!("`{name}` takes 2 arguments"));
+            }
+            let (pv, pt) = self.expr(&c.args[0], None)?;
+            let Ty::Ptr(_, e) = pt else {
+                return err(c.args[0].span(), "expected a raw pointer");
+            };
+            let (n, nt) = self.expr(&c.args[1], Some(Ty::Usize))?;
+            self.same(c.args[1].span(), nt, Ty::Usize)?;
+            let fat = self.make_fat_v(pv.unwrap(), n.unwrap());
+            let m = name == "from_raw_parts_mut";
+            return Ok(Some((Some(fat), Ty::Ref(m, intern(Ty::Slice(e))))));
         }
         if !matches!(name.as_str(), "size_of" | "align_of" | "null" | "null_mut") {
             return Ok(None);
@@ -5306,6 +5525,107 @@ impl Cx<'_, '_> {
         for i in 0..size {
             self.b.ins().store(mf(), z, dst, i as i32);
         }
+    }
+
+    /// prelude の Vec<T> のインスタンスなら (ptr のオフセット, len のオフセット, T)
+    fn vec_fields(&self, sid: u32) -> Option<(u32, u32, Ty)> {
+        let sd = &self.prog.structs[sid as usize];
+        let b = sd.base?;
+        if self.prog.structs[b as usize].name != "Vec" {
+            return None;
+        }
+        let po = sd.fields.iter().find(|f| f.0 == "ptr")?.2;
+        let lo = sd.fields.iter().find(|f| f.0 == "len")?.2;
+        Some((po, lo, *sd.args.first()?))
+    }
+
+    /// `&Vec<T>` (アドレス a) → `&[T]`、`&String` → `&str` の fat pointer
+    fn deref_to_slice(&mut self, a: Value, sid: u32, m: bool) -> Option<(Value, Ty)> {
+        if let Some((po, lo, e)) = self.vec_fields(sid) {
+            let p = self.b.ins().load(PTR, mf(), a, po as i32);
+            let n = self.b.ins().load(types::I64, mf(), a, lo as i32);
+            return Some((self.make_fat_v(p, n), Ty::Ref(m, intern(Ty::Slice(intern(e))))));
+        }
+        let sd = &self.prog.structs[sid as usize];
+        if sd.base.is_none() && sd.name == "String" {
+            let (_, vt, vo) = sd.fields.iter().find(|f| f.0 == "vec")?.clone();
+            let Ty::Struct(vs) = vt else { return None };
+            let va = self.addr_plus_v(a, vo);
+            let (fat, _) = self.deref_to_slice(va, vs, m)?;
+            return Some((fat, Ty::Ref(m, intern(Ty::Str))));
+        }
+        None
+    }
+
+    fn addr_plus_v(&mut self, a: Value, off: u32) -> Value {
+        self.addr_plus(a, off as i32)
+    }
+
+    /// prelude の関数 (ジェネリックなら型引数 targs のインスタンス) を、評価済みの引数で呼ぶ
+    fn call_named(
+        &mut self,
+        name: &str,
+        targs: Vec<Ty>,
+        args: &[(Value, Ty)],
+        span: proc_macro2::Span,
+    ) -> R<V> {
+        let Some(&id) = self.prog.index.get(name) else {
+            return err(span, format!("internal: `{name}` is missing from the prelude"));
+        };
+        let iid = if targs.is_empty() {
+            id
+        } else {
+            let mut g = self.insts.lock().unwrap();
+            let i = g.request(self.prog, id, targs).or_else(|e| err(span, e))?;
+            drop(g);
+            self.requested.push(i);
+            i
+        };
+        let sig = self.insts.lock().unwrap().sig(self.prog, iid).clone();
+        let mut cv = vec![];
+        let sret = if is_sret(&sig) {
+            let a = self.temp(sig.ret);
+            cv.push(a);
+            Some(a)
+        } else {
+            None
+        };
+        for (&(v, t), &pt) in args.iter().zip(&sig.params) {
+            self.same(span, t, pt)?;
+            self.push_arg(&mut cv, v, pt);
+        }
+        let f = self.fref(iid, &sig);
+        let call = self.b.ins().call(f, &cv);
+        if let Some(a) = sret {
+            return Ok((Some(a), sig.ret));
+        }
+        let r = self.b.inst_results(call).first().copied();
+        Ok((r, sig.ret))
+    }
+
+    /// 二項演算の被演算子。比較 (cmp) ならムーブせずに読み、一時値は所有する
+    fn operand(&mut self, e: &Expr, hint: Option<Ty>, cmp: bool) -> R<V> {
+        if !cmp {
+            return self.expr(e, hint);
+        }
+        if is_place_expr(e) {
+            let r = self.read_no_move(e)?;
+            if self.needs_drop(r.1) || !matches!(hint, Some(_)) {
+                return Ok(r);
+            }
+            // (整数リテラルの型合わせなど、期待型の変換が要る場合は通常の評価)
+            if hint == Some(r.1) {
+                return Ok(r);
+            }
+            return self.expr(e, hint);
+        }
+        let r = self.expr(e, hint)?;
+        if let (Some(v), t) = r {
+            if t != Ty::Never {
+                self.own_temp(v, t);
+            }
+        }
+        Ok(r)
     }
 
     /// 値を読むがムーブはしない (deref・呼び出しの対象など)

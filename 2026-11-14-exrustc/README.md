@@ -125,6 +125,11 @@ bench/regress.sh
       - `&Rect { .. }` を `&'static` で返すと、スタック上の一時値を指していた。rustc と同じく定数式は静的データに昇格するようにした。
       - タプル構造体のフィールド `n.0` の型を推論していなかった。
     - Box も Drop も使わないプログラムは、drop の処理を一切生成しない（`Program::has_drop`）。速度とサイズ予算は変わらない。
+  - Vec / String の追加時
+    - criterion ではほぼ全項目が +20〜40% になったが、変えていない lexer も同じだけ遅く、マシンの負荷による揺れだった。
+      同じ時間帯に HEAD と並べて測ると ±10% 程度の揺れの中。callgrind の命令数も HEAD 以下。
+    - 本物の増加は prelude の選択（+26%）だけだった。prelude の名前が増え、先頭 1 byte ごとの候補表が長くなったのが原因。(先頭 1 byte, 長さ) で引く表にして HEAD より少なくした。
+    - `==` は識別子として現れないので、prelude の `Vec::eq` / `String::eq` が付かず、ポインタを比べていた。eq は型と一緒に付け、到達可能性の根にも入れた。
 
 ## 対応している言語サブセット（no_std の範囲）
 
@@ -137,7 +142,7 @@ bench/regress.sh
 検証は、そうしたプログラムを rustc でもビルドし、実行結果（標準出力と終了コード）が一致することで行う。
 
 - rustc 側は libcore だけでビルドする（`-C panic=abort`）。
-- 比較は `tests/compare.sh` が行う。対象は `examples/*.rs` の 18 本で、そのうち no_std は 6 本（`nostd_calc` は字句解析と後置記法の電卓で、ジェネリック struct・`?`・const 配列・`&&str` の自動 deref を使う）。
+- 比較は `tests/compare.sh` が行う。対象は `examples/*.rs` の 19 本で、そのうち no_std は 6 本（`nostd_calc` は字句解析と後置記法の電卓で、ジェネリック struct・`?`・const 配列・`&&str` の自動 deref を使う）。
 
 ### 言語
 
@@ -178,6 +183,13 @@ bench/regress.sh
 - `Box<T>`（`examples/fn_ptr_box.rs`）：
   - `Box::new(x)` は libc の `malloc` でヒープに置き、drop で `free` する
   - `Box<dyn Trait>` / `Box<dyn Fn(A) -> B>`、自動 deref、`*b`、`&Box<T>` → `&T`、`Option<Box<Node>>` のような再帰的な型
+- `Vec<T>` / `String`（`examples/vec_string.rs`）：prelude に Rust で書いてある（`src/prelude.rs`）。libc の `realloc` / `free` を使い、Drop で要素を drop してから解放する
+  - `Vec`：`new` / `with_capacity` / `push` / `pop` / `len` / `is_empty` / `capacity` / `get(_mut)` / `first` / `last` / `insert` / `remove` / `swap_remove` / `swap` / `reverse` / `truncate` / `clear` / `append` / `as_slice` / `as_mut_slice` / `extend_from_slice` / `clone`（`T: Copy`）/ `contains` / `==`（`T: PartialEq`）/ `sort`（`T: Ord`、挿入ソート）
+  - `vec![a, b]` / `vec![x; n]`、添字 `v[i]`（範囲外は panic）、`&v[a..b]`、`for x in &v` / `v.iter_mut()` / `v`（値で回す）
+  - `&Vec<T>` → `&[T]`、`&String` → `&str` の暗黙の変換（ジェネリックな `&[T]` 引数にも）
+  - `String`：`new` / `from` / `with_capacity` / `push_str` / `push(char)`（UTF-8 に符号化）/ `len` / `is_empty` / `as_str` / `as_bytes` / `clear` / `truncate` / `clone` / `==`（`String` 同士と `&str`）、`"..".to_string()` / `to_owned()`
+  - `&str` / `&[T]` の `==` は中身で比べる
+  - Vec / String のメソッドは、型の名前がコードに現れたときだけ prelude から付ける（自分の struct に `push` があるだけでは付かない）
 - Drop（`examples/drop.rs`、`examples/drop_more.rs`。drop の順序を rustc と比べ、valgrind でリーク・二重解放がないことを確かめる）：
   - `impl Drop for S`（ジェネリックな impl も）、`drop(x)`
   - スコープの終わりで宣言と逆順に drop する。対象は return / `?` / break / continue で抜けるスコープ、値を捨てる式文、`let _ = e`、代入で上書きされる古い値
@@ -251,7 +263,9 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
 
 ### 未対応
 
-- `Vec` / `String`、`Box<[T]>`、`Box::into_raw` などの Box の関数（`new` 以外）
+- `Box<[T]>`、`Box::into_raw` などの Box の関数（`new` 以外）
+- イテレータ（`v.iter().map(..)`、`s.chars()`、`collect`）。`for` で直接回す形（`for x in &v` / `v.iter()` / `v.iter_mut()` / `v`）だけ使える
+- `format!` / `String + &str` / `Vec` のスライスメソッドの一部（prelude に書いたもの以外。`&v` を `&[T]` にすれば組み込みのスライスメソッドは使える）
 - 書式化（`write!` / `core::fmt`）
 - Drop の制限
   - panic では drop しない（unwind しない）
@@ -441,7 +455,7 @@ rustc 側はほとんどが std 由来。
 ## 次にやること
 
 - **言語**
-  - モジュール、`core::fmt` 相当の書式化、`Vec` / `String`（Drop と Box ができたので、prelude に書ける）
+  - モジュール、`core::fmt` 相当の書式化、イテレータ（`Iterator` trait と `map` / `filter` / `collect`）
   - 浮動小数点、オーバーフロー検査（debug ビルドの rustc と同じ panic）
   - 単相化をレイアウトでキーにして共有する（`Vec<A>` と `Vec<B>` を 1 つにする。blaze の polymorph）
   - 最小の自前 std（relax 方式）

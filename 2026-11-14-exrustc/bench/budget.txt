@@ -57,3 +57,6 @@ structs.object_bytes 6048
 traits.binary_bytes 7660
 traits.cache_bytes 7819
 traits.object_bytes 8677
+vec_string.binary_bytes 30660
+vec_string.cache_bytes 45029
+vec_string.object_bytes 53281
