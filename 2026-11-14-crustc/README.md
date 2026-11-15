@@ -682,6 +682,52 @@ rustc と比べると、1 関数編集は 20〜24 倍速く、cold の RSS は 1
 hello（`examples/hello.rs`）の出力サイズは、crustc で 6.0 KiB、rustc の debug（strip あり）で 333 KiB。
 rustc 側はほとんどが std 由来。
 
+### rustc との比較（2026-11-15 時点。オーバーフロー検査・panic のメッセージなどを足した後）
+
+wild は入っていない環境で、リンカは自動選択（ld.lld）。
+
+ビルド時間（`python3 bench/run.py 1000`、N = 1000 関数）：
+
+| tool | cold ms | no-op ms | 1 関数編集 ms | peak RSS (cold) | binary | cache / incr dir |
+|---|---:|---:|---:|---:|---:|---:|
+| crustc | 167 | 20 | **44** | **59 MiB** | 553 KiB | **642 KiB** |
+| rustc `-Cincremental -Cdebuginfo=0` | 962 | 230 | 433 | 163 MiB | 5013 KiB | 22151 KiB |
+| rustc `-O`（非 incremental） | 11604 | - | - | 147 MiB | 382 KiB | - |
+
+1 関数編集は rustc の incremental の約 10 倍速い。上の表（wild、検査を足す前）より crustc が遅いのは、リンカの違い（wild 5ms / ld.lld 17ms）と、検査と panic の表の分。
+
+生成したコードの速さ（`python3 bench/runtime.py`、`bench/rt/*.rs`。ビルドはキャッシュなし、ビルド・実行とも 3 回の中央値。どれも出力は rustc と一致）：
+
+| プログラム | crustc | crustc `-O` | rustc (debug) | rustc `-O` | ビルド ms（crustc / rustc debug / rustc -O） |
+|---|---:|---:|---:|---:|---|
+| fib（再帰 fib(35)） | 86 ms（3.1x） | 68 ms（2.5x） | 97 ms（3.5x） | 27 ms | 44 / 106 / 127 |
+| hashmap（100 万回の entry） | 212 ms（1.9x） | 144 ms（1.3x） | 723 ms（6.5x） | 112 ms | 55 / 162 / 289 |
+| matmul（200×200 を 5 回） | 225 ms（5.2x） | 94 ms（2.2x） | 657 ms（15x） | 43 ms | 67 / 168 / 268 |
+| nbody（5 体を 100 万ステップ） | 747 ms（19x） | 203 ms（5.1x） | 1388 ms（35x） | 40 ms | 53 / 119 / 191 |
+| sieve（2000 万までの篩） | 373 ms（4.0x） | 195 ms（2.1x） | 467 ms（5.0x） | 94 ms | 40 / 117 / 155 |
+| sort（200 万要素の sort ほか） | 1178 ms（6.0x） | 892 ms（4.6x） | 2161 ms（11x） | 195 ms | 58 / 142 / 314 |
+| strings（format! / split / parse） | 257 ms（6.3x） | 176 ms（4.3x） | 127 ms（3.1x） | 41 ms | 61 / 125 / 203 |
+
+（括弧は rustc `-O` に対する倍率）
+
+- crustc の debug ビルドは、strings を除いて rustc の debug ビルドより速い（検査は同じく入っている）。rustc の debug は std のジェネリックなコード（イテレータ・HashMap など）を最適化なしで実体化するため遅い。
+- crustc `-O` は rustc `-O` の 1.3〜5 倍。差が大きいのは、浮動小数点の配列を添字で回す nbody（LLVM はループと範囲検査を消してベクトル化する）、マージソートの sort、書式化の strings。
+- ビルドは crustc が rustc debug の 2〜3 倍、rustc `-O` の 3〜5 倍速い（キャッシュなし。インクリメンタルなら上の表のとおり差はもっと開く）。
+
+バイナリサイズ（KiB）：
+
+| プログラム | crustc | crustc `-O` | rustc (debug) | rustc (debug, strip) | rustc `-O` (strip) |
+|---|---:|---:|---:|---:|---:|
+| fib | 15.4 | 10.9 | 4259 | 336 | 335 |
+| hashmap | 24.1 | 16.1 | 4324 | 373 | 348 |
+| matmul | 41.4 | 24.3 | 4330 | 378 | 361 |
+| nbody | 40.4 | 20.9 | 4295 | 366 | 364 |
+| sieve | 18.2 | 12.1 | 4267 | 340 | 335 |
+| sort | 29.1 | 17.8 | 4332 | 385 | 348 |
+| strings | 30.4 | 19.9 | 4293 | 357 | 340 |
+
+crustc のバイナリはシンボルを持たない（strip しても同じ大きさ）。rustc は std を静的にリンクするので、strip しても 335 KiB 以上ある。crustc は使う部分の prelude だけをコンパイルし、libc を動的にリンクするので、rustc の 1/10〜1/30 になる。
+
 ### 途中で分かったこと
 
 - **cold 時に要約用の syn AST を全部保持していたため、5000 関数で RSS が 162MB になっていた**。

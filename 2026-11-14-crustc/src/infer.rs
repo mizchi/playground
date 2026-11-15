@@ -1738,7 +1738,10 @@ impl Inf<'_> {
                             let user_into = match self.resolve(fv) {
                                 Some(Ty::Ref(_, Ty::Struct(sid))) => self.prog.method(*sid, "__ref_into_iter"),
                                 // (`for x in &c`: c の型で `__ref_into_iter` を探す)
-                                Some(Ty::Struct(sid)) if by_ref.is_some() => self.prog.method(sid, "__ref_into_iter"),
+                                // (`for (k, v) in &map`: 無ければ iter / iter_mut (HashMap / BTreeMap / VecDeque など))
+                                Some(Ty::Struct(sid)) if by_ref.is_some() => self.prog.method(sid, "__ref_into_iter").or_else(|| {
+                                    self.prog.method(sid, if by_ref == Some(true) { "iter_mut" } else { "iter" })
+                                }),
                                 Some(Ty::Struct(sid)) if self.prog.method(sid, "next").is_none() => self.prog.method(sid, "into_iter"),
                                 _ => None,
                             };
