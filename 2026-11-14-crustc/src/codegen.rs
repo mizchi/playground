@@ -4347,7 +4347,7 @@ impl Cx<'_, '_> {
                     ),
                     _ => (xa, xb),
                 };
-                let eq = self.eq_at(x, y, e, span)?;
+                let eq = self.agg_or_scalar_eq(x, y, e, span)?;
                 let next = self.b.ins().iadd_imm_s(iv, 1);
                 self.b.def_var(i, next);
                 let zero8 = self.b.ins().iconst(types::I8, 0);
@@ -4370,14 +4370,14 @@ impl Cx<'_, '_> {
                     ),
                     _ => (a, b),
                 };
-                self.eq_at(x, y, *inner, span)
+                self.agg_or_scalar_eq(x, y, *inner, span)
             }
             Ty::Array(e, n) => {
                 let (es, _) = self.prog.size_align(*e);
                 let mut acc = one(self);
                 for i in 0..n {
                     let (x, y) = self.load_field(a, b, *e, i * es);
-                    let c = self.eq_at(x, y, *e, span)?;
+                    let c = self.agg_or_scalar_eq(x, y, *e, span)?;
                     acc = self.b.ins().band(acc, c);
                 }
                 Ok(acc)
@@ -9983,9 +9983,11 @@ impl Cx<'_, '_> {
         let (v, t) = self.operand(&mc.receiver, None, true)?;
         let Some(v) = v else { return Ok(Some((None, Ty::Never))) };
         let (ra, rt) = self.ord_addr(v, t);
+        // (`Abs(-3).cmp(&b)`: 受け手の型が評価してから分かった手書きの impl は、評価した値でそのメソッドを呼ぶ)
         if let Ty::Struct(sid) = rt {
-            if self.prog.method(sid, &name).is_some() {
-                return err(mc.span(), format!("call `{name}` on a named value"));
+            if let Some(id) = self.prog.method(sid, &name) {
+                let args: Vec<&Expr> = mc.args.iter().collect();
+                return self.call_fn(id, Some((ra, Ty::Ref(false, intern(rt)))), &args, None, None, mc.span()).map(Some);
             }
         }
         let arg = &mc.args[0];

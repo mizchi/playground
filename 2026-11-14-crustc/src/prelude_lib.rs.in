@@ -6055,8 +6055,22 @@ impl<K, V> __FromIter for BTreeMap<K, V> {
     fn __from_iter<I: Iterator>(it: I) -> BTreeMap<K, V> {
         let mut it = it;
         let mut m = BTreeMap::new();
+        // (std の collect は同じキーなら後のキーと値を残す。insert はキーを残して値だけ替える)
         while let Some((k, v)) = it.next() {
-            m.insert(k, v);
+            let (i, found) = m.bt_find(&k);
+            if found {
+                unsafe {
+                    let pk = m.ks.ptr.add(i);
+                    let pv = m.vs.ptr.add(i);
+                    drop(pk.read());
+                    drop(pv.read());
+                    pk.write(k);
+                    pv.write(v);
+                }
+            } else {
+                m.ks.insert(i, k);
+                m.vs.insert(i, v);
+            }
         }
         m
     }
@@ -6178,8 +6192,18 @@ impl<T> __FromIter for BTreeSet<T> {
     fn __from_iter<I: Iterator>(it: I) -> BTreeSet<T> {
         let mut it = it;
         let mut s = BTreeSet::new();
+        // (std の collect は等しい要素なら後のものを残す。insert は前のものを残す)
         while let Some(x) = it.next() {
-            s.insert(x);
+            let (i, found) = s.bs_find(&x);
+            if found {
+                unsafe {
+                    let p = s.v.ptr.add(i);
+                    drop(p.read());
+                    p.write(x);
+                }
+            } else {
+                s.v.insert(i, x);
+            }
         }
         s
     }

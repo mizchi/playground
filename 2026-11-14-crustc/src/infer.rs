@@ -2314,6 +2314,10 @@ impl Inf<'_> {
                     }
                     hops += 1;
                 }
+                // derive(Clone) の clone (メソッドの本体は codegen が作る): 受け手 (参照を外した) と同じ型
+                if callee.is_none() && n == "clone" && mc.args.is_empty() && sid.is_some() {
+                    return rv;
+                }
                 let args: Vec<u32> = mc.args.iter().map(|a| self.expr(a)).collect();
                 // `&dyn Trait` のメソッド: trait の宣言のシグネチャ
                 let mut dt = self.resolve(rv);
