@@ -4234,7 +4234,7 @@ unsafe extern "C" {
 }
 
 // `std::process::exit(code)`: stdio を書き出してから終わる
-pub fn __core_exit(code: i32) -> ! {
+pub fn __core_process_exit(code: i32) -> ! {
     unsafe {
         __exr_exit(code);
     }

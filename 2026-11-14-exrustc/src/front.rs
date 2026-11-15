@@ -2868,6 +2868,10 @@ impl Program {
                 return self.index.get(&format!("{ty}::{}", p.segments[n - 1].ident)).copied();
             }
         }
+        // `std::process::exit` / `process::exit` (ユーザの `exit` と名前がぶつからないように別の名前)
+        if n >= 2 && p.segments[n - 2].ident == "process" && p.segments[n - 1].ident == "exit" {
+            return self.index.get("__core_process_exit").copied();
+        }
         // `core::cmp::max` / `core::mem::swap` などは prelude の `__core_*` へ
         if n >= 2 && matches!(p.segments[0].ident.to_string().as_str(), "core" | "std") {
             return self
@@ -3139,6 +3143,8 @@ impl Program {
         // `vec![..]` / `"..".to_string()` は名前を書かずに Vec の realloc / String::from を使う
         stack.extend(self.index.get("__exr_realloc").copied());
         stack.extend(self.index.get("String::from").copied());
+        // (`process::exit` は名前を書かずに呼ばれる: あれば根にする。使われなければ要約で選ばれない)
+        stack.extend(self.index.get("__core_process_exit").copied());
         // const の式から呼ぶ関数 (`const N: u32 = sq(4);`。const は使う場所で式として展開される)
         for c in &self.consts {
             if c.expr.contains('(') {
