@@ -2693,6 +2693,45 @@ impl Cx<'_, '_> {
     /// `recv.m(args)`: レシーバを自動 deref して struct を見つけ、
     /// メソッドの self 型に合わせて自動参照 (`&self` / `&mut self`) かコピー (`self`) で渡す
     fn method_call(&mut self, mc: &syn::ExprMethodCall, expected: Option<Ty>) -> R<V> {
+        // ブランケット impl のメソッドをプリミティブ型・&str で呼ぶ (`5.describe()` / `"x".describe()`)
+        if let Some(&bid) = self.prog.blanket.get(&mc.method.to_string()) {
+            let pt = self.peek(&mc.receiver);
+            let prim = |t: Ty| t.is_int() || t.is_float() || matches!(t, Ty::Bool | Ty::Char);
+            let own = match pt.map(|t| self.strip_refs(t)) {
+                Some(Ty::Struct(sid)) => self.prog.method(sid, &mc.method.to_string()).is_some(),
+                _ => false,
+            };
+            if !own && pt.is_some_and(|t| prim(t) || matches!(t, Ty::Ref(_, Ty::Str))) {
+                let (v, t) = self.expr(&mc.receiver, None)?;
+                let Some(v) = v else { return Ok((None, Ty::Never)) };
+                // (&self に渡すのは値のアドレス。&str は fat pointer の置き場所のアドレスがそのまま &&str)
+                let addr = if t.is_fat() {
+                    v
+                } else {
+                    let ss = self.slot(t);
+                    self.b.ins().stack_store(PTR, v, ss, 0);
+                    self.b.ins().stack_addr(PTR, ss, 0)
+                };
+                let args: Vec<&Expr> = mc.args.iter().collect();
+                return self.call_fn(bid, Some((addr, Ty::Ref(false, intern(t)))), &args, mc.turbofish.as_ref(), expected, mc.span());
+            }
+        }
+        // `b.as_ref()` / `b.as_mut()` (b: Box<T> / &Box<T>): 中身への参照 (Box と参照は同じ表現)
+        if matches!(mc.method.to_string().as_str(), "as_ref" | "as_mut") && mc.args.is_empty() {
+            let mut t = self.peek(&mc.receiver);
+            while let Some(Ty::Ref(_, i)) = t {
+                t = Some(*i);
+            }
+            if let Some(Ty::Box(inner)) = t {
+                let (v, mut vt) = self.read_no_move(&mc.receiver)?;
+                let Some(mut v) = v else { return Ok((None, Ty::Never)) };
+                while let Ty::Ref(_, i) = vt {
+                    v = if i.is_fat() { v } else { self.b.ins().load(PTR, mf(), v, 0) };
+                    vt = *i;
+                }
+                return Ok((Some(v), Ty::Ref(mc.method == "as_mut", inner)));
+            }
+        }
         // prelude の `v.__push_auto(x)` (partition など): x が `&T` で v が `Vec<T>` なら `*x` を push
         if mc.method == "__push_auto" && mc.args.len() == 1 {
             let (r, a) = (&mc.receiver, &mc.args[0]);

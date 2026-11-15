@@ -798,6 +798,9 @@ pub struct Program {
     pub variant_names: FxMap<String, Option<(u32, usize)>>,
     /// 戻り値が本体から決まる `impl Trait` の関数
     pub opaque: Vec<u32>,
+    /// ブランケット impl のメソッド (名前 → 関数 id) と、その self 型の型パラメータ名
+    pub blanket: FxMap<String, u32>,
+    pub blanket_selfs: std::collections::HashSet<String>,
     /// 名前の最後のセグメント → 関数 ID 群 (`len` → `A::len`, `B::len`)。参照の過大近似用
     pub by_last: FxMap<String, Vec<u32>>,
     /// trait 名 → その trait で宣言された関数
@@ -1501,6 +1504,8 @@ impl Program {
             struct_index: FxMap::default(),
             variant_names: FxMap::default(),
             opaque: vec![],
+            blanket: FxMap::default(),
+            blanket_selfs: Default::default(),
             by_last: FxMap::default(),
             traits: FxMap::default(),
             impls: HashSet::new(),
@@ -1722,10 +1727,17 @@ impl Program {
                     ),
                     None => None,
                 };
+                let mut blanket = false;
                 let impl_of = match &ss.impl_of {
                     Some(n) if Ty::prim(n).is_some() => None,
                     Some(n) => match p.struct_index.get(n) {
                         Some(&sid) => Some(sid),
+                        // ブランケット impl (`impl<T: Display> Describe for T`): どの型のメソッドとしても探す
+                        None if ss.generics.iter().any(|g| &g.0 == n) && ss.has_self => {
+                            blanket = true;
+                            p.blanket_selfs.insert(n.clone());
+                            None
+                        }
                         None => {
                             return Err(format!("{}:1: cannot find struct `{n}` for impl", it.line));
                         }
@@ -1747,6 +1759,10 @@ impl Program {
                     .entry(last)
                     .or_default()
                     .push(p.names.len() as u32);
+                if blanket {
+                    let m = name.rsplit("::").next().unwrap().to_string();
+                    p.blanket.entry(m).or_insert(p.names.len() as u32);
+                }
                 p.index.insert(name.clone(), p.names.len() as u32);
                 p.names.push(name.clone());
                 p.item_of.push((!ss.is_extern).then_some(ii as u32));
@@ -1825,6 +1841,9 @@ impl Program {
                 continue;
             }
             let Some(&sid) = p.struct_index.get(sn) else {
+                if p.blanket_selfs.contains(sn) {
+                    continue;
+                }
                 return Err(format!("{}:1: cannot find type `{sn}`", it.line));
             };
             if !p.impls.insert((sid, tr.clone())) {
@@ -2024,11 +2043,17 @@ impl Program {
                 }
             }
         }
-        found
+        found.or_else(|| self.blanket.get(name).copied())
     }
 
     /// struct sid に名前 name のメソッドが見つからないとき、実装している trait のデフォルトメソッド
     pub fn default_method(&self, sid: u32, name: &str) -> Option<u32> {
+        let r = self.default_method_inner(sid, name);
+        // (なければブランケット impl のメソッド)
+        r.or_else(|| self.blanket.get(name).copied())
+    }
+
+    fn default_method_inner(&self, sid: u32, name: &str) -> Option<u32> {
         let sid = self.base_of(sid);
         let mut found = None;
         for (s, tr) in &self.impls {
