@@ -8,6 +8,7 @@
 #   elfz:  src/elfz.rs (.o のセクションの圧縮。zstd の代わりに同じ API の RLE を付ける) → C の .o を圧縮・解凍して中身を比べる
 #   macros: src/macros.rs (macro_rules! の展開と include_str!。proc_macro2 の代わりに tests/selfhost/mini_pm2.rs を付ける)
 #           → probe / examples / src を展開して、結果の長さとハッシュを出す
+#   parse: src/parse.rs (syn を使わない構文解析) → probe / examples / src を解析して節の数とアイテムを出す
 #   enc:   src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と src/fxhash.rs (FxHasher / FxMap)
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -99,6 +100,20 @@ for opt in "" -O; do
     echo "ok   macros $opt (${#min[@]} files, $(grep -c expanded "$out/macros.rustc.out") expanded)"
   else
     echo "DIFF macros $opt"; diff "$out/macros.rustc.out" "$out/macros.crustc.out" | head; fail=1
+  fi
+done
+python3 tests/selfhost/build_parse.py > "$out/parse_main.rs"
+rustc --edition 2024 -O -Awarnings "$out/parse_main.rs" -o "$out/parse_rustc" || exit 1
+"$out/parse_rustc" "${min[@]}" > "$out/parse.rustc.out"
+for opt in "" -O; do
+  if ! target/release/crustc "$out/parse_main.rs" -o "$out/parse_crustc" $opt; then
+    echo "FAIL parse $opt (crustc)"; fail=1; continue
+  fi
+  "$out/parse_crustc" "${min[@]}" > "$out/parse.crustc.out"
+  if cmp -s "$out/parse.rustc.out" "$out/parse.crustc.out"; then
+    echo "ok   parse $opt (${#min[@]} files, $(wc -l < "$out/parse.rustc.out") lines)"
+  else
+    echo "DIFF parse $opt"; diff "$out/parse.rustc.out" "$out/parse.crustc.out" | head; fail=1
   fi
 done
 python3 tests/selfhost/build_enc.py > "$out/enc_main.rs"

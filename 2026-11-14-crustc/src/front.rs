@@ -1653,9 +1653,16 @@ impl Program {
             pord: vec![],
         };
         // 0. 型の別名 (struct のフィールドの型より先に)
+        // (同じ名前の struct / enum があればそちら: ユーザの `struct Path` と prelude の `type Path = str`)
+        let adt_names: std::collections::HashSet<&str> = sums
+            .iter()
+            .flat_map(|sm| sm.structs.iter().map(|x| x.0.as_str()).chain(sm.enums.iter().map(|x| x.0.as_str())))
+            .collect();
         for sm in sums {
             for (n, g, t) in &sm.aliases {
-                p.aliases.insert(n.clone(), (g.clone(), t.clone()));
+                if !adt_names.contains(n.as_str()) {
+                    p.aliases.insert(n.clone(), (g.clone(), t.clone()));
+                }
             }
         }
         // 0. const / static の名前 (配列の長さで使うので型より先に)
@@ -2584,6 +2591,42 @@ impl Program {
                     let (fs, size, align) = self.struct_layout(fs);
                     let d = self.structs.get_mut(id as usize);
                     if d.size != size || d.align != align || d.fields.len() != fs.len() {
+                        changed = true;
+                    }
+                    d.fields = fs;
+                    d.size = size;
+                    d.align = align;
+                }
+            }
+            // (ジェネリックでない定義も、フィールドのインスタンスの大きさが変わっていれば取り直す:
+            //  `enum ItemKind { Const(String, Option<Ty>, ..) }` の Option<Ty> が Ty より先に作られた場合)
+            for id in 0..self.structs.len() {
+                let b = &self.structs[id];
+                if b.base.is_some() || !b.generics.is_empty() || b.name.starts_with('#') {
+                    continue;
+                }
+                if b.is_enum {
+                    let vs: Vec<_> = b
+                        .variants
+                        .iter()
+                        .map(|v| (v.name.clone(), v.kind, v.fields.iter().map(|(n, t, _)| (n.clone(), *t)).collect(), v.discr))
+                        .collect();
+                    let tag = b.tag;
+                    let (vs, size, align) = self.enum_layout(vs, tag);
+                    let d = self.structs.get_mut(id);
+                    let moved = d.variants.iter().zip(&vs).any(|(a, b)| a.fields.iter().zip(&b.fields).any(|(x, y)| x.2 != y.2));
+                    if d.size != size || d.align != align || moved {
+                        changed = true;
+                    }
+                    d.variants = vs;
+                    d.size = size;
+                    d.align = align;
+                } else {
+                    let fs: Vec<(String, Ty)> = b.fields.iter().map(|(n, t, _)| (n.clone(), *t)).collect();
+                    let (fs, size, align) = self.struct_layout(fs);
+                    let d = self.structs.get_mut(id);
+                    let moved = d.fields.iter().zip(&fs).any(|(x, y)| x.2 != y.2);
+                    if d.size != size || d.align != align || moved {
                         changed = true;
                     }
                     d.fields = fs;

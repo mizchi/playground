@@ -1114,8 +1114,30 @@ impl Cx<'_, '_> {
                         (Some(i), Some(o)) if ann.is_none() && hintable(&i.expr) => self.lookup(o).map(|x| x.1),
                         _ => None,
                     };
+                    // `let x;` (後で代入する): 0 で埋めて置く (drop の要る型は 0 で drop が何もしないものだけ)
                     let Some(init) = &l.init else {
-                        return err(l.span(), "`let` without initializer is not supported");
+                        let ann = ann.filter(|&a| !has_hole(self.prog, a));
+                        let Some(ty) = ann.filter(|&t| !self.prog.has_param(t)) else {
+                            return err(l.span(), "cannot infer the type of this `let`; annotate it");
+                        };
+                        if self.needs_drop(ty) && !self.zeroable(ty) {
+                            return err(l.span(), "`let` without initializer is not supported for this type");
+                        }
+                        let v = if ty.is_agg() {
+                            let a = self.temp(ty);
+                            self.zero(a, ty);
+                            Some(a)
+                        } else {
+                            match clif_ty(ty) {
+                                None => None,
+                                Some(ct) if ct == types::F64 => Some(self.b.ins().f64const(0.0)),
+                                Some(ct) if ct == types::F32 => Some(self.b.ins().f32const(0.0)),
+                                Some(ct) if ct == types::I128 => Some(self.int_const(Ty::I128, 0)),
+                                Some(ct) => Some(self.b.ins().iconst(ct, 0)),
+                            }
+                        };
+                        self.bind(name, ty, v);
+                        continue;
                     };
                     if init.diverge.is_some() {
                         return err(l.span(), "`let ... else` is not supported");
