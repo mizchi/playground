@@ -931,11 +931,14 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         if cmp_impl || need.contains("Ordering") {
             need.extend(["__exr_ord_i32", "__exr_pord_i32"]);
         }
+        if user_src.contains("PartialOrd<") || user_src.contains("PartialOrd for") {
+            need.extend(["__exr_ord_i32", "__exr_pord_code"]);
+        }
         if need.contains("Reverse") {
             need.extend(["cmp", "partial_cmp"]);
         }
         if need.contains("cmp") || need.contains("partial_cmp") {
-            need.extend(["__exr_cmp_m", "__exr_pcmp_m"]);
+            need.extend(["__exr_cmp_m", "__exr_pcmp_m", "__exr_pcmp_fl"]);
         }
         if need.contains("max") || need.contains("min") {
             need.extend(["__exr_max", "__exr_min"]);

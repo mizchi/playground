@@ -468,7 +468,22 @@ fn addr_taken(f: &syn::ItemFn) -> (HashSet<String>, Vec<(usize, usize)>) {
                     }
                 }
             }
-            for e in crate::closure::macro_exprs(m) {
+            let es = crate::closure::macro_exprs(m);
+            if es.is_empty() {
+                // (クロージャのない引数 (`println!("{:?}", a.partial_cmp(&n))`) の借用も数える)
+                use syn::punctuated::Punctuated;
+                // (引数そのものの `&x` は書式化が値として読むので数えない: レジスタのままにする)
+                if let Ok(es) = m.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated) {
+                    for e in es.iter() {
+                        match e {
+                            Expr::Reference(r) => self.visit_expr(&r.expr),
+                            Expr::Path(_) | Expr::Lit(_) => {}
+                            e => self.visit_expr(e),
+                        }
+                    }
+                }
+            }
+            for e in es {
                 self.visit_expr(&e);
             }
         }
@@ -3982,6 +3997,12 @@ impl Cx<'_, '_> {
         } else {
             deref_num(Some(lt))
         };
+        // (`v < (1, 5)` / `v == 2`: 右辺がリテラルなら、左の型の `PartialOrd<R>` / `PartialEq<R>` の R を期待型にする)
+        let rhint = match b.op {
+            Lt(_) | Le(_) | Gt(_) | Ge(_) => self.rhs_hint_from_impls(&self.prog.pord.clone(), lt, &b.right).or(rhint),
+            Eq(_) | Ne(_) => self.rhs_hint_from_impls(&self.prog.peq.clone(), lt, &b.right).or(rhint),
+            _ => rhint,
+        };
         let (r, rt) = self.operand(&b.right, rhint.or(Some(lt)), cmp)?;
         let Some(r) = r else {
             return Ok((None, Ty::Never));
@@ -4024,6 +4045,16 @@ impl Cx<'_, '_> {
                 }
             }
         }
+        // 型の違う `<` / `<=` / `>` / `>=`: `impl PartialOrd<R> for S` の partial_cmp (None ならどれも false)
+        if matches!(b.op, Lt(_) | Le(_) | Gt(_) | Ge(_)) && lt != rt {
+            let cands = self.prog.pord.clone();
+            if let Some((v, t)) = self.trait_bin(&cands, l, lt, r, rt, b.span())? {
+                let (c, _) = self.call_named("__exr_pord_code", vec![Ty::Unit], &[(v.unwrap(), Ty::Ref(false, intern(t)))], b.span())?;
+                let c = c.unwrap();
+                let e = self.ord_code_test(c, &b.op);
+                return Ok((Some(e), Ty::Bool));
+            }
+        }
         // `&str` / `String` の大小比較: prelude の __exr_str_cmp
         if matches!(b.op, Lt(_) | Le(_) | Gt(_) | Ge(_)) && self.prog.index.contains_key("__exr_str_cmp") {
             let str_ref = Ty::Ref(false, intern(Ty::Str));
@@ -4053,6 +4084,24 @@ impl Cx<'_, '_> {
             self.same(b.right.span(), rt, lt)?;
             let (la, t) = self.ord_addr(l, lt);
             let (ra, _) = self.ord_addr(r, rt);
+            // 手書きの partial_cmp (cmp がない): None ならどれも false
+            if let Ty::Struct(sid) = t {
+                if !self.prog.is_tuple(self.prog.base_of(sid))
+                    && self.prog.method(sid, "partial_cmp").is_some()
+                    && self.prog.method(sid, "cmp").is_none()
+                    && self.prog.index.contains_key("__exr_pord_code")
+                {
+                    let rr = Ty::Ref(false, intern(t));
+                    self.scopes.push(vec![]);
+                    self.bind("__exr_ca".into(), rr, Some(la));
+                    self.bind("__exr_cb".into(), rr, Some(ra));
+                    let e: Expr = syn::parse_quote!(__exr_pord_code::<()>(&__exr_ca.partial_cmp(__exr_cb)));
+                    let (c, _) = self.expr(&e, Some(Ty::I32))?;
+                    self.scopes.pop();
+                    let e = self.ord_code_test(c.unwrap(), &b.op);
+                    return Ok((Some(e), Ty::Bool));
+                }
+            }
             let c = self.cmp_call(la, ra, t)?;
             let cc = match b.op {
                 Lt(_) => IntCC::SignedLessThan,
@@ -4123,6 +4172,11 @@ impl Cx<'_, '_> {
     /// 参照の先 (`&[T]` と `impl .. for [T]`、`&[T; N]` と `PartialEq<[T; N]>`) で合わせる
     fn trait_eq(&mut self, l: Value, lt: Ty, r: Value, rt: Ty, span: proc_macro2::Span) -> R<Option<Value>> {
         let cands = self.prog.peq.clone();
+        Ok(self.trait_bin(&cands, l, lt, r, rt, span)?.and_then(|v| v.0))
+    }
+
+    /// cands (`fn m(&self, other: &R)` の候補) から l と r の型に合うものを選んで呼ぶ
+    fn trait_bin(&mut self, cands: &[u32], l: Value, lt: Ty, r: Value, rt: Ty, span: proc_macro2::Span) -> R<Option<V>> {
         // (値の型 t, 参照を足すか): 値そのものなら &t を、参照なら中身をその型として渡す
         let views = |t: Ty| -> Vec<(Ty, bool)> {
             match t {
@@ -4130,7 +4184,7 @@ impl Cx<'_, '_> {
                 t => vec![(t, true)],
             }
         };
-        for id in cands {
+        for &id in cands {
             let sig = &self.prog.sigs[id as usize];
             let (Some(&Ty::Ref(_, ps)), Some(&Ty::Ref(_, pr))) = (sig.params.first(), sig.params.get(1)) else {
                 continue;
@@ -4146,17 +4200,72 @@ impl Cx<'_, '_> {
                     let la = if addl { self.addr_of_value(l, lt) } else { l };
                     let ra = if addr { self.addr_of_value(r, rt) } else { r };
                     let name = self.prog.names[id as usize].clone();
-                    let (v, _) = self.call_named(
+                    let v = self.call_named(
                         &name,
                         targs,
                         &[(la, Ty::Ref(false, intern(xl))), (ra, Ty::Ref(false, intern(xr)))],
                         span,
                     )?;
-                    return Ok(v);
+                    return Ok(Some(v));
                 }
             }
         }
         Ok(None)
+    }
+
+    /// partial_cmp の結果のコード (-1 / 0 / 1、None は 2) で `<` などを決める
+    fn ord_code_test(&mut self, c: Value, op: &BinOp) -> Value {
+        let is = |this: &mut Self, k: i64| this.b.ins().icmp_imm_s(IntCC::Equal, c, k);
+        match op {
+            BinOp::Lt(_) => is(self, -1),
+            BinOp::Gt(_) => is(self, 1),
+            // (<= は -1 か 0、>= は 0 か 1。None (2) はどれも false)
+            BinOp::Le(_) => {
+                let (x, y) = (is(self, -1), is(self, 0));
+                self.b.ins().bor(x, y)
+            }
+            _ => {
+                let (x, y) = (is(self, 1), is(self, 0));
+                self.b.ins().bor(x, y)
+            }
+        }
+    }
+
+    /// 左の型 lt の比較の impl のうち、右辺の式 (リテラル・タプル・配列) の形に合う R が 1 つだけならそれ
+    fn rhs_hint_from_impls(&self, cands: &[u32], lt: Ty, rhs: &Expr) -> Option<Ty> {
+        if cands.is_empty() {
+            return None;
+        }
+        let fits = |t: Ty, e: &Expr| -> bool {
+            match strip_paren(e) {
+                Expr::Lit(syn::ExprLit { lit: Lit::Int(_), .. }) => t.is_int(),
+                Expr::Lit(syn::ExprLit { lit: Lit::Float(_), .. }) => t.is_float(),
+                Expr::Unary(u) if matches!(u.op, UnOp::Neg(_)) => t.is_int() || t.is_float(),
+                Expr::Tuple(tp) => matches!(t, Ty::Struct(sid) if self.prog.is_tuple(self.prog.base_of(sid))
+                    && self.prog.structs[sid as usize].args.len() == tp.elems.len()),
+                Expr::Array(a) => matches!(t, Ty::Array(_, n) if n as usize == a.elems.len()),
+                _ => false,
+            }
+        };
+        let lt0 = match lt {
+            Ty::Ref(_, i) => *i,
+            t => t,
+        };
+        let mut found = None;
+        for &id in cands {
+            let sig = &self.prog.sigs[id as usize];
+            let (Some(&Ty::Ref(_, ps)), Some(&Ty::Ref(_, pr))) = (sig.params.first(), sig.params.get(1)) else { continue };
+            if sig.is_generic() || self.prog.has_param(*pr) {
+                continue;
+            }
+            if (*ps == lt || *ps == lt0) && fits(*pr, rhs) {
+                if found.is_some_and(|f| f != *pr) {
+                    return None;
+                }
+                found = Some(*pr);
+            }
+        }
+        found
     }
 
     /// t 型の値 v (集約型ならアドレス) への参照
@@ -9890,6 +9999,13 @@ impl Cx<'_, '_> {
             );
         }
         let r = Ty::Ref(false, intern(rt));
+        // (浮動小数点の partial_cmp は NaN で None)
+        if name == "partial_cmp" && rt.is_float() && self.prog.index.contains_key("__exr_pcmp_fl") {
+            let ct = clif_ty(rt).unwrap();
+            let x = self.b.ins().load(ct, mf(), ra, 0);
+            let y = self.b.ins().load(ct, mf(), aa, 0);
+            return self.call_named("__exr_pcmp_fl", vec![rt], &[(x, rt), (y, rt)], mc.span()).map(Some);
+        }
         self.call_named(helper, vec![rt], &[(ra, r), (aa, r)], mc.span()).map(Some)
     }
 }

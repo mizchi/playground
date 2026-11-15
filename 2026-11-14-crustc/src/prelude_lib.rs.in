@@ -5078,6 +5078,19 @@ fn __exr_cmp_m<T>(a: &T, b: &T) -> Ordering {
     __exr_ordering::<()>(__exr_cmp::<T>(a, b))
 }
 
+// 浮動小数点の partial_cmp: NaN があれば None (T は f64 / f32。型名を書くと f64 の impl 一式を引くのでジェネリック)
+fn __exr_pcmp_fl<T>(a: T, b: T) -> Option<Ordering> {
+    if a < b {
+        Some(Ordering::Less)
+    } else if a > b {
+        Some(Ordering::Greater)
+    } else if a == b {
+        Some(Ordering::Equal)
+    } else {
+        None
+    }
+}
+
 fn __exr_pcmp_m<T>(a: &T, b: &T) -> Option<Ordering> {
     Some(__exr_cmp_m::<T>(a, b))
 }
@@ -5087,6 +5100,14 @@ fn __exr_ord_i32<G>(o: &Ordering) -> i32 {
         Ordering::Less => -1,
         Ordering::Equal => 0,
         Ordering::Greater => 1,
+    }
+}
+
+// `a < b` (型の違う PartialOrd): Less / Equal / Greater を -1 / 0 / 1、None を 2 に
+fn __exr_pord_code<G>(o: &Option<Ordering>) -> i32 {
+    match *o {
+        Some(x) => __exr_ord_i32::<()>(&x),
+        None => 2,
     }
 }
 

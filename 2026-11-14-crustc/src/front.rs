@@ -849,6 +849,8 @@ pub struct Program {
     pub assocs: Vec<AssocDef>,
     /// 右辺の型を持つ比較の impl の eq (`Vec::<PartialEq<[T;N]>>::eq` など)。`a == b` の型が違うとき探す
     pub peq: Vec<u32>,
+    /// 同じく `S::<PartialOrd<R>>::partial_cmp`。`a < b` の型が違うとき探す
+    pub pord: Vec<u32>,
 }
 
 /// `impl<..> Trait for S<..> { type Name = Value; }`
@@ -1212,7 +1214,9 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
             // Display と Debug はどちらも fmt なので、trait 名で区別する (`P::<Display>::fmt`)
             let name = match ow.impl_trait.as_deref() {
                 Some(t @ ("Display" | "Debug")) => format!("{}::<{t}>::{}", ow.base, f.sig.ident),
-                Some(t) if t.starts_with("PartialEq<") => format!("{}::<{t}>::{}", ow.base, f.sig.ident),
+                Some(t) if t.starts_with("PartialEq<") || t.starts_with("PartialOrd<") => {
+                    format!("{}::<{t}>::{}", ow.base, f.sig.ident)
+                }
                 // (参照への impl のメソッドは名前を分ける: `impl Add for &M` の add は `M::__ref_add`)
                 _ if matches!(ow.self_ty, TySyn::Ref(..)) => format!("{}::__ref_{}", ow.base, f.sig.ident),
                 _ => format!("{}::{}", ow.base, f.sig.ident),
@@ -1237,13 +1241,14 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
                 sm.impl_trait = Some(id.to_string());
                 // `impl PartialEq<[U; N]> for Vec<T>`: 右辺の型が self 型と違う比較は trait 名に型引数を残す
                 // (`PartialEq<[U;N]>`。メソッドは `Vec::<PartialEq<[U;N]>>::eq` になり、`==` が右辺の型で選ぶ)
-                if id == "PartialEq" {
+                // (`impl PartialOrd<Feet> for Meters` も同じ: `Meters::<PartialOrd<Feet>>::partial_cmp`)
+                if id == "PartialEq" || id == "PartialOrd" {
                     if let syn::PathArguments::AngleBracketed(ab) = &last.arguments {
                         use quote::ToTokens;
                         let rhs: String = ab.to_token_stream().to_string().chars().filter(|c| !c.is_whitespace()).collect();
                         let selfs: String = im.self_ty.to_token_stream().to_string().chars().filter(|c| !c.is_whitespace()).collect();
                         if rhs != format!("<{selfs}>") && rhs != "<Self>" {
-                            sm.impl_trait = Some(format!("PartialEq{rhs}"));
+                            sm.impl_trait = Some(format!("{id}{rhs}"));
                         }
                     }
                 }
@@ -1599,6 +1604,7 @@ impl Program {
             has_drop: false,
             assocs: vec![],
             peq: vec![],
+            pord: vec![],
         };
         // 0. const / static の名前 (配列の長さで使うので型より先に)
         for (ii, sm) in sums.iter().enumerate() {
@@ -1907,13 +1913,19 @@ impl Program {
                 n.ends_with("::eq") && n.contains("::<PartialEq<")
             })
             .collect();
+        p.pord = (0..p.names.len() as u32)
+            .filter(|&i| {
+                let n = &p.names[i as usize];
+                n.ends_with("::partial_cmp") && n.contains("::<PartialOrd<")
+            })
+            .collect();
         // 4. trait の実装 (impl ヘッダの要約から)
         for (it, sm) in items.iter().zip(sums) {
             let (Some(sn), Some(tr)) = (&sm.impl_self, &sm.impl_trait) else {
                 continue;
             };
             // (右辺の型を持つ比較の impl と、配列・スライスへの impl は、`==` が関数を直接選ぶので数えない)
-            if tr.starts_with("PartialEq<") || sn == "__array" || sn == "__slice" {
+            if tr.starts_with("PartialEq<") || tr.starts_with("PartialOrd<") || sn == "__array" || sn == "__slice" {
                 continue;
             }
             if !p.traits.contains_key(tr) {
@@ -3876,7 +3888,7 @@ fn parse_sig(
         // ローカルシンボル。短く保つことで .o / シンボル表を小さくする
         Some(o) => match o.impl_trait.as_deref() {
             Some(t @ ("Display" | "Debug")) => format!("_x{}.{t}.{name}", o.base),
-            Some(t) if t.starts_with("PartialEq<") => {
+            Some(t) if t.starts_with("PartialEq<") || t.starts_with("PartialOrd<") => {
                 let t: String = t.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
                 format!("_x{}.{t}.{name}", o.base)
             }
