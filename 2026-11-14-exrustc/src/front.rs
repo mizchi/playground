@@ -332,6 +332,15 @@ pub fn parse_tysyn(t: &syn::Type, self_ty: Option<&TySyn>) -> R<TySyn> {
                 syn::Expr::Path(p) if p.path.get_ident().is_some() => {
                     ArrLen::Const(p.path.get_ident().unwrap().to_string())
                 }
+                // 関連定数 `[u8; Buf::CAP]` / `[u8; Self::CAP]`
+                syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 2 => {
+                    let a = p.path.segments[0].ident.to_string();
+                    let a = match (a.as_str(), self_ty) {
+                        ("Self", Some(TySyn::Named(n))) => n.clone(),
+                        _ => a,
+                    };
+                    ArrLen::Const(format!("{a}::{}", p.path.segments[1].ident))
+                }
                 e => return err(e.span(), "array length must be a literal or a const"),
             };
             TySyn::Array(Box::new(parse_tysyn(&a.elem, self_ty)?), len)
@@ -778,6 +787,8 @@ pub struct Program {
     /// const と static
     pub consts: Vec<ConstDef>,
     pub const_index: FxMap<String, u32>,
+    /// 関連定数 (`S::N`) を最後の名前 (`N`) で引く (参照関係の過大近似用)
+    pub const_by_last: FxMap<String, Vec<u32>>,
     /// プリミティブ型への trait 実装 (型, trait)
     pub prim_impls: HashSet<(Ty, String)>,
     /// クロージャの fn id → 定義
@@ -1014,7 +1025,20 @@ pub fn parse_item(src: &str, it: &SrcItem) -> R<syn::Item> {
                 ty: Box::new(t.ty),
                 semi_token: t.semi_token,
             })),
-            other => err(other.span(), "only fns and associated types are supported in impl blocks")
+            // 関連定数 `const N: usize = 4;` (要約で `S::N` という名前の const にする)
+            syn::ImplItem::Const(c) => Ok(syn::Item::Const(syn::ItemConst {
+                attrs: c.attrs,
+                vis: c.vis,
+                const_token: c.const_token,
+                ident: c.ident,
+                generics: c.generics,
+                colon_token: c.colon_token,
+                ty: Box::new(c.ty),
+                eq_token: c.eq_token,
+                expr: Box::new(c.expr),
+                semi_token: c.semi_token,
+            })),
+            other => err(other.span(), "only fns, consts and associated types are supported in impl blocks")
                 .map_err(|e| relocate_err(e, it)),
         },
     }
@@ -1044,8 +1068,18 @@ pub fn parse_and_summarize(
     if let ItemKind::TraitMember(_) = it.kind {
         let ow = owner.ok_or("trait member without trait")?;
         // `type Item;` (関連型の宣言) は何も持たない
-        if let Ok(syn::TraitItem::Type(_)) = syn::parse_str::<syn::TraitItem>(&src[it.start..it.end]) {
-            return Ok((Summary::default(), None));
+        match syn::parse_str::<syn::TraitItem>(&src[it.start..it.end]) {
+            Ok(syn::TraitItem::Type(_)) => return Ok((Summary::default(), None)),
+            // `const K: i32;` (既定値があれば `Trait::K` という const にする: impl が持たないときに使う)
+            Ok(syn::TraitItem::Const(c)) => {
+                let mut sm = Summary::default();
+                if let Some((_, e)) = &c.default {
+                    use quote_like::ToSrc;
+                    sm.consts.push((format!("{}::{}", ow.base, c.ident), parse_tysyn(&c.ty, None)?, e.to_src()));
+                }
+                return Ok((sm, None));
+            }
+            _ => {}
         }
         let f = parse_trait_member(src, it)?;
         let mut sig = parse_sig(&f.sig, false, false, Some(ow)).map_err(|e| relocate_err(e, it))?;
@@ -1162,11 +1196,12 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
         syn::Item::Use(_) | syn::Item::Verbatim(_) => {}
         syn::Item::Const(c) => {
             use quote_like::ToSrc;
-            sm.consts.push((
-                c.ident.to_string(),
-                parse_tysyn(&c.ty, None)?,
-                c.expr.to_src(),
-            ));
+            // (impl の中なら `S::N`)
+            let name = match owner {
+                Some(ow) => format!("{}::{}", ow.base, c.ident),
+                None => c.ident.to_string(),
+            };
+            sm.consts.push((name, parse_tysyn(&c.ty, owner.map(|o| &o.self_ty))?, c.expr.to_src()));
         }
         syn::Item::Static(st) => {
             use quote_like::ToSrc;
@@ -1440,6 +1475,7 @@ impl Program {
             panic_handler: None,
             consts: vec![],
             const_index: FxMap::default(),
+            const_by_last: FxMap::default(),
             prim_impls: HashSet::new(),
             closures: FxMap::default(),
             closure_by: FxMap::default(),
@@ -1461,6 +1497,9 @@ impl Program {
                         "{}:1: duplicate definition of `{n}`",
                         items[ii].line
                     ));
+                }
+                if let Some((_, last)) = n.rsplit_once("::") {
+                    p.const_by_last.entry(last.to_string()).or_default().push(p.consts.len() as u32);
                 }
                 p.const_index.insert(n.clone(), p.consts.len() as u32);
                 p.consts.push(ConstDef {
@@ -2824,7 +2863,14 @@ impl Program {
         let mut v: Vec<u32> = it
             .idents
             .iter()
-            .filter_map(|&(a, b)| self.const_index.get(&src[a as usize..b as usize]).copied())
+            .flat_map(|&(a, b)| {
+                let s = &src[a as usize..b as usize];
+                self.const_index
+                    .get(s)
+                    .copied()
+                    .into_iter()
+                    .chain(self.const_by_last.get(s).into_iter().flatten().copied())
+            })
             .collect();
         v.sort_unstable();
         v.dedup();
@@ -2850,6 +2896,9 @@ impl Program {
             if has_consts {
                 if let Some(&i) = self.const_index.get(s) {
                     cs.push(i);
+                }
+                if let Some(ids) = self.const_by_last.get(s) {
+                    cs.extend_from_slice(ids);
                 }
             }
         }

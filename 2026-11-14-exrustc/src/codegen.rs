@@ -994,6 +994,9 @@ impl Cx<'_, '_> {
 
     fn peek_syn(&self, e: &Expr) -> Option<Ty> {
         match e {
+            Expr::Path(p) if p.path.segments.len() == 2 && self.const_of(p).is_some() => {
+                Some(self.prog.consts[self.const_of(p)? as usize].ty)
+            }
             Expr::Try(t) => {
                 let Ty::Struct(sid) = self.peek(&t.expr)? else {
                     return None;
@@ -1209,6 +1212,20 @@ impl Cx<'_, '_> {
         match e {
             Expr::Paren(p) => self.place(&p.expr),
             Expr::Group(g) => self.place(&g.expr),
+            // const (`LIMIT` / `S::N`) を場所として使う (`println!("{}", LIMIT)` / `&LIMIT`): 一時領域に置く
+            Expr::Path(p) if self.const_of(p).is_some() && p.path.get_ident().is_none_or(|id| self.lookup(&id.to_string()).is_none()) => {
+                let ci = self.const_of(p).unwrap();
+                let (v, t) = self.const_value(p, ci)?;
+                match v {
+                    Some(a) if t.is_agg() => Ok(Place::Mem(a, 0, t)),
+                    Some(v) => {
+                        let var = self.b.declare_var(clif_ty(t).unwrap_or(PTR));
+                        self.b.def_var(var, v);
+                        Ok(Place::Var(var, t))
+                    }
+                    None => Ok(Place::Zst(t)),
+                }
+            }
             Expr::Path(p) => {
                 let Some(id) = p.path.get_ident() else {
                     return err(p.span(), "unsupported path");
@@ -1458,14 +1475,7 @@ impl Cx<'_, '_> {
             // const は式そのものを埋め込む
             Expr::Path(p) if self.const_of(p).is_some() => {
                 let ci = self.const_of(p).unwrap();
-                let c = &self.prog.consts[ci as usize];
-                let (t, src) = (c.ty, c.expr.clone());
-                let ce: Expr = syn::parse_str(&src).or_else(|er| err(p.span(), er))?;
-                let (v, vt) = self.expr(&ce, Some(t)).map_err(|e| {
-                    format!("{}:1: in constant `{}`: {e}", p.span().start().line, c.name)
-                })?;
-                self.same(p.span(), vt, t)?;
-                Ok((v, t))
+                self.const_value(p, ci)
             }
             Expr::Path(p) if self.fn_item(p).is_some() => {
                 let id = self.fn_item(p).unwrap();
@@ -3926,10 +3936,15 @@ impl Cx<'_, '_> {
             Expr::Lit(syn::ExprLit {
                 lit: Lit::Int(i), ..
             }) => i.base10_parse::<u32>().or_else(|er| err(i.span(), er)),
-            Expr::Path(p) if p.path.get_ident().is_some() => {
+            Expr::Path(p) if p.path.get_ident().is_some() || self.const_of(p).is_some() => {
+                // (関連定数 `S::N` は const の名前 `S::N` で引く)
+                let name = match self.const_of(p) {
+                    Some(ci) => self.prog.consts[ci as usize].name.clone(),
+                    None => p.path.get_ident().unwrap().to_string(),
+                };
                 let ts = crate::front::TySyn::Array(
                     Box::new(crate::front::TySyn::Prim(Ty::U8)),
-                    crate::front::ArrLen::Const(p.path.get_ident().unwrap().to_string()),
+                    crate::front::ArrLen::Const(name),
                 );
                 match self.prog.resolve(&ts) {
                     Ok(Ty::Array(_, n)) => Ok(n),
@@ -5588,6 +5603,9 @@ impl Cx<'_, '_> {
     }
 
     fn path_value(&mut self, p: &syn::ExprPath, _expected: Option<Ty>) -> R<V> {
+        if let Some(ci) = self.const_of(p) {
+            return self.const_value(p, ci);
+        }
         if let Some(id) = self.fn_item(p) {
             return self.fn_value(p, id, _expected);
         }
@@ -5625,6 +5643,38 @@ impl Cx<'_, '_> {
 
     /// 1 セグメントのパスが (ローカル変数でない) const なら、その index
     fn const_of(&self, p: &syn::ExprPath) -> Option<u32> {
+        // 関連定数 `S::N` / `Self::N` / `T::N` (T は型引数) / trait の既定値 `Tr::N`
+        if p.qself.is_none() && p.path.segments.len() == 2 {
+            let (a, n) = (p.path.segments[0].ident.to_string(), p.path.segments[1].ident.to_string());
+            let ty = if a == "Self" {
+                self.env.self_ty.or(self.self_sid.map(Ty::Struct))
+            } else if self.env.params.iter().any(|(g, _)| *g == a) {
+                let ty: syn::Type = syn::Type::Path(syn::TypePath { qself: None, path: syn::Path::from(p.path.segments[0].ident.clone()) });
+                self.prog.parse_ty(&ty, &self.env).ok()
+            } else {
+                None
+            };
+            let base = match ty {
+                Some(Ty::Struct(sid)) => Some(self.prog.structs[self.prog.base_of(sid) as usize].name.clone()),
+                Some(t) => Some(self.prog.tn(t)),
+                None => Some(a.clone()),
+            }?;
+            if let Some(&ci) = self.prog.const_index.get(&format!("{base}::{n}")) {
+                return Some(ci);
+            }
+            // trait の既定値: 型が実装している trait の `Tr::N`
+            if let Some(Ty::Struct(sid)) = ty {
+                let b = self.prog.base_of(sid);
+                for (s2, tr) in &self.prog.impls {
+                    if *s2 == b {
+                        if let Some(&ci) = self.prog.const_index.get(&format!("{tr}::{n}")) {
+                            return Some(ci);
+                        }
+                    }
+                }
+            }
+            return None;
+        }
         let id = p.path.get_ident()?.to_string();
         if self.lookup(&id).is_some() {
             return None;
@@ -8747,5 +8797,19 @@ impl Cx<'_, '_> {
             _ => {}
         }
         Ok(())
+    }
+}
+
+impl Cx<'_, '_> {
+    /// const は式そのものを埋め込む
+    fn const_value(&mut self, p: &syn::ExprPath, ci: u32) -> R<V> {
+        let c = &self.prog.consts[ci as usize];
+        let (t, src) = (c.ty, c.expr.clone());
+        let ce: Expr = syn::parse_str(&src).or_else(|er| err(p.span(), er))?;
+        let (v, vt) = self.expr(&ce, Some(t)).map_err(|e| {
+            format!("{}:1: in constant `{}`: {e}", p.span().start().line, c.name)
+        })?;
+        self.same(p.span(), vt, t)?;
+        Ok((v, t))
     }
 }

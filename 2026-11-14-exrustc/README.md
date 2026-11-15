@@ -292,6 +292,7 @@ bench/regress.sh
   回る順・`entry().or_insert` / `or_default`・`first_key_value`・`pop_first`・`m[&k]` は std と同じ）、`VecDeque`（リングバッファ。`d[i]`・両端の push / pop）。
   キーが `&str` / String の map の `get("k")` は std の Borrow と同じく `&str` で引ける
 - `impl Index` / `IndexMut`：`x[i]` は x が `index` / `index_mut` を持つ struct なら `*x.index_mut(i)` にする
+- 関連定数（`examples/assoc_consts.rs`）：`impl S { const N: usize = 4; }` / trait の `const K: u32;`（既定値も）。`S::N` / `Self::N` / `T::N`（型引数）、配列の長さにも
 - 演算子のオーバーロード：`impl Add / Sub / Mul / Div / Rem / Neg / Not / BitAnd / BitOr / BitXor / AddAssign ..`。
   `a + b` は左辺が struct で `add` メソッドがあれば `a.add(b)` にする（`impl Mul<i32> for V` のような右辺の型も）
 - `&str` のメソッド：`split(char)` / `split_whitespace` / `lines` / `trim*` / `starts_with` / `ends_with` / `contains` / `find`（引数は `&str` か `char`）、`<` などの比較と `sort`
@@ -402,7 +403,6 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
   - Fn / FnMut / FnOnce を区別しない（`FnMut` のクロージャを `&dyn Fn` にしてもエラーにならない）
   - ローカル変数をキャプチャするクロージャを `impl Fn` で返すこと（引数のキャプチャだけ対応）
 - `dyn` の制限：`Self` やジェネリクスを使うメソッド（object safe でないもの）は dyn 経由で呼べない。`dyn A + B` は不可
-- 関連型、関連定数（`u32::MAX` などの組み込みは可）
 - 浮動小数点
 - 128 bit 整数
 - モジュール（`mod`）、マクロ定義（`macro_rules!`）

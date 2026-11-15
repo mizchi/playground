@@ -2,6 +2,9 @@
 arrays.binary_bytes 13826
 arrays.cache_bytes 11974
 arrays.object_bytes 12373
+assoc_consts.binary_bytes 16119
+assoc_consts.cache_bytes 27755
+assoc_consts.object_bytes 26913
 binary_heap.binary_bytes 93122
 binary_heap.cache_bytes 153301
 binary_heap.object_bytes 165614
