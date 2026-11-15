@@ -750,11 +750,18 @@ wild は入っていない環境で、リンカは自動選択（ld.lld）。
 
 gen1000（ソース 310 KB）での変化：
 
-| | 最初 | 機械語をキャッシュから外した後 | `.text` を圧縮した後 |
-|---|---:|---:|---:|
-| `.crcache` | 642 KiB | 116 KiB | 116 KiB |
-| `.o` | 757 KiB | 631 KiB | **153 KiB** |
-| 合計 | 1399 KiB | 747 KiB | **270 KiB**（rustc の incremental ディレクトリは 22151 KiB） |
+| | 最初 | 機械語をキャッシュから外した後 | `.text` を圧縮した後 | 索引と panic の表を詰めた後 |
+|---|---:|---:|---:|---:|
+| `.crcache` | 642 KiB | 116 KiB | 116 KiB | **38 KiB** |
+| `.o` | 757 KiB | 631 KiB | 153 KiB | **67 KiB** |
+| 合計 | 1399 KiB | 747 KiB | 270 KiB | **105 KiB**（rustc の incremental ディレクトリは 22156 KiB） |
+| バイナリ | 553 KiB | 553 KiB | 553 KiB | 519 KiB |
+
+- キャッシュのファイルは本体を zstd で圧縮し、キーは下位 64 bit・長さは可変長で書く（索引は 1 件 20 byte → 9 byte 前後。圧縮で要約や panic の場所も 1/3 になる）。
+- panic の表は可変長整数のバイト列にし、参照するのは `.text` の先頭だけにした（関数の位置は `.o` を作るときに自分で数え、symtab と合っているか確かめる）。
+  前は 1 関数あたりリロケーション 24 byte + 見出し 16 byte、1 か所あたり 8 byte だった。表はバイナリにも載るので、バイナリも 6% 小さくなった。
+  ハンドラ（`__exr_on_trap`）は panic のときに列を前から読む。
+- `.o` は `.text` だけでなく、メモリに載る PROGBITS（panic の表・文字列）も圧縮する（wild はどれも解凍して読む）。
 
 `python3 bench/run.py 1000`（wild 0.10.0 を PATH に入れて）：
 
@@ -763,7 +770,27 @@ gen1000（ソース 310 KB）での変化：
 | crustc（wild） | 124 | 17 | **28** | 19.5 MiB | 554 KiB | **270 KiB** |
 | crustc（ld.lld、圧縮しない一時 `.o`） | 151 | 18 | 41 | 59.0 MiB | 553 KiB | 270 KiB |
 
-- 圧縮は 646 KB → 157 KB で 0.3 ms（`--time` の `compress`）。wild の解凍込みのリンクは 6〜9 ms。
+- 圧縮は 587 KB → 69 KB で 0.3 ms（`--time` の `compress`）。wild の解凍込みのリンクは 6〜9 ms。
+
+#### 本物の rustc との比較（`python3 bench/vs_rustc.py`）
+
+同じソースを同じ手順（cold → no-op → 1 か所編集）でビルドし、残るディスク・バイナリ（strip 後）・実行時間を並べる。全結果は `bench/vs_rustc_result.md`。
+crustc のリンカは wild 0.10.0、rustc 1.97.0。どの設定でも出力は rustc `-O` と一致した。
+
+| プログラム | | cold ms | edit ms | disk KiB | binary KiB | run ms |
+|---|---|---:|---:|---:|---:|---:|
+| gen1000 | crustc | **118** | **28** | **105** | 521 | 12 |
+| | rustc -Cincremental | 827 | 417 | 22156 | 1043 | 9 |
+| | rustc -O | 11448 | - | - | 382 | 2 |
+| nbody | crustc -O | **47** | **6** | **29** | **23** | 92 |
+| | rustc -Cincremental | 149 | 106 | 2227 | 366 | 1231 |
+| | rustc -O | 177 | - | - | 364 | 62 |
+| sort | crustc -O | **46** | **6** | **28** | **20** | 550 |
+| | rustc -Cincremental | 203 | 128 | 3102 | 385 | 2041 |
+| | rustc -O | 317 | - | - | 348 | 184 |
+
+- 編集後の再ビルドは rustc の incremental の 15〜20 倍速く、残すディスクは 1/75〜1/210、バイナリは 1/10〜1/20（gen1000 は rustc `-O` より大きい: debug の検査と最適化なしの分）。
+- 実行時間は crustc（debug）が rustc（debug）より速いものが多い（strings と gen1000 を除く）。crustc `-O` は rustc `-O` の 1.5〜4 倍。
 - キャッシュに残ったもの：panic の場所の表（1 か所 4〜5 byte）、リロケーション、要約（21 KB）、エントリの索引（1 件 20 byte、約 40 KB）。整数は可変長で、オフセットと行は前の値との差で書く。
 
 crustc のバイナリはシンボルを持たない（strip しても同じ大きさ）。rustc は std を静的にリンクするので、strip しても 335 KiB 以上ある。crustc は使う部分の prelude だけをコンパイルし、libc を動的にリンクするので、rustc の 1/10〜1/30 になる。
