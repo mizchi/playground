@@ -530,13 +530,13 @@ impl Session {
             format!("{} items, {} parsed", a.items.len(), a.n_parsed),
         );
 
-        let live = a.prog.reachable(&a.refs);
+        let mut live = a.prog.reachable(&a.refs);
         let mut base = KeyHasher::new();
         base.add(&(self.cid, 1u8));
         base.add(self.isa.triple().to_string().as_str());
         base.add(&(self.opts.opt, self.opts.fast_regalloc));
         let base = base.finish();
-        let user_live: Vec<u32> = (0..a.prog.names.len())
+        let mut user_live: Vec<u32> = (0..a.prog.names.len())
             .filter(|&i| live[i] && Self::concrete(&a.prog, i))
             .map(|i| i as u32)
             .collect();
@@ -593,6 +593,34 @@ impl Session {
             }
             wave = std::mem::take(&mut insts.lock().unwrap().pending);
             wave.retain(|id| !blobs.contains_key(id));
+            // codegen の途中で作ったインスタンス (書式化・drop glue など) の本体が名前で参照する関数も
+            // 到達可能にする (main からの参照グラフにはなかったもの)
+            let starts: Vec<u32> = {
+                let g = insts.lock().unwrap();
+                wave.iter().map(|&id| g.body_of(id)).collect()
+            };
+            let mut stack: Vec<u32> = starts
+                .iter()
+                .flat_map(|&b| a.refs[b as usize].iter().copied())
+                .collect();
+            // 書式化の glue は Display / Debug の impl を名前を書かずに呼ぶ
+            if starts.iter().any(|&b| {
+                matches!(a.prog.names[b as usize].as_str(), "__exr_display" | "__exr_debug")
+            }) {
+                stack.extend((0..a.prog.names.len() as u32).filter(|&i| {
+                    matches!(a.prog.sigs[i as usize].impl_trait.as_deref(), Some("Display" | "Debug"))
+                }));
+            }
+            while let Some(i) = stack.pop() {
+                if std::mem::replace(&mut live[i as usize], true) {
+                    continue;
+                }
+                stack.extend(a.refs[i as usize].iter().copied());
+                if Self::concrete(&a.prog, i as usize) && !blobs.contains_key(&i) {
+                    user_live.push(i);
+                    wave.push(i);
+                }
+            }
         }
         let insts = insts.into_inner().unwrap();
         tm.lap(
@@ -1093,7 +1121,7 @@ fn emit_object(
                 kind: RELOC_KINDS[r.kind as usize],
                 addend: r.addend,
                 name: match r.target {
-                    Target::Func(t) => ModuleRelocTarget::from(ids[&t]),
+                    Target::Func(t) => ModuleRelocTarget::from(*ids.get(&t).unwrap_or_else(|| panic!("internal: function `{}` is not declared", insts.get(t).map(|i| i.sig.symbol.clone()).unwrap_or_else(|| prog.names[t as usize].clone())))),
                     Target::SelfOffset(off) => ModuleRelocTarget::FunctionOffset(fid, off),
                     Target::Data(k) => ModuleRelocTarget::from(data_ids[k as usize]),
                     Target::Static(c) => ModuleRelocTarget::from(statics[&c]),

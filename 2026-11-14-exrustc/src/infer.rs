@@ -110,6 +110,8 @@ struct Inf<'p> {
     pending: Vec<(*const syn::ExprClosure, Vec<u32>, u32)>,
     /// 0 でなければ式の型を記録しない (一時的に parse したノードの推論中)
     no_record: u32,
+    /// `it.collect()` の (受け手, 結果): 最後に結果が Vec<T> / HashMap<K, V> なら Item と単一化する
+    collects: Vec<(u32, u32)>,
 }
 
 /// sig はこの関数 (インスタンスなら型引数を入れた後) のシグネチャ、env は `Self` と型パラメータ
@@ -144,6 +146,7 @@ pub fn infer_full(
         defer: 0,
         pending: vec![],
         no_record: 0,
+        collects: vec![],
     };
     s.ret = match ret {
         // 一部だけ分かっている型 (`Result<?, u8>`): 型パラメータの所を型変数にする
@@ -174,6 +177,7 @@ pub fn infer_full(
     let tail = s.block(&f.block);
     let ret = s.ret;
     s.unify(tail, ret);
+    s.finish_collects();
     let lets = std::mem::take(&mut s.lets);
     let r = s.resolve(ret);
     let ps = pvars.into_iter().map(|v| s.resolve(v)).collect();
@@ -810,6 +814,31 @@ impl Inf<'_> {
     }
 
     /// 参照型の変数を辿って中身へ。参照を通ったら束縛モードを Ref にする
+    /// FromIterator の代わり: collect の結果が Vec<T> なら Item = T、HashMap<K, V> なら Item = (K, V)
+    fn finish_collects(&mut self) {
+        let cs = std::mem::take(&mut self.collects);
+        for (recv, r) in cs {
+            let Some(item) = self.assoc_var(recv, "Item") else { continue };
+            let root = self.find(r);
+            let (b, vars) = match self.shape[root as usize] {
+                Some(Shape::Adt(b, st, l)) => (b, self.adt_vars_of(st, l)),
+                Some(Shape::Known(Ty::Struct(sid))) => {
+                    let args = self.prog.structs[sid as usize].args.clone();
+                    (self.prog.base_of(sid), args.into_iter().map(|a| self.known(a)).collect())
+                }
+                _ => continue,
+            };
+            let name = self.prog.structs[b as usize].name.clone();
+            if name == "Vec" && vars.len() == 1 {
+                self.unify(item, vars[0]);
+            } else if name == "HashMap" && vars.len() == 2 {
+                let tb = self.prog.tuple_base(2);
+                let t = self.adt(tb, vec![vars[0], vars[1]]);
+                self.unify(item, t);
+            }
+        }
+    }
+
     fn closure_body(&mut self, c: &syn::ExprClosure, vs: &[u32], rv: u32) {
         self.scopes.push(vec![]);
         for (p, &v) in c.inputs.iter().zip(vs) {
@@ -1699,7 +1728,11 @@ impl Inf<'_> {
                     }
                     return self.scalar_method(mc, r, rv, args);
                 }
-                self.apply_recv(callee, args, rv)
+                let r = self.apply_recv(callee, args, rv);
+                if n == "collect" {
+                    self.collects.push((rv, r));
+                }
+                r
             }
             _ => self.expr_rest(e),
         }
@@ -1720,6 +1753,13 @@ impl Inf<'_> {
                 "is_empty" => self.known(Ty::Bool),
                 "as_bytes" => self.known(Ty::Ref(false, intern(Ty::Slice(intern(Ty::U8))))),
                 "as_ptr" => self.known(Ty::Ptr(false, intern(Ty::U8))),
+                // prelude の &str の関数 (split などのイテレータは分からないまま)
+                "trim" | "trim_start" | "trim_end" => self.known(Ty::Ref(false, intern(Ty::Str))),
+                "starts_with" | "ends_with" | "contains" => self.known(Ty::Bool),
+                "find" => {
+                    let u = self.known(Ty::Usize);
+                    self.option_of(u)
+                }
                 _ => self.var(),
             };
         }

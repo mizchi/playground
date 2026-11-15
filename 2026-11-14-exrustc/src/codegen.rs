@@ -309,6 +309,12 @@ impl Worker {
             };
             let r = if prog.index.get(crate::prelude::DROP_GLUE) == Some(&body_id) {
                 cx.drop_glue_body(sig)
+            } else if prog.index.get("__exr_hash") == Some(&body_id) {
+                cx.hash_glue_body(sig)
+            } else if prog.index.get("__exr_display") == Some(&body_id) {
+                cx.fmt_glue_body(sig, false)
+            } else if prog.index.get("__exr_debug") == Some(&body_id) {
+                cx.fmt_glue_body(sig, true)
             } else {
                 cx.body(f, sig)
             };
@@ -539,6 +545,10 @@ fn assoc_constraint(b: &str) -> Option<(String, crate::front::TySyn)> {
         )),
         _ => None,
     })
+}
+
+fn m_name(mc: &syn::ExprMethodCall) -> String {
+    mc.method.to_string()
 }
 
 fn strip_paren(e: &Expr) -> &Expr {
@@ -1008,8 +1018,17 @@ impl Cx<'_, '_> {
                 while let Ty::Ref(_, i) = t {
                     t = *i;
                 }
-                let Ty::Struct(sid) = t else { return None };
                 let name = mc.method.to_string();
+                // &str の組み込み / prelude の関数 (マクロの引数の中は型推論の記録がない)
+                if t == Ty::Str {
+                    return match name.as_str() {
+                        "trim" | "as_str" => Some(Ty::Ref(false, intern(Ty::Str))),
+                        "starts_with" | "ends_with" | "contains" | "is_empty" => Some(Ty::Bool),
+                        "len" => Some(Ty::Usize),
+                        _ => None,
+                    };
+                }
+                let Ty::Struct(sid) = t else { return None };
                 let id = self
                     .prog
                     .method(sid, &name)
@@ -1133,7 +1152,18 @@ impl Cx<'_, '_> {
                             let a = self.symbol_addr(NS_STATIC, ci);
                             Ok(Place::Mem(a, 0, t))
                         }
-                        _ => err(p.span(), format!("cannot find value `{id}`")),
+                        // unit struct の値 (`struct U;` の `U`)
+                        _ => match self.prog.struct_by_path(&p.path, self.self_sid) {
+                            Some(sid)
+                                if self.prog.structs[sid as usize].fields.is_empty()
+                                    && !self.prog.structs[sid as usize].is_enum
+                                    && self.prog.structs[sid as usize].generics.is_empty() =>
+                            {
+                                let t = Ty::Struct(sid);
+                                Ok(Place::Mem(self.temp(t), 0, t))
+                            }
+                            _ => err(p.span(), format!("cannot find value `{id}`")),
+                        },
                     },
                 }
             }
@@ -1166,6 +1196,20 @@ impl Cx<'_, '_> {
                         u.span(),
                         format!("type `{}` cannot be dereferenced", self.prog.tn(t)),
                     ),
+                }
+            }
+            // `map[&k]`: get(&k).unwrap() の指す先
+            Expr::Index(ix)
+                if matches!(self.peek(&ix.expr).map(|t| self.strip_refs(t)),
+                    Some(Ty::Struct(sid)) if self.prog.structs[self.prog.base_of(sid) as usize].name == "HashMap") =>
+            {
+                let b = &ix.expr;
+                let k = &ix.index;
+                let e: Expr = syn::parse_quote!((#b).get(#k).unwrap());
+                let (v, t) = self.expr(&e, None)?;
+                match (v, t) {
+                    (Some(p), Ty::Ref(_, inner)) => Ok(Place::Mem(p, 0, *inner)),
+                    _ => err(ix.span(), "internal: bad map index"),
                 }
             }
             Expr::Index(ix) if !matches!(&*ix.index, Expr::Range(_)) => {
@@ -2315,6 +2359,22 @@ impl Cx<'_, '_> {
     /// `recv.m(args)`: レシーバを自動 deref して struct を見つけ、
     /// メソッドの self 型に合わせて自動参照 (`&self` / `&mut self`) かコピー (`self`) で渡す
     fn method_call(&mut self, mc: &syn::ExprMethodCall, expected: Option<Ty>) -> R<V> {
+        // `x.to_string()` (Display を実装した型。&str は str_method が String::from にする)
+        if mc.method == "to_string" && mc.args.is_empty() && self.prog.index.contains_key("__exr_display") {
+            if let Some(t) = self.peek(&mc.receiver) {
+                let mut b = t;
+                while let Ty::Ref(_, i) = b {
+                    b = *i;
+                }
+                let own = match b {
+                    Ty::Struct(sid) => self.prog.method(sid, "to_string").is_some(),
+                    _ => false,
+                };
+                if !own && b != Ty::Str && self.fmt_ok(t, false) {
+                    return self.to_string_value(&mc.receiver, mc.span());
+                }
+            }
+        }
         if let Some(r) = self.builtin_method(mc)? {
             return Ok(r);
         }
@@ -2591,9 +2651,19 @@ impl Cx<'_, '_> {
             vals.push((r, rt, span));
         }
         for (a, &pt) in args.iter().zip(&sig0.params[skip..]) {
-            let exp = Some(self.prog.partial_subst(pt, &sol)).filter(|&t| !self.prog.has_param(t));
+            let mut exp = Some(self.prog.partial_subst(pt, &sol)).filter(|&t| !self.prog.has_param(t));
             // `F: Fn(A) -> B` の引数にクロージャを渡すなら、A / B をクロージャの型の手がかりにする
             let fb = self.fn_bound_of(&sig0, pt);
+            // 関数アイテム (`or_insert_with(Vec::new)`) なら、境界を関数ポインタの期待型にして型引数を決める
+            if let (Some((bps, bret)), None, Expr::Path(_)) = (&fb, exp, strip_paren(a)) {
+                let ft = crate::front::FnTy {
+                    params: bps.iter().map(|&t| self.prog.partial_subst(t, &sol)).collect(),
+                    ret: self.prog.partial_subst(*bret, &sol),
+                };
+                if !ft.params.iter().any(|&t| self.prog.has_param(t)) && !self.prog.has_param(ft.ret) {
+                    exp = Some(Ty::Fn(crate::front::intern_fn(ft)));
+                }
+            }
             if let (Some((bps, bret)), Expr::Closure(_)) = (&fb, strip_paren(a)) {
                 let ps = bps.iter().map(|&t| self.prog.partial_subst(t, &sol)).collect();
                 let r = Some(self.prog.partial_subst(*bret, &sol));
@@ -2911,6 +2981,30 @@ impl Cx<'_, '_> {
                 if let Some((f, ft)) = self.deref_to_slice(r, sid, false) {
                     (r, rt) = (f, ft);
                 }
+            }
+        }
+        // `&str` / `String` の大小比較: prelude の __exr_str_cmp
+        if matches!(b.op, Lt(_) | Le(_) | Gt(_) | Ge(_)) && self.prog.index.contains_key("__exr_str_cmp") {
+            let str_ref = Ty::Ref(false, intern(Ty::Str));
+            let as_str = |this: &mut Self, v: Value, t: Ty| -> Option<Value> {
+                match t {
+                    Ty::Ref(_, Ty::Str) => Some(v),
+                    Ty::Struct(sid) => this.deref_to_slice(v, sid, false).filter(|(_, ft)| *ft == str_ref).map(|f| f.0),
+                    Ty::Ref(_, Ty::Struct(sid)) => {
+                        this.deref_to_slice(v, *sid, false).filter(|(_, ft)| *ft == str_ref).map(|f| f.0)
+                    }
+                    _ => None,
+                }
+            };
+            if let (Some(x), Some(y)) = (as_str(self, l, lt), as_str(self, r, rt)) {
+                let (c, _) = self.call_named("__exr_str_cmp", vec![Ty::Unit], &[(x, str_ref), (y, str_ref)], b.span())?;
+                let cc = match b.op {
+                    Lt(_) => IntCC::SignedLessThan,
+                    Le(_) => IntCC::SignedLessThanOrEqual,
+                    Gt(_) => IntCC::SignedGreaterThan,
+                    _ => IntCC::SignedGreaterThanOrEqual,
+                };
+                return Ok((Some(self.b.ins().icmp_imm_s(cc, c.unwrap(), 0)), Ty::Bool));
             }
         }
         if is_cmp(&b.op) {
@@ -3575,6 +3669,25 @@ impl Cx<'_, '_> {
             }
             rt = *i;
         }
+        // String で String 自身にないメソッド (split など) は &str のメソッド
+        if let Ty::Struct(sid) = rt {
+            let sd = &self.prog.structs[sid as usize];
+            if sd.base.is_none()
+                && sd.name == "String"
+                && self.prog.method(sid, &name).is_none()
+                && matches!(
+                    name.as_str(),
+                    "split" | "split_whitespace" | "lines" | "trim" | "starts_with" | "ends_with" | "contains"
+                        | "find" | "chars"
+                )
+            {
+                let r = &mc.receiver;
+                let m = &mc.method;
+                let args = &mc.args;
+                let e: Expr = syn::parse_quote!((#r).as_str().#m(#args));
+                return self.expr(&e, None).map(Some);
+            }
+        }
         let elem = match rt {
             Ty::Array(t, _) => *t,
             Ty::Ref(_, Ty::Slice(t)) => **t,
@@ -3753,10 +3866,75 @@ impl Cx<'_, '_> {
                 Some(self.b.ins().load(PTR, mf(), fat, 0)),
                 Ty::Ptr(false, intern(Ty::U8)),
             ),
+            // split / lines / trim / starts_with / ends_with / contains / find: prelude の関数
+            "split" | "split_whitespace" | "lines" | "trim" | "starts_with" | "ends_with" | "contains" | "find"
+                if self.prog.index.contains_key(match m_name(mc).as_str() {
+                    "split" => "__exr_str_split",
+                    "split_whitespace" => "__exr_str_split_ws",
+                    "lines" => "__exr_str_lines",
+                    "trim" => "__exr_str_trim",
+                    "starts_with" => "__exr_str_starts_with",
+                    "ends_with" => "__exr_str_ends_with",
+                    _ => "__exr_str_find",
+                }) =>
+            {
+                let sref = Ty::Ref(false, intern(Ty::Str));
+                let name = m_name(mc);
+                let f = match name.as_str() {
+                    "split" => "__exr_str_split",
+                    "split_whitespace" => "__exr_str_split_ws",
+                    "lines" => "__exr_str_lines",
+                    "trim" => "__exr_str_trim",
+                    "starts_with" => "__exr_str_starts_with",
+                    "ends_with" => "__exr_str_ends_with",
+                    _ => "__exr_str_find",
+                };
+                let mut args = vec![(fat, sref)];
+                for a in &mc.args {
+                    // char のパターン (`s.contains('x')`) は UTF-8 にして &str で渡す
+                    let char_pat = name != "split" && self.peek(a) == Some(Ty::Char);
+                    let exp = if name == "split" || char_pat { Ty::Char } else { sref };
+                    let (v, t) = self.expr(a, Some(exp))?;
+                    if name == "split" && t != Ty::Char {
+                        return err(a.span(), "only `char` separators are supported in `split`");
+                    }
+                    self.same(a.span(), t, exp)?;
+                    if char_pat {
+                        let ss = self.b.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot,
+                            4,
+                            0,
+                        ));
+                        let buf = self.b.ins().stack_addr(PTR, ss, 0);
+                        let bt = Ty::Ptr(true, intern(Ty::U8));
+                        let (n, _) = self.call_named(
+                            "__exr_char_utf8",
+                            vec![Ty::Unit],
+                            &[(v.unwrap(), Ty::Char), (buf, bt)],
+                            a.span(),
+                        )?;
+                        let fat = self.make_fat_v(buf, n.unwrap());
+                        args.push((fat, sref));
+                        continue;
+                    }
+                    args.push((v.unwrap(), t));
+                }
+                let r = self.call_named(f, vec![Ty::Unit], &args, mc.span())?;
+                // contains は find の結果が Some か
+                if name == "contains" {
+                    let (v, t) = r;
+                    let v = v.unwrap();
+                    let tag = self.b.ins().load(types::I8, mf(), v, 0);
+                    let _ = t;
+                    let some = self.b.ins().icmp_imm_u(IntCC::NotEqual, tag, 0);
+                    return Ok(Some((Some(some), Ty::Bool)));
+                }
+                return Ok(Some(r));
+            }
             // `s.chars()` / `s.bytes()`
             "chars" => {
                 return self
-                    .call_named("__exr_str_chars", vec![], &[(fat, Ty::Ref(false, intern(Ty::Str)))], mc.span())
+                    .call_named("__exr_str_chars", vec![Ty::Unit], &[(fat, Ty::Ref(false, intern(Ty::Str)))], mc.span())
                     .map(Some);
             }
             "bytes" => {
@@ -4200,13 +4378,41 @@ impl Cx<'_, '_> {
             }
             bt = Some(*i);
         }
+        // (型が分からないメソッド・関数呼び出し (`s.split(' ')` など) もイテレータとみなす)
         let iterator = match bt {
             Some(Ty::Struct(sid)) => self.vec_fields(sid).is_none(),
+            None => matches!(e, Expr::MethodCall(_) | Expr::Call(_)),
             _ => false,
         };
         if iterator {
+            // `for (k, v) in &map`: next がなければ iter() / iter_mut() / into_iter() を通す
+            let struct_has_next = |cx: &Self, t: Option<Ty>| match t {
+                Some(Ty::Struct(s)) => cx.prog.method(s, "next").is_some(),
+                _ => true,
+            };
+            // (`m.iter_mut()` は剥がした後の m ではなく、式全体の型で見る)
+            let has_next = struct_has_next(self, bt)
+                || matches!(strip_paren(&f.expr), Expr::MethodCall(_))
+                    && struct_has_next(self, self.peek(&f.expr));
+            let via: Option<Expr> = if has_next {
+                None
+            } else {
+                let fe = &f.expr;
+                Some(match strip_paren(fe) {
+                    Expr::Reference(r) if r.mutability.is_some() => {
+                        let inner = &r.expr;
+                        syn::parse_quote!((#inner).iter_mut())
+                    }
+                    Expr::Reference(r) => {
+                        let inner = &r.expr;
+                        syn::parse_quote!((#inner).iter())
+                    }
+                    e => syn::parse_quote!((#e).into_iter()),
+                })
+            };
+            let src_e: &Expr = via.as_ref().unwrap_or(&f.expr);
             self.scopes.push(vec![]);
-            let (v, t) = self.expr(&f.expr, None)?;
+            let (v, t) = self.expr(src_e, None)?;
             if t == Ty::Never {
                 self.pop_scope();
                 return Ok((None, Ty::Never));
@@ -4564,6 +4770,9 @@ impl Cx<'_, '_> {
             .unwrap_or_default();
         match name.as_str() {
             "vec" => self.vec_macro(mac, expected),
+            "format" | "print" | "println" | "eprint" | "eprintln" | "write" | "writeln" => {
+                self.fmt_macro(mac, &name)
+            }
             "panic" | "unreachable" | "todo" | "unimplemented" => Ok(self.panic_call()),
             "assert" | "debug_assert" => {
                 let args = self.macro_args(mac)?;
@@ -5844,6 +6053,13 @@ impl Cx<'_, '_> {
         Ok(r)
     }
 
+    fn strip_refs(&self, mut t: Ty) -> Ty {
+        while let Ty::Ref(_, i) = t {
+            t = *i;
+        }
+        t
+    }
+
     /// 値を読むがムーブはしない (deref・呼び出しの対象など)
     fn read_no_move(&mut self, e: &Expr) -> R<V> {
         if is_place_expr(e) && !matches!(strip_paren(e), Expr::Path(p) if self.fn_item(p).is_some() || self.const_of(p).is_some()) {
@@ -6209,5 +6425,789 @@ impl Cx<'_, '_> {
         }
         self.b.ins().return_(&[]);
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 書式化 (format! / print! / println! / eprint! / eprintln! / write! / writeln!)
+// ---------------------------------------------------------------------------
+//
+// 書式文字列はコンパイル時に分解し、prelude の Formatter に「文字列片」と「値」を順に書く。
+// 値は `__exr_display::<T>` / `__exr_debug::<T>` (drop glue と同じく型ごとに codegen が本体を作る) で書く。
+// 数値・文字列の書き出し・パディング・Debug の整形は prelude の Rust の関数。
+
+/// 書式指定 1 個分
+#[derive(Clone, Default, PartialEq)]
+struct FmtSpec {
+    width: usize,
+    /// `{:w$}` / `{:1$}`: 幅を引数から取る (引数の番号)
+    width_arg: Option<usize>,
+    fill: char,
+    align: u8,
+    flags: u8,
+    prec: Option<usize>,
+    radix: u8,
+}
+
+enum FmtPiece {
+    Lit(String),
+    Arg {
+        /// 引数の番号 (位置か名前から決めたもの)
+        arg: usize,
+        debug: bool,
+        spec: FmtSpec,
+    },
+}
+
+/// 書式文字列を分解する。名前つきの `{x}` は named (名前つき引数) か、なければその名前の変数を引数に足す
+fn parse_fmt(
+    s: &str,
+    n_pos: usize,
+    named: &mut Vec<String>,
+    span: proc_macro2::Span,
+) -> R<Vec<FmtPiece>> {
+    let cs: Vec<char> = s.chars().collect();
+    let mut out = vec![];
+    let mut lit = String::new();
+    let mut next = 0;
+    let mut i = 0;
+    while i < cs.len() {
+        let c = cs[i];
+        if c == '{' && cs.get(i + 1) == Some(&'{') {
+            lit.push('{');
+            i += 2;
+            continue;
+        }
+        if c == '}' && cs.get(i + 1) == Some(&'}') {
+            lit.push('}');
+            i += 2;
+            continue;
+        }
+        if c == '}' {
+            return err(span, "invalid format string: unmatched `}`");
+        }
+        if c != '{' {
+            lit.push(c);
+            i += 1;
+            continue;
+        }
+        let Some(end) = cs[i..].iter().position(|&x| x == '}').map(|p| p + i) else {
+            return err(span, "invalid format string: unmatched `{`");
+        };
+        let inner: String = cs[i + 1..end].iter().collect();
+        i = end + 1;
+        if !lit.is_empty() {
+            out.push(FmtPiece::Lit(std::mem::take(&mut lit)));
+        }
+        let (a, sp) = match inner.split_once(':') {
+            Some((a, s)) => (a.trim().to_string(), s.to_string()),
+            None => (inner.trim().to_string(), String::new()),
+        };
+        let arg = if a.is_empty() {
+            next += 1;
+            next - 1
+        } else if let Ok(k) = a.parse::<usize>() {
+            k
+        } else {
+            match named.iter().position(|n| *n == a) {
+                Some(k) => n_pos + k,
+                None => {
+                    named.push(a);
+                    n_pos + named.len() - 1
+                }
+            }
+        };
+        // [[fill]align][+][#][0][width][.prec][type]
+        let sc: Vec<char> = sp.chars().collect();
+        let mut j = 0;
+        let mut spec = FmtSpec {
+            fill: ' ',
+            ..Default::default()
+        };
+        let al = |c: char| match c {
+            '<' => Some(1),
+            '>' => Some(2),
+            '^' => Some(3),
+            _ => None,
+        };
+        if sc.len() >= 2 && al(sc[1]).is_some() {
+            spec.fill = sc[0];
+            spec.align = al(sc[1]).unwrap();
+            j = 2;
+        } else if !sc.is_empty() && al(sc[0]).is_some() {
+            spec.align = al(sc[0]).unwrap();
+            j = 1;
+        }
+        if sc.get(j) == Some(&'+') {
+            spec.flags |= 2;
+            j += 1;
+        }
+        if sc.get(j) == Some(&'#') {
+            spec.flags |= 4;
+            j += 1;
+        }
+        if sc.get(j) == Some(&'0') {
+            spec.flags |= 1;
+            j += 1;
+        }
+        // 幅: 数字、または `名前$` / `番号$`
+        let ws = j;
+        while sc.get(j).is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_') {
+            j += 1;
+        }
+        let wtok: String = sc[ws..j].iter().collect();
+        if sc.get(j) == Some(&'$') {
+            j += 1;
+            spec.width_arg = Some(match wtok.parse::<usize>() {
+                Ok(k) => k,
+                Err(_) => match named.iter().position(|n| *n == wtok) {
+                    Some(k) => n_pos + k,
+                    None => {
+                        named.push(wtok);
+                        n_pos + named.len() - 1
+                    }
+                },
+            });
+        } else if let Ok(w) = wtok.parse::<usize>() {
+            spec.width = w;
+        } else {
+            // 数字でなければ型の指定 (`x` / `b` など)
+            j = ws;
+        }
+        if sc.get(j) == Some(&'.') {
+            j += 1;
+            let mut p = 0;
+            while let Some(d) = sc.get(j).and_then(|c| c.to_digit(10)) {
+                p = p * 10 + d as usize;
+                j += 1;
+            }
+            spec.prec = Some(p);
+        }
+        let ty: String = sc[j..].iter().collect();
+        let (debug, radix) = match ty.as_str() {
+            "" => (false, 0),
+            "?" => (true, 0),
+            "x" => (false, 1),
+            "X" => (false, 2),
+            "b" => (false, 3),
+            "o" => (false, 4),
+            "x?" => (true, 1),
+            "X?" => (true, 2),
+            t => return err(span, format!("unsupported format specifier `{t}`")),
+        };
+        spec.radix = radix;
+        out.push(FmtPiece::Arg { arg, debug, spec });
+    }
+    if !lit.is_empty() {
+        out.push(FmtPiece::Lit(lit));
+    }
+    Ok(out)
+}
+
+impl Cx<'_, '_> {
+    /// &str の定数 (fat pointer のアドレス)
+    fn str_const(&mut self, s: &str) -> Value {
+        let n = s.len();
+        let p = self.data_addr(s.as_bytes().to_vec());
+        self.make_fat(p, n as i64)
+    }
+
+    fn formatter_ty(&self) -> R<Ty> {
+        let Some(&sid) = self.prog.struct_index.get("Formatter") else {
+            return Err("internal: Formatter is missing from the prelude".into());
+        };
+        Ok(Ty::Struct(sid))
+    }
+
+    fn string_ty(&self) -> R<Ty> {
+        let Some(&sid) = self.prog.struct_index.get("String") else {
+            return Err("internal: String is missing from the prelude".into());
+        };
+        Ok(Ty::Struct(sid))
+    }
+
+    /// 値として書けるか (`{}` なら Display、`{:?}` なら Debug を実装しているか)
+    fn fmt_ok(&self, t: Ty, debug: bool) -> bool {
+        match t {
+            t if t.is_int() || matches!(t, Ty::Bool | Ty::Char | Ty::Str) => true,
+            Ty::Unit => debug,
+            Ty::Ref(_, i) | Ty::Box(i) => self.fmt_ok(*i, debug),
+            Ty::Array(e, _) | Ty::Slice(e) => debug && self.fmt_ok(*e, debug),
+            Ty::Struct(sid) => {
+                let b = self.prog.base_of(sid);
+                let tr = if debug { "Debug" } else { "Display" };
+                if self.prog.impls.contains(&(b, tr.to_string())) {
+                    return true;
+                }
+                debug && self.prog.is_tuple(b)
+                    && self.prog.structs[sid as usize].args.iter().all(|&a| self.fmt_ok(a, true))
+            }
+            _ => false,
+        }
+    }
+
+    /// 書式化マクロの本体。dest が Some なら write! (その Formatter / String に書く)
+    fn fmt_macro(&mut self, mac: &syn::Macro, name: &str) -> R<V> {
+        use syn::parse::Parser;
+        let span = mac.span();
+        let p = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated;
+        let mut args: Vec<Expr> = p
+            .parse2(mac.tokens.clone())
+            .map(|v| v.into_iter().collect())
+            .or_else(|e| err(span, e))?;
+        let dest = if matches!(name, "write" | "writeln") {
+            if args.is_empty() {
+                return err(span, format!("`{name}!` needs a destination"));
+            }
+            Some(args.remove(0))
+        } else {
+            None
+        };
+        let newline = matches!(name, "println" | "eprintln" | "writeln");
+        let fmt_s = match args.first() {
+            Some(Expr::Lit(syn::ExprLit {
+                lit: Lit::Str(s), ..
+            })) => s.value(),
+            None if newline || dest.is_some() => String::new(),
+            Some(e) => return err(e.span(), "format argument must be a string literal"),
+            None => return err(span, format!("`{name}!` needs a format string")),
+        };
+        let rest: Vec<Expr> = args.into_iter().skip(1).collect();
+        // 位置引数と `name = expr`
+        let mut pos: Vec<Expr> = vec![];
+        let mut named: Vec<String> = vec![];
+        let mut named_e: Vec<Expr> = vec![];
+        for a in rest {
+            match a {
+                Expr::Assign(asg) => {
+                    let Expr::Path(p) = &*asg.left else {
+                        return err(asg.span(), "expected `name = value`");
+                    };
+                    named.push(p.path.get_ident().map(|i| i.to_string()).unwrap_or_default());
+                    named_e.push(*asg.right);
+                }
+                e => pos.push(e),
+            }
+        }
+        let mut names = named.clone();
+        let mut pieces = parse_fmt(&fmt_s, pos.len(), &mut names, span)?;
+        if newline {
+            pieces.push(FmtPiece::Lit("\n".into()));
+        }
+        // 書式文字列の `{x}` (引数にない名前) はその名前の変数
+        for n in &names[named.len()..] {
+            let id = syn::Ident::new(n, span);
+            named_e.push(syn::parse_quote!(#id));
+        }
+        let all: Vec<Expr> = pos.into_iter().chain(named_e).collect();
+        // 書き込み先の Formatter
+        let fty = self.formatter_ty().or_else(|e| err(span, e))?;
+        let fref = Ty::Ref(true, intern(fty));
+        let sty = self.string_ty().or_else(|e| err(span, e))?;
+        let sref = Ty::Ref(true, intern(sty));
+        let mut owned_string = None;
+        let f = match &dest {
+            Some(d) => {
+                let (v, t) = self.read_no_move(d)?;
+                let v = v.ok_or("expected a destination")?;
+                let mut t = t;
+                let mut v = v;
+                while let Ty::Ref(_, i) = t {
+                    if matches!(i, Ty::Struct(_)) {
+                        t = *i;
+                        break;
+                    }
+                    v = self.b.ins().load(PTR, mf(), v, 0);
+                    t = *i;
+                }
+                if t == fty {
+                    v
+                } else if t == sty {
+                    self.call_named("__exr_formatter", vec![Ty::Unit], &[(v, sref)], span)?.0.unwrap()
+                } else {
+                    return err(
+                        d.span(),
+                        format!("cannot write into `{}`", self.prog.tn(t)),
+                    );
+                }
+            }
+            None => {
+                let (s, _) = self.call_named("String::new", vec![], &[], span)?;
+                let s = s.unwrap();
+                owned_string = Some(s);
+                self.call_named("__exr_formatter", vec![Ty::Unit], &[(s, sref)], span)?.0.unwrap()
+            }
+        };
+        // 引数は (ムーブせずに) 1 回ずつ評価してアドレスにする
+        let mut vals: Vec<(Value, Ty, proc_macro2::Span)> = vec![];
+        // 幅に使う引数 (`{:w$}`) は usize
+        let width_args: Vec<usize> = pieces
+            .iter()
+            .filter_map(|p| match p {
+                FmtPiece::Arg { spec, .. } => spec.width_arg,
+                _ => None,
+            })
+            .collect();
+        for (ai, a) in all.iter().enumerate() {
+            let (v, t) = if is_place_expr(a) {
+                match self.place(a)? {
+                    Place::Mem(p, o, t) => (self.addr_plus(p, o), t),
+                    Place::Var(var, t) => {
+                        let x = self.b.use_var(var);
+                        let ss = self.slot(t);
+                        self.b.ins().stack_store(PTR, x, ss, 0);
+                        (self.b.ins().stack_addr(PTR, ss, 0), t)
+                    }
+                    Place::Zst(t) => (self.b.ins().iconst(PTR, 0), t),
+                }
+            } else {
+                let exp = width_args.contains(&ai).then_some(Ty::Usize);
+                let (v, t) = self.expr(a, exp)?;
+                if t == Ty::Never {
+                    return Ok((None, Ty::Never));
+                }
+                let v = match v {
+                    Some(v) if t.is_agg() => {
+                        self.own_temp_at(v, t);
+                        v
+                    }
+                    Some(v) => {
+                        let ss = self.slot(t);
+                        self.b.ins().stack_store(PTR, v, ss, 0);
+                        let a = self.b.ins().stack_addr(PTR, ss, 0);
+                        if self.needs_drop(t) {
+                            self.own_temp_at(a, t);
+                        }
+                        a
+                    }
+                    None => self.b.ins().iconst(PTR, 0),
+                };
+                (v, t)
+            };
+            vals.push((v, t, a.span()));
+        }
+        let mut cur = FmtSpec {
+            fill: ' ',
+            ..Default::default()
+        };
+        let str_ref = Ty::Ref(false, intern(Ty::Str));
+        for pc in &pieces {
+            match pc {
+                FmtPiece::Lit(s) => {
+                    let l = self.str_const(s);
+                    self.call_named("__exr_fmt_lit", vec![Ty::Unit], &[(f, fref), (l, str_ref)], span)?;
+                }
+                FmtPiece::Arg { arg, debug, spec } => {
+                    let Some(&(v, t, asp)) = vals.get(*arg) else {
+                        return err(span, format!("format string refers to argument {arg}, but there are {}", vals.len()));
+                    };
+                    if !self.fmt_ok(t, *debug) {
+                        return err(
+                            asp,
+                            format!(
+                                "`{}` doesn't implement `{}`",
+                                self.prog.tn(t),
+                                if *debug { "Debug" } else { "Display" }
+                            ),
+                        );
+                    }
+                    if *spec != cur || spec.width_arg.is_some() {
+                        let c = |this: &mut Self, ty: ir::Type, x: i64| this.b.ins().iconst(ty, x);
+                        let w = match spec.width_arg {
+                            Some(k) => {
+                                let Some(&(wv, wt, wsp)) = vals.get(k) else {
+                                    return err(span, "missing width argument");
+                                };
+                                self.same(wsp, wt, Ty::Usize)?;
+                                self.b.ins().load(types::I64, mf(), wv, 0)
+                            }
+                            None => c(self, types::I64, spec.width as i64),
+                        };
+                        let fill = c(self, types::I32, spec.fill as i64);
+                        let al = c(self, types::I8, spec.align as i64);
+                        let fl = c(self, types::I8, spec.flags as i64);
+                        let pr = c(self, types::I64, spec.prec.unwrap_or(0) as i64);
+                        let hp = c(self, types::I8, spec.prec.is_some() as i64);
+                        let rx = c(self, types::I8, spec.radix as i64);
+                        self.call_named(
+                            "__exr_fmt_spec",
+                            vec![Ty::Unit],
+                            &[
+                                (f, fref),
+                                (w, Ty::Usize),
+                                (fill, Ty::Char),
+                                (al, Ty::U8),
+                                (fl, Ty::U8),
+                                (pr, Ty::Usize),
+                                (hp, Ty::Bool),
+                                (rx, Ty::U8),
+                            ],
+                            span,
+                        )?;
+                        cur = spec.clone();
+                    }
+                    let g = if *debug { "__exr_debug" } else { "__exr_display" };
+                    self.call_named(g, vec![t], &[(v, Ty::Ref(false, intern(t))), (f, fref)], span)?;
+                }
+            }
+        }
+        match name {
+            "format" => Ok((owned_string, sty)),
+            "print" | "println" | "eprint" | "eprintln" => {
+                let s = owned_string.unwrap();
+                let pf = if name.starts_with('e') { "__exr_eprint" } else { "__exr_print" };
+                self.call_named(pf, vec![Ty::Unit], &[(s, Ty::Ref(false, intern(sty)))], span)?;
+                self.own_temp_at(s, sty);
+                Ok((None, Ty::Unit))
+            }
+            _ => self.call_named("__exr_fmt_ok", vec![Ty::Unit], &[], span),
+        }
+    }
+
+    /// `x.to_string()` (Display を実装した型): `format!("{}", x)` と同じ
+    fn to_string_value(&mut self, recv: &Expr, span: proc_macro2::Span) -> R<V> {
+        let mac: syn::Macro = syn::parse_quote!(format!("{}", #recv));
+        let _ = span;
+        self.fmt_macro(&mac, "format")
+    }
+
+    /// `__exr_display::<T>` / `__exr_debug::<T>` の本体
+    fn fmt_glue_body(&mut self, sig: &FnSig, debug: bool) -> R<()> {
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        self.b.switch_to_block(entry);
+        self.b.seal_block(entry);
+        let ps = self.b.block_params(entry).to_vec();
+        let (x, f) = (ps[0], ps[1]);
+        let Some(Ty::Ref(_, t)) = sig.params.first() else {
+            return Err("internal: bad fmt glue signature".into());
+        };
+        let t = **t;
+        let fty = self.formatter_ty()?;
+        let fref = Ty::Ref(true, intern(fty));
+        let span = proc_macro2::Span::call_site();
+        let str_ref = Ty::Ref(false, intern(Ty::Str));
+        let me = if debug { "__exr_debug" } else { "__exr_display" };
+        match t {
+            t if t.is_int() => {
+                let ct = clif_ty(t).unwrap();
+                let v = self.b.ins().load(ct, mf(), x, 0);
+                let v64 = if ct == types::I64 {
+                    v
+                } else if t.signed() {
+                    self.b.ins().sextend(types::I64, v)
+                } else {
+                    self.b.ins().uextend(types::I64, v)
+                };
+                let (mag, neg) = if t.signed() {
+                    let neg = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, v64, 0);
+                    let n = self.b.ins().ineg(v64);
+                    (self.b.ins().select(neg, n, v64), neg)
+                } else {
+                    (v64, self.b.ins().iconst(types::I8, 0))
+                };
+                self.call_named("__exr_fmt_int", vec![Ty::Unit], &[(f, fref), (mag, Ty::U64), (neg, Ty::Bool)], span)?;
+            }
+            Ty::Bool => {
+                let v = self.b.ins().load(types::I8, mf(), x, 0);
+                let h = if debug { "__exr_fmt_bool" } else { "__exr_fmt_bool" };
+                self.call_named(h, vec![Ty::Unit], &[(f, fref), (v, Ty::Bool)], span)?;
+            }
+            Ty::Char => {
+                let v = self.b.ins().load(types::I32, mf(), x, 0);
+                let h = if debug { "__exr_fmt_char_debug" } else { "__exr_fmt_char" };
+                self.call_named(h, vec![Ty::Unit], &[(f, fref), (v, Ty::Char)], span)?;
+            }
+            Ty::Unit => {
+                let l = self.str_const("()");
+                self.call_named("__exr_fmt_lit", vec![Ty::Unit], &[(f, fref), (l, str_ref)], span)?;
+            }
+            // x: &str (fat のアドレス)
+            Ty::Str => {
+                let h = if debug { "__exr_fmt_str_debug" } else { "__exr_fmt_str" };
+                self.call_named(h, vec![Ty::Unit], &[(f, fref), (x, str_ref)], span)?;
+            }
+            Ty::Ref(_, Ty::Str) => {
+                let h = if debug { "__exr_fmt_str_debug" } else { "__exr_fmt_str" };
+                self.call_named(h, vec![Ty::Unit], &[(f, fref), (x, str_ref)], span)?;
+            }
+            Ty::Ref(_, i) | Ty::Box(i) if !t.is_fat() => {
+                let p = self.b.ins().load(PTR, mf(), x, 0);
+                self.call_named(me, vec![*i], &[(p, Ty::Ref(false, intern(*i))), (f, fref)], span)?;
+            }
+            // &[T] / &mut [T]: 要素の列
+            Ty::Ref(_, Ty::Slice(e)) | Ty::Box(Ty::Slice(e)) => {
+                let p = self.b.ins().load(PTR, mf(), x, 0);
+                let n = self.b.ins().load(types::I64, mf(), x, 8);
+                self.fmt_list(f, p, n, **e, me)?;
+            }
+            Ty::Array(e, n) => {
+                let n = self.b.ins().iconst(types::I64, n as i64);
+                self.fmt_list(f, x, n, *e, me)?;
+            }
+            Ty::Struct(sid) => {
+                let b = self.prog.base_of(sid);
+                let tr = if debug { "Debug" } else { "Display" };
+                let bname = self.prog.structs[b as usize].name.clone();
+                let mname = format!("{bname}::<{tr}>::fmt");
+                if let Some(&m) = self.prog.index.get(&mname) {
+                    // 手書き (と prelude) の impl
+                    let ms = &self.prog.sigs[m as usize];
+                    let mut fid = m;
+                    if ms.is_generic() {
+                        let mut sol = vec![None; ms.generics.len()];
+                        if let Some(st) = ms.self_ty {
+                            self.prog.match_ty(st, t, &mut sol);
+                        }
+                        let recv = [Ty::Ref(false, intern(t)), fref];
+                        fid = self.resolve_call(m, &recv, sol, None, span)?.0;
+                    }
+                    let fs = self.insts.lock().unwrap().sig(self.prog, fid).clone();
+                    let fr = self.fref(fid, &fs);
+                    let mut cv = vec![];
+                    if is_sret(&fs) {
+                        cv.push(self.temp(fs.ret));
+                    }
+                    cv.push(x);
+                    cv.push(f);
+                    self.b.ins().call(fr, &cv);
+                } else if debug {
+                    self.fmt_derived(sid, x, f)?;
+                } else {
+                    return Err(format!("`{bname}` doesn't implement `Display`"));
+                }
+            }
+            t => return Err(format!("`{}` cannot be formatted", self.prog.tn(t))),
+        }
+        self.b.ins().return_(&[]);
+        Ok(())
+    }
+
+    /// `[a, b, ..]`
+    fn fmt_list(&mut self, f: Value, p: Value, n: Value, e: Ty, me: &str) -> R<()> {
+        let fty = self.formatter_ty()?;
+        let fref = Ty::Ref(true, intern(fty));
+        let span = proc_macro2::Span::call_site();
+        let str_ref = Ty::Ref(false, intern(Ty::Str));
+        let empty = self.str_const("");
+        let kind = self.b.ins().iconst(types::I8, 2);
+        self.call_named("__exr_dbg_begin", vec![Ty::Unit], &[(f, fref), (empty, str_ref), (kind, Ty::U8)], span)?;
+        let (es, _) = self.prog.size_align(e);
+        let i = self.b.declare_var(types::I64);
+        let z = self.b.ins().iconst(types::I64, 0);
+        self.b.def_var(i, z);
+        let head = self.b.create_block();
+        let body = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.ins().jump(head, &[]);
+        self.b.switch_to_block(head);
+        let iv = self.b.use_var(i);
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, iv, n);
+        self.b.ins().brif(more, body, &[], done, &[]);
+        self.b.switch_to_block(body);
+        let iv = self.b.use_var(i);
+        let empty = self.str_const("");
+        self.call_named("__exr_dbg_item", vec![Ty::Unit], &[(f, fref), (iv, Ty::Usize), (empty, str_ref)], span)?;
+        let off = self.b.ins().imul_imm_s(iv, es as i64);
+        let a = self.b.ins().iadd(p, off);
+        self.call_named(me, vec![e], &[(a, Ty::Ref(false, intern(e))), (f, fref)], span)?;
+        self.call_named("__exr_dbg_item_end", vec![Ty::Unit], &[(f, fref)], span)?;
+        let iv = self.b.use_var(i);
+        let next = self.b.ins().iadd_imm_s(iv, 1);
+        self.b.def_var(i, next);
+        self.b.ins().jump(head, &[]);
+        self.b.switch_to_block(done);
+        let fl = self.b.ins().iconst(types::I8, 0);
+        self.call_named("__exr_dbg_end", vec![Ty::Unit], &[(f, fref), (n, Ty::Usize), (kind, Ty::U8), (fl, Ty::Bool)], span)?;
+        Ok(())
+    }
+
+    /// `#[derive(Debug)]` の struct / enum とタプル
+    fn fmt_derived(&mut self, sid: u32, x: Value, f: Value) -> R<()> {
+        let fty = self.formatter_ty()?;
+        let fref = Ty::Ref(true, intern(fty));
+        let span = proc_macro2::Span::call_site();
+        let b = self.prog.base_of(sid);
+        let sd = &self.prog.structs[sid as usize];
+        let tuple = self.prog.is_tuple(b);
+        let bname = self.prog.structs[b as usize].name.clone();
+        // (名前, フィールド (名前, 型, オフセット), 名前つきか) の候補。enum なら判別値ごと
+        let shapes: Vec<(Option<i64>, String, Vec<(String, Ty, u32)>, bool)> = if sd.is_enum {
+            sd.variants
+                .iter()
+                .map(|v| {
+                    (
+                        Some(v.discr),
+                        v.name.clone(),
+                        v.fields.clone(),
+                        v.kind == crate::front::VariantKind::Struct,
+                    )
+                })
+                .collect()
+        } else {
+            let named = sd.fields.first().is_some_and(|f| f.0.parse::<usize>().is_err());
+            vec![(None, if tuple { String::new() } else { bname }, sd.fields.clone(), named)]
+        };
+        let tag = if sd.is_enum {
+            Some(self.b.ins().load(clif_ty(sd.tag).unwrap(), mf(), x, 0))
+        } else {
+            None
+        };
+        let done = self.b.create_block();
+        for (discr, name, fields, named) in shapes {
+            let next = self.b.create_block();
+            if let (Some(d), Some(tag)) = (discr, tag) {
+                let yes = self.b.create_block();
+                let c = self.b.ins().icmp_imm_s(IntCC::Equal, tag, d);
+                self.b.ins().brif(c, yes, &[], next, &[]);
+                self.b.switch_to_block(yes);
+            }
+            let nm = self.str_const(&name);
+            let str_ref = Ty::Ref(false, intern(Ty::Str));
+            if fields.is_empty() && !tuple {
+                self.call_named("__exr_fmt_lit", vec![Ty::Unit], &[(f, fref), (nm, str_ref)], span)?;
+            } else {
+                let kind = self.b.ins().iconst(types::I8, if named { 0 } else { 1 });
+                self.call_named("__exr_dbg_begin", vec![Ty::Unit], &[(f, fref), (nm, str_ref), (kind, Ty::U8)], span)?;
+                for (i, (fname, ft, off)) in fields.iter().enumerate() {
+                    let iv = self.b.ins().iconst(types::I64, i as i64);
+                    let key = self.str_const(if named { fname } else { "" });
+                    self.call_named("__exr_dbg_item", vec![Ty::Unit], &[(f, fref), (iv, Ty::Usize), (key, str_ref)], span)?;
+                    let a = self.addr_plus(x, *off as i32);
+                    self.call_named("__exr_debug", vec![*ft], &[(a, Ty::Ref(false, intern(*ft))), (f, fref)], span)?;
+                    self.call_named("__exr_dbg_item_end", vec![Ty::Unit], &[(f, fref)], span)?;
+                }
+                let n = self.b.ins().iconst(types::I64, fields.len() as i64);
+                let tf = self.b.ins().iconst(types::I8, tuple as i64);
+                self.call_named("__exr_dbg_end", vec![Ty::Unit], &[(f, fref), (n, Ty::Usize), (kind, Ty::U8), (tf, Ty::Bool)], span)?;
+            }
+            self.b.ins().jump(done, &[]);
+            self.b.switch_to_block(next);
+            if discr.is_none() {
+                self.b.ins().jump(done, &[]);
+                let dead = self.b.create_block();
+                self.b.switch_to_block(dead);
+            }
+        }
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        Ok(())
+    }
+}
+
+impl Cx<'_, '_> {
+    /// `__exr_hash::<T>(x: &T) -> u64` の本体 (整数は掛け算で混ぜる、文字列はバイト列の FNV、
+    /// struct / enum / タプル / 配列は要素のハッシュを組み合わせる)
+    fn hash_glue_body(&mut self, sig: &FnSig) -> R<()> {
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        self.b.switch_to_block(entry);
+        self.b.seal_block(entry);
+        let x = self.b.block_params(entry)[0];
+        let Some(Ty::Ref(_, t)) = sig.params.first() else {
+            return Err("internal: bad hash glue signature".into());
+        };
+        let h = self.hash_at(x, **t)?;
+        self.b.ins().return_(&[h]);
+        Ok(())
+    }
+
+    fn mix(&mut self, h: Value, v: Value) -> Value {
+        let a = self.b.ins().imul_imm_s(h, 31);
+        let s = self.b.ins().iadd(a, v);
+        let m = self.b.ins().imul_imm_s(s, 0x9E3779B97F4A7C15u64 as i64);
+        let sh = self.b.ins().ushr_imm_u(m, 29);
+        self.b.ins().bxor(m, sh)
+    }
+
+    fn hash_call(&mut self, a: Value, t: Ty) -> R<Value> {
+        let span = proc_macro2::Span::call_site();
+        let (v, _) = self.call_named("__exr_hash", vec![t], &[(a, Ty::Ref(false, intern(t)))], span)?;
+        Ok(v.unwrap())
+    }
+
+    fn hash_at(&mut self, x: Value, t: Ty) -> R<Value> {
+        let span = proc_macro2::Span::call_site();
+        let u8s = Ty::Ref(false, intern(Ty::Slice(intern(Ty::U8))));
+        Ok(match t {
+            t if t.is_int() || matches!(t, Ty::Bool | Ty::Char) => {
+                let ct = clif_ty(t).unwrap();
+                let v = self.b.ins().load(ct, mf(), x, 0);
+                let v = if ct == types::I64 { v } else { self.b.ins().uextend(types::I64, v) };
+                let z = self.b.ins().iconst(types::I64, 0);
+                self.mix(z, v)
+            }
+            Ty::Str => self.call_named("__exr_hash_bytes", vec![Ty::Unit], &[(x, u8s)], span)?.0.unwrap(),
+            Ty::Ref(_, Ty::Str) => self.call_named("__exr_hash_bytes", vec![Ty::Unit], &[(x, u8s)], span)?.0.unwrap(),
+            Ty::Ref(_, i) | Ty::Box(i) if !t.is_fat() => {
+                let p = self.b.ins().load(PTR, mf(), x, 0);
+                self.hash_call(p, *i)?
+            }
+            Ty::Array(e, n) => {
+                let (es, _) = self.prog.size_align(*e);
+                let mut h = self.b.ins().iconst(types::I64, 0);
+                for i in 0..n {
+                    let a = self.addr_plus(x, (i * es) as i32);
+                    let v = self.hash_call(a, *e)?;
+                    h = self.mix(h, v);
+                }
+                h
+            }
+            Ty::Struct(sid) => {
+                let sd = &self.prog.structs[sid as usize];
+                let bname = self.prog.structs[self.prog.base_of(sid) as usize].name.clone();
+                // String は中身のバイト列
+                if bname == "String" {
+                    let (fat, _) = self
+                        .deref_to_slice(x, sid, false)
+                        .ok_or("internal: bad String")?;
+                    return Ok(self.call_named("__exr_hash_bytes", vec![Ty::Unit], &[(fat, u8s)], span)?.0.unwrap());
+                }
+                let is_enum = sd.is_enum;
+                let tag_ty = sd.tag;
+                let fields = sd.fields.clone();
+                let variants: Vec<(i64, Vec<(String, Ty, u32)>)> =
+                    sd.variants.iter().map(|v| (v.discr, v.fields.clone())).collect();
+                if is_enum {
+                    let tag = self.b.ins().load(clif_ty(tag_ty).unwrap(), mf(), x, 0);
+                    let t64 = if clif_ty(tag_ty) == Some(types::I64) {
+                        tag
+                    } else {
+                        self.b.ins().uextend(types::I64, tag)
+                    };
+                    let z = self.b.ins().iconst(types::I64, 0);
+                    let h0 = self.mix(z, t64);
+                    let done = self.b.create_block();
+                    let res = self.b.append_block_param(done, types::I64);
+                    for (d, fs) in variants {
+                        let yes = self.b.create_block();
+                        let next = self.b.create_block();
+                        let c = self.b.ins().icmp_imm_s(IntCC::Equal, tag, d);
+                        self.b.ins().brif(c, yes, &[], next, &[]);
+                        self.b.switch_to_block(yes);
+                        let mut h = h0;
+                        for (_, ft, off) in fs {
+                            let a = self.addr_plus(x, off as i32);
+                            let v = self.hash_call(a, ft)?;
+                            h = self.mix(h, v);
+                        }
+                        self.b.ins().jump(done, &[h.into()]);
+                        self.b.switch_to_block(next);
+                    }
+                    self.b.ins().jump(done, &[h0.into()]);
+                    self.b.switch_to_block(done);
+                    res
+                } else {
+                    let mut h = self.b.ins().iconst(types::I64, 0);
+                    for (_, ft, off) in fields {
+                        let a = self.addr_plus(x, off as i32);
+                        let v = self.hash_call(a, ft)?;
+                        h = self.mix(h, v);
+                    }
+                    h
+                }
+            }
+            t => return Err(format!("`{}` cannot be used as a hash key", self.prog.tn(t))),
+        })
     }
 }

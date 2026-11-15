@@ -68,7 +68,7 @@ pub unsafe fn __core_write_volatile<T: Copy>(p: *mut T, v: T) {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Option<T> {
     None,
     Some(T),
@@ -214,7 +214,7 @@ impl<T> Option<&T> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Result<T, E> {
     Ok(T),
     Err(E),
@@ -1195,12 +1195,1047 @@ impl Iterator for Chars {
     }
 }
 
-fn __exr_str_chars(s: &str) -> Chars {
+fn __exr_str_chars<G>(s: &str) -> Chars {
     Chars {
         ptr: s.as_ptr(),
         len: s.len(),
         i: 0,
     }
+}
+// --- 書式化 (format! / println! / write! と Display / Debug) ----------------------------------
+// マクロは codegen が展開し、値ごとに `__exr_display::<T>` / `__exr_debug::<T>` (型ごとに codegen が
+// 本体を作る) を呼ぶ。数値・文字列の書き出しとパディング、Debug の整形はここの関数が行う
+
+pub struct __FmtError {
+    _p: u8,
+}
+
+pub struct Formatter {
+    buf: &mut String,
+    // 書式指定 ({:>8} / {:08.3x} など)
+    width: usize,
+    fill: char,
+    // 0 = 指定なし, 1 = <, 2 = >, 3 = ^
+    align: u8,
+    zero: bool,
+    plus: bool,
+    alt: bool,
+    prec: usize,
+    has_prec: bool,
+    // 0 = {} / {:?}, 1 = x, 2 = X, 3 = b, 4 = o
+    radix: u8,
+    // {:#?} のインデントの深さ
+    indent: usize,
+}
+
+pub trait Display {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError>;
+}
+
+pub trait Debug {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError>;
+}
+
+impl Formatter {
+    pub fn write_str(&mut self, s: &str) -> Result<(), __FmtError> {
+        self.buf.push_str(s);
+        Ok(())
+    }
+    pub fn write_char(&mut self, c: char) -> Result<(), __FmtError> {
+        self.buf.push(c);
+        Ok(())
+    }
+    pub fn alternate(&self) -> bool {
+        self.alt
+    }
+    pub fn pad(&mut self, s: &str) -> Result<(), __FmtError> {
+        __exr_fmt_str::<()>(self, s);
+        Ok(())
+    }
+}
+
+fn __exr_formatter<G>(buf: &mut String) -> Formatter {
+    Formatter {
+        buf: buf,
+        width: 0,
+        fill: ' ',
+        align: 0,
+        zero: false,
+        plus: false,
+        alt: false,
+        prec: 0,
+        has_prec: false,
+        radix: 0,
+        indent: 0,
+    }
+}
+
+fn __exr_fmt_spec<G>(
+    f: &mut Formatter,
+    width: usize,
+    fill: char,
+    align: u8,
+    flags: u8,
+    prec: usize,
+    has_prec: bool,
+    radix: u8,
+) {
+    f.width = width;
+    f.fill = fill;
+    f.align = align;
+    f.zero = flags & 1 != 0;
+    f.plus = flags & 2 != 0;
+    f.alt = flags & 4 != 0;
+    f.prec = prec;
+    f.has_prec = has_prec;
+    f.radix = radix;
+}
+
+fn __exr_fmt_lit<G>(f: &mut Formatter, s: &str) {
+    f.buf.push_str(s);
+}
+
+// 幅に足りない分を fill で埋める (既定の寄せは def_align)
+fn __exr_pad<G>(f: &mut Formatter, s: &str, def_align: u8) {
+    // 文字数 (UTF-8 の継続バイトは数えない)
+    let mut n = 0;
+    for &b in s.as_bytes() {
+        if b & 0xC0 != 0x80 {
+            n += 1;
+        }
+    }
+    if n >= f.width {
+        f.buf.push_str(s);
+        return;
+    }
+    let pad = f.width - n;
+    let align = if f.align == 0 { def_align } else { f.align };
+    let (l, r) = if align == 1 {
+        (0, pad)
+    } else if align == 2 {
+        (pad, 0)
+    } else {
+        (pad / 2, pad - pad / 2)
+    };
+    let mut i = 0;
+    while i < l {
+        f.buf.push(f.fill);
+        i += 1;
+    }
+    f.buf.push_str(s);
+    let mut i = 0;
+    while i < r {
+        f.buf.push(f.fill);
+        i += 1;
+    }
+}
+
+fn __exr_fmt_str<G>(f: &mut Formatter, s: &str) {
+    if f.has_prec {
+        // 精度は文字数での切り詰め
+        let mut t = String::new();
+        let mut n = 0;
+        for &b in s.as_bytes() {
+            if b & 0xC0 != 0x80 {
+                if n == f.prec {
+                    break;
+                }
+                n += 1;
+            }
+            t.vec.push(b);
+        }
+        __exr_pad::<()>(f, t.as_str(), 1);
+    } else if f.width == 0 {
+        f.buf.push_str(s);
+    } else {
+        __exr_pad::<()>(f, s, 1);
+    }
+}
+
+fn __exr_fmt_int<G>(f: &mut Formatter, mag: u64, neg: bool) {
+    let base: u64 = if f.radix == 1 || f.radix == 2 {
+        16
+    } else if f.radix == 3 {
+        2
+    } else if f.radix == 4 {
+        8
+    } else {
+        10
+    };
+    let mut digits = [0u8; 64];
+    let mut n = 0;
+    let mut v = mag;
+    loop {
+        let d = (v % base) as u8;
+        digits[n] = if d < 10 {
+            b'0' + d
+        } else if f.radix == 2 {
+            b'A' + d - 10
+        } else {
+            b'a' + d - 10
+        };
+        n += 1;
+        v /= base;
+        if v == 0 {
+            break;
+        }
+    }
+    let mut s = String::new();
+    if neg {
+        s.push('-');
+    } else if f.plus {
+        s.push('+');
+    }
+    if f.alt {
+        if base == 16 {
+            s.push_str("0x");
+        } else if base == 2 {
+            s.push_str("0b");
+        } else if base == 8 {
+            s.push_str("0o");
+        }
+    }
+    let prefix = s.len();
+    // `{:05}`: 符号と 0x の後ろを 0 で埋める
+    if f.zero && f.width > prefix + n {
+        let mut z = f.width - prefix - n;
+        while z > 0 {
+            s.push('0');
+            z -= 1;
+        }
+    }
+    while n > 0 {
+        n -= 1;
+        s.push(digits[n] as char);
+    }
+    if f.zero {
+        f.buf.push_str(s.as_str());
+    } else {
+        __exr_pad::<()>(f, s.as_str(), 2);
+    }
+}
+
+fn __exr_fmt_bool<G>(f: &mut Formatter, b: bool) {
+    __exr_fmt_str::<()>(f, if b { "true" } else { "false" });
+}
+
+fn __exr_fmt_char<G>(f: &mut Formatter, c: char) {
+    let mut s = String::new();
+    s.push(c);
+    __exr_fmt_str::<()>(f, s.as_str());
+}
+
+fn __exr_escape<G>(s: &mut String, c: char, quote: char) {
+    if c == quote || c == '\\' {
+        s.push('\\');
+        s.push(c);
+    } else if c == '\n' {
+        s.push_str("\\n");
+    } else if c == '\r' {
+        s.push_str("\\r");
+    } else if c == '\t' {
+        s.push_str("\\t");
+    } else if c == '\0' {
+        s.push_str("\\0");
+    } else {
+        s.push(c);
+    }
+}
+
+fn __exr_fmt_str_debug<G>(f: &mut Formatter, x: &str) {
+    let mut s = String::new();
+    s.push('"');
+    for &b in x.as_bytes() {
+        if b < 0x80 {
+            __exr_escape::<()>(&mut s, b as char, '"');
+        } else {
+            s.vec.push(b);
+        }
+    }
+    s.push('"');
+    __exr_pad::<()>(f, s.as_str(), 1);
+}
+
+fn __exr_fmt_char_debug<G>(f: &mut Formatter, c: char) {
+    let mut s = String::new();
+    s.push('\'');
+    __exr_escape::<()>(&mut s, c, '\'');
+    s.push('\'');
+    __exr_pad::<()>(f, s.as_str(), 1);
+}
+
+fn __exr_indent<G>(f: &mut Formatter) {
+    let mut i = 0;
+    while i < f.indent {
+        f.buf.push_str("    ");
+        i += 1;
+    }
+}
+
+// Debug の整形: kind 0 = `Name { a: .. }`, 1 = `Name(..)` / タプル, 2 = `[..]`, 3 = `{k: v}`
+fn __exr_dbg_begin<G>(f: &mut Formatter, name: &str, kind: u8) {
+    f.buf.push_str(name);
+    let open = if kind == 0 {
+        if f.alt { " {" } else { " { " }
+    } else if kind == 1 {
+        "("
+    } else if kind == 2 {
+        "["
+    } else {
+        "{"
+    };
+    f.buf.push_str(open);
+    if f.alt {
+        f.buf.push('\n');
+        f.indent += 1;
+    }
+}
+
+fn __exr_dbg_item<G>(f: &mut Formatter, i: usize, key: &str) {
+    if f.alt {
+        __exr_indent::<()>(f);
+    } else if i > 0 {
+        f.buf.push_str(", ");
+    }
+    if !key.is_empty() {
+        f.buf.push_str(key);
+        f.buf.push_str(": ");
+    }
+}
+
+fn __exr_dbg_item_end<G>(f: &mut Formatter) {
+    if f.alt {
+        f.buf.push_str(",\n");
+    }
+}
+
+fn __exr_dbg_end<G>(f: &mut Formatter, n: usize, kind: u8, tuple: bool) {
+    let close = if kind == 0 {
+        if f.alt { "}" } else { " }" }
+    } else if kind == 1 {
+        ")"
+    } else if kind == 2 {
+        "]"
+    } else {
+        "}"
+    };
+    if f.alt {
+        f.indent -= 1;
+        __exr_indent::<()>(f);
+    } else if tuple && n == 1 {
+        // `(1,)`
+        f.buf.push(',');
+    }
+    f.buf.push_str(close);
+}
+
+// 書式指定の状態を保存して、入れ子の値を既定の書式で書く (`{:>5?}` の中の要素など)
+fn __exr_dbg_value_begin(f: &mut Formatter) -> usize {
+    let w = f.width;
+    f.width = 0;
+    w
+}
+
+fn __exr_print<G>(s: &String) {
+    for &b in s.as_bytes() {
+        unsafe {
+            __exr_putchar(b as i32);
+        }
+    }
+}
+
+fn __exr_eprint<G>(s: &String) {
+    unsafe {
+        __exr_write(2, s.vec.ptr as *const u8, s.vec.len);
+    }
+}
+
+unsafe extern "C" {
+    #[link_name = "putchar"]
+    fn __exr_putchar(c: i32) -> i32;
+    #[link_name = "write"]
+    fn __exr_write(fd: i32, p: *const u8, n: usize) -> isize;
+}
+
+fn __exr_display<T>(x: &T, f: &mut Formatter) {}
+fn __exr_fmt_ok<G>() -> Result<(), __FmtError> {
+    Ok(())
+}
+fn __exr_debug<T>(x: &T, f: &mut Formatter) {}
+
+impl Display for String {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_fmt_str::<()>(f, self.as_str());
+        Ok(())
+    }
+}
+
+impl Debug for String {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_fmt_str_debug::<()>(f, self.as_str());
+        Ok(())
+    }
+}
+
+impl<T> Debug for Vec<T> {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_dbg_begin::<()>(f, "", 2);
+        let mut i = 0;
+        while i < self.len {
+            __exr_dbg_item::<()>(f, i, "");
+            unsafe {
+                __exr_debug(&*self.ptr.add(i), f);
+            }
+            __exr_dbg_item_end::<()>(f);
+            i += 1;
+        }
+        if self.len == 0 && f.alt {
+            // 空なら `[]`
+            f.indent -= 1;
+            f.buf.pop_byte();
+            f.buf.push(']');
+            return Ok(());
+        }
+        __exr_dbg_end::<()>(f, self.len, 2, false);
+        Ok(())
+    }
+}
+
+impl String {
+    fn pop_byte(&mut self) {
+        self.vec.len -= 1;
+    }
+}
+// --- HashMap<K, V> (オープンアドレス法・線形探索。ハッシュは型ごとに codegen が作る __exr_hash) --
+
+fn __exr_hash<T>(x: &T) -> u64 {
+    0
+}
+
+fn __exr_hash_bytes<G>(b: &[u8]) -> u64 {
+    // FNV-1a
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &c in b {
+        h = (h ^ c as u64).wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+pub struct HashMap<K, V> {
+    // 0 = 空, 1 = 使用中, 2 = 削除済み
+    st: *mut u8,
+    ks: *mut K,
+    vs: *mut V,
+    cap: usize,
+    len: usize,
+    used: usize,
+}
+
+impl<K, V> HashMap<K, V> {
+    pub fn new() -> HashMap<K, V> {
+        HashMap {
+            st: core::ptr::null_mut(),
+            ks: core::ptr::null_mut(),
+            vs: core::ptr::null_mut(),
+            cap: 0,
+            len: 0,
+            used: 0,
+        }
+    }
+    pub fn with_capacity(n: usize) -> HashMap<K, V> {
+        let mut m = HashMap::new();
+        let mut c = 8;
+        while c * 3 < n * 4 {
+            c *= 2;
+        }
+        m.alloc(c);
+        m
+    }
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    fn alloc(&mut self, c: usize) {
+        let ks = core::mem::size_of::<K>();
+        let vs = core::mem::size_of::<V>();
+        self.st = unsafe { __exr_realloc(core::ptr::null_mut(), c) };
+        self.ks = unsafe { __exr_realloc(core::ptr::null_mut(), if ks == 0 { 1 } else { c * ks }) } as *mut K;
+        self.vs = unsafe { __exr_realloc(core::ptr::null_mut(), if vs == 0 { 1 } else { c * vs }) } as *mut V;
+        let mut i = 0;
+        while i < c {
+            unsafe {
+                self.st.add(i).write(0);
+            }
+            i += 1;
+        }
+        self.cap = c;
+        self.len = 0;
+        self.used = 0;
+    }
+    // (見つかった位置, 見つかったか)。見つからなければ入れられる位置
+    fn find(&self, k: &K) -> (usize, bool) {
+        let mask = self.cap - 1;
+        let mut i = (__exr_hash(k) as usize) & mask;
+        let mut free = self.cap;
+        loop {
+            let s = unsafe { *self.st.add(i) };
+            if s == 0 {
+                return (if free < self.cap { free } else { i }, false);
+            }
+            if s == 2 {
+                if free == self.cap {
+                    free = i;
+                }
+            } else if unsafe { *self.ks.add(i) == *k } {
+                return (i, true);
+            }
+            i = (i + 1) & mask;
+        }
+    }
+    fn grow(&mut self) {
+        if self.cap != 0 && (self.used + 1) * 4 <= self.cap * 3 {
+            return;
+        }
+        let (ost, oks, ovs, ocap) = (self.st, self.ks, self.vs, self.cap);
+        let nc = if ocap == 0 { 8 } else if self.len * 2 >= ocap { ocap * 2 } else { ocap };
+        self.alloc(nc);
+        let mut i = 0;
+        while i < ocap {
+            if unsafe { *ost.add(i) } == 1 {
+                let k = unsafe { oks.add(i).read() };
+                let v = unsafe { ovs.add(i).read() };
+                let (j, _) = self.find(&k);
+                unsafe {
+                    self.st.add(j).write(1);
+                    self.ks.add(j).write(k);
+                    self.vs.add(j).write(v);
+                }
+                self.len += 1;
+                self.used += 1;
+            }
+            i += 1;
+        }
+        if ocap != 0 {
+            unsafe {
+                __exr_free(ost);
+                __exr_free(oks as *mut u8);
+                __exr_free(ovs as *mut u8);
+            }
+        }
+    }
+    pub fn insert(&mut self, k: K, v: V) -> Option<V> {
+        self.grow();
+        let (i, found) = self.find(&k);
+        if found {
+            let old = unsafe { self.vs.add(i).read() };
+            unsafe {
+                self.vs.add(i).write(v);
+            }
+            drop(k);
+            return Some(old);
+        }
+        unsafe {
+            if *self.st.add(i) == 0 {
+                self.used += 1;
+            }
+            self.st.add(i).write(1);
+            self.ks.add(i).write(k);
+            self.vs.add(i).write(v);
+        }
+        self.len += 1;
+        None
+    }
+    pub fn get(&self, k: &K) -> Option<&V> {
+        if self.len == 0 {
+            return None;
+        }
+        let (i, found) = self.find(k);
+        if found {
+            unsafe { Some(&*self.vs.add(i)) }
+        } else {
+            None
+        }
+    }
+    pub fn get_mut(&mut self, k: &K) -> Option<&mut V> {
+        if self.len == 0 {
+            return None;
+        }
+        let (i, found) = self.find(k);
+        if found {
+            unsafe { Some(&mut *self.vs.add(i)) }
+        } else {
+            None
+        }
+    }
+    pub fn contains_key(&self, k: &K) -> bool {
+        if self.len == 0 {
+            return false;
+        }
+        let (_, found) = self.find(k);
+        found
+    }
+    pub fn remove(&mut self, k: &K) -> Option<V> {
+        if self.len == 0 {
+            return None;
+        }
+        let (i, found) = self.find(k);
+        if !found {
+            return None;
+        }
+        unsafe {
+            self.st.add(i).write(2);
+            __exr_drop_in_place(self.ks.add(i));
+        }
+        self.len -= 1;
+        unsafe { Some(self.vs.add(i).read()) }
+    }
+    pub fn clear(&mut self) {
+        let mut i = 0;
+        while i < self.cap {
+            if unsafe { *self.st.add(i) } == 1 {
+                unsafe {
+                    __exr_drop_in_place(self.ks.add(i));
+                    __exr_drop_in_place(self.vs.add(i));
+                }
+            }
+            unsafe {
+                self.st.add(i).write(0);
+            }
+            i += 1;
+        }
+        self.len = 0;
+        self.used = 0;
+    }
+    pub fn entry(&mut self, k: K) -> Entry<K, V> {
+        self.grow();
+        let (i, found) = self.find(&k);
+        Entry {
+            map: self,
+            key: Some(k),
+            idx: i,
+            found: found,
+        }
+    }
+    pub fn iter(&self) -> HmIter<K, V> {
+        HmIter {
+            st: self.st as *const u8,
+            ks: self.ks as *const K,
+            vs: self.vs as *const V,
+            cap: self.cap,
+            i: 0,
+        }
+    }
+    pub fn iter_mut(&mut self) -> HmIterMut<K, V> {
+        HmIterMut {
+            st: self.st as *const u8,
+            ks: self.ks as *const K,
+            vs: self.vs,
+            cap: self.cap,
+            i: 0,
+        }
+    }
+    pub fn keys(&self) -> HmKeys<K, V> {
+        HmKeys { it: self.iter() }
+    }
+    pub fn values(&self) -> HmValues<K, V> {
+        HmValues { it: self.iter() }
+    }
+    pub fn values_mut(&mut self) -> HmValuesMut<K, V> {
+        HmValuesMut { it: self.iter_mut() }
+    }
+    pub fn into_iter(self) -> HmIntoIter<K, V> {
+        HmIntoIter { m: self, i: 0 }
+    }
+}
+
+impl<K, V> Drop for HashMap<K, V> {
+    fn drop(&mut self) {
+        if self.cap == 0 {
+            return;
+        }
+        self.clear();
+        unsafe {
+            __exr_free(self.st);
+            __exr_free(self.ks as *mut u8);
+            __exr_free(self.vs as *mut u8);
+        }
+    }
+}
+
+pub struct Entry<K, V> {
+    map: &mut HashMap<K, V>,
+    key: Option<K>,
+    idx: usize,
+    found: bool,
+}
+
+impl<K, V> Entry<K, V> {
+    pub fn or_insert(self, v: V) -> &mut V {
+        let m = self.map;
+        let i = self.idx;
+        let mut key = self.key;
+        if self.found {
+            drop(v);
+        } else {
+            unsafe {
+                if *m.st.add(i) == 0 {
+                    m.used += 1;
+                }
+                m.st.add(i).write(1);
+                m.ks.add(i).write(key.take().unwrap());
+                m.vs.add(i).write(v);
+            }
+            m.len += 1;
+        }
+        drop(key);
+        unsafe { &mut *m.vs.add(i) }
+    }
+    pub fn or_insert_with<F: FnOnce() -> V>(self, f: F) -> &mut V {
+        if self.found {
+            let m = self.map;
+            let i = self.idx;
+            drop(self.key);
+            unsafe { &mut *m.vs.add(i) }
+        } else {
+            self.or_insert(f())
+        }
+    }
+    pub fn and_modify<F: FnOnce(&mut V)>(self, f: F) -> Entry<K, V> {
+        if self.found {
+            unsafe {
+                f(&mut *self.map.vs.add(self.idx));
+            }
+        }
+        self
+    }
+}
+
+pub struct HmIter<K, V> {
+    st: *const u8,
+    ks: *const K,
+    vs: *const V,
+    cap: usize,
+    i: usize,
+}
+
+impl<K, V> Iterator for HmIter<K, V> {
+    type Item = (&K, &V);
+    fn next(&mut self) -> Option<(&K, &V)> {
+        while self.i < self.cap {
+            let i = self.i;
+            self.i += 1;
+            if unsafe { *self.st.add(i) } == 1 {
+                return unsafe { Some((&*self.ks.add(i), &*self.vs.add(i))) };
+            }
+        }
+        None
+    }
+}
+
+pub struct HmIterMut<K, V> {
+    st: *const u8,
+    ks: *const K,
+    vs: *mut V,
+    cap: usize,
+    i: usize,
+}
+
+impl<K, V> Iterator for HmIterMut<K, V> {
+    type Item = (&K, &mut V);
+    fn next(&mut self) -> Option<(&K, &mut V)> {
+        while self.i < self.cap {
+            let i = self.i;
+            self.i += 1;
+            if unsafe { *self.st.add(i) } == 1 {
+                return unsafe { Some((&*self.ks.add(i), &mut *self.vs.add(i))) };
+            }
+        }
+        None
+    }
+}
+
+pub struct HmKeys<K, V> {
+    it: HmIter<K, V>,
+}
+
+impl<K, V> Iterator for HmKeys<K, V> {
+    type Item = &K;
+    fn next(&mut self) -> Option<&K> {
+        match self.it.next() {
+            Some((k, _)) => Some(k),
+            None => None,
+        }
+    }
+}
+
+pub struct HmValues<K, V> {
+    it: HmIter<K, V>,
+}
+
+impl<K, V> Iterator for HmValues<K, V> {
+    type Item = &V;
+    fn next(&mut self) -> Option<&V> {
+        match self.it.next() {
+            Some((_, v)) => Some(v),
+            None => None,
+        }
+    }
+}
+
+pub struct HmValuesMut<K, V> {
+    it: HmIterMut<K, V>,
+}
+
+impl<K, V> Iterator for HmValuesMut<K, V> {
+    type Item = &mut V;
+    fn next(&mut self) -> Option<&mut V> {
+        match self.it.next() {
+            Some((_, v)) => Some(v),
+            None => None,
+        }
+    }
+}
+
+pub struct HmIntoIter<K, V> {
+    m: HashMap<K, V>,
+    i: usize,
+}
+
+impl<K, V> Iterator for HmIntoIter<K, V> {
+    type Item = (K, V);
+    fn next(&mut self) -> Option<(K, V)> {
+        while self.i < self.m.cap {
+            let i = self.i;
+            self.i += 1;
+            if unsafe { *self.m.st.add(i) } == 1 {
+                unsafe {
+                    self.m.st.add(i).write(0);
+                }
+                self.m.len -= 1;
+                return unsafe { Some((self.m.ks.add(i).read(), self.m.vs.add(i).read())) };
+            }
+        }
+        None
+    }
+}
+
+impl<K, V> Debug for HashMap<K, V> {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_dbg_begin::<()>(f, "", 3);
+        let mut n = 0;
+        let mut i = 0;
+        while i < self.cap {
+            if unsafe { *self.st.add(i) } == 1 {
+                __exr_dbg_item::<()>(f, n, "");
+                unsafe {
+                    __exr_debug(&*self.ks.add(i), f);
+                    f.buf.push_str(": ");
+                    __exr_debug(&*self.vs.add(i), f);
+                }
+                __exr_dbg_item_end::<()>(f);
+                n += 1;
+            }
+            i += 1;
+        }
+        __exr_dbg_end::<()>(f, n, 3, false);
+        Ok(())
+    }
+}
+impl<K, V> __FromIter for HashMap<K, V> {
+    fn __from_iter<I: Iterator>(it: I) -> HashMap<K, V> {
+        let mut it = it;
+        let mut m = HashMap::new();
+        while let Some((k, v)) = it.next() {
+            m.insert(k, v);
+        }
+        m
+    }
+}
+
+// --- &str の分割・検索 (split / split_whitespace / lines / trim / starts_with / ends_with / contains) ---
+
+// 文字列の大小 (バイト列の辞書順): 負 / 0 / 正
+fn __exr_str_cmp<G>(a: &str, b: &str) -> i32 {
+    let x = a.as_bytes();
+    let y = b.as_bytes();
+    let mut i = 0;
+    while i < x.len() && i < y.len() {
+        if x[i] != y[i] {
+            return if x[i] < y[i] { -1 } else { 1 };
+        }
+        i += 1;
+    }
+    if x.len() < y.len() {
+        -1
+    } else if x.len() > y.len() {
+        1
+    } else {
+        0
+    }
+}
+
+fn __exr_sub<G>(p: *const u8, n: usize) -> &str {
+    unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(p, n)) }
+}
+
+pub struct Split {
+    p: *const u8,
+    len: usize,
+    i: usize,
+    sep: u8,
+    // 0 = 区切り文字 1 個, 1 = 空白の連続 (split_whitespace), 2 = 行 (lines)
+    mode: u8,
+    done: bool,
+}
+
+impl Iterator for Split {
+    type Item = &str;
+    fn next(&mut self) -> Option<&str> {
+        if self.mode == 1 {
+            while self.i < self.len && __exr_is_space::<()>(unsafe { *self.p.add(self.i) }) {
+                self.i += 1;
+            }
+            if self.i >= self.len {
+                return None;
+            }
+            let st = self.i;
+            while self.i < self.len && !__exr_is_space::<()>(unsafe { *self.p.add(self.i) }) {
+                self.i += 1;
+            }
+            return Some(__exr_sub::<()>(unsafe { self.p.add(st) }, self.i - st));
+        }
+        if self.done {
+            return None;
+        }
+        if self.mode == 2 && self.i >= self.len {
+            return None;
+        }
+        let st = self.i;
+        while self.i < self.len && unsafe { *self.p.add(self.i) } != self.sep {
+            self.i += 1;
+        }
+        let mut end = self.i;
+        if self.i >= self.len {
+            self.done = true;
+        } else {
+            self.i += 1;
+        }
+        // lines は末尾の \r も取る
+        if self.mode == 2 && end > st && unsafe { *self.p.add(end - 1) } == 13 {
+            end -= 1;
+        }
+        Some(__exr_sub::<()>(unsafe { self.p.add(st) }, end - st))
+    }
+}
+
+fn __exr_is_space<G>(b: u8) -> bool {
+    b == 32 || b == 9 || b == 10 || b == 13 || b == 11 || b == 12
+}
+
+fn __exr_str_split<G>(s: &str, c: char) -> Split {
+    Split { p: s.as_ptr(), len: s.len(), i: 0, sep: c as u8, mode: 0, done: false }
+}
+
+fn __exr_str_split_ws<G>(s: &str) -> Split {
+    Split { p: s.as_ptr(), len: s.len(), i: 0, sep: 0, mode: 1, done: false }
+}
+
+fn __exr_str_lines<G>(s: &str) -> Split {
+    Split { p: s.as_ptr(), len: s.len(), i: 0, sep: 10, mode: 2, done: false }
+}
+
+fn __exr_str_trim<G>(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut a = 0;
+    let mut e = b.len();
+    while a < e && __exr_is_space::<()>(b[a]) {
+        a += 1;
+    }
+    while e > a && __exr_is_space::<()>(b[e - 1]) {
+        e -= 1;
+    }
+    __exr_sub::<()>(unsafe { s.as_ptr().add(a) }, e - a)
+}
+
+fn __exr_str_find<G>(s: &str, t: &str) -> Option<usize> {
+    let a = s.as_bytes();
+    let b = t.as_bytes();
+    if b.len() > a.len() {
+        return None;
+    }
+    let mut i = 0;
+    while i + b.len() <= a.len() {
+        let mut j = 0;
+        while j < b.len() && a[i + j] == b[j] {
+            j += 1;
+        }
+        if j == b.len() {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn __exr_str_starts_with<G>(s: &str, t: &str) -> bool {
+    let a = s.as_bytes();
+    let b = t.as_bytes();
+    if b.len() > a.len() {
+        return false;
+    }
+    let mut j = 0;
+    while j < b.len() {
+        if a[j] != b[j] {
+            return false;
+        }
+        j += 1;
+    }
+    true
+}
+
+// char の UTF-8 を p に書いて長さを返す (`s.contains('x')` の char を &str にする)
+fn __exr_char_utf8<G>(c: char, p: *mut u8) -> usize {
+    let c = c as u32;
+    unsafe {
+        if c < 0x80 {
+            *p = c as u8;
+            1
+        } else if c < 0x800 {
+            *p = 0xC0 | (c >> 6) as u8;
+            *p.add(1) = 0x80 | (c & 0x3F) as u8;
+            2
+        } else if c < 0x10000 {
+            *p = 0xE0 | (c >> 12) as u8;
+            *p.add(1) = 0x80 | ((c >> 6) & 0x3F) as u8;
+            *p.add(2) = 0x80 | (c & 0x3F) as u8;
+            3
+        } else {
+            *p = 0xF0 | (c >> 18) as u8;
+            *p.add(1) = 0x80 | ((c >> 12) & 0x3F) as u8;
+            *p.add(2) = 0x80 | ((c >> 6) & 0x3F) as u8;
+            *p.add(3) = 0x80 | (c & 0x3F) as u8;
+            4
+        }
+    }
+}
+
+fn __exr_str_ends_with<G>(s: &str, t: &str) -> bool {
+    let a = s.as_bytes();
+    let b = t.as_bytes();
+    if b.len() > a.len() {
+        return false;
+    }
+    let off = a.len() - b.len();
+    let mut j = 0;
+    while j < b.len() {
+        if a[off + j] != b[j] {
+            return false;
+        }
+        j += 1;
+    }
+    true
 }
 "#;
 
@@ -1308,6 +2343,29 @@ fn is_iterator_trait(h: usize) -> bool {
         .any(|&(a, b)| matches!(&PRELUDE[a as usize..b as usize], "Iterator" | "IntoIter"))
 }
 
+/// 書式化で使う prelude の名前
+const FMT_NAMES: &[&str] = &[
+    "String", "new", "Formatter", "Display", "Debug", "__exr_formatter", "__exr_fmt_spec",
+    "__exr_fmt_lit", "__exr_fmt_int", "__exr_fmt_str", "__exr_fmt_bool", "__exr_fmt_char",
+    "__exr_fmt_str_debug", "__exr_fmt_char_debug", "__exr_dbg_begin", "__exr_dbg_item",
+    "__exr_dbg_item_end", "__exr_dbg_end", "__exr_print", "__exr_eprint", "__exr_display",
+    "__exr_debug", "__exr_fmt_ok", "fmt", "__FmtError",
+];
+
+/// 文字列リテラル以外への `.to_string()` があるか (`5.to_string()` は書式化を使う)
+fn nonliteral_to_string(src: &str) -> bool {
+    let b = src.as_bytes();
+    let mut i = 0;
+    while let Some(k) = src[i..].find(".to_string()") {
+        let at = i + k;
+        if at == 0 || b[at - 1] != b'"' {
+            return true;
+        }
+        i = at + 1;
+    }
+    false
+}
+
 /// これらの名前が現れたら Iterator を使っているとみなす
 const ITER_NAMES: &[&str] = &[
     "Iterator", "next", "map", "filter", "filter_map", "collect", "sum", "product", "count",
@@ -1344,7 +2402,12 @@ fn owner(h: usize) -> Option<&'static str> {
                 it.idents
                     .iter()
                     .map(|&(a, b)| &PRELUDE[a as usize..b as usize])
-                    .find(|w| matches!(*w, "Vec" | "String"))
+                    .find_map(|w| match w {
+                        "Vec" | "String" | "HashMap" => Some(w),
+                        // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
+                        w if w.starts_with("Hm") => Some("HashMap"),
+                        _ => None,
+                    })
             })
             .collect()
     })[h]
@@ -1390,7 +2453,8 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             "to_owned", "iter", "iter_mut", "chars", "into_iter", "next", "map", "filter",
             "filter_map", "collect", "sum", "product", "count", "fold", "for_each", "any", "all",
             "find", "position", "nth", "zip", "chain", "take", "skip", "take_while", "copied",
-            "cloned",
+            "cloned", "format", "print", "println", "eprint", "eprintln", "write", "writeln",
+            "split", "split_whitespace", "lines", "trim", "starts_with", "ends_with", "contains",
         ]);
         // (先頭の 1 byte, 長さ) ごとの候補。prelude の名前が増えても 1 識別子あたりの比較は 0〜1 回
         let mut t: Vec<Vec<&'static str>> = vec![vec![]; 256 * 32];
@@ -1426,6 +2490,12 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
                 if *n != "Iterator" && ITER_NAMES.contains(n) && !method_call_at(bytes, a as usize, b as usize) {
                     continue;
                 }
+                // 書式化のマクロは `name!(` のときだけ (`p.write(..)` のメソッドは別物)
+                if matches!(*n, "format" | "print" | "println" | "eprint" | "eprintln" | "write" | "writeln")
+                    && bytes.get(b as usize) != Some(&b'!')
+                {
+                    continue;
+                }
                 if !names.contains(n) {
                     names.push(n);
                 }
@@ -1440,6 +2510,14 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     if need.is_empty() {
         return String::new();
     }
+    // 書式化のマクロ: Formatter と書き出しの関数一式 (codegen が名前を書かずに呼ぶ)
+    if ["format", "print", "println", "eprint", "eprintln", "write", "writeln", "fmt", "Formatter"]
+        .iter()
+        .any(|n| need.contains(n))
+        || nonliteral_to_string(user_src)
+    {
+        need.extend(FMT_NAMES.iter().copied());
+    }
     // `vec![..]` は Vec::with_capacity + push に、`"..".to_string()` は String::from になる
     if need.contains("vec") {
         need.extend(["Vec", "with_capacity", "push"]);
@@ -1452,7 +2530,30 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     // (イテレータの列は必ず作るもの (iter / into_iter / chars / 範囲 / 自前の impl Iterator) から始まる。
     //  Option::map や自分の型の fold だけでは付けない)
     let producer = ["iter", "iter_mut", "into_iter"].iter().any(|n| need.contains(n));
+    // &str の split / lines などは prelude の関数 (イテレータを返すものはイテレータの部品も要る)
+    for (m, f) in [
+        ("split", "__exr_str_split"),
+        ("split_whitespace", "__exr_str_split_ws"),
+        ("lines", "__exr_str_lines"),
+        ("trim", "__exr_str_trim"),
+        ("starts_with", "__exr_str_starts_with"),
+        ("ends_with", "__exr_str_ends_with"),
+        ("contains", "__exr_str_find"),
+        ("find", "__exr_str_find"),
+    ] {
+        if need.contains(m) {
+            need.insert(f);
+            if !matches!(m, "split" | "split_whitespace" | "lines" | "trim") {
+                need.insert("__exr_char_utf8");
+            }
+        }
+    }
+    if need.contains("HashMap") {
+        need.extend(["__exr_hash", "__exr_hash_bytes"]);
+    }
     let iter_lib = need.contains("Iterator")
+        || need.contains("HashMap")
+        || ["split", "split_whitespace", "lines"].iter().any(|n| need.contains(n))
         || need.contains("chars")
         || chain
         || (producer && need.contains("next"));
@@ -1524,6 +2625,9 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
                 || (name.as_deref() == Some("Result")
                     && (need.contains("Ok") || need.contains("Err")))
                 || (name.as_deref() == Some(BOX_ALLOC) && need.contains("Box"))
+                // 文字列の < (sort / max など)
+                || (name.as_deref() == Some("__exr_str_cmp")
+                    && (need.contains("sort") || need.contains("String") || need.contains("max") || need.contains("min")))
                 // 範囲を値として使うかもしれない (`(0..n).map(..)`)
                 || (matches!(name.as_deref(), Some("Range") | Some("RangeInclusive"))
                     && need.contains("Iterator"))

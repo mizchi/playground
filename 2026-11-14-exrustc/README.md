@@ -136,6 +136,14 @@ bench/regress.sh
     - LSP の 1 関数編集で prelude の選択が +63%（候補の名前が増えたため）。アイテムのハッシュごとに結果を Session に覚え、変わっていないアイテムは走査しないようにした。callgrind で `Session::check` は HEAD より少ない。
     - 型推論が一時的に parse したマクロの引数の型をアドレスで記録していたため、解放後のアドレスに codegen が作ったノードが重なり、別の式の型（`&str`）を引いていた。一時ノードは記録しないようにした。
     - クロージャを 1 つ編集すると、それを受け取る map などのインスタンスが 65 個作り直されていた。クロージャの struct の deep hash から親アイテムのハッシュを外し、18 個（親とクロージャだけ）にした。
+  - format! / HashMap の追加時
+    - nostd_core のキャッシュが 8.7 KB → 22.7 KB になった。生ポインタの `p.write(v)` の `write` と `a.max(b)` で、書式化の部品と String / Vec が丸ごと付いていた。
+      書式化のマクロ名は `name!` の形のときだけ数え、`__exr_str_cmp` も max / min では付けないようにした。
+    - iterators は HashMap のイテレータ（`HmIter` など、`impl Iterator for` の側）が付いていた。これらも HashMap の名前があるときだけにした。
+    - 書式化の helper（`__exr_fmt_int` など）はジェネリック `<G>` にして根から外した。呼ばれた分だけインスタンスとしてコンパイルされる。
+      instance の本体から呼ばれる非ジェネリックな関数（`__exr_print` → `putchar`）は、codegen の各波の後に生きている集合を広げて拾う。
+    - 予算を緩めたのは vec_string のキャッシュだけ（45.0 KB → 48.5 KB）。`name.to_string()` は受け手の型が選択の時点で分からず（整数なら Display が要る）、書式化の部品を付けるため。
+    - callgrind: gen1000 のビルドは +0.15%、check は −4%。prelude を多く使う例は増えた（iterators +5%、vec_string +15%。付く prelude が増えた分）。
 
 ## 対応している言語サブセット（no_std の範囲）
 
@@ -204,6 +212,19 @@ bench/regress.sh
   - 消費：`collect`（`Vec<_>` / `String`、`collect::<Vec<_>>()` と `let v: Vec<_> = ..` の `_` も）/ `sum` / `product` / `count` / `fold` / `for_each` / `any` / `all` / `find` / `position` / `last` / `nth` / `max` / `min`
   - クロージャの引数の型は、呼び先の境界（`F: FnMut(Self::Item) -> B`）を関連型まで解いて決める。型推論も関連型を辿る（`let s: i64 = (1..=10).sum();` の範囲は i64）
   - prelude のイテレータ部品は、イテレータを作ってアダプタ・消費メソッドを呼ぶコード（`v.iter().map(` / `(0..n).sum(` / `impl Iterator` / `.chars()`）があるときだけ付ける。`for x in v.iter()` だけ、`Option::map` だけ、変数名の `count` だけでは付けない
+- 書式化（`examples/formatting.rs`）：`format!` / `print!` / `println!` / `eprint!` / `eprintln!` / `write!` / `writeln!`（`String` と `fmt::Formatter` に）
+  - `{}` / `{:?}` / `{:#?}`、位置・名前つき引数、`{x}` の取り込み、`{{` / `}}`
+  - 幅・寄せ・埋め（`{:>8}` / `{:*^9}` / `{:08}` / `{:>w$}`）、`+`、`#`、精度（文字列の切り詰め）、`x` / `X` / `b` / `o`
+  - `impl fmt::Display for S`（`fmt::Result` / `fmt::Formatter<'_>` / `f.pad`）と `x.to_string()`
+  - `#[derive(Debug)]`（struct・タプル構造体・unit 構造体・enum・ジェネリック）。整数・bool・char・`&str`・String・Vec・配列・スライス・タプル・Option・Result・HashMap の Debug
+  - 型ごとの Display / Debug の本体は codegen が作る（`__exr_display::<T>` / `__exr_debug::<T>`）。prelude は Rust で書いた helper だけ
+- HashMap（`examples/hashmap.rs`、`examples/text_more.rs`）：prelude に Rust で書いた（オープンアドレス法・線形探索・FNV-1a）
+  - `new` / `with_capacity` / `insert` / `get` / `get_mut` / `remove` / `contains_key` / `len` / `is_empty` / `clear` / `m[&k]`
+  - `entry(k).or_insert(v)` / `or_insert_with` / `and_modify`
+  - `iter` / `iter_mut` / `keys` / `values` / `values_mut` / `into_iter` / `for (k, v) in &m`、`collect::<HashMap<_, _>>()`
+  - キーは整数・bool・char・`&str`・String と `#[derive(Hash)]` の struct / enum / タプル（ハッシュ関数は型ごとに codegen が作る）
+  - 回る順番は rustc と違う（rustc もランダムなので、例ではキーを並べ替えてから出す）
+- `&str` のメソッド：`split(char)` / `split_whitespace` / `lines` / `trim*` / `starts_with` / `ends_with` / `contains` / `find`（引数は `&str` か `char`）、`<` などの比較と `sort`
 - Drop（`examples/drop.rs`、`examples/drop_more.rs`。drop の順序を rustc と比べ、valgrind でリーク・二重解放がないことを確かめる）：
   - `impl Drop for S`（ジェネリックな impl も）、`drop(x)`
   - スコープの終わりで宣言と逆順に drop する。対象は return / `?` / break / continue で抜けるスコープ、値を捨てる式文、`let _ = e`、代入で上書きされる古い値
@@ -278,10 +299,12 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
 ### 未対応
 
 - `Box<[T]>`、`Box::into_raw` などの Box の関数（`new` 以外）
-- `format!` / `String + &str` / `Vec` のスライスメソッドの一部（prelude に書いたもの以外。`&v` を `&[T]` にすれば組み込みのスライスメソッドは使える）
-- イテレータの制限：`rev`（値として。`for` の中なら可）、`DoubleEndedIterator` / `ExactSizeIterator`、`peekable` / `flat_map` / `step_by`、`collect` は `Vec<T>` と `String` だけ、`sum` / `product` は整数だけ
+- `String + &str` / `Vec` のスライスメソッドの一部（prelude に書いたもの以外。`&v` を `&[T]` にすれば組み込みのスライスメソッドは使える）
+- イテレータの制限：`rev`（値として。`for` の中なら可）、`DoubleEndedIterator` / `ExactSizeIterator`、`peekable` / `flat_map` / `step_by`、`collect` は `Vec<T>` / `String` / `HashMap<K, V>` だけ、`sum` / `product` は整数だけ
 - 関連型の制限：trait の関連型は `Self::X` / `T::X` / `<T as Tr>::X` の形だけ。関連型に境界（`type Item: Copy;`）は付けられない
-- 書式化（`write!` / `core::fmt`）
+- 書式化の制限：`{:e}`、`{:p}`、`impl Debug for S` の手書きで `f.debug_struct(..)` などのビルダー、`Formatter` のフラグを読むメソッド（`f.alternate()` など）、`format_args!`
+- タプルの `Ord`（`Vec<(u32, usize)>` の `sort`）、`#[derive(PartialOrd, Ord)]`
+- HashMap の制限：`HashSet`、`BTreeMap`、`HashMap::from([..])`、`retain` / `drain`、キーに `impl Hash` を手書きすること
 - Drop の制限
   - panic では drop しない（unwind しない）
   - `impl Drop` を持つ型のフィールドの一部だけをパターンでムーブすると、残りのフィールドはリークする（`let Pair { a, .. } = p;` の `b`）
@@ -470,7 +493,7 @@ rustc 側はほとんどが std 由来。
 ## 次にやること
 
 - **言語**
-  - モジュール、`core::fmt` 相当の書式化、`DoubleEndedIterator`（値としての `rev`）、`HashMap`
+  - モジュール、`DoubleEndedIterator`（値としての `rev`）、`HashSet` / `BTreeMap`
   - 浮動小数点、オーバーフロー検査（debug ビルドの rustc と同じ panic）
   - 単相化をレイアウトでキーにして共有する（`Vec<A>` と `Vec<B>` を 1 つにする。blaze の polymorph）
   - 最小の自前 std（relax 方式）

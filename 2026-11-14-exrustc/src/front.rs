@@ -364,6 +364,20 @@ pub fn parse_tysyn(t: &syn::Type, self_ty: Option<&TySyn>) -> R<TySyn> {
                 p.path.segments.last().unwrap().ident.to_string(),
             )
         }
+        // `fmt::Result` / `fmt::Error` (`std::fmt::Result` も)
+        syn::Type::Path(p)
+            if p.qself.is_none()
+                && p.path.segments.len() >= 2
+                && p.path.segments[p.path.segments.len() - 2].ident == "fmt"
+                && matches!(p.path.segments.last().unwrap().ident.to_string().as_str(), "Result" | "Error") =>
+        {
+            let err = TySyn::Named("__FmtError".into());
+            if p.path.segments.last().unwrap().ident == "Error" {
+                err
+            } else {
+                TySyn::App("Result".into(), vec![TySyn::Prim(Ty::Unit), err])
+            }
+        }
         syn::Type::Path(p) if p.qself.is_none() => {
             // `core::ffi::c_int` などは最後のセグメントで見る
             let seg = p.path.segments.last().unwrap();
@@ -1089,7 +1103,11 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
         syn::Item::Fn(f) if owner.is_some() => {
             let ow = owner.unwrap();
             let mut sig = parse_sig(&f.sig, false, false, Some(ow))?;
-            let name = format!("{}::{}", ow.base, f.sig.ident);
+            // Display と Debug はどちらも fmt なので、trait 名で区別する (`P::<Display>::fmt`)
+            let name = match ow.impl_trait.as_deref() {
+                Some(t @ ("Display" | "Debug")) => format!("{}::<{t}>::{}", ow.base, f.sig.ident),
+                _ => format!("{}::{}", ow.base, f.sig.ident),
+            };
             lift_closures(f, &name, &mut sig, Some(&ow.self_ty), &mut sm)?;
             sm.fns.push((name, sig));
         }
@@ -1102,7 +1120,8 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
                 if bang.is_some() {
                     return err(tr.span(), "negative impls are not supported");
                 }
-                let Some(id) = tr.get_ident() else {
+                // `fmt::Display` などは最後のセグメント
+                let Some(id) = tr.segments.last().map(|s| &s.ident) else {
                     return err(tr.span(), "unsupported trait path");
                 };
                 sm.impl_trait = Some(id.to_string());
@@ -1729,14 +1748,30 @@ impl Program {
                 }
             }
         }
-        // 必須メソッドが実装されているか
+        // 必須メソッドが実装されているか (derive したものは本体を codegen が作る)
+        let derived: HashSet<(u32, String)> = sums
+            .iter()
+            .flat_map(|sm| sm.derives.iter())
+            .filter_map(|(tn, ds)| p.struct_index.get(tn).map(|&sid| (sid, ds)))
+            .flat_map(|(sid, ds)| ds.iter().map(move |d| (sid, d.clone())))
+            .collect();
         for (sid, tr) in &p.impls {
+            if derived.contains(&(*sid, tr.clone())) {
+                continue;
+            }
             let Some(decls) = p.traits.get(tr) else {
                 continue;
             }; // derive した組み込み trait
             for &d in decls {
                 let m = p.names[d as usize].rsplit("::").next().unwrap();
-                if !p.sigs[d as usize].has_body && p.method(*sid, m).is_none() {
+                // (Display / Debug のメソッドは `S::<Display>::fmt`)
+                let found = if matches!(tr.as_str(), "Display" | "Debug") {
+                    p.index
+                        .contains_key(&format!("{}::<{tr}>::{m}", p.structs[*sid as usize].name))
+                } else {
+                    p.method(*sid, m).is_some()
+                };
+                if !p.sigs[d as usize].has_body && !found {
                     return Err(format!(
                         "not all trait items implemented, missing: `{m}` in `impl {tr} for {}`",
                         p.structs[*sid as usize].name
@@ -1801,7 +1836,8 @@ impl Program {
             Ty::Array(e, _) => {
                 tr == "Sized" || (matches!(tr, "Copy" | "Clone") && self.implements(*e, tr))
             }
-            Ty::Slice(_) | Ty::Str | Ty::Dyn(_) => false,
+            Ty::Str => matches!(tr, "Display" | "Debug" | "PartialEq" | "Eq" | "Hash" | "PartialOrd" | "Ord"),
+            Ty::Slice(_) | Ty::Dyn(_) => false,
             // 関数ポインタ: Fn 系 (引数の数が合うもの) と Copy
             Ty::Fn(f) => match parse_fn_bound(tr) {
                 Some((_, ps, _)) => ps.len() == f.params.len(),
@@ -1810,6 +1846,10 @@ impl Program {
             // 組み込み型: マーカー trait と比較・既定値など (core が実装しているもの)
             Ty::Ref(true, _) => tr == "Sized",
             Ty::Box(_) => matches!(tr, "Sized" | "Drop"),
+            // `&T: Display` / `Debug` / `Hash` は T しだい
+            Ty::Ref(_, i) if matches!(tr, "Display" | "Debug" | "Hash" | "PartialOrd" | "Ord") => {
+                self.implements(*i, tr)
+            }
             Ty::Ptr(..) | Ty::Ref(..) => {
                 matches!(tr, "Copy" | "Clone" | "Sized" | "PartialEq" | "Eq")
             }
@@ -1825,6 +1865,7 @@ impl Program {
                         | "Ord"
                         | "Default"
                         | "Debug"
+                        | "Display"
                         | "Hash"
                 ) || self.prim_impls.contains(&(t, tr.to_string()))
             }
@@ -2789,12 +2830,14 @@ impl Program {
         // `vec![..]` / `"..".to_string()` は名前を書かずに Vec の realloc / String::from を使う
         stack.extend(self.index.get("__exr_realloc").copied());
         stack.extend(self.index.get("String::from").copied());
-        stack.extend(self.index.get("__exr_str_chars").copied());
+
         // `impl Drop` の drop は drop glue から、メソッド `eq` は `==` から (名前を書かずに) 呼ばれる
         stack.extend((0..self.names.len() as u32).filter(|&i| {
             let s = &self.sigs[i as usize];
+            // (書式化の部品と Display / Debug の impl も、codegen が名前を書かずに呼ぶ)
             matches!(s.impl_trait.as_deref(), Some("Drop"))
                 || (s.has_self && self.names[i as usize].ends_with("::eq"))
+                || self.names[i as usize] == "String::new"
         }));
         while let Some(i) = stack.pop() {
             if std::mem::replace(&mut seen[i as usize], true) {
@@ -3081,9 +3124,10 @@ fn bound_names(bs: &Bounds) -> R<Vec<String>> {
                     {
                         v.push(bound_string(t))
                     }
-                    syn::TypeParamBound::Trait(t) => match t.path.get_ident() {
-                        Some(id) => v.push(id.to_string()),
-                        None => return err(t.span(), "unsupported trait bound"),
+                    // `fmt::Display` などのパスは最後のセグメント
+                    syn::TypeParamBound::Trait(t) => match t.path.segments.last() {
+                        Some(seg) if seg.arguments.is_none() => v.push(seg.ident.to_string()),
+                        _ => return err(t.span(), "unsupported trait bound"),
                     },
                     syn::TypeParamBound::Lifetime(_) => {}
                     _ => return err(b.span(), "unsupported bound"),
@@ -3191,7 +3235,10 @@ fn parse_sig(
     let symbol = match owner {
         _ if is_extern || is_main => name,
         // ローカルシンボル。短く保つことで .o / シンボル表を小さくする
-        Some(o) => format!("_x{}.{name}", o.base),
+        Some(o) => match o.impl_trait.as_deref() {
+            Some(t @ ("Display" | "Debug")) => format!("_x{}.{t}.{name}", o.base),
+            _ => format!("_x{}.{name}", o.base),
+        },
         None => format!("_x{name}"),
     };
     let is_trait = owner.is_some_and(|o| o.is_trait);
