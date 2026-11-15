@@ -198,6 +198,33 @@ pub fn free_vars(c: &ExprClosure) -> Vec<String> {
             });
         }
         fn visit_macro(&mut self, m: &'a syn::Macro) {
+            // `matches!(e, pat if guard)`: e と guard の中を見る (パターンの束縛は guard の中だけ)
+            if m.path.is_ident("matches") {
+                use syn::parse::Parser;
+                let parser = |input: syn::parse::ParseStream| -> syn::Result<(Expr, Pat, Option<Expr>)> {
+                    let e: Expr = input.parse()?;
+                    input.parse::<syn::Token![,]>()?;
+                    let p = Pat::parse_multi_with_leading_vert(input)?;
+                    let g = if input.peek(syn::Token![if]) {
+                        input.parse::<syn::Token![if]>()?;
+                        Some(input.parse()?)
+                    } else {
+                        None
+                    };
+                    let _ = input.parse::<Option<syn::Token![,]>>();
+                    Ok((e, p, g))
+                };
+                if let Ok((e, p, g)) = parser.parse2(m.tokens.clone()) {
+                    self.visit_expr(&e);
+                    if let Some(g) = g {
+                        self.scoped(|v| {
+                            v.bind(&p);
+                            v.visit_expr(&g);
+                        });
+                    }
+                    return;
+                }
+            }
             // panic! / assert! などの引数は式の列として見る
             use syn::punctuated::Punctuated;
             if let Ok(es) = m.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated)
@@ -359,6 +386,50 @@ pub fn moves_capture(c: &ExprClosure, caps: &[String]) -> bool {
     if body.is_some_and(|e| v.is_cap(e)) {
         return true;
     }
+    v.visit_expr(&c.body);
+    v.found
+}
+
+/// クロージャの本体がキャプチャした変数に代入するか (`r = ..` / `n += 1` / `v.x = ..`)。
+/// そのときは値でキャプチャすると外の変数が変わらないので、参照で持つ
+pub fn assigns_capture(c: &ExprClosure, caps: &[String]) -> bool {
+    use syn::visit::Visit;
+    struct V<'a> {
+        caps: &'a [String],
+        found: bool,
+    }
+    fn base_name(e: &Expr) -> Option<String> {
+        match e {
+            Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+            Expr::Field(f) => base_name(&f.base),
+            Expr::Index(i) => base_name(&i.expr),
+            Expr::Paren(p) => base_name(&p.expr),
+            Expr::Unary(u) => base_name(&u.expr),
+            _ => None,
+        }
+    }
+    impl<'ast> Visit<'ast> for V<'_> {
+        fn visit_expr_assign(&mut self, a: &'ast syn::ExprAssign) {
+            if base_name(&a.left).is_some_and(|n| self.caps.contains(&n)) {
+                self.found = true;
+            }
+            syn::visit::visit_expr_assign(self, a);
+        }
+        fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
+            use syn::BinOp::*;
+            let assign = matches!(
+                b.op,
+                AddAssign(_) | SubAssign(_) | MulAssign(_) | DivAssign(_) | RemAssign(_) | BitXorAssign(_)
+                    | BitAndAssign(_) | BitOrAssign(_) | ShlAssign(_) | ShrAssign(_)
+            );
+            if assign && base_name(&b.left).is_some_and(|n| self.caps.contains(&n)) {
+                self.found = true;
+            }
+            syn::visit::visit_expr_binary(self, b);
+        }
+        fn visit_expr_closure(&mut self, _: &'ast ExprClosure) {}
+    }
+    let mut v = V { caps, found: false };
     v.visit_expr(&c.body);
     v.found
 }

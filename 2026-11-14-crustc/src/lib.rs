@@ -16,6 +16,7 @@ pub mod link;
 pub mod lsp;
 pub mod macros;
 pub mod parse;
+pub mod ast_closure;
 pub mod prelude;
 #[doc(hidden)]
 pub mod testgen;

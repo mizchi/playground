@@ -468,6 +468,19 @@ pub fn parse_expr(src: &str) -> R<Expr> {
     Ok(e)
 }
 
+/// `pat` / `pat if guard` (matches! の 2 つ目の引数)
+pub fn parse_pat_guard(src: &str) -> Option<(Pat, Option<Expr>)> {
+    let toks = tokenize(src).ok()?;
+    let mut p = Parser { toks: toks, i: 0 };
+    let pat = p.pat().ok()?;
+    let guard = if p.eat_ident("if") { Some(p.expr(true).ok()?) } else { None };
+    p.eat_punct(",");
+    if !p.at_end() {
+        return None;
+    }
+    Some((pat, guard))
+}
+
 impl Parser {
     fn err(&self, msg: &str) -> String {
         match self.toks.get(self.i) {

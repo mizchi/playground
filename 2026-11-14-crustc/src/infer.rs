@@ -424,7 +424,25 @@ impl Inf<'_> {
                         }
                     }
                     _ => {
-                        self.link(a, b);
+                        // (`&Vec<T>` / `&[T; N]` と `&[T]` は強制変換で渡すだけ: 参照どうしは同じ型にしない。
+                        //  つなぐとクロージャがキャプチャした `v: &Vec<T>` が `&[T]` になってしまう)
+                        let slc = |s: &mut Self, v: u32| {
+                            let r = s.find(v);
+                            matches!(s.shape[r as usize], Some(Shape::Slc(_)))
+                        };
+                        let seqish = |s: &mut Self, v: u32| {
+                            let r = s.find(v);
+                            match s.shape[r as usize] {
+                                Some(Shape::Arr(..)) => true,
+                                Some(Shape::Adt(b, _, 1)) => s.is_vec(b),
+                                Some(Shape::Known(Ty::Struct(sid))) => s.is_vec(s.prog.base_of(sid)),
+                                _ => false,
+                            }
+                        };
+                        let coerce = (slc(self, x) && seqish(self, y)) || (slc(self, y) && seqish(self, x));
+                        if !coerce {
+                            self.link(a, b);
+                        }
                         self.unify(x, y);
                     }
                 }

@@ -118,7 +118,7 @@ crustc（debug / `-O`）と rustc（`-Cincremental` / `-O`）でビルドし、c
 tests/probe.sh
 ```
 
-よく使う機能の小さいプログラム（`tests/probe/*.rs`、88 本）を rustc と比べ、通った数を出す。
+よく使う機能の小さいプログラム（`tests/probe/*.rs`、89 本）を rustc と比べ、通った数を出す。
 
 ```bash
 tests/selfhost.sh
@@ -131,6 +131,7 @@ tests/selfhost.sh
 - `src/elfz.rs`（`.o` のセクションを SHF_COMPRESSED にする）：zstd クレートの代わりに同じ API の小さな RLE を付けて、C の `.o` を圧縮・解凍し、セクションとシンボルが rustc 版と一致する。
 - `src/macros.rs`（`macro_rules!` の展開と `include_str!`）：proc_macro2 の代わりに使う分だけの字句解析器（`tests/selfhost/mini_pm2.rs`、トークン木・位置・Spacing）を付けて、probe / examples / src の 147 ファイルを展開し、結果が rustc 版と一致する。
 - `src/parse.rs`（syn を使わない自前の構文解析）：probe / examples / src の 149 ファイル（parse.rs 自身も）を解析し、アイテムと節の数が rustc 版と一致する（-O で rustc 版 0.12 秒に対し 0.33 秒）。
+- `src/ast_closure.rs`（自前の構文木の上のクロージャ解析。closure.rs の移植）：全ファイルの関数のクロージャの自由変数と「値でキャプチャするか」が rustc 版と一致する。
 - `src/enc.rs`（キャッシュの直列化。`enc_struct!` マクロと trait の静的呼び出し `T::dec(r)`）と `src/fxhash.rs`（FxHasher / `FxMap`）：構造体・Vec・Option・タプルを符号化して戻し、バイト列とハッシュが rustc 版と一致する（-O でも）。
 
 環境変数：`CRUSTC_DUMP_PRELUDE=1` は付けた prelude を stderr に出す。`CRUSTC_NO_STRIP=1` は出力のシンボルを残す（callgrind などで関数名を見るため）。
@@ -980,6 +981,16 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
 - 修正：非ジェネリックな enum のフィールドの `Option<T>` が、T の大きさが決まる前に配置されてフィールドが重なっていた
   （再帰する構文木で起きる。インスタンスを取り直した後、非ジェネリックな定義も取り直す）
 - 修正：ユーザの `struct Path` が prelude の `type Path = str` に負けていた
+
+#### セルフホストの第 8 段階: クロージャ解析を自前の構文木へ移す
+
+- `src/ast_closure.rs`：closure.rs（syn の構文木）と同じ解析（本体の中のクロージャを前順に、マクロの引数の中も・自由変数・
+  キャプチャを値として使うか）を src/parse.rs の構文木の上で行う。`tests/ast_closure.rs` が全ファイルの 1273 個のクロージャで syn 版と一致することを確かめる
+- 修正：値として渡す変数と代入する変数が混ざったクロージャ（`|| { r = cnt(caps); }`）は全部を値でキャプチャしていたので、外の `r` が変わらなかった
+  （代入するキャプチャがあれば参照で持つ）
+- 修正：型推論で `&Vec<T>` を `&[T]` の引数に渡すと参照どうしを同じ型にしていたので、クロージャがキャプチャした `&Vec<T>` が `&[T]` として扱われた
+- 修正：`matches!(x, p if guard)` の guard の中の変数をキャプチャに数えていなかった
+- `&Box<T>` / `&&T` を `&dyn FnMut(&T)` の引数に渡す（deref の強制変換）
 
 ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen）と、
 依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。

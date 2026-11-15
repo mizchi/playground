@@ -2671,9 +2671,20 @@ impl Cx<'_, '_> {
         };
         let mut vals = vec![];
         for (a, &pt) in args.iter().zip(params) {
-            let (v, t) = self.expr(a, Some(pt))?;
+            let (mut v, mut t) = self.expr(a, Some(pt))?;
             if t == Ty::Never {
                 return Ok((None, Ty::Never));
+            }
+            // (`&Box<T>` / `&&T` を `&T` の引数に: deref の強制変換)
+            while let (Ty::Ref(_, _), Ty::Ref(m, inner @ (Ty::Ref(..) | Ty::Box(_))), Some(val)) = (pt, t, v) {
+                if t == pt || self.prog.has_param(pt) {
+                    break;
+                }
+                v = Some(if inner.is_fat() { val } else { self.b.ins().load(PTR, mf(), val, 0) });
+                t = match inner {
+                    Ty::Box(x) => Ty::Ref(m, x),
+                    i => *i,
+                };
             }
             self.same(a.span(), t, pt)?;
             vals.push(v);

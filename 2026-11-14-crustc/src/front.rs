@@ -1526,7 +1526,7 @@ fn lift_closures(
             fields,
             sig: csig,
             // (`move` がなくても、本体がキャプチャを値として渡す・返すなら値で持つ: rustc と同じく FnOnce)
-            by_move: c.capture.is_some() || closure::moves_capture(c, &caps),
+            by_move: c.capture.is_some() || (closure::moves_capture(c, &caps) && !closure::assigns_capture(c, &caps)),
             ret_ann,
             n_parent,
         });
