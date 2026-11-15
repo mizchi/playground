@@ -318,7 +318,7 @@ impl<T, E> Result<T, E> {
     pub fn expect(self, msg: &str) -> T {
         match self {
             Ok(x) => x,
-            Err(_) => panic!("{}", msg),
+            Err(e) => panic!("{}: {:?}", msg, e),
         }
     }
     pub fn is_ok_and<F: FnOnce(T) -> bool>(self, f: F) -> bool {
@@ -360,7 +360,7 @@ impl<T, E> Result<T, E> {
     pub fn unwrap(self) -> T {
         match self {
             Ok(v) => v,
-            Err(_) => panic!("called `Result::unwrap()` on an `Err` value"),
+            Err(e) => panic!("called `Result::unwrap()` on an `Err` value: {:?}", e),
         }
     }
     pub fn unwrap_err(self) -> E {
@@ -4403,25 +4403,144 @@ fn __exr_err_str<G>(s: &str) {
 
 
 unsafe extern "C" {
-    #[link_name = "signal"]
-    fn __exr_signal(sig: i32, h: fn(i32)) -> usize;
+    #[link_name = "sigaction"]
+    fn __exr_sigaction(sig: i32, act: *const u64, old: *mut u64) -> i32;
 }
 
-// trap (ud2 の SIGILL) で止まったら panic として 101 で終わる (stdout は exit が書き出す)
-fn __exr_on_trap(sig: i32) {
-    let _ = sig;
+// `unwrap` / `expect` を呼んだ場所 (行 << 16 | 列)。その中の panic はこの場所を出す (#[track_caller] 相当)
+static mut __EXR_CALLER: u64 = 0;
+
+// panic の trap の表 (中身はリンクの前に driver が入れる。形は emit_object を参照)
+static __EXR_TRAP_TABLE: [u64; 1] = [0];
+static mut __EXR_SA: [u64; 19] = [0; 19];
+static __EXR_KIND_MSG: &str = "attempt to add with overflowattempt to subtract with overflowattempt to multiply with overflowattempt to divide by zeroattempt to calculate the remainder with a divisor of zeroexplicit panicattempt to negate with overflowattempt to shift left with overflowattempt to shift right with overflowattempt to divide with overflowattempt to calculate the remainder with overflowexplicit panic";
+static __EXR_KIND_OFF: [u16; 13] = [0, 28, 61, 94, 119, 176, 190, 221, 256, 292, 323, 371, 385];
+
+fn __exr_err_num<G>(n: u64) {
+    let mut d = [0u8; 20];
+    let p = d.as_mut_ptr();
+    let mut k = 20;
+    let mut v = n;
+    loop {
+        k -= 1;
+        unsafe {
+            *p.add(k) = b'0' + (v % 10) as u8;
+        }
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    unsafe {
+        __exr_write(2, p.add(k) as *const u8, 20 - k);
+    }
+}
+
+fn __exr_panic_head<G>(line: u64, col: u64) {
     unsafe {
         __exr_fflush(core::ptr::null_mut());
     }
-    __exr_err_str::<()>("thread 'main' panicked (exrustc: a check failed: arithmetic overflow, division by zero, index out of bounds, unwrap on None/Err or an explicit panic)\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n");
+    // (行 0: 呼んだ側の場所)
+    let (line, col) = if line == 0 {
+        let c = unsafe { __EXR_CALLER };
+        (c >> 16, c & 0xFFFF)
+    } else {
+        (line, col)
+    };
+    __exr_err_str::<()>("\nthread 'main' panicked at src/main.rs:");
+    __exr_err_num::<()>(line);
+    __exr_err_str::<()>(":");
+    __exr_err_num::<()>(col);
+    __exr_err_str::<()>(":\n");
+}
+
+fn __exr_panic_tail<G>() {
+    __exr_err_str::<()>("\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n");
     unsafe {
         __exr_exit(101);
     }
 }
 
-fn __exr_rt_init<G>() {
+// trap (ud2 の SIGILL) で止まったら、発生したアドレスで表を引いて panic のメッセージを出し、101 で終わる
+fn __exr_on_trap(sig: i32, info: *const u64, ctx: *const u8) {
+    let _ = (sig, ctx);
+    let pc = unsafe { *info.add(2) };
+    let t = __EXR_TRAP_TABLE.as_ptr();
+    let mut found = false;
+    let mut inf: u64 = 0;
+    let mut mi: u64 = 0;
+    let mut p = unsafe { t.add(1) };
     unsafe {
-        __exr_signal(4, __exr_on_trap);
+        let nf = *t;
+        let mut i = 0;
+        while i < nf {
+            let fa = *p;
+            let n = *p.add(1);
+            p = p.add(2);
+            let mut j = 0;
+            while j < n {
+                let e = *p;
+                if fa + (e >> 44) == pc {
+                    found = true;
+                    inf = e & 0x7FFFFFFF;
+                    mi = (e >> 31) & 0x1FFF;
+                }
+                p = p.add(1);
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+    if !found {
+        unsafe {
+            __exr_fflush(core::ptr::null_mut());
+        }
+        __exr_err_str::<()>("\nthread 'main' panicked");
+        __exr_panic_tail::<()>();
+    }
+    __exr_panic_head::<()>((inf >> 11) & 0xFFFF, inf & 0x7FF);
+    if mi != 0 {
+        // (メッセージの表は関数の表の後ろ: [数, (アドレス, 長さ) *])
+        unsafe {
+            let e = p.add(2 * mi as usize - 1);
+            __exr_write(2, *e as *const u8, *e.add(1) as usize);
+        }
+    } else {
+        // (種類ごとのメッセージ: 繋げた文字列と、各メッセージの始まりの位置の表)
+        let kind = if inf >> 27 > 11 { 11 } else { (inf >> 27) as usize };
+        unsafe {
+            let o = __EXR_KIND_OFF.as_ptr();
+            let (a, b) = (*o.add(kind) as usize, *o.add(kind + 1) as usize);
+            __exr_write(2, __EXR_KIND_MSG.as_ptr().add(a), b - a);
+        }
+    }
+    __exr_panic_tail::<()>();
+}
+
+// 書式つきの panic! (`panic!("bad {}", x)`): 書式化した文字列で
+fn __exr_panic_fmt<G>(pre: &str, s: &String, line: u32, col: u32) {
+    __exr_panic_head::<()>(line as u64, col as u64);
+    __exr_err_str::<()>(pre);
+    __exr_err_str::<()>(s.as_str());
+    __exr_panic_tail::<()>();
+}
+
+fn __exr_panic_index<G>(len: usize, i: usize, line: u32, col: u32) {
+    __exr_panic_head::<()>(line as u64, col as u64);
+    __exr_err_str::<()>("index out of bounds: the len is ");
+    __exr_err_num::<()>(len as u64);
+    __exr_err_str::<()>(" but the index is ");
+    __exr_err_num::<()>(i as u64);
+    __exr_panic_tail::<()>();
+}
+
+fn __exr_rt_init<G>() {
+    // struct sigaction: ハンドラ, sa_mask (128 byte), sa_flags (SA_SIGINFO = 4), sa_restorer
+    unsafe {
+        let p = __EXR_SA.as_mut_ptr();
+        *p = __exr_on_trap as usize as u64;
+        *p.add(17) = 4;
+        __exr_sigaction(4, p as *const u64, core::ptr::null_mut());
     }
 }
 
@@ -4699,6 +4818,12 @@ impl Display for __DynError {
     }
 }
 
+impl Debug for __FmtError {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        f.buf.push_str("Error");
+        Ok(())
+    }
+}
 impl Debug for __DynError {
     fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
         f.buf.push_str(self.dbg.as_str());

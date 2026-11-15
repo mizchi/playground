@@ -1026,6 +1026,7 @@ fn emit_object(
     todo.sort_unstable();
     todo.dedup();
     let mut defs = vec![];
+    let mut trap_table: Option<cranelift_module::DataId> = None;
     while let Some(ci) = todo.pop() {
         if statics.contains_key(&ci) {
             continue;
@@ -1040,6 +1041,11 @@ fn emit_object(
             )
             .map_err(|e| e.to_string())?;
         statics.insert(ci, id);
+        // panic の trap の表は、全関数を置いた後で中身を作る
+        if c.name == "__EXR_TRAP_TABLE" {
+            trap_table = Some(id);
+            continue;
+        }
         let e: syn::Expr = syn::parse_str(&c.expr).map_err(|e| e.to_string())?;
         let dv = crate::consteval::eval(prog, &e, c.ty)
             .map_err(|e| format!("in static `{}`: {e}", c.name))?;
@@ -1159,6 +1165,70 @@ fn emit_object(
             .collect();
         m.define_function_bytes(fid, blob.align as u64, &blob.code, &relocs)
             .map_err(|e| e.to_string())?;
+    }
+    // panic の trap の表 (main が登録したハンドラが、発生したアドレスで種類・場所・メッセージを引く):
+    // [関数の数, (関数のアドレス, 個数, (オフセット << 44 | (メッセージ番号 + 1) << 31 | 種類・行・列) * 個数) *,
+    //  メッセージの数, (アドレス, 長さ) *]  (1 か所 8 byte。オフセットが 1 MiB を超える場所は載せない)
+    if let Some(tid) = trap_table {
+        let mut words: Vec<u64> = vec![0];
+        let mut fn_relocs: Vec<(u32, cranelift_module::FuncId)> = vec![];
+        let mut msgs: Vec<Vec<u8>> = vec![];
+        let mut nf = 0u64;
+        for &uid in user_live.iter().chain(&order) {
+            let blob = &blobs[&uid];
+            if blob.traps.is_empty() {
+                continue;
+            }
+            let n = blob.traps.iter().filter(|t| t.0 < 1 << 20).count();
+            if n == 0 {
+                continue;
+            }
+            nf += 1;
+            fn_relocs.push(((words.len() * 8) as u32, ids[&uid]));
+            words.push(0);
+            words.push(n as u64);
+            for &(off, info, mi) in &blob.traps {
+                if off >= 1 << 20 {
+                    continue;
+                }
+                let gm = if mi == u32::MAX || msgs.len() >= (1 << 13) - 1 {
+                    u32::MAX
+                } else {
+                    let bytes = &blob.datas[mi as usize];
+                    match msgs.iter().position(|x| x == bytes) {
+                        Some(k) => k as u32,
+                        None => {
+                            msgs.push(bytes.clone());
+                            msgs.len() as u32 - 1
+                        }
+                    }
+                };
+                let m1 = if gm == u32::MAX { 0 } else { gm as u64 + 1 };
+                words.push(((off as u64) << 44) | (m1 << 31) | (info as u64 & 0x7FFF_FFFF));
+            }
+        }
+        words[0] = nf;
+        words.push(msgs.len() as u64);
+        let mut msg_relocs = vec![];
+        for mb in &msgs {
+            let did = anon_data(&mut m, mb.clone(), 1, &mut anon)?;
+            msg_relocs.push(((words.len() * 8) as u32, did));
+            words.push(0);
+            words.push(mb.len() as u64);
+        }
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let mut desc = cranelift_module::DataDescription::new();
+        desc.define(bytes.into_boxed_slice());
+        desc.set_align(8);
+        for (off, fid) in fn_relocs {
+            let fr = desc.import_function(ModuleRelocTarget::from(fid));
+            desc.write_function_addr(off, fr);
+        }
+        for (off, did) in msg_relocs {
+            let gv = desc.import_global_value(ModuleRelocTarget::from(did));
+            desc.write_data_addr(off, gv, 0);
+        }
+        m.define_data(tid, &desc).map_err(|e| e.to_string())?;
     }
     m.finish().emit().map_err(|e| e.to_string())
 }

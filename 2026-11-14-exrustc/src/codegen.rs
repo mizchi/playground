@@ -55,6 +55,8 @@ pub struct Blob {
     pub datas: Vec<Vec<u8>>,
     /// この関数が参照する vtable (関数 ID の列)。.o では内容で重複を除く
     pub vtables: Vec<Vec<u32>>,
+    /// panic の trap の場所: (関数の中のオフセット, 種類・行・列, メッセージ (datas の index。なければ u32::MAX))
+    pub traps: Vec<(u32, u32, u32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -172,7 +174,12 @@ pub struct Worker {
     /// 直前に lowering した関数の無名データ
     datas: Vec<Vec<u8>>,
     vtables: Vec<Vec<u32>>,
+    traps: Vec<(u32, u32)>,
 }
+
+/// panic の trap の最初のコード (1〜4 はほかの trap)。関数ごとに 245 か所まで場所を覚える
+const TRAP_SITE_BASE: u8 = 5;
+const TRAP_SITE_MAX: usize = 245;
 
 /// UserExternalName の名前空間: 0 = 関数, 1 = 無名データ, 2 = static, 3 = vtable
 pub const NS_DATA: u32 = 1;
@@ -187,6 +194,7 @@ impl Worker {
             requested: vec![],
             datas: vec![],
             vtables: vec![],
+            traps: vec![],
         }
     }
 
@@ -299,6 +307,12 @@ impl Worker {
                 overflow_checks: prog.overflow_checks
                     && (prog.item_of.get(body_id as usize).copied().flatten().is_some_and(|i| i < prog.prelude_from)
                         || f.attrs.iter().any(|a| a.path().is_ident("rustc_inherit_overflow_checks"))),
+                traps: vec![],
+                index_panic_block: None,
+                caller_loc: matches!(
+                    prog.names.get(body_id as usize).map(|n| n.as_str()),
+                    Some("Option::unwrap" | "Option::expect" | "Result::unwrap" | "Result::expect" | "Result::unwrap_err" | "Result::expect_err")
+                ) && prog.item_of.get(body_id as usize).copied().flatten().is_some_and(|i| i >= prog.prelude_from),
                 self_sid: env.self_sid,
                 sret: None,
                 frefs: HashMap::new(),
@@ -344,6 +358,7 @@ impl Worker {
             self.requested = std::mem::take(&mut cx.requested);
             self.datas = std::mem::take(&mut cx.datas);
             self.vtables = std::mem::take(&mut cx.vtables);
+            self.traps = std::mem::take(&mut cx.traps);
             r?;
             cx.b.seal_all_blocks();
             cx.b.finalize(isa.frontend_config());
@@ -381,12 +396,24 @@ impl Worker {
                 target,
             });
         }
+        // panic の trap (コード 5 + k) の場所と、その種類・行・列・メッセージ
+        let infos = std::mem::take(&mut self.traps);
+        let mut traps = vec![];
+        for t in code.buffer.traps() {
+            let c = t.code.as_raw().get() as usize;
+            // (表には 1 か所 8 byte で載せるので、関数の先頭から 1 MiB を超える場所は載せない)
+            if (TRAP_SITE_BASE as usize..TRAP_SITE_BASE as usize + infos.len()).contains(&c) && t.offset < 1 << 20 {
+                let (info, msg) = infos[c - TRAP_SITE_BASE as usize];
+                traps.push((t.offset, info, msg));
+            }
+        }
         Ok(Blob {
             align: code.buffer.min_alignment.max(1),
             code: code.buffer.data().to_vec(),
             relocs,
             datas: std::mem::take(&mut self.datas),
             vtables: std::mem::take(&mut self.vtables),
+            traps,
         })
     }
 }
@@ -498,6 +525,12 @@ struct Cx<'a, 'p> {
     user_code: bool,
     /// 算術のオーバーフロー検査 (rustc の debug ビルドと同じ。-O なら入れない)
     overflow_checks: bool,
+    /// panic の trap の情報 (trap コード 5 + k が k 番目): (種類・行・列, メッセージの datas の index)
+    traps: Vec<(u32, u32)>,
+    /// 添字の範囲外で panic する (関数で共有する) ブロック
+    index_panic_block: Option<Block>,
+    /// `Option::unwrap` などの本体 (#[track_caller] 相当: panic の場所は呼んだ側)
+    caller_loc: bool,
     /// impl の中なら self 型
     self_sid: Option<u32>,
     /// struct を返す関数の、戻り値の書き込み先
@@ -1463,7 +1496,10 @@ impl Cx<'_, '_> {
                 self.same(ix.index.span(), it, Ty::Usize)?;
                 // 範囲外なら panic (rustc と同じく境界検査する)
                 let ok = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
-                self.panic_unless(ok);
+                // (rustc の場所: Vec など Index の impl を通るものは `[`、配列・スライスは式の先頭)
+                let via_impl = matches!(self.peek(&ix.expr).map(|t| self.strip_refs(t)), Some(Ty::Struct(_)));
+                let sp = if via_impl { ix.bracket_token.span.open() } else { ix.span() };
+                self.index_check(ok, len, i, sp);
                 let addr = self.elem_addr(base, i, elem);
                 Ok(Place::Mem(addr, 0, elem))
             }
@@ -1876,6 +1912,10 @@ impl Cx<'_, '_> {
                     }
                     (Ty::Ptr(..), Ty::Ptr(..)) => return Ok((v, to)),
                     (Ty::Ptr(..), t) if matches!(t, Ty::Usize | Ty::U64 | Ty::Isize | Ty::I64) => {
+                        return Ok((v, to));
+                    }
+                    // 関数ポインタのアドレス (`f as usize`)
+                    (Ty::Fn(_), t) if matches!(t, Ty::Usize | Ty::U64 | Ty::Isize | Ty::I64) => {
                         return Ok((v, to));
                     }
                     (t, Ty::Ptr(..)) if matches!(t, Ty::Usize | Ty::U64 | Ty::Isize | Ty::I64) => {
@@ -2751,6 +2791,17 @@ impl Cx<'_, '_> {
     /// `recv.m(args)`: レシーバを自動 deref して struct を見つけ、
     /// メソッドの self 型に合わせて自動参照 (`&self` / `&mut self`) かコピー (`self`) で渡す
     fn method_call(&mut self, mc: &syn::ExprMethodCall, expected: Option<Ty>) -> R<V> {
+        // `x.unwrap()` / `x.expect(..)`: panic の場所 (メソッド名の位置) を先に書いておく (#[track_caller] 相当)
+        if matches!(mc.method.to_string().as_str(), "unwrap" | "expect" | "unwrap_err" | "expect_err")
+            && self.prog.panic_handler.is_none()
+        {
+            if let Some(&ci) = self.prog.const_index.get("__EXR_CALLER") {
+                let st = mc.method.span().start();
+                let v = self.b.ins().iconst(types::I64, ((st.line as i64) << 16) | (st.column as i64 + 1));
+                let a = self.symbol_addr(NS_STATIC, ci);
+                self.b.ins().store(mf(), v, a, 0);
+            }
+        }
         // `v[a..b].iter()` / `s[1..].len()`: 範囲の添字の受け手は自動で借用する (書き換えるメソッドは &mut)
         if let Expr::Index(ix) = strip_paren(&mc.receiver) {
             if matches!(&*ix.index, Expr::Range(_))
@@ -6150,7 +6201,8 @@ impl Cx<'_, '_> {
         // std のプログラム: 条件つき trap (main が登録したハンドラが panic として 101 で終わらせる)。
         // 分岐とブロックを増やさないので、検査のコンパイルの重さは命令 1 つ分
         if self.prog.panic_handler.is_none() {
-            self.b.ins().trapnz(cond, TrapCode::unwrap_user(4));
+            let code = self.trap_site(kind, span, None);
+            self.b.ins().trapnz(cond, code);
             return;
         }
         // (`#[panic_handler]` があればそれを呼ぶ)
@@ -6161,6 +6213,36 @@ impl Cx<'_, '_> {
         self.b.switch_to_block(pb);
         self.panic_call();
         self.b.switch_to_block(cont);
+    }
+
+    /// panic の trap のコードを 1 つ取り、場所 (種類・行・列) とメッセージを覚える (表は .o に置き、
+    /// main が登録したハンドラが発生したアドレスで引く)。数が多すぎれば場所なしのコード 4
+    fn trap_site(&mut self, kind: u8, span: proc_macro2::Span, msg: Option<String>) -> TrapCode {
+        let k = self.traps.len();
+        if k >= TRAP_SITE_MAX {
+            return TrapCode::unwrap_user(4);
+        }
+        let st = span.start();
+        let info = if self.caller_loc {
+            (kind as u32) << 27
+        } else {
+            ((kind as u32) << 27) | ((st.line.min(0xFFFF) as u32) << 11) | ((st.column + 1).min(0x7FF) as u32)
+        };
+        let m = match msg {
+            Some(m) => {
+                let bytes = m.into_bytes();
+                match self.datas.iter().position(|d| *d == bytes) {
+                    Some(i) => i as u32,
+                    None => {
+                        self.datas.push(bytes);
+                        self.datas.len() as u32 - 1
+                    }
+                }
+            }
+            None => u32::MAX,
+        };
+        self.traps.push((info, m));
+        TrapCode::unwrap_user(TRAP_SITE_BASE + k as u8)
     }
 
     /// 値が整数の定数ならその値 (`x % 4` の 0 除算の検査を省く)
@@ -6310,7 +6392,64 @@ impl Cx<'_, '_> {
                 });
                 self.expr(&ex, expected)
             }
-            "panic" | "unreachable" | "todo" | "unimplemented" => Ok(self.panic_call()),
+            "panic" | "unreachable" | "todo" | "unimplemented" => {
+                if self.prog.panic_handler.is_none() {
+                    // メッセージ: 文字列だけならそのまま、書式つきなら書式化してから prelude の関数で panic する
+                    let args = self.macro_args(mac).unwrap_or_default();
+                    let head = match name.as_str() {
+                        "unreachable" => "internal error: entered unreachable code",
+                        "todo" => "not yet implemented",
+                        "unimplemented" => "not implemented",
+                        _ => "",
+                    };
+                    let lit = match args.first() {
+                        Some(Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. })) if args.len() == 1 && !s.value().contains('{') => Some(s.value()),
+                        _ => None,
+                    };
+                    // (書式化の部品がない (書式化を使わない) プログラムでは、書式の文字列の固定の部分だけを出す)
+                    let lit = if lit.is_none() && !self.prog.index.contains_key("__exr_panic_fmt") {
+                        match args.first() {
+                            Some(Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. })) => {
+                                let v = s.value();
+                                let fixed = v.split('{').next().unwrap_or("").trim_end_matches(": ").to_string();
+                                if fixed.is_empty() { None } else { Some(fixed) }
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        lit
+                    };
+                    if !args.is_empty() && lit.is_none() {
+                        if self.prog.index.contains_key("__exr_panic_fmt") {
+                            let toks = &mac.tokens;
+                            let e: Expr = syn::parse_quote!(format!(#toks));
+                            let (s, st) = self.expr(&e, None)?;
+                            if let Some(s) = s {
+                                let pre = if head.is_empty() { String::new() } else { format!("{head}: ") };
+                                let pv = self.str_const(&pre);
+                                let span = mac.span().start();
+                                let (sl, sc) = if self.caller_loc { (0, 0) } else { (span.line as i64, span.column as i64 + 1) };
+                                let l = self.b.ins().iconst(types::I32, sl);
+                                let c = self.b.ins().iconst(types::I32, sc);
+                                let sref = Ty::Ref(false, intern(Ty::Str));
+                                self.call_named("__exr_panic_fmt", vec![Ty::Unit], &[(pv, sref), (s, Ty::Ref(false, intern(st))), (l, Ty::U32), (c, Ty::U32)], mac.span())?;
+                            }
+                            self.b.ins().trap(TrapCode::unwrap_user(3));
+                            return Ok(self.dead());
+                        }
+                    }
+                    let msg = match (lit, head) {
+                        (Some(m), "") => m,
+                        (Some(m), h) => format!("{h}: {m}"),
+                        (None, "") => "explicit panic".to_string(),
+                        (None, h) => h.to_string(),
+                    };
+                    let code = self.trap_site(12, mac.span(), Some(msg));
+                    self.b.ins().trap(code);
+                    return Ok(self.dead());
+                }
+                Ok(self.panic_call())
+            }
             "assert" | "debug_assert" => {
                 let args = self.macro_args(mac)?;
                 let Some(c) = args.first() else {
@@ -6319,7 +6458,15 @@ impl Cx<'_, '_> {
                 let (cv, ct) = self.expr(c, Some(Ty::Bool))?;
                 self.same(c.span(), ct, Ty::Bool)?;
                 if let Some(cv) = cv {
-                    self.panic_unless(cv);
+                    let text = {
+                        use quote::ToTokens;
+                        c.to_token_stream().to_string()
+                    };
+                    let msg = match args.get(1) {
+                        Some(Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. })) if args.len() == 2 => s.value(),
+                        _ => format!("assertion failed: {text}"),
+                    };
+                    self.panic_unless_at(cv, 12, mac.span(), Some(msg));
                 }
                 Ok((None, Ty::Unit))
             }
@@ -6338,7 +6485,8 @@ impl Cx<'_, '_> {
                 let (c, ct) = self.expr(&e, Some(Ty::Bool))?;
                 self.same(mac.span(), ct, Ty::Bool)?;
                 if let Some(c) = c {
-                    self.panic_unless(c);
+                    let op = if name.ends_with("_eq") { "==" } else { "!=" };
+                    self.panic_unless_at(c, 12, mac.span(), Some(format!("assertion `left {op} right` failed")));
                 }
                 Ok((None, Ty::Unit))
             }
@@ -6388,6 +6536,55 @@ impl Cx<'_, '_> {
             }
             _ => err(mac.span(), format!("macro `{name}!` is not supported")),
         }
+    }
+
+    /// 添字の検査: 範囲外なら `index out of bounds: the len is L but the index is I` で panic する。
+    /// 値をメッセージに入れるので trap でなく分岐して prelude の関数を呼ぶ (呼ぶブロックは関数で 1 つを共有し、
+    /// 長さ・添字・場所はブロック引数で渡す)
+    fn index_check(&mut self, ok: Value, len: Value, i: Value, span: proc_macro2::Span) {
+        if self.prog.panic_handler.is_some() || !self.prog.index.contains_key("__exr_panic_index") {
+            self.panic_unless_at(ok, 12, span, Some("index out of bounds".into()));
+            return;
+        }
+        let pb = match self.index_panic_block {
+            Some(b) => b,
+            None => {
+                let pb = self.b.create_block();
+                self.b.set_cold_block(pb);
+                let l = self.b.append_block_param(pb, types::I64);
+                let x = self.b.append_block_param(pb, types::I64);
+                let ln = self.b.append_block_param(pb, types::I32);
+                let cl = self.b.append_block_param(pb, types::I32);
+                let cur = self.b.current_block().unwrap();
+                self.b.switch_to_block(pb);
+                let _ = self.call_named(
+                    "__exr_panic_index",
+                    vec![Ty::Unit],
+                    &[(l, Ty::Usize), (x, Ty::Usize), (ln, Ty::U32), (cl, Ty::U32)],
+                    span,
+                );
+                self.b.ins().trap(TrapCode::unwrap_user(3));
+                self.b.switch_to_block(cur);
+                self.index_panic_block = Some(pb);
+                pb
+            }
+        };
+        let st = span.start();
+        let ln = self.b.ins().iconst(types::I32, st.line as i64);
+        let cl = self.b.ins().iconst(types::I32, st.column as i64 + 1);
+        let cont = self.b.create_block();
+        self.b.ins().brif(ok, cont, &[], pb, &[len.into(), i.into(), ln.into(), cl.into()]);
+        self.b.switch_to_block(cont);
+    }
+
+    /// cond が偽なら panic する (kind と msg は std のプログラムでの panic のメッセージ)
+    fn panic_unless_at(&mut self, cond: Value, kind: u8, span: proc_macro2::Span, msg: Option<String>) {
+        if self.prog.panic_handler.is_none() {
+            let code = self.trap_site(kind, span, msg);
+            self.b.ins().trapz(cond, code);
+            return;
+        }
+        self.panic_unless(cond);
     }
 
     /// cond が偽なら panic する

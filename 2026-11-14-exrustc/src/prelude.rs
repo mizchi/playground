@@ -364,6 +364,17 @@ const FMT_NAMES: &[&str] = &[
     "__exr_debug", "__exr_fmt_ok", "fmt", "__FmtError",
 ];
 
+/// 書式の引数つきの panic 系マクロ (`panic!("bad {}", x)` など) があるか
+fn panic_with_args(src: &str) -> bool {
+    ["panic!(", "unreachable!(", "todo!(", "unimplemented!(", "assert!(", "assert_eq!(", "assert_ne!("].iter().any(|m| {
+        src.match_indices(m).any(|(i, _)| {
+            let rest = &src[i + m.len()..];
+            let line = rest.split('\n').next().unwrap_or("");
+            line.contains('{') && line.contains("\",")
+        })
+    })
+}
+
 /// 文字列リテラル以外への `.to_string()` があるか (`5.to_string()` は書式化を使う)
 fn nonliteral_to_string(src: &str) -> bool {
     let b = src.as_bytes();
@@ -438,7 +449,7 @@ fn owner(h: usize) -> Option<&'static str> {
 fn defined_name(src: &str, it: &SrcItem) -> Option<String> {
     // (起動時に prelude の全アイテムで呼ぶので、Vec を作らずに辿る)
     let mut ids = it.idents.iter().map(|&(a, b)| &src[a as usize..b as usize]);
-    ids.find(|w| matches!(*w, "fn" | "struct" | "enum"))?;
+    ids.find(|w| matches!(*w, "fn" | "struct" | "enum" | "static"))?;
     ids.next().map(|s| s.strip_prefix("__core_").unwrap_or(s).to_string())
 }
 
@@ -548,6 +559,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         .iter()
         .any(|n| need.contains(n))
         || nonliteral_to_string(user_src)
+        || panic_with_args(user_src)
     {
         need.extend(FMT_NAMES.iter().copied());
     }
@@ -743,7 +755,8 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     // 算術の検査の panic (no_std で panic_handler を持つプログラムは使わない)
     if !user_src.contains("no_std") {
         need.extend(["__exr_err_str", "__exr_fflush", "__exr_write", "__exr_exit"]);
-        need.extend(["__exr_rt_init", "__exr_on_trap", "__exr_signal"]);
+        need.extend(["__exr_rt_init", "__exr_on_trap", "__exr_sigaction", "__EXR_TRAP_TABLE", "__EXR_KIND_MSG", "__EXR_KIND_OFF", "__EXR_SA", "__exr_err_num", "__exr_panic_index", "__EXR_CALLER"]);
+
     }
     if user_src.contains("process::exit") {
         need.insert("process_exit");
@@ -951,6 +964,10 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         }
     }
     let mut chosen = vec![false; all.len()];
+    // (書式つきの panic は書式化を使うプログラムだけ: String と Vec を引き込むため)
+    if !user_src.contains("no_std") && need.contains("__exr_formatter") {
+        need.insert("__exr_panic_fmt");
+    }
     loop {
         let mut changed = false;
         for (i, (it, name, core_only)) in all.iter().enumerate() {

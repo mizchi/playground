@@ -190,6 +190,13 @@ bench/regress.sh
     - サイズ：検査の分だけコードが増える（gen1000 のバイナリ 443 KB → 498 KB、`-O` なら増えない）。rustc の debug ビルドと同じ性質の増加なので、予算は UPDATE_BUDGET=1 で取り直した。
     - 途中で見つけた既存のバグ：`?` で String のエラーを返すと二重解放、`{ return None; }` が `()` 型、enum の `==` が使っていないバリアントのポインタを辿る、`saturating_add` がベクトル用の命令、`struct Node { children: Vec<Node> }` が「無限の大きさ」、`Node<T>` が `Option<Box<Node<T>>>` を持つと具体化が止まらない、char のリテラルパターン、型推論の中で作り直した式のアドレスが codegen のノードと重なる、など。
     - `|a| a + 1` の戻り値を呼び先の境界 (`B`) で決めようとして、まだ決まっていない `B` を親の型推論より優先していた（`map(|w| w.parse().unwrap())`）。
+  - panic のメッセージを種類ごとに出した時
+    - 実行時のハンドラ（表引き・数の書き出し・メッセージ）が std のプログラムに必ず付く分、小さい例のサイズが +3〜6 KB（hello のバイナリ 6.0 KB → 10.0 KB）。
+      最初は +6〜7 KB で、書式つき panic の関数が String / Vec を引き込んでいた（書式化を使うプログラムだけに付けるようにした）・
+      sigaction の構造体を配列の初期化で作っていた（static にした）・メッセージを if の連鎖で選んでいた（繋げた文字列と位置の表にした）のを直した。
+    - 表は最初 1 か所 16 byte で gen1000 のオブジェクトが +15%。オフセット 20 bit・メッセージ番号 13 bit・種類と行と列 31 bit を 1 語に詰めて +8%（キャッシュも同じ形で +5%）。予算は UPDATE_BUDGET=1 で取り直した。
+    - callgrind：gen1000 のビルドは 2.54G → 2.57G（+1%）、`-O` は 3.06G → 3.11G。hello のキャッシュなしのビルドは 10.3M → 29M（ハンドラの関数の parse と codegen。約 4 ms）、キャッシュありの再ビルドは 2.8M → 5.6M。
+    - 途中で見つけた既存のバグ：`__FmtError` が Debug を実装していなかった（`Result<_, fmt::Error>` の unwrap）。
   - イテレータ・Vec・clone の追加時
     - **これまで `#[derive(Clone)]` の型の `.clone()` は使えず、`Vec<String>` の clone と `cloned()` はビットごとのコピー（二重解放）だった**。clone の glue を足して直した。
     - 新しいアダプタ（Rev / Peekable / FlatMap など）の `impl Iterator` が、イテレータを使うプログラムに全部付いていた。その struct が要るときだけにした。
@@ -417,7 +424,14 @@ bench/regress.sh
 - panic：
   - `#[panic_handler]` があればそれを呼ぶ（範囲外アクセス・`unwrap`・`assert!`・`panic!`・オーバーフロー検査など）
   - なければ trap する。std のプログラム（`no_std` でないもの）では main の最初に trap（SIGILL）のシグナルハンドラを登録し、
-    rustc の panic と同じく stdout を書き出して終了コード 101 で終わる（stderr のメッセージは種類ごとには出さない）
+    rustc の panic と同じく stdout を書き出して終了コード 101 で終わる
+  - stderr には rustc と同じ形で、場所と種類ごとのメッセージを出す（`thread 'main' panicked at src/main.rs:行:列:` の次の行。ファイル名は `src/main.rs` 固定）
+    - オーバーフロー・0 除算・`MIN / -1`・シフト量、`panic!` / `unreachable!` / `todo!` / `unimplemented!`（書式つきも）、`assert!`（式の文字列か独自のメッセージ）、`assert_eq!` / `assert_ne!`（`left` / `right` の値は出さない）
+    - 範囲外の添字は `index out of bounds: the len is N but the index is I`
+    - `Option` / `Result` の `unwrap` / `expect` は呼んだ側の場所（`#[track_caller]` 相当）。`Result::unwrap` の `Err` の値は、書式化を使うプログラムでだけ `{:?}` で出す
+  - しくみ：trap ごとに別の trap コードを付け、codegen が「関数の中のオフセット → 種類・行・列・メッセージ」を記録する。
+    driver がそれを static の表 `__EXR_TRAP_TABLE`（1 か所 8 byte）にし、SIGILL のハンドラ（`SA_SIGINFO`）が発生したアドレスで引く。
+    検査そのものは `trapnz` のままなので、検査の速さは変わらない。範囲外の添字だけは長さと添字を渡すため、関数ごとに 1 つの冷たいブロックから `__exr_panic_index` を呼ぶ
 - オーバーフロー検査（rustc の debug ビルドと同じ。`-O` なら入れない）：
   - `+` / `-` / `*`（と `+=` など）、単項の `-`、`abs`、`pow`、`<<` / `>>` の量が型の幅以上
   - 0 除算と `MIN / -1`（rustc と同じく `-O` でも検査する）。除数・シフト量が定数なら省く
