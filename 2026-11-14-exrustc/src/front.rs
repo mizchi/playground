@@ -2560,7 +2560,7 @@ impl Program {
         if !sd.is_enum {
             return None;
         }
-        let vn = p.segments[1].ident.to_string();
+        let vn = segs[1].ident.to_string();
         sd.variants
             .iter()
             .position(|v| v.name == vn)

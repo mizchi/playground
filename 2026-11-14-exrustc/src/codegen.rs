@@ -2386,6 +2386,20 @@ impl Cx<'_, '_> {
         if let Some(r) = self.ord_method(mc)? {
             return Ok(r);
         }
+        // `x.clamp(lo, hi)` (整数も Ord な型も): prelude の __exr_clamp
+        if mc.method == "clamp" && mc.args.len() == 2 && self.prog.index.contains_key("__exr_clamp") {
+            let own = match self.peek(&mc.receiver).map(|t| self.strip_refs(t)) {
+                Some(Ty::Struct(sid)) => self.prog.method(sid, "clamp").is_some(),
+                Some(_) => false,
+                // (型が分からない: 自分の型に clamp があるときだけ普通のメソッド呼び出しにする)
+                None => self.prog.names.iter().any(|n| n.ends_with("::clamp")),
+            };
+            if !own {
+                let (r, a, b) = (&mc.receiver, &mc.args[0], &mc.args[1]);
+                let e: Expr = syn::parse_quote!(__exr_clamp(#r, #a, #b));
+                return self.expr(&e, expected);
+            }
+        }
         // `a.max(b)` / `a.min(b)` (Ord を実装した struct / タプル / String): prelude の __exr_max / __exr_min
         if matches!(mc.method.to_string().as_str(), "max" | "min")
             && mc.args.len() == 1
@@ -3063,7 +3077,7 @@ impl Cx<'_, '_> {
                 };
                 return Ok((Some(e), Ty::Bool));
             }
-            if !(lt.is_int() || matches!(lt, Ty::Bool | Ty::Char)) {
+            if !(lt.is_int() || matches!(lt, Ty::Bool | Ty::Char | Ty::Ptr(..))) {
                 return err(
                     b.span(),
                     format!("comparison of `{}` is not supported", self.prog.tn(lt)),
@@ -3704,6 +3718,29 @@ impl Cx<'_, '_> {
     /// 配列 / スライスの組み込みメソッド (len / is_empty / get / get_mut / first / last / swap / contains)
     fn builtin_method(&mut self, mc: &syn::ExprMethodCall) -> R<Option<V>> {
         let name = mc.method.to_string();
+        // 配列・スライスの sort / binary_search: prelude の関数 (`__exr_slice_sort(&mut a)`)
+        let slice_fn = match name.as_str() {
+            "sort" | "sort_unstable" => Some(("__exr_slice_sort", true)),
+            "sort_by" | "sort_unstable_by" => Some(("__exr_slice_sort_by", true)),
+            "sort_by_key" | "sort_unstable_by_key" => Some(("__exr_slice_sort_by_key", true)),
+            "binary_search" => Some(("__exr_slice_bsearch", false)),
+            "binary_search_by" => Some(("__exr_slice_bsearch_by", false)),
+            "binary_search_by_key" => Some(("__exr_slice_bsearch_by_key", false)),
+            _ => None,
+        }
+        .filter(|(f, _)| self.prog.index.contains_key(*f));
+        // `v[..n].sort()`: 範囲の添字は自動で借用する
+        if let (Some((f, m)), Expr::Index(ix)) = (slice_fn, strip_paren(&mc.receiver)) {
+            if matches!(&*ix.index, Expr::Range(_)) {
+                let r = &mc.receiver;
+                let e: Expr = if m { syn::parse_quote!(&mut #r) } else { syn::parse_quote!(&#r) };
+                let (v, t) = self.expr(&e, None)?;
+                let Some(v) = v else { return Ok(Some((None, Ty::Never))) };
+                let id = self.prog.index[f];
+                let args: Vec<&Expr> = mc.args.iter().collect();
+                return self.call_fn(id, Some((v, t)), &args, None, None, mc.span()).map(Some);
+            }
+        }
         let Some(mut rt) = self.peek(&mc.receiver) else {
             return Ok(None);
         };
@@ -3730,6 +3767,15 @@ impl Cx<'_, '_> {
                 let args = &mc.args;
                 let e: Expr = syn::parse_quote!((#r).as_str().#m(#args));
                 return self.expr(&e, None).map(Some);
+            }
+        }
+        if let (Some((f, m)), Ty::Array(..) | Ty::Ref(_, Ty::Slice(_))) = (slice_fn, rt) {
+            if let Some(&id) = self.prog.index.get(f) {
+                // 受け手を `&[T]` / `&mut [T]` にして、引数 (クロージャも) は元の式のまま渡す
+                let (base, len, elem) = self.indexable(&mc.receiver)?;
+                let (fat, st) = (self.make_fat_v(base, len), Ty::Ref(m, intern(Ty::Slice(intern(elem)))));
+                let args: Vec<&Expr> = mc.args.iter().collect();
+                return self.call_fn(id, Some((fat, st)), &args, None, None, mc.span()).map(Some);
             }
         }
         let elem = match rt {
@@ -4112,8 +4158,20 @@ impl Cx<'_, '_> {
         if !known.contains(&name.as_str()) {
             return Ok(None);
         }
-        let (a, _) = self.expr(&mc.receiver, Some(t))?;
-        let a = a.unwrap();
+        // 受け手が `&u64` / `&mut u64` なら指す先の値 (自動 deref)
+        let (a, a_ty) = if matches!(self.peek(&mc.receiver), Some(Ty::Ref(..))) {
+            self.expr(&mc.receiver, None)?
+        } else {
+            self.expr(&mc.receiver, Some(t))?
+        };
+        let Some(mut a) = a else {
+            return Ok(Some((None, Ty::Never)));
+        };
+        let mut at = a_ty;
+        while let Ty::Ref(_, i) = at {
+            a = self.b.ins().load(clif_ty(*i).unwrap_or(PTR), mf(), a, 0);
+            at = *i;
+        }
         let ct = clif_ty(t).unwrap();
         let s = t.signed();
         let arg = |this: &mut Self, i: usize, want: Ty| -> R<Value> {

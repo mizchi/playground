@@ -154,6 +154,15 @@ bench/regress.sh
       - `&&&str` の `len()` が 1 段しか辿らず、0 を返していた。
       - 比較の右辺の `None` / `Ordering::Less` を場所（ローカル変数）として読もうとしていた。
     - callgrind: gen1000 のビルドは −2.6%、check は −6.8%、prelude を使う例は +0.4〜1.5%。
+  - マージソート・binary_search・clamp の追加時（`examples/sorting.rs`）
+    - sort は 16 個ずつの挿入ソート + 下から上へのマージ（作業領域は realloc で n 要素分）。要素は `read` / `write` でビット移動するので Drop を持つ型でも二重解放しない（valgrind で確認）。
+      20 万要素の `Vec<u64>` の sort が 56 秒 → 0.04 秒になった。
+    - sort を使う例はサイズ予算を上げた（vec_string +3%、ordering +16% など）。マージソートの本体が挿入ソートより大きく、要素型と比較のクロージャごとにインスタンスができるため。
+      vec_string のビルドも +9%（callgrind。コンパイルする関数が増えた分）。sort を使わないプログラムは変わらない（gen1000 は ±0%）。
+    - 途中で見つけた既存のバグ
+      - `&mut u64` / `&u64` を受け手にした整数のメソッド（`s.wrapping_mul(..)`）が、指す先ではなくアドレスを計算していた。
+      - `std::cmp::Ordering::Less` のような 3 段以上のパスのバリアントを、2 段目の名前（`cmp`）で探していた。
+      - 生ポインタの `==` / `!=` が使えなかった。
 
 ## 対応している言語サブセット（no_std の範囲）
 
@@ -240,7 +249,7 @@ bench/regress.sh
   - 手書きの `impl PartialOrd` / `impl Ord`（`impl PartialEq` / `impl Eq for S {}` も）。`<` と sort はそれを呼ぶ
   - `cmp` / `partial_cmp`（整数にも）、`Ordering` と `reverse` / `then` / `then_with` / `is_lt` など、`std::cmp::Reverse`
   - `max` / `min`（Ord な struct・タプル・String にも）、`std::cmp::max` / `min`
-  - `sort` / `sort_by` / `sort_by_key` / `sort_unstable*`（安定な挿入ソート）、イテレータの `max` / `min` / `max_by_key` / `min_by_key` / `max_by` / `min_by`
+  - `sort` / `sort_by` / `sort_by_key` / `sort_unstable*`（安定なマージソート。Vec・配列・スライス・`v[a..b]`）、`binary_search` / `binary_search_by` / `binary_search_by_key`（同じ値が並ぶときに返す位置も std と同じ）、`clamp`（整数・Ord な型。`lo > hi` なら panic）、イテレータの `max` / `min` / `max_by_key` / `min_by_key` / `max_by` / `min_by`
   - 比較の本体は型ごとに codegen が作る（`__exr_cmp::<T>`。Box / Vec を使わないプログラムではその場で展開する）
 - Drop（`examples/drop.rs`、`examples/drop_more.rs`。drop の順序を rustc と比べ、valgrind でリーク・二重解放がないことを確かめる）：
   - `impl Drop for S`（ジェネリックな impl も）、`drop(x)`
@@ -320,7 +329,7 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
 - イテレータの制限：`rev`（値として。`for` の中なら可）、`DoubleEndedIterator` / `ExactSizeIterator`、`peekable` / `flat_map` / `step_by`、`collect` は `Vec<T>` / `String` / `HashMap<K, V>` だけ、`sum` / `product` は整数だけ
 - 関連型の制限：trait の関連型は `Self::X` / `T::X` / `<T as Tr>::X` の形だけ。関連型に境界（`type Item: Copy;`）は付けられない
 - 書式化の制限：`{:e}`、`{:p}`、`impl Debug for S` の手書きで `f.debug_struct(..)` などのビルダー、`Formatter` のフラグを読むメソッド（`f.alternate()` など）、`format_args!`
-- 比較の制限：浮動小数点がないので `partial_cmp` は常に `Some`。`clamp`、`binary_search`、`BinaryHeap`、`Ord::cmp(&a, &b)` の UFCS。sort は挿入ソート（O(n²)）
+- 比較の制限：浮動小数点がないので `partial_cmp` は常に `Some`。`BinaryHeap`、`Ord::cmp(&a, &b)` の UFCS、`sort_by_cached_key`
 - HashMap の制限：`HashSet`、`BTreeMap`、`HashMap::from([..])`、`retain` / `drain`、キーに `impl Hash` を手書きすること
 - Drop の制限
   - panic では drop しない（unwind しない）

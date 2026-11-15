@@ -512,53 +512,188 @@ impl<T: PartialEq> Vec<T> {
 }
 
 impl<T: Ord> Vec<T> {
-    // 挿入ソート (安定)
     pub fn sort(&mut self) {
-        let mut i = 1;
-        while i < self.len {
-            let mut j = i;
-            while j > 0 && unsafe { *self.ptr.add(j) < *self.ptr.add(j - 1) } {
-                self.swap(j, j - 1);
-                j -= 1;
-            }
-            i += 1;
-        }
+        __exr_merge_sort(self.ptr, self.len, |a: &T, b: &T| a < b);
     }
     pub fn sort_unstable(&mut self) {
         self.sort();
+    }
+    pub fn binary_search(&self, x: &T) -> Result<usize, usize> {
+        __exr_bsearch_by(self.ptr, self.len, |e: &T| __exr_cmp_m::<T>(e, x))
     }
 }
 
 impl<T> Vec<T> {
     pub fn sort_by<F: FnMut(&T, &T) -> Ordering>(&mut self, f: F) {
         let mut f = f;
-        let mut i = 1;
-        while i < self.len {
-            let mut j = i;
-            while j > 0 && __exr_ord_i32::<()>(&f(unsafe { &*self.ptr.add(j) }, unsafe { &*self.ptr.add(j - 1) })) < 0 {
-                self.swap(j, j - 1);
-                j -= 1;
-            }
-            i += 1;
-        }
+        __exr_merge_sort(self.ptr, self.len, |a: &T, b: &T| __exr_ord_i32::<()>(&f(a, b)) < 0);
     }
     pub fn sort_unstable_by<F: FnMut(&T, &T) -> Ordering>(&mut self, f: F) {
         self.sort_by(f);
     }
     pub fn sort_by_key<K: Ord, F: FnMut(&T) -> K>(&mut self, f: F) {
         let mut f = f;
-        let mut i = 1;
-        while i < self.len {
-            let mut j = i;
-            while j > 0 && __exr_cmp::<K>(&f(unsafe { &*self.ptr.add(j) }), &f(unsafe { &*self.ptr.add(j - 1) })) < 0 {
-                self.swap(j, j - 1);
-                j -= 1;
+        __exr_merge_sort(self.ptr, self.len, |a: &T, b: &T| __exr_cmp::<K>(&f(a), &f(b)) < 0);
+    }
+    pub fn sort_unstable_by_key<K: Ord, F: FnMut(&T) -> K>(&mut self, f: F) {
+        self.sort_by_key(f);
+    }
+    pub fn binary_search_by<F: FnMut(&T) -> Ordering>(&self, f: F) -> Result<usize, usize> {
+        __exr_bsearch_by(self.ptr, self.len, f)
+    }
+    pub fn binary_search_by_key<B: Ord, F: FnMut(&T) -> B>(&self, b: &B, f: F) -> Result<usize, usize> {
+        let mut f = f;
+        __exr_bsearch_by(self.ptr, self.len, |e: &T| __exr_cmp_m::<B>(&f(e), b))
+    }
+}
+
+// 安定なマージソート (下から上へ)。16 個ずつ挿入ソートしてから、作業領域と交互にマージする。
+// 要素は read / write でビット移動するので、Drop を持つ型でも二重解放しない
+fn __exr_merge_sort<T, F: FnMut(&T, &T) -> bool>(p: *mut T, n: usize, lt: F) {
+    let mut lt = lt;
+    let sz = core::mem::size_of::<T>();
+    if n < 2 || sz == 0 {
+        return;
+    }
+    let run = 16;
+    let mut s = 0;
+    while s < n {
+        let e = if s + run < n { s + run } else { n };
+        let mut i = s + 1;
+        while i < e {
+            unsafe {
+                let x = p.add(i).read();
+                let mut j = i;
+                while j > s && lt(&x, &*p.add(j - 1)) {
+                    p.add(j).write(p.add(j - 1).read());
+                    j -= 1;
+                }
+                p.add(j).write(x);
+            }
+            i += 1;
+        }
+        s = e;
+    }
+    if n <= run {
+        return;
+    }
+    let buf = unsafe { __exr_realloc(0usize as *mut u8, n * sz) } as *mut T;
+    let mut src = p;
+    let mut dst = buf;
+    let mut w = run;
+    while w < n {
+        let mut lo = 0;
+        while lo < n {
+            let mid = if lo + w < n { lo + w } else { n };
+            let hi = if lo + 2 * w < n { lo + 2 * w } else { n };
+            let mut i = lo;
+            let mut j = mid;
+            let mut k = lo;
+            unsafe {
+                while i < mid && j < hi {
+                    // 右が真に小さいときだけ右を先に出す (安定)
+                    if lt(&*src.add(j), &*src.add(i)) {
+                        dst.add(k).write(src.add(j).read());
+                        j += 1;
+                    } else {
+                        dst.add(k).write(src.add(i).read());
+                        i += 1;
+                    }
+                    k += 1;
+                }
+                while i < mid {
+                    dst.add(k).write(src.add(i).read());
+                    i += 1;
+                    k += 1;
+                }
+                while j < hi {
+                    dst.add(k).write(src.add(j).read());
+                    j += 1;
+                    k += 1;
+                }
+            }
+            lo = hi;
+        }
+        let t = src;
+        src = dst;
+        dst = t;
+        w *= 2;
+    }
+    if src != p {
+        let mut i = 0;
+        while i < n {
+            unsafe {
+                p.add(i).write(src.add(i).read());
             }
             i += 1;
         }
     }
-    pub fn sort_unstable_by_key<K: Ord, F: FnMut(&T) -> K>(&mut self, f: F) {
-        self.sort_by_key(f);
+    unsafe {
+        __exr_free(buf as *mut u8);
+    }
+}
+
+// std と同じ二分探索 (同じ値が並ぶときに返す位置も std に合わせる)
+fn __exr_bsearch_by<T, F: FnMut(&T) -> Ordering>(p: *mut T, n: usize, f: F) -> Result<usize, usize> {
+    let mut f = f;
+    let mut size = n;
+    if size == 0 {
+        return Err(0);
+    }
+    let mut base = 0;
+    while size > 1 {
+        let half = size / 2;
+        let mid = base + half;
+        let c = __exr_ord_i32::<()>(&f(unsafe { &*p.add(mid) }));
+        if c <= 0 {
+            base = mid;
+        }
+        size -= half;
+    }
+    let c = __exr_ord_i32::<()>(&f(unsafe { &*p.add(base) }));
+    if c == 0 {
+        Ok(base)
+    } else if c < 0 {
+        Err(base + 1)
+    } else {
+        Err(base)
+    }
+}
+
+// 配列・スライスの sort / binary_search (codegen が `a.sort()` をこれにする)
+fn __exr_slice_sort<T: Ord>(s: &mut [T]) {
+    __exr_merge_sort(s.as_mut_ptr(), s.len(), |a: &T, b: &T| a < b);
+}
+fn __exr_slice_sort_by<T, F: FnMut(&T, &T) -> Ordering>(s: &mut [T], f: F) {
+    let mut f = f;
+    __exr_merge_sort(s.as_mut_ptr(), s.len(), |a: &T, b: &T| __exr_ord_i32::<()>(&f(a, b)) < 0);
+}
+fn __exr_slice_sort_by_key<T, K: Ord, F: FnMut(&T) -> K>(s: &mut [T], f: F) {
+    let mut f = f;
+    __exr_merge_sort(s.as_mut_ptr(), s.len(), |a: &T, b: &T| __exr_cmp::<K>(&f(a), &f(b)) < 0);
+}
+fn __exr_slice_bsearch<T: Ord>(s: &[T], x: &T) -> Result<usize, usize> {
+    __exr_bsearch_by(s.as_ptr() as *mut T, s.len(), |e: &T| __exr_cmp_m::<T>(e, x))
+}
+fn __exr_slice_bsearch_by<T, F: FnMut(&T) -> Ordering>(s: &[T], f: F) -> Result<usize, usize> {
+    __exr_bsearch_by(s.as_ptr() as *mut T, s.len(), f)
+}
+fn __exr_slice_bsearch_by_key<T, B: Ord, F: FnMut(&T) -> B>(s: &[T], b: &B, f: F) -> Result<usize, usize> {
+    let mut f = f;
+    __exr_bsearch_by(s.as_ptr() as *mut T, s.len(), |e: &T| __exr_cmp_m::<B>(&f(e), b))
+}
+
+// Ord::clamp (`x.clamp(lo, hi)`。lo > hi なら panic)
+fn __exr_clamp<T>(x: T, lo: T, hi: T) -> T {
+    if __exr_cmp::<T>(&lo, &hi) > 0 {
+        panic!("assertion failed: min <= max");
+    }
+    if __exr_cmp::<T>(&x, &lo) < 0 {
+        lo
+    } else if __exr_cmp::<T>(&x, &hi) > 0 {
+        hi
+    } else {
+        x
     }
 }
 
@@ -2732,6 +2867,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             "find", "position", "nth", "zip", "chain", "take", "skip", "take_while", "copied",
             "cloned", "format", "print", "println", "eprint", "eprintln", "write", "writeln",
             "split", "split_whitespace", "lines", "trim", "starts_with", "ends_with", "contains",
+            "clamp",
         ]);
         // (先頭の 1 byte, 長さ) ごとの候補。prelude の名前が増えても 1 識別子あたりの比較は 0〜1 回
         let mut t: Vec<Vec<&'static str>> = vec![vec![]; 256 * 32];
@@ -2774,6 +2910,10 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
                     continue;
                 }
                 if *n == "cmp" && bytes.get(b as usize) == Some(&b':') {
+                    continue;
+                }
+                // (自分の関数 `clamp(v, lo, hi)` では付けない)
+                if *n == "clamp" && !method_call_at(bytes, a as usize, b as usize) {
                     continue;
                 }
                 if !names.contains(n) {
@@ -2842,7 +2982,8 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     const ORD_NAMES: &[&str] = &[
         "Ord", "PartialOrd", "Ordering", "cmp", "partial_cmp", "sort", "sort_by", "sort_by_key",
         "sort_unstable", "sort_unstable_by", "sort_unstable_by_key", "max_by_key", "min_by_key",
-        "max_by", "min_by", "Reverse",
+        "max_by", "min_by", "Reverse", "clamp", "binary_search", "binary_search_by",
+        "binary_search_by_key",
     ];
     let cmp_impl = impls_cmp_trait(user_src);
     // (再帰する型は Box / Vec を通るので、そのときは glue を付ける。それ以外の型の比較は codegen が直接展開する)
@@ -2868,6 +3009,25 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         }
         if need.contains("max") || need.contains("min") {
             need.extend(["__exr_max", "__exr_min"]);
+        }
+        if need.contains("clamp") {
+            need.insert("__exr_clamp");
+        }
+        // 配列・スライスのメソッドとして呼ぶとき用 (Vec のメソッドは名前から付く)
+        for (m, f) in [
+            ("sort", "__exr_slice_sort"),
+            ("sort_unstable", "__exr_slice_sort"),
+            ("sort_by", "__exr_slice_sort_by"),
+            ("sort_unstable_by", "__exr_slice_sort_by"),
+            ("sort_by_key", "__exr_slice_sort_by_key"),
+            ("sort_unstable_by_key", "__exr_slice_sort_by_key"),
+            ("binary_search", "__exr_slice_bsearch"),
+            ("binary_search_by", "__exr_slice_bsearch_by"),
+            ("binary_search_by_key", "__exr_slice_bsearch_by_key"),
+        ] {
+            if need.contains(m) {
+                need.insert(f);
+            }
         }
     }
     if iter_lib {
