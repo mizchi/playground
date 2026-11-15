@@ -3,6 +3,10 @@
 
 /// `Box::new` が呼ぶアロケータ (libc の malloc)
 pub const BOX_ALLOC: &str = "__exr_malloc";
+/// Box の drop が呼ぶ解放関数 (libc の free)
+pub const BOX_FREE: &str = "__exr_free";
+/// drop glue: `__exr_drop_in_place::<T>` の本体は codegen が型ごとに作る
+pub const DROP_GLUE: &str = "__exr_drop_in_place";
 
 pub const PRELUDE: &str = r#"
 pub struct PanicInfo {
@@ -13,6 +17,15 @@ unsafe extern "C" {
     #[link_name = "malloc"]
     fn __exr_malloc(size: usize) -> *mut u8;
 }
+unsafe extern "C" {
+    #[link_name = "free"]
+    fn __exr_free(p: *mut u8);
+}
+fn __exr_drop_in_place<T>(p: *mut T) {}
+pub trait Drop {
+    fn drop(&mut self);
+}
+pub fn __core_drop<T>(_x: T) {}
 
 // 関数ポインタを `dyn Fn` にするときの vtable の中身 (データは関数ポインタを置いた場所)
 fn __exr_fnptr0<R>(f: &fn() -> R) -> R {
@@ -107,15 +120,22 @@ impl<T> Option<T> {
             None => other,
         }
     }
+    // 中身を drop せずに入れ替える (生ポインタの read / write は drop しない)
     pub fn take(&mut self) -> Option<T> {
-        let v = *self;
-        *self = None;
-        v
+        let p = self as *mut Option<T>;
+        unsafe {
+            let v = p.read();
+            p.write(None);
+            v
+        }
     }
     pub fn replace(&mut self, value: T) -> Option<T> {
-        let v = *self;
-        *self = Some(value);
-        v
+        let p = self as *mut Option<T>;
+        unsafe {
+            let v = p.read();
+            p.write(Some(value));
+            v
+        }
     }
     pub fn as_ref(&self) -> Option<&T> {
         match self {
@@ -318,7 +338,7 @@ pub fn select(user_src: &str, user_items: &[SrcItem]) -> String {
     static NAMES: OnceLock<Vec<Vec<&'static str>>> = OnceLock::new();
     let by_first = NAMES.get_or_init(|| {
         let mut h: Vec<&'static str> = all.iter().filter_map(|x| x.1.as_deref()).collect();
-        h.extend(["Some", "None", "Ok", "Err", "core", "std", "Box", "dyn"]);
+        h.extend(["Some", "None", "Ok", "Err", "core", "std", "Box", "dyn", "Drop"]);
         let mut t: Vec<Vec<&'static str>> = vec![vec![]; 256];
         for n in h {
             if !t[n.as_bytes()[0] as usize].contains(&n) {
@@ -352,7 +372,11 @@ pub fn select(user_src: &str, user_items: &[SrcItem]) -> String {
                 continue;
             }
             // core::cmp::max などは `core` / `std` という識別子 (パスか use) がなければ使えない
-            if *core_only && !(need.contains("core") || need.contains("std")) {
+            // (`drop(x)` は prelude の関数として使える)
+            if *core_only
+                && !(need.contains("core") || need.contains("std"))
+                && name.as_deref() != Some("drop")
+            {
                 continue;
             }
             // バリアント名 (Some など) で enum が要る
@@ -364,6 +388,8 @@ pub fn select(user_src: &str, user_items: &[SrcItem]) -> String {
                 || (name.as_deref() == Some("Result")
                     && (need.contains("Ok") || need.contains("Err")))
                 || (name.as_deref() == Some(BOX_ALLOC) && need.contains("Box"))
+                || (matches!(name.as_deref(), Some(BOX_FREE) | Some(DROP_GLUE))
+                    && (need.contains("Box") || need.contains("Drop")))
                 || (name.as_deref().is_some_and(|n| n.starts_with("__exr_fnptr"))
                     && need.contains("dyn"));
             if wanted {
@@ -374,7 +400,7 @@ pub fn select(user_src: &str, user_items: &[SrcItem]) -> String {
                         .iter()
                         .map(|&(a, b)| &PRELUDE[a as usize..b as usize]),
                 );
-                if let ItemKind::ImplMember(h) = it.kind {
+                if let ItemKind::ImplMember(h) | ItemKind::TraitMember(h) = it.kind {
                     if !chosen[h as usize] {
                         chosen[h as usize] = true;
                         let hit = &all[h as usize].0;

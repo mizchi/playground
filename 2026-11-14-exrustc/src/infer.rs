@@ -87,6 +87,8 @@ enum Shape {
     Ptr(bool, u32),
     /// クロージャ: adt_args[start..start+n] が引数、その次が戻り値の型変数
     Clo(u32, u32),
+    /// `Box<T>`
+    Bx(u32),
 }
 
 struct Inf<'p> {
@@ -193,6 +195,10 @@ impl Inf<'_> {
             Ty::Ref(m, inner) => {
                 let i = self.known(*inner);
                 self.with(Shape::Ref(m, i))
+            }
+            Ty::Box(inner) => {
+                let i = self.known(*inner);
+                self.with(Shape::Bx(i))
             }
             Ty::Array(e, n) => {
                 let i = self.known(*e);
@@ -308,6 +314,7 @@ impl Inf<'_> {
                 self.unify(x, y);
             }
             (Some(Shape::Slc(x)), Some(Shape::Slc(y)))
+            | (Some(Shape::Bx(x)), Some(Shape::Bx(y)))
             | (Some(Shape::Ptr(_, x)), Some(Shape::Ptr(_, y))) => {
                 self.link(a, b);
                 self.unify(x, y);
@@ -404,7 +411,7 @@ impl Inf<'_> {
         loop {
             let r = self.find(f);
             match self.shape[r as usize] {
-                Some(Shape::Ref(_, i)) => f = i,
+                Some(Shape::Ref(_, i)) | Some(Shape::Bx(i)) => f = i,
                 Some(Shape::Clo(st, k)) if k as usize == n => {
                     let vs = self.adt_args[st as usize..=(st + k) as usize].to_vec();
                     return Some((vs[..n].to_vec(), vs[n]));
@@ -452,6 +459,7 @@ impl Inf<'_> {
         match self.shape[r as usize] {
             Some(Shape::Known(t)) => Some(t),
             Some(Shape::Ref(m, i)) => Some(Ty::Ref(m, intern(self.resolve(i)?))),
+            Some(Shape::Bx(i)) => Some(Ty::Box(intern(self.resolve(i)?))),
             Some(Shape::Arr(e, n)) => Some(Ty::Array(intern(self.resolve(e)?), n)),
             Some(Shape::Slc(e)) => Some(Ty::Slice(intern(self.resolve(e)?))),
             Some(Shape::Ptr(m, e)) => Some(Ty::Ptr(m, intern(self.resolve(e)?))),
@@ -470,13 +478,13 @@ impl Inf<'_> {
     fn deref(&mut self, v: u32) -> u32 {
         let r = self.find(v);
         match self.shape[r as usize] {
-            Some(Shape::Ref(_, i)) | Some(Shape::Ptr(_, i)) => i,
+            Some(Shape::Ref(_, i)) | Some(Shape::Ptr(_, i)) | Some(Shape::Bx(i)) => i,
             _ => self.var(),
         }
     }
     /// 自動 deref しながらフィールドの型を引く
     fn field(&mut self, base: u32, name: &str) -> u32 {
-        let (v, _) = self.auto_deref(base, None);
+        let v = self.deref_expr(base);
         let r = self.find(v);
         let sid = match self.shape[r as usize] {
             Some(Shape::Known(Ty::Struct(sid))) => sid,
@@ -526,7 +534,7 @@ impl Inf<'_> {
 
     /// 配列 / スライス (参照越しも) の要素の型変数
     fn elem_of(&mut self, v: u32) -> Option<u32> {
-        let (v, _) = self.auto_deref(v, None);
+        let v = self.deref_expr(v);
         let r = self.find(v);
         match self.shape[r as usize] {
             Some(Shape::Arr(e, _)) | Some(Shape::Slc(e)) => Some(e),
@@ -581,6 +589,10 @@ impl Inf<'_> {
             Ty::Ref(m, inner) => {
                 let i = self.known_g(*inner, pv);
                 self.with(Shape::Ref(m, i))
+            }
+            Ty::Box(inner) => {
+                let i = self.known_g(*inner, pv);
+                self.with(Shape::Bx(i))
             }
             Ty::Array(e, n) => {
                 let i = self.known_g(*e, pv);
@@ -686,6 +698,17 @@ impl Inf<'_> {
     }
 
     /// 参照型の変数を辿って中身へ。参照を通ったら束縛モードを Ref にする
+    /// 式の文脈 (フィールド・メソッド・添字) の自動 deref: 参照と Box を剥がす
+    fn deref_expr(&mut self, mut v: u32) -> u32 {
+        loop {
+            let r = self.find(v);
+            match self.shape[r as usize] {
+                Some(Shape::Ref(_, i)) | Some(Shape::Bx(i)) => v = i,
+                _ => return v,
+            }
+        }
+    }
+
     fn auto_deref(&mut self, mut v: u32, mut mode: Option<bool>) -> (u32, Option<bool>) {
         loop {
             let r = self.find(v);
@@ -1142,7 +1165,8 @@ impl Inf<'_> {
                 let b = self.expr(&f.base);
                 match &f.member {
                     syn::Member::Named(id) => self.field(b, &id.to_string()),
-                    syn::Member::Unnamed(_) => self.var(),
+                    // タプル構造体・タプルのフィールドは "0", "1", .. という名前
+                    syn::Member::Unnamed(i) => self.field(b, &i.index.to_string()),
                 }
             }
             Expr::Struct(s) => {
@@ -1275,7 +1299,7 @@ impl Inf<'_> {
                         && p.path.segments[n - 2].ident == "Box"
                         && args.len() == 1
                     {
-                        return self.with(Shape::Ref(true, args[0]));
+                        return self.with(Shape::Bx(args[0]));
                     }
                 }
                 if callee.is_none() {
@@ -1374,13 +1398,13 @@ impl Inf<'_> {
             }
             Expr::MethodCall(mc) if is_builtin_scalar_method(&mc.method.to_string()) => {
                 let r = self.expr(&mc.receiver);
-                let (rv, _) = self.auto_deref(r, None);
+                let rv = self.deref_expr(r);
                 let args: Vec<u32> = mc.args.iter().map(|a| self.expr(a)).collect();
                 self.scalar_method(mc, r, rv, args)
             }
             Expr::MethodCall(mc) => {
                 let r = self.expr(&mc.receiver);
-                let (rv, _) = self.auto_deref(r, None);
+                let rv = self.deref_expr(r);
                 let root = self.find(rv);
                 let sid = match self.shape[root as usize] {
                     Some(Shape::Known(Ty::Struct(sid))) => Some(sid),

@@ -206,6 +206,11 @@ pub fn encode_blob(b: &Blob, prog: &Program, insts: &Insts, out: &mut Vec<u8>) {
 
 /// 関数への参照: 普通の関数は名前 (タグ 0)、インスタンスは (元の関数名, 型引数) (タグ 2)
 fn put_func(out: &mut Vec<u8>, id: u32, prog: &Program, insts: &Insts) {
+    // vtable の空欄 (drop の要らない型の drop glue)
+    if id == u32::MAX {
+        out.push(6);
+        return;
+    }
     let put_name = |out: &mut Vec<u8>, id: u32| {
         let n = prog.names[id as usize].as_bytes();
         out.extend_from_slice(&(n.len() as u16).to_le_bytes());
@@ -229,6 +234,9 @@ fn put_func(out: &mut Vec<u8>, id: u32, prog: &Program, insts: &Insts) {
 
 /// put_func の逆 (タグを読んだ後)。インスタンスは insts に要求し直す
 fn get_func(r: &mut Rd, tag: u8, prog: &Program, insts: &Mutex<Insts>) -> Option<u32> {
+    if tag == 6 {
+        return Some(u32::MAX);
+    }
     let len = r.u16()? as usize;
     let name = std::str::from_utf8(r.take(len)?).ok()?;
     let id = *prog.index.get(name)?;

@@ -117,6 +117,14 @@ bench/regress.sh
     - criterion では LSP の 1 関数編集が +14%、lexer が +10% と出た。ただ lexer のコードは変えていない。
     - callgrind で見ると、`lexer::St::tok` の `b"..".contains(&c)` が memchr になっていた。呼び出し回数は同じで、命令数だけ +32% 増えていた（静的な文字列の配置の違い）。
     - `matches!` に替えた結果、ベースラインより LSP の 1 関数編集 −5%、no-op ビルド −13%、lexer −6% になった。
+  - Drop の追加時（`tests/compare.sh` に valgrind の段を足した：メモリエラーと確実なリークがあれば失敗）
+    - `*b` の読み出しが `b` のムーブ扱いになり、Box がリークしていた。deref の中身はムーブせずに読むようにした。
+    - `self.top = n.next`（Box の中身のフィールドだけのムーブ）で、`n` 全体をムーブ扱いにしていたため、ノードがリークしていた。
+      ムーブしたフィールドを 0（null の Box / `None`）で埋め、持ち主は普通に drop するようにした。
+    - 以前からあった不具合も 2 つ見つかった。
+      - `&Rect { .. }` を `&'static` で返すと、スタック上の一時値を指していた。rustc と同じく定数式は静的データに昇格するようにした。
+      - タプル構造体のフィールド `n.0` の型を推論していなかった。
+    - Box も Drop も使わないプログラムは、drop の処理を一切生成しない（`Program::has_drop`）。速度とサイズ予算は変わらない。
 
 ## 対応している言語サブセット（no_std の範囲）
 
@@ -129,7 +137,7 @@ bench/regress.sh
 検証は、そうしたプログラムを rustc でもビルドし、実行結果（標準出力と終了コード）が一致することで行う。
 
 - rustc 側は libcore だけでビルドする（`-C panic=abort`）。
-- 比較は `tests/compare.sh` が行う。対象は `examples/*.rs` の 16 本で、そのうち no_std は 6 本（`nostd_calc` は字句解析と後置記法の電卓で、ジェネリック struct・`?`・const 配列・`&&str` の自動 deref を使う）。
+- 比較は `tests/compare.sh` が行う。対象は `examples/*.rs` の 18 本で、そのうち no_std は 6 本（`nostd_calc` は字句解析と後置記法の電卓で、ジェネリック struct・`?`・const 配列・`&&str` の自動 deref を使う）。
 
 ### 言語
 
@@ -168,9 +176,14 @@ bench/regress.sh
   - ジェネリック関数は turbofish（`id::<i64>`）か期待型（`let f: fn(i64) -> i64 = id;`）で型引数を決める
   - `&dyn Fn` / `Box<dyn Fn>` にする（引数 3 個まで。prelude の中継関数 `__exr_fnptrN` が vtable に入る）
 - `Box<T>`（`examples/fn_ptr_box.rs`）：
-  - `Box::new(x)` は libc の `malloc` でヒープに置く。型としては「所有する `&mut T`」として扱う
-  - `Box<dyn Trait>` / `Box<dyn Fn(A) -> B>`、自動 deref、`*b`、`Option<Box<Node>>` のような再帰的な型
-  - **解放はしない**（Drop を実装していないので、Box はリークする。出力は変わらない）
+  - `Box::new(x)` は libc の `malloc` でヒープに置き、drop で `free` する
+  - `Box<dyn Trait>` / `Box<dyn Fn(A) -> B>`、自動 deref、`*b`、`&Box<T>` → `&T`、`Option<Box<Node>>` のような再帰的な型
+- Drop（`examples/drop.rs`、`examples/drop_more.rs`。drop の順序を rustc と比べ、valgrind でリーク・二重解放がないことを確かめる）：
+  - `impl Drop for S`（ジェネリックな impl も）、`drop(x)`
+  - スコープの終わりで宣言と逆順に drop する。対象は return / `?` / break / continue で抜けるスコープ、値を捨てる式文、`let _ = e`、代入で上書きされる古い値
+  - ムーブを追跡する：値として読む・値で受ける `self`・`move` キャプチャ・値で束縛するパターン（`if let Some(b) = o`）・`for x in arr`
+  - 一時値（`make().area()`、`&Box::new(..)`、match 対象）は文の終わりで drop する。let の初期化式の一時値はブロックの終わりまで延ばす
+  - フィールドだけのムーブ（`self.top = n.next`）は、元のフィールドを 0 で埋めて持ち主を drop する
 - 型：
   - 整数（`i8`〜`i64`、`u8`〜`u64`、`isize`、`usize`）、`bool`、`char`、`()`、`!`
   - `&T`、`&mut T`、`*const T`、`*mut T`
@@ -238,10 +251,13 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
 
 ### 未対応
 
-- alloc（`Vec` / `Box` / `String`）
+- `Vec` / `String`、`Box<[T]>`、`Box::into_raw` などの Box の関数（`new` 以外）
 - 書式化（`write!` / `core::fmt`）
-- Drop（Box の解放を含む）、`Vec` / `String`
-- `Box<[T]>`、`Box::into_raw` などの Box の関数（`new` 以外）。型としては `&mut T` と区別しないので、エラーメッセージには `&mut T` と出る
+- Drop の制限
+  - panic では drop しない（unwind しない）
+  - `impl Drop` を持つ型のフィールドの一部だけをパターンでムーブすると、残りのフィールドはリークする（`let Pair { a, .. } = p;` の `b`）
+  - クロージャの本体から `move` キャプチャした値をムーブすること（FnOnce として消費する使い方）はエラーにする
+  - 一時値の寿命は rustc の規則の近似（let の初期化式の一時値は常にブロックの終わりまで延びる）
 - クロージャの制限
   - マクロの引数の中のクロージャ（`assert!(f(|x| x))` の `|x| x`）
   - Fn / FnMut / FnOnce を区別しない（`FnMut` のクロージャを `&dyn Fn` にしてもエラーにならない）
@@ -277,7 +293,12 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
   - 本体は親のアイテムを parse し直し、k 番目を取り出して普通の fn にしてコンパイルする。キャプチャは `__env` のフィールドとしてスコープに入る。
   - 呼ばれないクロージャも、作った時点でインスタンスを要求する（本体のエラーを報告するため。未使用なら `--gc-sections` で消える）。
 - **関数ポインタ**：関数のアドレス 1 語。`func_addr` で取り、`call_indirect` で呼ぶ（ABI は普通の呼び出しと同じ）。
-- **`Box<T>`**：ヒープへのポインタ（`Box<dyn ..>` は fat pointer）。型の上では `&mut T` と同じなので、自動 deref・`&mut T → &T`・dyn への変換がそのまま使える。
+- **`Box<T>`**：ヒープへのポインタ（`Box<dyn ..>` は fat pointer）。参照と同じ経路で自動 deref・dyn への変換をする。
+- **drop**（`codegen.rs` の Drop 節）
+  - drop が要る値を持つローカル変数・一時値は、1 byte の drop フラグと一緒に所有者として登録する。ムーブでフラグを 0 にし、スコープの出口でフラグが 1 のものを逆順に drop する（分岐でムーブするかどうかが変わっても正しい）。
+  - drop 本体は prelude の `__exr_drop_in_place::<T>` のインスタンス（drop glue）。codegen が型ごとに 1 段だけ展開した本体を作り（`impl Drop` の呼び出し → フィールド / バリアント / 要素 → Box なら free）、入れ子の型は呼び出しにするので、再帰的な型でも展開が止まる。
+  - vtable の最後の欄は中身の型の drop glue。`Box<dyn Trait>` の drop はここを呼んでから free する。
+  - drop glue はインスタンス単位でキャッシュされる。`impl Drop` の有無は deep hash に入れてあり、後から足し引きしても、その型を使う関数が作り直される。
 - **`&dyn Trait`**：(データのポインタ, vtable のアドレス) の 16 byte。
   - vtable は trait のメソッドの宣言順に並べた関数アドレスの列で、Blob に「関数 ID の列」として持つ。
   - キャッシュには関数名（インスタンスなら元の関数名と型引数）で保存する。
@@ -420,7 +441,7 @@ rustc 側はほとんどが std 由来。
 ## 次にやること
 
 - **言語**
-  - モジュール、`core::fmt` 相当の書式化、Drop（Box の解放）
+  - モジュール、`core::fmt` 相当の書式化、`Vec` / `String`（Drop と Box ができたので、prelude に書ける）
   - 浮動小数点、オーバーフロー検査（debug ビルドの rustc と同じ panic）
   - 単相化をレイアウトでキーにして共有する（`Vec<A>` と `Vec<B>` を 1 つにする。blaze の polymorph）
   - 最小の自前 std（relax 方式）

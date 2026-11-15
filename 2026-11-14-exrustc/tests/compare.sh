@@ -34,6 +34,15 @@ for src in examples/*.rs; do
   fi
   "$out/$name.rustc" >"$out/$name.out2"; c2=$?
   echo "exit=$c1" >>"$out/$name.out1"; echo "exit=$c2" >>"$out/$name.out2"
+  # valgrind があれば、メモリエラー (二重解放・解放後の使用・未初期化の読み出し) とリークも見る
+  if command -v valgrind >/dev/null 2>&1; then
+    # (終了コードはプログラムのもの。-q なので何か出力されたら問題あり)
+    valgrind -q --leak-check=full --errors-for-leak-kinds=definite \
+        "$out/$name" >/dev/null 2>"$out/$name.vg"
+    if [ -s "$out/$name.vg" ]; then
+      echo "FAIL $name (valgrind)"; head -20 "$out/$name.vg"; fail=1; continue
+    fi
+  fi
   if diff "$out/$name.out1" "$out/$name.out2" >"$out/$name.diff"; then
     echo "ok   $name"
   else

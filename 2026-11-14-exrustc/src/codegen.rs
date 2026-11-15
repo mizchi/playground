@@ -296,6 +296,10 @@ impl Worker {
                 root,
                 closure_ix,
                 closure_hint: None,
+                owned: vec![],
+                temps: vec![],
+                owned_binds: 0,
+                last_scrut: None,
                 env,
                 insts,
                 requested: vec![],
@@ -303,7 +307,11 @@ impl Worker {
                 vtables: vec![],
                 gvs: HashMap::new(),
             };
-            let r = cx.body(f, sig);
+            let r = if prog.index.get(crate::prelude::DROP_GLUE) == Some(&body_id) {
+                cx.drop_glue_body(sig)
+            } else {
+                cx.body(f, sig)
+            };
             self.requested = std::mem::take(&mut cx.requested);
             self.datas = std::mem::take(&mut cx.datas);
             self.vtables = std::mem::take(&mut cx.vtables);
@@ -385,7 +393,7 @@ fn addr_taken(f: &syn::ItemFn) -> (HashSet<String>, Vec<&syn::ExprClosure>) {
 /// 式の評価結果。Unit / Never のとき値は None。struct のときはアドレス。
 type V = (Option<Value>, Ty);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Loc {
     /// レジスタ (Cranelift Variable)
     Var(Variable),
@@ -417,6 +425,20 @@ struct Loop {
     cont: Block,
     brk: Block,
     breaks: usize,
+    /// ループに入ったときのスコープの深さと一時値の数 (break / continue でそこまで drop する)
+    depth: usize,
+    temps: usize,
+}
+
+/// drop の責任を持つ値 (所有しているローカル変数・一時値)。flag が 1 のときだけ drop する
+/// (ムーブしたら 0 にする。分岐によってムーブしたりしなかったりするので実行時のフラグにする)
+#[derive(Clone, Copy)]
+struct Owned {
+    loc: Loc,
+    ty: Ty,
+    flag: StackSlot,
+    /// ローカル変数ならスコープの深さ
+    depth: usize,
 }
 
 struct Cx<'a, 'p> {
@@ -449,6 +471,13 @@ struct Cx<'a, 'p> {
     closure_ix: HashMap<usize, u32>,
     /// 次に作るクロージャの引数・戻り値の型の手がかり (呼び先の `F: Fn(A) -> B` から)
     closure_hint: Option<(Vec<Ty>, Option<Ty>)>,
+    /// drop の責任を持つローカル変数 (スコープの深さ順) と、文の終わりで drop する一時値
+    owned: Vec<Owned>,
+    temps: Vec<Owned>,
+    /// drop が要る値を値で束縛した回数 (パターンが match 対象からムーブしたかの判定用)
+    owned_binds: usize,
+    /// 直前の match 対象が一時値なら、その drop フラグ
+    last_scrut: Option<StackSlot>,
 }
 
 /// 間接呼び出しの呼び先
@@ -458,6 +487,30 @@ enum Indirect {
     Vtable(Value, usize),
     /// 関数ポインタ
     Ptr(Value),
+}
+
+/// 静的データに昇格できる定数式か (リテラル・構築・const・unit バリアントだけでできている)
+fn is_promotable(cx: &Cx, e: &Expr) -> bool {
+    match e {
+        Expr::Lit(l) => !matches!(l.lit, Lit::Str(_) | Lit::ByteStr(_)),
+        Expr::Paren(p) => is_promotable(cx, &p.expr),
+        Expr::Unary(u) => matches!(u.op, UnOp::Neg(_)) && is_promotable(cx, &u.expr),
+        Expr::Struct(s) => s.rest.is_none() && s.fields.iter().all(|f| is_promotable(cx, &f.expr)),
+        Expr::Tuple(t) => t.elems.iter().all(|x| is_promotable(cx, x)),
+        Expr::Array(a) => a.elems.iter().all(|x| is_promotable(cx, x)),
+        Expr::Call(c) => {
+            matches!(&*c.func, Expr::Path(p)
+                if cx.prog.variant_by_path(&p.path, cx.self_sid).is_some()
+                    || cx.prog.struct_by_path(&p.path, cx.self_sid).is_some())
+                && c.args.iter().all(|x| is_promotable(cx, x))
+        }
+        Expr::Path(p) => {
+            cx.const_of(p).is_some()
+                || (cx.prog.variant_by_path(&p.path, cx.self_sid).is_some()
+                    && p.path.get_ident().is_none_or(|i| cx.lookup(&i.to_string()).is_none()))
+        }
+        _ => false,
+    }
 }
 
 fn strip_paren(e: &Expr) -> &Expr {
@@ -615,6 +668,10 @@ impl Cx<'_, '_> {
             },
         };
         self.scopes.last_mut().unwrap().push((name, loc, ty));
+        if self.needs_drop(ty) {
+            self.owned_binds += 1;
+            self.own_local(loc, ty);
+        }
     }
 
     fn lookup(&self, name: &str) -> Option<(Loc, Ty)> {
@@ -641,11 +698,12 @@ impl Cx<'_, '_> {
                 syn::FnArg::Typed(pt) => pat_name(&pt.pat)?,
             };
             if ty.is_agg() {
-                // 呼び出し側がコピー済みなので、そのメモリをそのまま使う
+                // 呼び出し側がコピー済みなので、そのメモリをそのまま使う (値渡しの引数は呼び出された側が drop する)
                 self.scopes
                     .last_mut()
                     .unwrap()
                     .push((name, Loc::Ptr(v), ty));
+                self.own_local(Loc::Ptr(v), ty);
             } else {
                 self.bind(name, ty, Some(v));
             }
@@ -682,6 +740,7 @@ impl Cx<'_, '_> {
             _ => f.block.span(),
         };
         self.same(span, t, self.ret)?;
+        self.drop_for_exit(0, 0);
         self.emit_return(v);
         Ok(())
     }
@@ -715,6 +774,7 @@ impl Cx<'_, '_> {
         let n = blk.stmts.len();
         for (i, st) in blk.stmts.iter().enumerate() {
             let last = i + 1 == n;
+            let t0 = self.temps.len();
             match st {
                 Stmt::Local(l) if !is_simple_let(&l.pat) => {
                     // 分解する let (`let S { x, y } = s;`): 反駁不能パターンとして束縛だけ行う
@@ -728,7 +788,32 @@ impl Cx<'_, '_> {
                         diverged = true;
                         continue;
                     };
+                    let ob = self.owned_binds;
                     self.pat_bind(&l.pat, place, BindMode::Move)?;
+                    if self.owned_binds > ob {
+                        let f = self.last_scrut;
+                        self.release(&init.expr, f);
+                    }
+                    self.extend_temps(t0);
+                }
+                Stmt::Local(l) if matches!(l.pat, Pat::Wild(_)) => {
+                    // `let _ = e;`: 場所ならムーブしない。値ならすぐ drop する
+                    let Some(init) = &l.init else {
+                        return err(l.span(), "`let` without initializer is not supported");
+                    };
+                    if is_place_expr(&init.expr) {
+                        let _ = self.place(&init.expr)?;
+                    } else {
+                        let (v, t) = self.expr(&init.expr, None)?;
+                        if t == Ty::Never {
+                            diverged = true;
+                            continue;
+                        }
+                        if let Some(v) = v {
+                            self.own_temp(v, t);
+                        }
+                    }
+                    self.drop_temps(t0);
                 }
                 Stmt::Local(l) => {
                     let (name, ann) = match &l.pat {
@@ -755,6 +840,7 @@ impl Cx<'_, '_> {
                     let ty = ann.unwrap_or(t);
                     self.same(init.expr.span(), t, ty)?;
                     self.bind(name, ty, v);
+                    self.extend_temps(t0);
                 }
                 Stmt::Expr(e, semi) => {
                     let exp = if last && semi.is_none() {
@@ -768,8 +854,17 @@ impl Cx<'_, '_> {
                     }
                     if last && semi.is_none() {
                         result = r;
-                    } else if semi.is_none() && !matches!(r.1, Ty::Unit | Ty::Never) {
-                        return err(e.span(), "expected `;` after non-unit expression");
+                    } else {
+                        if semi.is_none() && !matches!(r.1, Ty::Unit | Ty::Never) {
+                            return err(e.span(), "expected `;` after non-unit expression");
+                        }
+                        // 捨てる値と、文の一時値を drop する
+                        if let (Some(v), t) = r {
+                            if t != Ty::Never {
+                                self.own_temp(v, t);
+                            }
+                        }
+                        self.drop_temps(t0);
                     }
                 }
                 Stmt::Item(it) => return err(it.span(), "nested items are not supported"),
@@ -780,11 +875,13 @@ impl Cx<'_, '_> {
                     }
                     if last && m.semi_token.is_none() {
                         result = r;
+                    } else {
+                        self.drop_temps(t0);
                     }
                 }
             }
         }
-        self.scopes.pop();
+        self.pop_scope();
         if diverged && result.1 == Ty::Unit {
             result = (None, Ty::Never);
         }
@@ -1014,13 +1111,14 @@ impl Cx<'_, '_> {
                 }
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
-                let (v, t) = self.expr(&u.expr, None)?;
+                // `*b` は b をムーブしない
+                let (v, t) = self.read_no_move(&u.expr)?;
                 match (v, t) {
                     (Some(_), t) if t.is_fat() => err(
                         u.span(),
                         "dereferencing a slice is not supported (index it instead)",
                     ),
-                    (Some(p), Ty::Ref(_, inner)) | (Some(p), Ty::Ptr(_, inner)) => {
+                    (Some(p), Ty::Ref(_, inner) | Ty::Ptr(_, inner) | Ty::Box(inner)) => {
                         Ok(Place::Mem(p, 0, *inner))
                     }
                     _ => err(
@@ -1051,9 +1149,13 @@ impl Cx<'_, '_> {
         let mut p = if is_place_expr(base) {
             self.place(base)?
         } else {
-            match self.expr(base, None)? {
+            let r = self.expr(base, None)?;
+            if let (Some(v), t) = r {
+                self.own_temp(v, t);
+            }
+            match r {
                 (Some(a), t) if t.is_agg() => Place::Mem(a, 0, t),
-                (Some(p), Ty::Ref(_, i)) => Place::Mem(p, 0, *i),
+                (Some(p), Ty::Ref(_, i) | Ty::Box(i)) => Place::Mem(p, 0, *i),
                 (_, t) => {
                     return err(
                         base.span(),
@@ -1065,11 +1167,11 @@ impl Cx<'_, '_> {
         loop {
             p = match p {
                 Place::Mem(a, o, Ty::Struct(sid)) => return Ok((a, o, sid)),
-                Place::Mem(a, o, Ty::Ref(_, i)) => {
+                Place::Mem(a, o, Ty::Ref(_, i) | Ty::Box(i)) => {
                     let ptr = self.b.ins().load(PTR, mf(), a, o);
                     Place::Mem(ptr, 0, *i)
                 }
-                Place::Var(v, Ty::Ref(_, i)) => {
+                Place::Var(v, Ty::Ref(_, i) | Ty::Box(i)) => {
                     let ptr = self.b.use_var(v);
                     Place::Mem(ptr, 0, *i)
                 }
@@ -1100,6 +1202,13 @@ impl Cx<'_, '_> {
         if let (Some(want @ Ty::Ref(false, wi)), Ty::Ref(true, gi)) = (expected, t) {
             if wi == gi {
                 return Ok((v, want));
+            }
+        }
+        // `Box<T>` → `Box<dyn Trait>`
+        if let (Some(want @ Ty::Box(Ty::Dyn(tr))), Some(v), Ty::Box(inner)) = (expected, v, t) {
+            if !matches!(inner, Ty::Dyn(_)) {
+                let fat = self.to_dyn(v, *inner, tr, e.span())?;
+                return Ok((Some(fat), want));
             }
         }
         // `&T` → `&dyn Trait` (データのポインタ + vtable)
@@ -1170,7 +1279,42 @@ impl Cx<'_, '_> {
             }
             Expr::Path(_) | Expr::Field(_) => {
                 let p = self.place(e)?;
-                Ok(self.read(p))
+                let r = self.read(p);
+                // drop が要る値を値として読んだらムーブ
+                if self.needs_drop(r.1) {
+                    let mut root = e;
+                    while let Expr::Field(f) = strip_paren(root) {
+                        root = &f.base;
+                    }
+                    if let Expr::Path(rp) = strip_paren(root) {
+                        if let Some(id) = rp.path.get_ident() {
+                            if self.caps.iter().any(|c| c.0 == id.to_string()) {
+                                return err(
+                                    e.span(),
+                                    "moving a captured value out of a closure is not supported",
+                                );
+                            }
+                        }
+                    }
+                    if let (Expr::Field(_), Place::Mem(a, o, t), Some(v)) = (strip_paren(e), p, r.0) {
+                        if self.zeroable(t) {
+                            // フィールドだけのムーブ: 値を退避して元を「空」(0) にする。
+                            // 持ち主はそのまま drop される (0 の Box は解放しない、0 の Option は None)
+                            let v = if t.is_agg() {
+                                let tmp = self.temp(t);
+                                self.copy(tmp, v, t);
+                                tmp
+                            } else {
+                                v
+                            };
+                            let dst = self.addr_plus(a, o);
+                            self.zero(dst, t);
+                            return Ok((Some(v), t));
+                        }
+                    }
+                    self.mark_moved(e);
+                }
+                Ok(r)
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
                 let p = self.place(e)?;
@@ -1188,7 +1332,16 @@ impl Cx<'_, '_> {
                     return Ok((None, Ty::Never));
                 }
                 self.same(a.right.span(), rt, t)?;
+                let refill = if self.needs_drop(t) {
+                    self.drop_before_assign(&a.left, p)
+                } else {
+                    None
+                };
                 self.write(p, v);
+                if let Some(f) = refill {
+                    let one = self.b.ins().iconst(types::I8, 1);
+                    self.b.ins().stack_store(PTR, one, f, 0);
+                }
                 Ok((None, Ty::Unit))
             }
             Expr::If(i) => self.if_(i, expected),
@@ -1202,6 +1355,7 @@ impl Cx<'_, '_> {
                 let exit = self.b.create_block();
                 self.b.ins().jump(header, &[]);
                 self.b.switch_to_block(header);
+                let t0 = self.temps.len();
                 let (c, ct) = self.expr(&w.cond, Some(Ty::Bool))?;
                 self.same(w.cond.span(), ct, Ty::Bool)?;
                 match c {
@@ -1217,16 +1371,20 @@ impl Cx<'_, '_> {
                     cont: header,
                     brk: exit,
                     breaks: 0,
+                    depth: self.scopes.len(),
+                    temps: t0,
                 });
                 let (_, bt) = self.block(&w.body, Some(Ty::Unit))?;
                 self.loops.pop();
                 if bt != Ty::Never {
                     self.same(w.body.span(), bt, Ty::Unit)?;
+                    self.drop_for_exit(usize::MAX, t0);
                     self.b.ins().jump(header, &[]);
                 } else {
                     self.b.ins().trap(TrapCode::unwrap_user(1));
                 }
                 self.b.switch_to_block(exit);
+                self.drop_temps(t0);
                 Ok((None, Ty::Unit))
             }
             Expr::Loop(l) => {
@@ -1241,11 +1399,14 @@ impl Cx<'_, '_> {
                     cont: body,
                     brk: exit,
                     breaks: 0,
+                    depth: self.scopes.len(),
+                    temps: self.temps.len(),
                 });
                 let (_, bt) = self.block(&l.body, Some(Ty::Unit))?;
                 let lp = self.loops.pop().unwrap();
                 if bt != Ty::Never {
                     self.same(l.body.span(), bt, Ty::Unit)?;
+                    self.drop_for_exit(usize::MAX, lp.temps);
                     self.b.ins().jump(body, &[]);
                 } else {
                     self.b.ins().trap(TrapCode::unwrap_user(1));
@@ -1268,7 +1429,8 @@ impl Cx<'_, '_> {
                     return err(br.span(), "`break` outside of a loop");
                 };
                 lp.breaks += 1;
-                let t = lp.brk;
+                let (t, d, tt) = (lp.brk, lp.depth, lp.temps);
+                self.drop_for_exit(d, tt);
                 self.b.ins().jump(t, &[]);
                 Ok(self.dead())
             }
@@ -1279,7 +1441,8 @@ impl Cx<'_, '_> {
                 let Some(lp) = self.loops.last() else {
                     return err(c.span(), "`continue` outside of a loop");
                 };
-                let t = lp.cont;
+                let (t, d, tt) = (lp.cont, lp.depth, lp.temps);
+                self.drop_for_exit(d, tt);
                 self.b.ins().jump(t, &[]);
                 Ok(self.dead())
             }
@@ -1299,6 +1462,7 @@ impl Cx<'_, '_> {
                         None
                     }
                 };
+                self.drop_for_exit(0, 0);
                 self.emit_return(v);
                 Ok(self.dead())
             }
@@ -1404,6 +1568,20 @@ impl Cx<'_, '_> {
             Some(Ty::Ref(_, i)) => Some(*i),
             _ => None,
         };
+        // 定数式への共有参照は静的データに昇格する (`fn f() -> &'static S { &S { x: 1 } }`)
+        if !m && is_promotable(self, &r.expr) {
+            let t = inner_exp
+                .filter(|t| !matches!(t, Ty::Dyn(_) | Ty::Slice(_) | Ty::Str))
+                .or_else(|| self.peek(&r.expr));
+            if let Some(t) = t.filter(|&t| !self.needs_drop(t) && !self.prog.has_param(t)) {
+                if let Ok(dv) = crate::consteval::eval(self.prog, &r.expr, t) {
+                    if dv.relocs.is_empty() && !dv.bytes.is_empty() {
+                        let a = self.data_addr(dv.bytes);
+                        return Ok((Some(a), Ty::Ref(false, intern(t))));
+                    }
+                }
+            }
+        }
         let (v, t) = self.expr(&r.expr, inner_exp)?;
         if t == Ty::Never {
             return Ok((None, Ty::Never));
@@ -1418,6 +1596,8 @@ impl Cx<'_, '_> {
                 a
             }
         };
+        // `&一時値`: 一時値は文 (let ならブロック) の終わりまで所有する
+        self.own_temp_at(a, t);
         Ok((Some(a), Ty::Ref(m, intern(t))))
     }
 
@@ -1638,6 +1818,9 @@ impl Cx<'_, '_> {
                 };
                 let (v, _) = self.read(p);
                 self.write(Place::Mem(a, off as i32, ft), v);
+                if self.needs_drop(t) {
+                    self.mark_moved_loc(loc);
+                }
             } else {
                 let addr = match loc {
                     Loc::Zst => self.b.ins().iconst(PTR, 0),
@@ -1720,6 +1903,9 @@ impl Cx<'_, '_> {
                 fns.push(fid);
             }
         }
+        // 最後の欄は drop glue (`Box<dyn ..>` の drop で使う)
+        let de = self.vtable_drop_entry(t);
+        fns.push(de);
         let k = match self.vtables.iter().position(|x| *x == fns) {
             Some(k) => k,
             None => {
@@ -1899,15 +2085,27 @@ impl Cx<'_, '_> {
 
     /// 関数でない値の呼び出し `f(x)`: クロージャ (の参照) か `&dyn Fn`
     fn call_value(&mut self, c: &syn::ExprCall, expected: Option<Ty>) -> R<V> {
-        let (v, mut t) = self.expr(&c.func, None)?;
+        // 呼び出しはムーブしない (Fn / FnMut は参照で呼ぶ)。一時値なら文の終わりまで所有する
+        let (v, mut t) = if is_place_expr(&c.func)
+            && !matches!(&*c.func, Expr::Path(p) if self.fn_item(p).is_some())
+        {
+            let p = self.place(&c.func)?;
+            self.read(p)
+        } else {
+            let r = self.expr(&c.func, None)?;
+            if let (Some(v), t) = r {
+                self.own_temp(v, t);
+            }
+            r
+        };
         let Some(mut v) = v else {
             return err(c.func.span(), "expected a function");
         };
         loop {
             match t {
-                Ty::Ref(_, Ty::Dyn(_)) => break,
-                Ty::Ref(_, i) if i.is_agg() => t = *i,
-                Ty::Ref(_, i) => {
+                Ty::Ref(_, Ty::Dyn(_)) | Ty::Box(Ty::Dyn(_)) => break,
+                Ty::Ref(_, i) | Ty::Box(i) if i.is_agg() => t = *i,
+                Ty::Ref(_, i) | Ty::Box(i) => {
                     v = self.b.ins().load(PTR, mf(), v, 0);
                     t = *i;
                 }
@@ -1926,7 +2124,7 @@ impl Cx<'_, '_> {
                 let recv = (v, Ty::Ptr(true, intern(t)));
                 self.call_fn(cid, Some(recv), &args, None, expected, c.span())
             }
-            Ty::Ref(_, Ty::Dyn(s)) => self.dyn_fn_call(v, s, &args, c.span()),
+            Ty::Ref(_, Ty::Dyn(s)) | Ty::Box(Ty::Dyn(s)) => self.dyn_fn_call(v, s, &args, c.span()),
             Ty::Fn(f) => self.indirect_call(Indirect::Ptr(v), &f.params, f.ret, &args, c.span()),
             t => err(
                 c.func.span(),
@@ -1989,13 +2187,21 @@ impl Cx<'_, '_> {
         if let Some(r) = self.prim_trait_method(mc)? {
             return Ok(r);
         }
+        let mut recv_temp = None;
         let mut p = if is_place_expr(&mc.receiver) {
             self.place(&mc.receiver)?
         } else {
-            match self.expr(&mc.receiver, None)? {
+            let r = self.expr(&mc.receiver, None)?;
+            // 一時値の受け手は文の終わりまで所有する (値で受けるメソッドならムーブ)
+            if let (Some(v), t) = r {
+                if t != Ty::Never {
+                    recv_temp = self.own_temp(v, t);
+                }
+            }
+            match r {
                 (_, Ty::Never) => return Ok((None, Ty::Never)),
                 (Some(a), t) if t.is_agg() => Place::Mem(a, 0, t),
-                (Some(v), Ty::Ref(_, i)) => Place::Mem(v, 0, *i),
+                (Some(v), Ty::Ref(_, i) | Ty::Box(i)) => Place::Mem(v, 0, *i),
                 (_, t) => {
                     return err(
                         mc.method.span(),
@@ -2007,15 +2213,15 @@ impl Cx<'_, '_> {
         let (a, o, sid) = loop {
             p = match p {
                 Place::Mem(a, o, Ty::Struct(sid)) => break (a, o, sid),
-                Place::Mem(a, o, Ty::Ref(_, Ty::Dyn(tr))) => {
+                Place::Mem(a, o, Ty::Ref(_, Ty::Dyn(tr)) | Ty::Box(Ty::Dyn(tr))) => {
                     let fat = self.addr_plus(a, o);
                     return self.dyn_method_call(fat, tr, mc);
                 }
-                Place::Mem(a, o, Ty::Ref(_, i)) => {
+                Place::Mem(a, o, Ty::Ref(_, i) | Ty::Box(i)) => {
                     let ptr = self.b.ins().load(PTR, mf(), a, o);
                     Place::Mem(ptr, 0, *i)
                 }
-                Place::Var(v, Ty::Ref(_, i)) => {
+                Place::Var(v, Ty::Ref(_, i) | Ty::Box(i)) => {
                     let ptr = self.b.use_var(v);
                     Place::Mem(ptr, 0, *i)
                 }
@@ -2054,6 +2260,13 @@ impl Cx<'_, '_> {
             Ty::Ref(m, _) => Ty::Ref(m, intern(st)),
             _ => st,
         };
+        // `self` を値で受ける: 受け手からムーブ
+        if !matches!(recv_ty, Ty::Ref(..)) && self.needs_drop(st) {
+            match recv_temp {
+                Some(f) => self.clear_flag(f),
+                None => self.mark_moved(&mc.receiver),
+            }
+        }
         let args: Vec<&Expr> = mc.args.iter().collect();
         self.call_fn(
             id,
@@ -2272,7 +2485,10 @@ impl Cx<'_, '_> {
             }
             // 自動 deref 強制: `&&T` を `&T` の引数に渡す
             let want = self.prog.partial_subst(pt, &sol);
-            while let (Ty::Ref(_, _), Ty::Ref(_, inner @ Ty::Ref(..)), Some(val)) = (want, t, v) {
+            // (`&Box<T>` も `&T` に)
+            while let (Ty::Ref(_, _), Ty::Ref(m, inner @ (Ty::Ref(..) | Ty::Box(_))), Some(val)) =
+                (want, t, v)
+            {
                 if t == want || self.prog.has_param(want) {
                     break;
                 }
@@ -2282,7 +2498,10 @@ impl Cx<'_, '_> {
                 } else {
                     self.b.ins().load(PTR, mf(), val, 0)
                 });
-                t = *inner;
+                t = match inner {
+                    Ty::Box(x) => Ty::Ref(m, x),
+                    i => *i,
+                };
             }
             if let (Ty::Ref(false, wi), Ty::Ref(true, gi)) = (want, t) {
                 if wi == gi {
@@ -2897,7 +3116,7 @@ impl Cx<'_, '_> {
         } else {
             match self.expr(e, None)? {
                 (Some(a), t) if t.is_agg() => Place::Mem(a, 0, t),
-                (Some(v), Ty::Ref(_, i)) => Place::Mem(v, 0, *i),
+                (Some(v), Ty::Ref(_, i) | Ty::Box(i)) => Place::Mem(v, 0, *i),
                 (_, t) => {
                     return err(
                         e.span(),
@@ -2918,11 +3137,11 @@ impl Cx<'_, '_> {
                     let len = self.b.ins().load(types::I64, mf(), a, o + 8);
                     return Ok((base, len, **t));
                 }
-                Place::Mem(a, o, Ty::Ref(_, i)) => {
+                Place::Mem(a, o, Ty::Ref(_, i) | Ty::Box(i)) => {
                     let ptr = self.b.ins().load(PTR, mf(), a, o);
                     Place::Mem(ptr, 0, *i)
                 }
-                Place::Var(v, Ty::Ref(_, i)) => {
+                Place::Var(v, Ty::Ref(_, i) | Ty::Box(i)) => {
                     let ptr = self.b.use_var(v);
                     Place::Mem(ptr, 0, *i)
                 }
@@ -3297,7 +3516,16 @@ impl Cx<'_, '_> {
                 (Some(self.elem_addr(p, n, elem)), pt)
             }
             "is_null" => (Some(self.b.ins().icmp_imm_u(IntCC::Equal, p, 0)), Ty::Bool),
-            "read" | "read_volatile" | "read_unaligned" => self.read(Place::Mem(p, 0, elem)),
+            "read" | "read_volatile" | "read_unaligned" => {
+                if elem.is_agg() {
+                    // 指す先が後で書き換えられても値が変わらないようにコピーする
+                    let a = self.temp(elem);
+                    self.copy(a, p, elem);
+                    (Some(a), elem)
+                } else {
+                    self.read(Place::Mem(p, 0, elem))
+                }
+            }
             "write" | "write_volatile" | "write_unaligned" => {
                 let (v, vt) = self.expr(args[0], Some(elem))?;
                 self.same(args[0].span(), vt, elem)?;
@@ -3697,6 +3925,10 @@ impl Cx<'_, '_> {
                 _ => {}
             }
         }
+        // 値で回す (`for x in arr`): 要素は x にムーブするので、配列は drop しない
+        if mode.is_none() && self.needs_drop(elem) {
+            self.mark_moved(base_e);
+        }
         let i = self.b.declare_var(types::I64);
         let start = if rev {
             len
@@ -3783,10 +4015,13 @@ impl Cx<'_, '_> {
             cont: step,
             brk: exit,
             breaks: 0,
+            // パターンの束縛のスコープも break で drop する
+            depth: self.scopes.len() - 1,
+            temps: self.temps.len(),
         });
         let (_, bt) = self.block(&f.body, Some(Ty::Unit))?;
         self.loops.pop();
-        self.scopes.pop();
+        self.pop_scope();
         if bt != Ty::Never {
             self.same(f.body.span(), bt, Ty::Unit)?;
             self.b.ins().jump(step, &[]);
@@ -4002,7 +4237,7 @@ impl Cx<'_, '_> {
                         self.require(c, no);
                     }
                 }
-                self.scopes.pop();
+                self.pop_scope();
                 let one = self.b.ins().iconst(types::I8, 1);
                 self.b.ins().jump(merge, &[one.into()]);
                 self.b.switch_to_block(no);
@@ -4109,6 +4344,7 @@ impl Cx<'_, '_> {
             let (ev, _) = self.read(Self::field_place(place, ety, eoff));
             self.write(Place::Mem(a, reoff as i32, rety), ev);
         }
+        self.drop_for_exit(0, 0);
         self.emit_return(Some(a));
         self.b.switch_to_block(cont);
         Ok((param, oty))
@@ -4132,7 +4368,7 @@ impl Cx<'_, '_> {
                 return err(c.span(), "`Box::new` takes 1 argument");
             }
             let inner = match expected {
-                Some(Ty::Ref(true, t)) if !matches!(t, Ty::Dyn(_) | Ty::Slice(_) | Ty::Str) => Some(*t),
+                Some(Ty::Box(t)) if !matches!(t, Ty::Dyn(_) | Ty::Slice(_) | Ty::Str) => Some(*t),
                 _ => None,
             };
             let (v, t) = self.expr(&c.args[0], inner)?;
@@ -4149,7 +4385,7 @@ impl Cx<'_, '_> {
             let call = self.b.ins().call(fr, &[sz]);
             let ptr = self.b.inst_results(call)[0];
             self.write(Place::Mem(ptr, 0, t), v);
-            return Ok(Some((Some(ptr), Ty::Ref(true, intern(t)))));
+            return Ok(Some((Some(ptr), Ty::Box(intern(t)))));
         }
         if !matches!(name.as_str(), "size_of" | "align_of" | "null" | "null_mut") {
             return Ok(None);
@@ -4346,10 +4582,17 @@ impl Cx<'_, '_> {
 
     /// match 対象を place にする。値なら一時変数に置く。None は発散
     fn scrutinee(&mut self, e: &Expr) -> R<Option<Place>> {
+        self.last_scrut = None;
         if is_place_expr(e) {
             return Ok(Some(self.place(e)?));
         }
         let (v, t) = self.expr(e, None)?;
+        // 一時値の match 対象は文の終わりまで所有する (パターンがムーブしたらフラグを下ろす)
+        if let Some(v) = v {
+            if t != Ty::Never {
+                self.last_scrut = self.own_temp(v, t);
+            }
+        }
         Ok(match (v, t) {
             (_, Ty::Never) => None,
             (Some(a), t) if t.is_agg() => Some(Place::Mem(a, 0, t)),
@@ -4366,6 +4609,7 @@ impl Cx<'_, '_> {
         let Some(place) = self.scrutinee(&m.expr)? else {
             return Ok((None, Ty::Never));
         };
+        let sflag = self.last_scrut;
         let merge = self.b.create_block();
         let mut result_ty: Option<Ty> = None;
         let mut param: Option<Value> = None;
@@ -4374,7 +4618,11 @@ impl Cx<'_, '_> {
             let next = self.b.create_block();
             self.pat_test(&arm.pat, place, next)?;
             self.scopes.push(vec![]);
+            let ob = self.owned_binds;
             self.pat_bind(&arm.pat, place, BindMode::Move)?;
+            if self.owned_binds > ob {
+                self.release(&m.expr, sflag);
+            }
             if let Some((_, g)) = &arm.guard {
                 let (c, ct) = self.expr(g, Some(Ty::Bool))?;
                 self.same(g.span(), ct, Ty::Bool)?;
@@ -4383,7 +4631,7 @@ impl Cx<'_, '_> {
                 }
             }
             let (v, t) = self.expr(&arm.body, result_ty.or(expected))?;
-            self.scopes.pop();
+            self.pop_scope();
             self.finish_arm(v, t, merge, &mut result_ty, &mut param, arm.body.span())?;
             self.b.switch_to_block(next);
         }
@@ -4400,15 +4648,20 @@ impl Cx<'_, '_> {
         let Some(place) = self.scrutinee(&l.expr)? else {
             return Ok((None, Ty::Never));
         };
+        let sflag = self.last_scrut;
         let else_blk = self.b.create_block();
         let merge = self.b.create_block();
         let mut result_ty: Option<Ty> = None;
         let mut param: Option<Value> = None;
         self.pat_test(&l.pat, place, else_blk)?;
         self.scopes.push(vec![]);
+        let ob = self.owned_binds;
         self.pat_bind(&l.pat, place, BindMode::Move)?;
+        if self.owned_binds > ob {
+            self.release(&l.expr, sflag);
+        }
         let (tv, tt) = self.block(&i.then_branch, expected)?;
-        self.scopes.pop();
+        self.pop_scope();
         self.finish_arm(
             tv,
             tt,
@@ -4441,28 +4694,38 @@ impl Cx<'_, '_> {
         let exit = self.b.create_block();
         self.b.ins().jump(header, &[]);
         self.b.switch_to_block(header);
-        // 毎回 match 対象を評価し直す
+        // 毎回 match 対象を評価し直す (一時値は 1 回ごとに drop する)
+        let t0 = self.temps.len();
         let Some(place) = self.scrutinee(&l.expr)? else {
             return Ok((None, Ty::Never));
         };
+        let sflag = self.last_scrut;
         self.pat_test(&l.pat, place, exit)?;
         self.scopes.push(vec![]);
+        let ob = self.owned_binds;
         self.pat_bind(&l.pat, place, BindMode::Move)?;
+        if self.owned_binds > ob {
+            self.release(&l.expr, sflag);
+        }
         self.loops.push(Loop {
             cont: header,
             brk: exit,
             breaks: 0,
+            depth: self.scopes.len() - 1,
+            temps: t0,
         });
         let (_, bt) = self.block(&w.body, Some(Ty::Unit))?;
         self.loops.pop();
-        self.scopes.pop();
+        self.pop_scope();
         if bt != Ty::Never {
             self.same(w.body.span(), bt, Ty::Unit)?;
+            self.drop_for_exit(usize::MAX, t0);
             self.b.ins().jump(header, &[]);
         } else {
             self.b.ins().trap(TrapCode::unwrap_user(1));
         }
         self.b.switch_to_block(exit);
+        self.drop_temps(t0);
         Ok((None, Ty::Unit))
     }
 
@@ -4941,5 +5204,474 @@ fn pat_name(p: &Pat) -> R<String> {
         Pat::Ident(pi) if pi.subpat.is_none() && pi.by_ref.is_none() => Ok(pi.ident.to_string()),
         Pat::Wild(_) => Ok("_".into()),
         _ => err(p.span(), "unsupported pattern"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drop
+// ---------------------------------------------------------------------------
+//
+// - drop が要る型 ([`Program::needs_drop`]) の値を持つローカル変数・一時値は、所有者として
+//   `owned` / `temps` に drop フラグ (スタック上の 1 byte) と一緒に登録する。
+// - ムーブ (値としての読み出し・値で受ける self・move キャプチャ・値で束縛するパターン) でフラグを 0 にする。
+//   フィールドだけのムーブ (部分ムーブ) も全体のフラグを 0 にする (残りはリークする)。
+// - スコープの終わり・return / break / continue / `?` で、フラグが 1 のものを登録と逆順に drop する。
+// - drop 本体は `__exr_drop_in_place::<T>` のインスタンス (drop glue)。codegen が型ごとに
+//   1 段だけ展開した本体を作り、入れ子の型は呼び出しにする (再帰的な型でも展開が止まる)。
+// - panic では drop しない (unwind しない)。
+
+impl Cx<'_, '_> {
+    fn needs_drop(&self, t: Ty) -> bool {
+        self.prog.has_drop && self.prog.needs_drop(t)
+    }
+
+    fn new_flag(&mut self) -> StackSlot {
+        let ss = self
+            .b
+            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 1, 0));
+        let one = self.b.ins().iconst(types::I8, 1);
+        self.b.ins().stack_store(PTR, one, ss, 0);
+        ss
+    }
+
+    fn clear_flag(&mut self, flag: StackSlot) {
+        let z = self.b.ins().iconst(types::I8, 0);
+        self.b.ins().stack_store(PTR, z, flag, 0);
+    }
+
+    /// 今のスコープのローカル変数として所有する
+    fn own_local(&mut self, loc: Loc, ty: Ty) {
+        if !self.needs_drop(ty) {
+            return;
+        }
+        let flag = self.new_flag();
+        let depth = self.scopes.len() - 1;
+        self.owned.push(Owned {
+            loc,
+            ty,
+            flag,
+            depth,
+        });
+    }
+
+    /// 一時値 v (集約型ならアドレス) を文の終わりまで所有する。drop が要らなければ None
+    fn own_temp(&mut self, v: Value, ty: Ty) -> Option<StackSlot> {
+        if !self.needs_drop(ty) {
+            return None;
+        }
+        let loc = if ty.is_agg() {
+            Loc::Ptr(v)
+        } else {
+            let ss = self.slot(ty);
+            self.b.ins().stack_store(PTR, v, ss, 0);
+            Loc::Slot(ss)
+        };
+        let flag = self.new_flag();
+        self.temps.push(Owned {
+            loc,
+            ty,
+            flag,
+            depth: 0,
+        });
+        Some(flag)
+    }
+
+    /// 0 で埋めた状態が「drop しても何もしない値」になる型か (Box は null、enum は判別値 0 のバリアント)。
+    /// `impl Drop` を含む型は 0 にすると drop が走ってしまうので不可
+    fn zeroable(&self, t: Ty) -> bool {
+        match t {
+            Ty::Box(_) => true,
+            Ty::Array(e, _) => !self.needs_drop(*e) || self.zeroable(*e),
+            Ty::Struct(sid) => {
+                if self.prog.drop_impls.contains(&self.prog.base_of(sid)) {
+                    return false;
+                }
+                let sd = &self.prog.structs[sid as usize];
+                let ok = |fs: &[(String, Ty, u32)]| {
+                    fs.iter().all(|f| !self.needs_drop(f.1) || self.zeroable(f.1))
+                };
+                if sd.is_enum {
+                    sd.variants.iter().find(|v| v.discr == 0).is_some_and(|v| ok(&v.fields))
+                } else {
+                    ok(&sd.fields)
+                }
+            }
+            _ => !self.needs_drop(t),
+        }
+    }
+
+    fn zero(&mut self, dst: Value, t: Ty) {
+        let (size, _) = self.prog.size_align(t);
+        let z = self.b.ins().iconst(types::I8, 0);
+        for i in 0..size {
+            self.b.ins().store(mf(), z, dst, i as i32);
+        }
+    }
+
+    /// 値を読むがムーブはしない (deref・呼び出しの対象など)
+    fn read_no_move(&mut self, e: &Expr) -> R<V> {
+        if is_place_expr(e) && !matches!(strip_paren(e), Expr::Path(p) if self.fn_item(p).is_some() || self.const_of(p).is_some()) {
+            let p = self.place(e)?;
+            Ok(self.read(p))
+        } else {
+            self.expr(e, None)
+        }
+    }
+
+    /// アドレス a にある一時値を所有する
+    fn own_temp_at(&mut self, a: Value, ty: Ty) {
+        if !self.needs_drop(ty) {
+            return;
+        }
+        let flag = self.new_flag();
+        self.temps.push(Owned {
+            loc: Loc::Ptr(a),
+            ty,
+            flag,
+            depth: 0,
+        });
+    }
+
+    /// ローカル変数 (の場所) の drop フラグ
+    fn flag_of_loc(&self, loc: Loc) -> Option<StackSlot> {
+        self.owned.iter().rev().find(|o| o.loc == loc).map(|o| o.flag)
+    }
+
+    /// 式 e (ローカル変数か、そのフィールド) から値をムーブした: 変数のフラグを下ろす
+    fn mark_moved(&mut self, e: &Expr) {
+        let mut e = e;
+        loop {
+            match e {
+                Expr::Paren(p) => e = &p.expr,
+                Expr::Group(g) => e = &g.expr,
+                // 参照越しのフィールドからはムーブできない (Copy 以外は rustc が弾く)
+                Expr::Field(f) => e = &f.base,
+                Expr::Path(p) => {
+                    let Some(id) = p.path.get_ident() else { return };
+                    if let Some((loc, t)) = self.lookup(&id.to_string()) {
+                        if matches!(t, Ty::Ref(..) | Ty::Ptr(..)) {
+                            return;
+                        }
+                        if let Some(f) = self.flag_of_loc(loc) {
+                            self.clear_flag(f);
+                        }
+                    }
+                    return;
+                }
+                _ => return,
+            }
+        }
+    }
+
+    /// パターンが match 対象 e から値でムーブした (flag は e が一時値のときのフラグ)
+    fn release(&mut self, e: &Expr, flag: Option<StackSlot>) {
+        if is_place_expr(e) {
+            self.mark_moved(e);
+        } else if let Some(f) = flag {
+            self.clear_flag(f);
+        }
+    }
+
+    /// 代入で上書きする前に古い値を drop する。ローカル変数ならフラグを見て、代入後に立て直すフラグを返す
+    fn drop_before_assign(&mut self, left: &Expr, p: Place) -> Option<StackSlot> {
+        if let Expr::Path(pp) = strip_paren(left) {
+            if let Some(id) = pp.path.get_ident() {
+                if let Some((loc, ty)) = self.lookup(&id.to_string()) {
+                    if let Some(flag) = self.flag_of_loc(loc) {
+                        self.emit_owned_drop(Owned {
+                            loc,
+                            ty,
+                            flag,
+                            depth: 0,
+                        });
+                        return Some(flag);
+                    }
+                }
+            }
+        }
+        // フィールド・`*p`・`a[i]`: 初期化済みなので必ず drop する
+        let addr = match p {
+            Place::Mem(a, o, _) => self.addr_plus(a, o),
+            Place::Var(v, t) => {
+                let x = self.b.use_var(v);
+                let ss = self.slot(t);
+                self.b.ins().stack_store(PTR, x, ss, 0);
+                self.b.ins().stack_addr(PTR, ss, 0)
+            }
+            Place::Zst(_) => return None,
+        };
+        self.drop_in_place(addr, p.ty());
+        None
+    }
+
+    fn mark_moved_loc(&mut self, loc: Loc) {
+        if let Some(f) = self.flag_of_loc(loc) {
+            self.clear_flag(f);
+        }
+    }
+
+    /// フラグが立っていれば drop する
+    fn emit_owned_drop(&mut self, o: Owned) {
+        let f = self.b.ins().stack_load(PTR, types::I8, o.flag, 0);
+        let yes = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.ins().brif(f, yes, &[], done, &[]);
+        self.b.switch_to_block(yes);
+        self.clear_flag(o.flag);
+        let addr = match o.loc {
+            Loc::Slot(ss) => self.b.ins().stack_addr(PTR, ss, 0),
+            Loc::Ptr(a) => a,
+            Loc::Var(v) => {
+                let x = self.b.use_var(v);
+                let ss = self.slot(o.ty);
+                self.b.ins().stack_store(PTR, x, ss, 0);
+                self.b.ins().stack_addr(PTR, ss, 0)
+            }
+            Loc::Zst => self.b.ins().iconst(PTR, 0),
+        };
+        self.drop_in_place(addr, o.ty);
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+    }
+
+    /// addr にある t の値を drop する (drop glue の呼び出し)
+    fn drop_in_place(&mut self, addr: Value, t: Ty) {
+        if !self.needs_drop(t) {
+            return;
+        }
+        let Some(&g) = self.prog.index.get(crate::prelude::DROP_GLUE) else {
+            return;
+        };
+        let iid = {
+            let mut ins = self.insts.lock().unwrap();
+            match ins.request(self.prog, g, vec![t]) {
+                Ok(i) => i,
+                Err(_) => return,
+            }
+        };
+        self.requested.push(iid);
+        let sig = self.insts.lock().unwrap().sig(self.prog, iid).clone();
+        let f = self.fref(iid, &sig);
+        self.b.ins().call(f, &[addr]);
+    }
+
+    /// スコープを閉じる: そのスコープのローカル変数を逆順に drop する
+    fn pop_scope(&mut self) {
+        let depth = self.scopes.len() - 1;
+        while self.owned.last().is_some_and(|o| o.depth >= depth) {
+            let o = self.owned.pop().unwrap();
+            self.emit_owned_drop(o);
+        }
+        self.scopes.pop();
+    }
+
+    /// 早期脱出 (return / break / continue): 深さ depth 以上のローカル変数と temps[t..] を drop する
+    fn drop_for_exit(&mut self, depth: usize, t: usize) {
+        let temps: Vec<Owned> = self.temps[t.min(self.temps.len())..].to_vec();
+        for o in temps.into_iter().rev() {
+            self.emit_owned_drop(o);
+        }
+        let locals: Vec<Owned> = self.owned.iter().filter(|o| o.depth >= depth).copied().collect();
+        for o in locals.into_iter().rev() {
+            self.emit_owned_drop(o);
+        }
+    }
+
+    /// 文の終わり: temps[t..] を drop して捨てる
+    fn drop_temps(&mut self, t: usize) {
+        while self.temps.len() > t {
+            let o = self.temps.pop().unwrap();
+            self.emit_owned_drop(o);
+        }
+    }
+
+    /// let の初期化式の一時値は、ブロックの終わりまで延ばす (rustc の一時値の寿命延長の近似)
+    fn extend_temps(&mut self, t: usize) {
+        let depth = self.scopes.len() - 1;
+        let ts: Vec<Owned> = self.temps.drain(t.min(self.temps.len())..).collect();
+        for mut o in ts {
+            o.depth = depth;
+            self.owned.push(o);
+        }
+    }
+
+    fn free(&mut self, p: Value) {
+        if let Some(&fr) = self.prog.index.get(crate::prelude::BOX_FREE) {
+            let sig = self.prog.sigs[fr as usize].clone();
+            let f = self.fref(fr, &sig);
+            self.b.ins().call(f, &[p]);
+        }
+    }
+
+    /// vtable の中で drop glue が入っている位置 (メソッドの後ろ)
+    fn vtable_drop_index(&self, tr: &str) -> usize {
+        if crate::front::parse_fn_bound(tr).is_some() {
+            1
+        } else {
+            self.prog.traits.get(tr).map(|v| v.len()).unwrap_or(0)
+        }
+    }
+
+    /// vtable の drop の欄: t の drop glue (要らなければ u32::MAX = null)
+    fn vtable_drop_entry(&mut self, t: Ty) -> u32 {
+        if !self.needs_drop(t) {
+            return u32::MAX;
+        }
+        let Some(&g) = self.prog.index.get(crate::prelude::DROP_GLUE) else {
+            return u32::MAX;
+        };
+        let mut ins = self.insts.lock().unwrap();
+        match ins.request(self.prog, g, vec![t]) {
+            Ok(i) => {
+                drop(ins);
+                self.requested.push(i);
+                i
+            }
+            Err(_) => u32::MAX,
+        }
+    }
+
+    /// `__exr_drop_in_place::<T>(p: *mut T)` の本体
+    fn drop_glue_body(&mut self, sig: &FnSig) -> R<()> {
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        self.b.switch_to_block(entry);
+        self.b.seal_block(entry);
+        let p = self.b.block_params(entry)[0];
+        let Some(Ty::Ptr(_, t)) = sig.params.first() else {
+            return Err("internal: bad drop glue signature".into());
+        };
+        let t = **t;
+        match t {
+            Ty::Box(Ty::Dyn(tr)) => {
+                // 中身の型は vtable の drop 欄が知っている。data が 0 ならムーブ済み
+                let data = self.b.ins().load(PTR, mf(), p, 0);
+                let live = self.b.create_block();
+                let out = self.b.create_block();
+                self.b.ins().brif(data, live, &[], out, &[]);
+                self.b.switch_to_block(live);
+                let vt = self.b.ins().load(PTR, mf(), p, 8);
+                let idx = self.vtable_drop_index(tr);
+                let dfn = self.b.ins().load(PTR, mf(), vt, 8 * idx as i32);
+                let call = self.b.create_block();
+                let done = self.b.create_block();
+                self.b.ins().brif(dfn, call, &[], done, &[]);
+                self.b.switch_to_block(call);
+                let mut s = Signature::new(self.cc);
+                s.params.push(AbiParam::new(PTR));
+                let sr = self.b.import_signature(s);
+                self.b.ins().call_indirect(sr, dfn, &[data]);
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(done);
+                self.free(data);
+                self.b.ins().jump(out, &[]);
+                self.b.switch_to_block(out);
+            }
+            Ty::Box(inner) => {
+                let ptr = self.b.ins().load(PTR, mf(), p, 0);
+                let live = self.b.create_block();
+                let out = self.b.create_block();
+                self.b.ins().brif(ptr, live, &[], out, &[]);
+                self.b.switch_to_block(live);
+                self.drop_in_place(ptr, *inner);
+                self.free(ptr);
+                self.b.ins().jump(out, &[]);
+                self.b.switch_to_block(out);
+            }
+            Ty::Array(e, n) => {
+                let (size, _) = self.prog.size_align(*e);
+                // 要素ごとに drop (長さは静的に分かるので展開しないループ)
+                let i = self.b.declare_var(types::I64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                self.b.def_var(i, z);
+                let head = self.b.create_block();
+                let body = self.b.create_block();
+                let done = self.b.create_block();
+                self.b.ins().jump(head, &[]);
+                self.b.switch_to_block(head);
+                let iv = self.b.use_var(i);
+                let more = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThan, iv, n as i64);
+                self.b.ins().brif(more, body, &[], done, &[]);
+                self.b.switch_to_block(body);
+                let off = self.b.ins().imul_imm_s(iv, size as i64);
+                let a = self.b.ins().iadd(p, off);
+                self.drop_in_place(a, *e);
+                let next = self.b.ins().iadd_imm_s(iv, 1);
+                self.b.def_var(i, next);
+                self.b.ins().jump(head, &[]);
+                self.b.switch_to_block(done);
+            }
+            Ty::Struct(sid) => {
+                // 先に `impl Drop` の drop(&mut self)、それからフィールド
+                if self.prog.drop_impls.contains(&self.prog.base_of(sid)) {
+                    if let Some(m) = self.prog.method(sid, "drop") {
+                        let recv = [Ty::Ref(true, intern(t))];
+                        let mut fid = m;
+                        let ms = &self.prog.sigs[m as usize];
+                        if ms.is_generic() {
+                            let mut sol = vec![None; ms.generics.len()];
+                            if let Some(st) = ms.self_ty {
+                                self.prog.match_ty(st, t, &mut sol);
+                            }
+                            fid = self
+                                .resolve_call(m, &recv, sol, None, proc_macro2::Span::call_site())?
+                                .0;
+                        }
+                        let fs = self.insts.lock().unwrap().sig(self.prog, fid).clone();
+                        let f = self.fref(fid, &fs);
+                        self.b.ins().call(f, &[p]);
+                    }
+                }
+                let sd = &self.prog.structs[sid as usize];
+                if sd.is_enum {
+                    let tag_ty = sd.tag;
+                    let vs: Vec<(i64, Vec<(Ty, u32)>)> = sd
+                        .variants
+                        .iter()
+                        .map(|v| {
+                            (
+                                v.discr,
+                                v.fields
+                                    .iter()
+                                    .filter(|f| self.needs_drop(f.1))
+                                    .map(|f| (f.1, f.2))
+                                    .collect(),
+                            )
+                        })
+                        .collect();
+                    let tag = self.b.ins().load(clif_ty(tag_ty).unwrap(), mf(), p, 0);
+                    for (d, fs) in vs {
+                        if fs.is_empty() {
+                            continue;
+                        }
+                        let yes = self.b.create_block();
+                        let next = self.b.create_block();
+                        let c = self.b.ins().icmp_imm_s(IntCC::Equal, tag, d);
+                        self.b.ins().brif(c, yes, &[], next, &[]);
+                        self.b.switch_to_block(yes);
+                        for (ft, off) in fs {
+                            let a = self.addr_plus(p, off as i32);
+                            self.drop_in_place(a, ft);
+                        }
+                        self.b.ins().jump(next, &[]);
+                        self.b.switch_to_block(next);
+                    }
+                } else {
+                    let fs: Vec<(Ty, u32)> = sd
+                        .fields
+                        .iter()
+                        .filter(|f| self.needs_drop(f.1))
+                        .map(|f| (f.1, f.2))
+                        .collect();
+                    for (ft, off) in fs {
+                        let a = self.addr_plus(p, off as i32);
+                        self.drop_in_place(a, ft);
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.b.ins().return_(&[]);
+        Ok(())
     }
 }

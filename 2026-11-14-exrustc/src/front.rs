@@ -61,6 +61,8 @@ pub enum Ty {
     Dyn(&'static String),
     /// 関数ポインタ `fn(A) -> R` (関数アイテムを値として使ったものもこれ)
     Fn(&'static FnTy),
+    /// `Box<T>`: ヒープへの所有ポインタ (`Box<dyn Trait>` は fat)。drop で中身を drop して free する
+    Box(&'static Ty),
 }
 
 impl Ty {
@@ -70,7 +72,10 @@ impl Ty {
     }
     /// (ポインタ, 長さ) の 2 語で表す参照
     pub fn is_fat(self) -> bool {
-        matches!(self, Ty::Ref(_, Ty::Slice(_) | Ty::Str | Ty::Dyn(_)))
+        matches!(
+            self,
+            Ty::Ref(_, Ty::Slice(_) | Ty::Str | Ty::Dyn(_)) | Ty::Box(Ty::Slice(_) | Ty::Str | Ty::Dyn(_))
+        )
     }
 }
 
@@ -200,8 +205,8 @@ impl Ty {
             Ty::I16 | Ty::U16 => 16,
             Ty::I32 | Ty::U32 | Ty::Char => 32,
             Ty::I64 | Ty::U64 | Ty::Isize | Ty::Usize | Ty::Ptr(..) | Ty::Fn(_) => 64,
-            Ty::Ref(..) if self.is_fat() => 0,
-            Ty::Ref(..) => 64,
+            Ty::Ref(..) | Ty::Box(_) if self.is_fat() => 0,
+            Ty::Ref(..) | Ty::Box(_) => 64,
             Ty::Unit
             | Ty::Never
             | Ty::Struct(_)
@@ -705,6 +710,10 @@ pub struct Program {
     pub closure_by: FxMap<(u32, u32), u32>,
     /// クロージャの (ジェネリックな) struct id → fn id
     pub closure_of_struct: FxMap<u32, u32>,
+    /// `impl Drop for S` のある struct / enum (ジェネリックなら元の定義)
+    pub drop_impls: crate::fxhash::FxSet<u32>,
+    /// drop が要る型がありうるか (prelude に drop glue があるか。Box も Drop もなければ false)
+    pub has_drop: bool,
 }
 
 /// 持ち上げたクロージャ ([`crate::closure`])
@@ -1316,6 +1325,8 @@ impl Program {
             closures: FxMap::default(),
             closure_by: FxMap::default(),
             closure_of_struct: FxMap::default(),
+            drop_impls: Default::default(),
+            has_drop: false,
         };
         // 0. const / static の名前 (配列の長さで使うので型より先に)
         for (ii, sm) in sums.iter().enumerate() {
@@ -1385,6 +1396,12 @@ impl Program {
         // deep hash = 値・参照を問わずフィールドから推移的に届く全 struct の定義ハッシュ。
         // 参照経由 (`&'a Other`) でもフィールドオフセットはコードに埋まるので含める。
         let n_defs = sdefs.len();
+        // `impl Drop` の有無も、その型を使う関数のコード (drop の呼び出し) を変えるので deep hash に入れる
+        let drop_names: HashSet<&str> = sums
+            .iter()
+            .filter(|sm| sm.impl_trait.as_deref() == Some("Drop"))
+            .filter_map(|sm| sm.impl_self.as_deref())
+            .collect();
         let deeps: Vec<Key> = (0..n_defs)
             .map(|id| {
                 let mut seen = HashSet::new();
@@ -1392,7 +1409,7 @@ impl Program {
                 let mut hs = vec![];
                 while let Some(t) = stack.pop() {
                     match t {
-                        Ty::Ref(_, i) | Ty::Ptr(_, i) | Ty::Array(i, _) | Ty::Slice(i) => {
+                        Ty::Ref(_, i) | Ty::Ptr(_, i) | Ty::Array(i, _) | Ty::Slice(i) | Ty::Box(i) => {
                             stack.push(*i)
                         }
                         Ty::Struct(sid) => {
@@ -1407,6 +1424,9 @@ impl Program {
                             }
                             if (sid as usize) < n_defs {
                                 hs.push(items[sdefs[sid as usize].0].hash);
+                                if drop_names.contains(sdefs[sid as usize].1.as_str()) {
+                                    hs.push(0xd0d0);
+                                }
                             }
                             let vf = sd.variants.iter().flat_map(|v| v.fields.iter());
                             stack.extend(sd.fields.iter().chain(vf).map(|f| f.1));
@@ -1602,7 +1622,35 @@ impl Program {
         if !p.index.contains_key("main") {
             return Err("no `main` function".into());
         }
+        p.drop_impls = p
+            .impls
+            .iter()
+            .filter(|(_, tr)| tr == "Drop")
+            .map(|(sid, _)| *sid)
+            .collect();
+        p.has_drop = p.index.contains_key(crate::prelude::DROP_GLUE);
         Ok(p)
+    }
+
+    /// 型 t の値を捨てるときに drop glue が要るか (Box / `impl Drop` / それらを含む型)
+    pub fn needs_drop(&self, t: Ty) -> bool {
+        if !self.has_drop {
+            return false;
+        }
+        match t {
+            Ty::Box(_) => true,
+            Ty::Array(e, n) => n > 0 && self.needs_drop(*e),
+            Ty::Struct(sid) => {
+                let sd = &self.structs[sid as usize];
+                self.drop_impls.contains(&self.base_of(sid))
+                    || sd.fields.iter().any(|f| self.needs_drop(f.1))
+                    || sd
+                        .variants
+                        .iter()
+                        .any(|v| v.fields.iter().any(|f| self.needs_drop(f.1)))
+            }
+            _ => false,
+        }
     }
 
     /// 型 t が trait tr を実装しているか
@@ -1630,6 +1678,7 @@ impl Program {
             },
             // 組み込み型: マーカー trait と比較・既定値など (core が実装しているもの)
             Ty::Ref(true, _) => tr == "Sized",
+            Ty::Box(_) => matches!(tr, "Sized" | "Drop"),
             Ty::Ptr(..) | Ty::Ref(..) => {
                 matches!(tr, "Copy" | "Clone" | "Sized" | "PartialEq" | "Eq")
             }
@@ -1737,9 +1786,8 @@ impl Program {
                     None => return Err(format!("cannot find type `{n}`")),
                 }
             }
-            // `Box<T>` は所有する `&mut T` として扱う (ヒープに置き、解放はしない)
             TySyn::App(n, args) if n == "Box" && args.len() == 1 && !self.struct_index.contains_key(n) => {
-                Ty::Ref(true, intern(r(&args[0])?))
+                Ty::Box(intern(r(&args[0])?))
             }
             TySyn::App(n, args) => {
                 let Some(&id) = self.struct_index.get(n) else {
@@ -1975,7 +2023,9 @@ impl Program {
     pub fn has_param(&self, t: Ty) -> bool {
         match t {
             Ty::Param(_) => true,
-            Ty::Ref(_, i) | Ty::Ptr(_, i) | Ty::Array(i, _) | Ty::Slice(i) => self.has_param(*i),
+            Ty::Ref(_, i) | Ty::Ptr(_, i) | Ty::Array(i, _) | Ty::Slice(i) | Ty::Box(i) => {
+                self.has_param(*i)
+            }
             Ty::Struct(sid) => self.structs[sid as usize]
                 .args
                 .iter()
@@ -1993,6 +2043,7 @@ impl Program {
             Ty::Ptr(m, i) => Ty::Ptr(m, intern(self.subst(*i, args))),
             Ty::Array(i, n) => Ty::Array(intern(self.subst(*i, args)), n),
             Ty::Slice(i) => Ty::Slice(intern(self.subst(*i, args))),
+            Ty::Box(i) => Ty::Box(intern(self.subst(*i, args))),
             Ty::Fn(f) if self.has_param(t) => Ty::Fn(intern_fn(FnTy {
                 params: f.params.iter().map(|&p| self.subst(p, args)).collect(),
                 ret: self.subst(f.ret, args),
@@ -2035,7 +2086,8 @@ impl Program {
             },
             (Ty::Ref(_, a), Ty::Ref(_, b))
             | (Ty::Ptr(_, a), Ty::Ptr(_, b))
-            | (Ty::Slice(a), Ty::Slice(b)) => self.match_ty(*a, *b, sol),
+            | (Ty::Slice(a), Ty::Slice(b))
+            | (Ty::Box(a), Ty::Box(b)) => self.match_ty(*a, *b, sol),
             (Ty::Array(a, n), Ty::Array(b, m)) => n == m && self.match_ty(*a, *b, sol),
             (Ty::Fn(a), Ty::Fn(b)) if a != b => {
                 a.params.len() == b.params.len()
@@ -2069,6 +2121,7 @@ impl Program {
             Ty::Array(i, n) => TySyn::Array(Box::new(self.ty_syn(*i)), ArrLen::Lit(n as u64)),
             Ty::Str => TySyn::Str,
             Ty::Dyn(s) => TySyn::Dyn(s.to_string()),
+            Ty::Box(i) => TySyn::App("Box".into(), vec![self.ty_syn(*i)]),
             Ty::Fn(f) => TySyn::FnPtr(
                 f.params.iter().chain([&f.ret]).map(|&t| self.ty_syn(t)).collect(),
             ),
@@ -2395,6 +2448,7 @@ impl Program {
             Ty::Slice(i) => format!("[{}]", self.tn(*i)),
             Ty::Str => "str".into(),
             Ty::Dyn(s) => format!("dyn {}", s.replace(" (", "(").replace("( ", "(").replace(" )", ")")),
+            Ty::Box(i) => format!("Box<{}>", self.tn(*i)),
             Ty::Fn(f) => {
                 let ps: Vec<String> = f.params.iter().map(|&p| self.tn(p)).collect();
                 match f.ret {
@@ -2450,6 +2504,10 @@ impl Program {
                 for &f in self.traits.get(s).map(|v| &v[..]).unwrap_or(&[]) {
                     h.add(&self.names[f as usize]);
                 }
+            }
+            Ty::Box(i) => {
+                h.add(&110u8);
+                self.hash_ty(*i, h);
             }
             Ty::Fn(f) => {
                 h.add(&(109u8, f.params.len()));
@@ -2534,8 +2592,14 @@ impl Program {
         let mut stack = vec![self.index["main"]];
         stack.extend((0..self.names.len() as u32).filter(|&i| self.sigs[i as usize].export));
         stack.extend(self.panic_handler);
-        // `Box::new` が呼ぶアロケータ (prelude にあるのは Box が使われたときだけ)
+        // `Box::new` が呼ぶアロケータと drop が呼ぶ free (prelude にあるのは Box / Drop が使われたときだけ)
         stack.extend(self.index.get(crate::prelude::BOX_ALLOC).copied());
+        stack.extend(self.index.get(crate::prelude::BOX_FREE).copied());
+        // `impl Drop` の drop は drop glue から (名前を書かずに) 呼ばれる
+        stack.extend(
+            (0..self.names.len() as u32)
+                .filter(|&i| self.sigs[i as usize].impl_trait.as_deref() == Some("Drop")),
+        );
         while let Some(i) = stack.pop() {
             if std::mem::replace(&mut seen[i as usize], true) {
                 continue;

@@ -1053,7 +1053,9 @@ fn emit_object(
         let fid = ids[&uid];
         let mut data_ids = vec![];
         for d in &blob.datas {
-            data_ids.push(anon_data(&mut m, d.clone(), 1, &mut anon)?);
+            // 昇格した定数 (`&Rect { .. }`) も入るので、長さから決まる自然なアラインメントにする
+            let al = 1u32 << d.len().trailing_zeros().min(3);
+            data_ids.push(anon_data(&mut m, d.clone(), al, &mut anon)?);
         }
         let mut vt_ids = vec![];
         for vt in &blob.vtables {
