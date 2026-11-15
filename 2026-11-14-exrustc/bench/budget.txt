@@ -121,7 +121,7 @@ structs.binary_bytes 7266
 structs.cache_bytes 5075
 structs.object_bytes 6048
 text_more.binary_bytes 48837
-text_more.cache_bytes 85328
+text_more.cache_bytes 89669
 text_more.object_bytes 79724
 traits.binary_bytes 7660
 traits.cache_bytes 7819

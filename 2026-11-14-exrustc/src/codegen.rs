@@ -2710,6 +2710,7 @@ impl Cx<'_, '_> {
         if mc.method == "__push_piece" && mc.args.len() == 1 {
             let (r, a) = (&mc.receiver, &mc.args[0]);
             let e: Expr = match self.peek(a).map(|t| self.strip_refs(t)) {
+                Some(Ty::Char) if matches!(self.peek(a), Some(Ty::Ref(..))) => syn::parse_quote!((#r).push(*(#a))),
                 Some(Ty::Char) | None => syn::parse_quote!((#r).push(#a)),
                 Some(Ty::Str) => syn::parse_quote!((#r).push_str(#a)),
                 _ => syn::parse_quote!((#r).push_str((#a).as_str())),

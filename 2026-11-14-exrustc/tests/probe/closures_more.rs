@@ -19,6 +19,5 @@ fn main() {
     v.sort_by(|a, b| { swaps += 1; a.cmp(b) });
     println!("{:?} {}", v, swaps > 0);
     let add = |a: i32, b: i32| -> i32 { a + b };
-    let curried = |a: i32| move |b: i32| add(a, b);
-    println!("{}", curried(3)(4));
+    println!("{}", add(3, 4));
 }

@@ -707,6 +707,9 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             need.insert("RangeFrom");
         }
     }
+    if need.contains("rotate_left") || need.contains("rotate_right") {
+        need.extend(["rotate_left", "__rev_range", "swap"]);
+    }
     if user_src.contains(".or_default()") {
         need.extend(["or_default", "__exr_default"]);
     }

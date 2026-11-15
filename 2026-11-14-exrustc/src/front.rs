@@ -1440,12 +1440,18 @@ fn lift_closures(
                     },
                     _ => None,
                 });
-                match ty {
+                // (引数でなければ、本体の `let` の注釈か初期化式のリテラルから型を決める)
+                // (接尾辞のない整数リテラルは、戻り値の型が整数ならそれ: `let mut c = 0; move || { c += 1; c }`)
+                let int_hint = match &bret {
+                    TySyn::Prim(t) if t.is_int() => Some(*t),
+                    _ => None,
+                };
+                match ty.or_else(|| local_ty_syn(&f.block, n, int_hint)) {
                     Some(t) => args.push(t),
                     None => {
                         return err(
                             tc.span(),
-                            format!("a returned closure can only capture parameters (`{n}`)"),
+                            format!("a returned closure can only capture parameters and locals with an obvious type (`{n}`; annotate it: `let {n}: T = ..`)"),
                         );
                     }
                 }
@@ -2775,6 +2781,13 @@ impl Program {
     }
 
     pub fn struct_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
+        // `std::cmp::Reverse` / `core::cmp::Ordering` などは最後のセグメント (prelude の型)
+        if p.segments.len() > 1
+            && matches!(p.segments[0].ident.to_string().as_str(), "std" | "core" | "alloc")
+        {
+            let last = p.segments.last().unwrap().ident.to_string();
+            return self.struct_index.get(&last).copied();
+        }
         if p.segments.len() > 1 {
             return self.struct_by_path(&self.strip_mods(p)?, self_sid);
         }
@@ -3587,4 +3600,45 @@ fn syn_holds_by_value(t: &TySyn, g: &str) -> bool {
         TySyn::Array(e, _) => syn_holds_by_value(e, g),
         _ => false,
     }
+}
+
+/// 本体の直下の `let n: T = ..` / `let mut n = 0;` から、ローカル変数 n の型 (注釈か、リテラル・String の初期化式)
+fn local_ty_syn(b: &syn::Block, n: &str, int_hint: Option<Ty>) -> Option<TySyn> {
+    let mut found = None;
+    for st in &b.stmts {
+        let syn::Stmt::Local(l) = st else { continue };
+        let (pat, ann) = match &l.pat {
+            syn::Pat::Type(pt) => (&*pt.pat, Some(&*pt.ty)),
+            p => (p, None),
+        };
+        let syn::Pat::Ident(pi) = pat else { continue };
+        if pi.ident != n {
+            continue;
+        }
+        if let Some(t) = ann {
+            found = parse_tysyn(t, None).ok();
+            continue;
+        }
+        let init = l.init.as_ref().map(|i| &*i.expr);
+        found = match init {
+            Some(syn::Expr::Lit(el)) => match &el.lit {
+                syn::Lit::Int(i) => Some(TySyn::Prim(Ty::from_suffix(i.suffix()).or(int_hint).unwrap_or(Ty::I32))),
+                syn::Lit::Float(x) => Some(TySyn::Prim(if x.suffix() == "f32" { Ty::F32 } else { Ty::F64 })),
+                syn::Lit::Bool(_) => Some(TySyn::Prim(Ty::Bool)),
+                syn::Lit::Char(_) => Some(TySyn::Prim(Ty::Char)),
+                syn::Lit::Str(_) => Some(TySyn::Ref(false, Box::new(TySyn::Str))),
+                _ => None,
+            },
+            // `String::new()` / `String::from(..)` / `"..".to_string()`
+            Some(syn::Expr::Call(c)) => match &*c.func {
+                syn::Expr::Path(p) if p.path.segments.len() == 2 && p.path.segments[0].ident == "String" => {
+                    Some(TySyn::Named("String".into()))
+                }
+                _ => None,
+            },
+            Some(syn::Expr::MethodCall(mc)) if mc.method == "to_string" => Some(TySyn::Named("String".into())),
+            _ => None,
+        };
+    }
+    found
 }

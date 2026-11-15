@@ -1123,7 +1123,7 @@ impl Inf<'_> {
                 let ri = self.find(i);
                 match self.shape[ri as usize] {
                     None => i,
-                    Some(Shape::Known(t)) if t.is_int() || matches!(t, Ty::Char | Ty::Bool) => i,
+                    Some(Shape::Known(t)) if t.is_int() || t.is_float() || matches!(t, Ty::Char | Ty::Bool) => i,
                     _ => v,
                 }
             }
