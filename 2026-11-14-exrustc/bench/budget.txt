@@ -60,6 +60,15 @@ nostd_panic_unwrap.object_bytes 4099
 options.binary_bytes 12255
 options.cache_bytes 13053
 options.object_bytes 12675
+ordering.binary_bytes 72172
+ordering.cache_bytes 126889
+ordering.object_bytes 133543
+ordering_impl.binary_bytes 32239
+ordering_impl.cache_bytes 50740
+ordering_impl.object_bytes 54566
+ordering_inline.binary_bytes 12070
+ordering_inline.cache_bytes 20714
+ordering_inline.object_bytes 20344
 structs.binary_bytes 7266
 structs.cache_bytes 5075
 structs.object_bytes 6048

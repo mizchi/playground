@@ -1832,6 +1832,20 @@ impl Program {
                             .iter()
                             .all(|f| self.implements(f.1, tr)))
             }
+            // タプル: 要素がすべて実装していれば (core の impl と同じ)
+            Ty::Struct(sid) if self.is_tuple(sid) => {
+                matches!(
+                    tr,
+                    "Copy" | "Clone" | "Sized" | "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Hash" | "Debug" | "Default"
+                ) && self.structs[sid as usize].fields.iter().all(|f| self.implements(f.1, tr))
+            }
+            // Vec / String は要素しだいで比較できる
+            Ty::Struct(sid)
+                if matches!(tr, "PartialOrd" | "Ord" | "Eq" | "Hash")
+                    && matches!(self.structs[self.base_of(sid) as usize].name.as_str(), "Vec" | "String") =>
+            {
+                self.structs[sid as usize].args.iter().all(|&a| self.implements(a, tr))
+            }
             Ty::Struct(sid) => self.impls.contains(&(self.base_of(sid), tr.to_string())),
             Ty::Array(e, _) => {
                 tr == "Sized" || (matches!(tr, "Copy" | "Clone") && self.implements(*e, tr))
@@ -2837,6 +2851,11 @@ impl Program {
             // (書式化の部品と Display / Debug の impl も、codegen が名前を書かずに呼ぶ)
             matches!(s.impl_trait.as_deref(), Some("Drop"))
                 || (s.has_self && self.names[i as usize].ends_with("::eq"))
+                // (`<` と sort は比較の glue から partial_cmp / cmp を呼ぶ)
+                || (s.has_self
+                    && matches!(s.impl_trait.as_deref(), Some("PartialOrd" | "Ord"))
+                    && (self.names[i as usize].ends_with("::cmp")
+                        || self.names[i as usize].ends_with("::partial_cmp")))
                 || self.names[i as usize] == "String::new"
         }));
         while let Some(i) = stack.pop() {

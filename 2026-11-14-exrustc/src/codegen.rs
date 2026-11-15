@@ -306,11 +306,14 @@ impl Worker {
                 datas: vec![],
                 vtables: vec![],
                 gvs: HashMap::new(),
+                cmp_depth: 0,
             };
             let r = if prog.index.get(crate::prelude::DROP_GLUE) == Some(&body_id) {
                 cx.drop_glue_body(sig)
             } else if prog.index.get("__exr_hash") == Some(&body_id) {
                 cx.hash_glue_body(sig)
+            } else if prog.index.get("__exr_cmp") == Some(&body_id) {
+                cx.cmp_glue_body(sig)
             } else if prog.index.get("__exr_display") == Some(&body_id) {
                 cx.fmt_glue_body(sig, false)
             } else if prog.index.get("__exr_debug") == Some(&body_id) {
@@ -470,6 +473,8 @@ struct Cx<'a, 'p> {
     datas: Vec<Vec<u8>>,
     vtables: Vec<Vec<u32>>,
     gvs: HashMap<(u32, u32), ir::GlobalValue>,
+    /// glue なしで大小比較を展開している深さ (参照で再帰する型の歯止め)
+    cmp_depth: u32,
     /// クロージャの本体なら、キャプチャ (名前, 型, by-ref か, `__env` 内のオフセット)
     caps: Vec<(String, Ty, bool, u32)>,
     /// クロージャを書いた大元の関数と、この本体のクロージャ式 (アドレス) → 番号
@@ -561,7 +566,8 @@ fn strip_paren(e: &Expr) -> &Expr {
 
 fn is_place_expr(e: &Expr) -> bool {
     match e {
-        Expr::Path(_) | Expr::Field(_) => true,
+        Expr::Path(p) => p.qself.is_none() && p.path.get_ident().is_some(),
+        Expr::Field(_) => true,
         Expr::Index(ix) => !matches!(&*ix.index, Expr::Range(_)),
         Expr::Unary(u) => matches!(u.op, UnOp::Deref(_)),
         Expr::Paren(p) => is_place_expr(&p.expr),
@@ -898,6 +904,7 @@ impl Cx<'_, '_> {
                     }
                     if last && semi.is_none() {
                         result = r;
+                        self.drop_tail_temps(t0, result);
                     } else {
                         if semi.is_none() && !matches!(r.1, Ty::Unit | Ty::Never) {
                             return err(e.span(), "expected `;` after non-unit expression");
@@ -919,6 +926,7 @@ impl Cx<'_, '_> {
                     }
                     if last && m.semi_token.is_none() {
                         result = r;
+                        self.drop_tail_temps(t0, result);
                     } else {
                         self.drop_temps(t0);
                     }
@@ -2375,6 +2383,28 @@ impl Cx<'_, '_> {
                 }
             }
         }
+        if let Some(r) = self.ord_method(mc)? {
+            return Ok(r);
+        }
+        // `a.max(b)` / `a.min(b)` (Ord を実装した struct / タプル / String): prelude の __exr_max / __exr_min
+        if matches!(mc.method.to_string().as_str(), "max" | "min")
+            && mc.args.len() == 1
+            && self.prog.index.contains_key("__exr_max")
+        {
+            if let Some(Ty::Struct(sid)) = self.peek(&mc.receiver) {
+                if self.prog.method(sid, &mc.method.to_string()).is_none()
+                    && self.prog.default_method(sid, &mc.method.to_string()).is_none()
+                {
+                    let f = syn::Ident::new(
+                        if mc.method == "max" { "__exr_max" } else { "__exr_min" },
+                        mc.method.span(),
+                    );
+                    let (r, a) = (&mc.receiver, &mc.args[0]);
+                    let e: Expr = syn::parse_quote!(#f(#r, #a));
+                    return self.expr(&e, expected);
+                }
+            }
+        }
         if let Some(r) = self.builtin_method(mc)? {
             return Ok(r);
         }
@@ -3006,6 +3036,20 @@ impl Cx<'_, '_> {
                 };
                 return Ok((Some(self.b.ins().icmp_imm_s(cc, c.unwrap(), 0)), Ty::Bool));
             }
+        }
+        // タプル・struct・enum・配列・スライス・Vec などの大小比較: 型ごとの glue (__exr_cmp)
+        if matches!(b.op, Lt(_) | Le(_) | Gt(_) | Ge(_)) && !(lt.is_int() || matches!(lt, Ty::Bool | Ty::Char)) {
+            self.same(b.right.span(), rt, lt)?;
+            let (la, t) = self.ord_addr(l, lt);
+            let (ra, _) = self.ord_addr(r, rt);
+            let c = self.cmp_call(la, ra, t)?;
+            let cc = match b.op {
+                Lt(_) => IntCC::SignedLessThan,
+                Le(_) => IntCC::SignedLessThanOrEqual,
+                Gt(_) => IntCC::SignedGreaterThan,
+                _ => IntCC::SignedGreaterThanOrEqual,
+            };
+            return Ok((Some(self.b.ins().icmp_imm_s(cc, c, 0)), Ty::Bool));
         }
         if is_cmp(&b.op) {
             self.same(b.right.span(), rt, lt)?;
@@ -3850,10 +3894,20 @@ impl Cx<'_, '_> {
 
     /// &str: len / is_empty / as_bytes / as_ptr (表現は &[u8] と同じ)
     fn str_method(&mut self, mc: &syn::ExprMethodCall) -> R<Option<V>> {
-        let (v, _) = self.expr(&mc.receiver, None)?;
-        let Some(fat) = v else {
+        let (v, mut t) = self.expr(&mc.receiver, None)?;
+        let Some(mut fat) = v else {
             return Ok(Some((None, Ty::Never)));
         };
+        // `&&&str` など: fat な参照 (の置き場所のアドレス) まで辿る
+        while let Ty::Ref(_, i) = t {
+            if t.is_fat() {
+                break;
+            }
+            if !i.is_fat() {
+                fat = self.b.ins().load(PTR, mf(), fat, 0);
+            }
+            t = *i;
+        }
         let u8s = Ty::Ref(false, intern(Ty::Slice(intern(Ty::U8))));
         Ok(Some(match mc.method.to_string().as_str() {
             "len" => (Some(self.b.ins().load(types::I64, mf(), fat, 8)), Ty::Usize),
@@ -5269,7 +5323,9 @@ impl Cx<'_, '_> {
                     self.require(c, next);
                 }
             }
+            let t0 = self.temps.len();
             let (v, t) = self.expr(&arm.body, result_ty.or(expected))?;
+            self.drop_tail_temps(t0, (v, t));
             self.pop_scope();
             self.finish_arm(v, t, merge, &mut result_ty, &mut param, arm.body.span())?;
             self.b.switch_to_block(next);
@@ -6033,7 +6089,10 @@ impl Cx<'_, '_> {
         if !cmp {
             return self.expr(e, hint);
         }
-        if is_place_expr(e) {
+        // (`None` などローカル変数でない名前は値として評価する)
+        let non_local = matches!(strip_paren(e), Expr::Path(p)
+            if p.path.get_ident().is_some_and(|id| self.lookup(&id.to_string()).is_none()));
+        if is_place_expr(e) && !non_local {
             let r = self.read_no_move(e)?;
             if self.needs_drop(r.1) || !matches!(hint, Some(_)) {
                 return Ok(r);
@@ -6235,6 +6294,27 @@ impl Cx<'_, '_> {
             let o = self.temps.pop().unwrap();
             self.emit_owned_drop(o);
         }
+    }
+
+    /// ブロックの末尾の式・match の arm の一時値は、その場で drop する (Rust 2024 と同じ)。
+    /// 分岐の中で作った値を文の終わりで触ると支配関係が崩れるため。結果そのものの一時値は残す
+    fn drop_tail_temps(&mut self, t: usize, result: V) {
+        if result.1 == Ty::Never {
+            self.temps.truncate(t.min(self.temps.len()));
+            return;
+        }
+        let keep: Vec<Owned> = self.temps[t.min(self.temps.len())..]
+            .iter()
+            .filter(|o| result.0.is_some_and(|v| o.loc == Loc::Ptr(v)))
+            .copied()
+            .collect();
+        let rest: Vec<Owned> = self.temps.drain(t.min(self.temps.len())..).collect();
+        for o in rest.into_iter().rev() {
+            if !keep.iter().any(|k| k.loc == o.loc) {
+                self.emit_owned_drop(o);
+            }
+        }
+        self.temps.extend(keep);
     }
 
     /// let の初期化式の一時値は、ブロックの終わりまで延ばす (rustc の一時値の寿命延長の近似)
@@ -7209,5 +7289,270 @@ impl Cx<'_, '_> {
             }
             t => return Err(format!("`{}` cannot be used as a hash key", self.prog.tn(t))),
         })
+    }
+}
+
+// --- 大小比較 (PartialOrd / Ord) ---------------------------------------------
+
+impl Cx<'_, '_> {
+    /// 値 v (型 t) を比較の glue に渡せる (アドレス, 指す先の型) にする。
+    /// 細い参照は指す先まで辿り、スカラーの値は一時領域に置く
+    fn ord_addr(&mut self, v: Value, t: Ty) -> (Value, Ty) {
+        let (mut v, mut t) = (v, t);
+        loop {
+            match t {
+                Ty::Ref(_, i) if !t.is_fat() => {
+                    if matches!(i, Ty::Ref(..)) && !i.is_fat() {
+                        v = self.b.ins().load(PTR, mf(), v, 0);
+                        t = *i;
+                        continue;
+                    }
+                    return (v, *i);
+                }
+                t if t.is_agg() || t.is_fat() => return (v, t),
+                t => {
+                    let a = self.temp(t);
+                    self.b.ins().store(mf(), v, a, 0);
+                    return (a, t);
+                }
+            }
+        }
+    }
+
+    /// `__exr_cmp::<t>(a, b)` (a, b は t の値のアドレス) → -1 / 0 / 1 の i32
+    fn cmp_call(&mut self, a: Value, b: Value, t: Ty) -> R<Value> {
+        if t.is_int() || matches!(t, Ty::Bool | Ty::Char | Ty::Unit | Ty::Ptr(..)) {
+            return self.cmp_at(a, b, t);
+        }
+        // glue がなければその場で展開する
+        if !self.prog.index.contains_key("__exr_cmp") {
+            if self.cmp_depth > 16 {
+                return Err(format!("comparison of the recursive type `{}` is not supported", self.prog.tn(t)));
+            }
+            self.cmp_depth += 1;
+            let r = self.cmp_at(a, b, t);
+            self.cmp_depth -= 1;
+            return r;
+        }
+        let span = proc_macro2::Span::call_site();
+        let r = Ty::Ref(false, intern(t));
+        let (v, _) = self.call_named("__exr_cmp", vec![t], &[(a, r), (b, r)], span)?;
+        Ok(v.unwrap())
+    }
+
+    /// `__exr_cmp::<T>(a: &T, b: &T) -> i32` の本体
+    fn cmp_glue_body(&mut self, sig: &FnSig) -> R<()> {
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        self.b.switch_to_block(entry);
+        self.b.seal_block(entry);
+        let a = self.b.block_params(entry)[0];
+        let b = self.b.block_params(entry)[1];
+        let Some(Ty::Ref(_, t)) = sig.params.first() else {
+            return Err("internal: bad cmp glue signature".into());
+        };
+        let c = self.cmp_at(a, b, **t)?;
+        self.b.ins().return_(&[c]);
+        Ok(())
+    }
+
+    /// 2 つのスカラーの大小 (x > y) - (x < y)
+    fn cmp_scalar(&mut self, x: Value, y: Value, signed: bool) -> Value {
+        let (lt, gt) = if signed {
+            (IntCC::SignedLessThan, IntCC::SignedGreaterThan)
+        } else {
+            (IntCC::UnsignedLessThan, IntCC::UnsignedGreaterThan)
+        };
+        let l = self.b.ins().icmp(lt, x, y);
+        let g = self.b.ins().icmp(gt, x, y);
+        let l = self.b.ins().uextend(types::I32, l);
+        let g = self.b.ins().uextend(types::I32, g);
+        self.b.ins().isub(g, l)
+    }
+
+    /// 0 でなければ done へ (その値で)、0 なら次のブロックへ進む
+    fn cmp_chain(&mut self, c: Value, done: Block) {
+        let next = self.b.create_block();
+        self.b.ins().brif(c, done, &[c.into()], next, &[]);
+        self.b.switch_to_block(next);
+    }
+
+    /// 要素型 e の列 (pa, la) と (pb, lb) を辞書順に比べる
+    fn cmp_seq(&mut self, pa: Value, la: Value, pb: Value, lb: Value, e: Ty) -> R<Value> {
+        let (es, _) = self.prog.size_align(e);
+        let done = self.b.create_block();
+        let res = self.b.append_block_param(done, types::I32);
+        let head = self.b.create_block();
+        let body = self.b.create_block();
+        let tail = self.b.create_block();
+        let i = self.b.declare_var(types::I64);
+        let z = self.b.ins().iconst(types::I64, 0);
+        self.b.def_var(i, z);
+        let n = self.b.ins().umin(la, lb);
+        self.b.ins().jump(head, &[]);
+        self.b.switch_to_block(head);
+        let iv = self.b.use_var(i);
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, iv, n);
+        self.b.ins().brif(more, body, &[], tail, &[]);
+        self.b.switch_to_block(body);
+        let off = self.b.ins().imul_imm_s(iv, es as i64);
+        let xa = self.b.ins().iadd(pa, off);
+        let xb = self.b.ins().iadd(pb, off);
+        let c = self.cmp_call(xa, xb, e)?;
+        let nx = self.b.ins().iadd_imm_s(iv, 1);
+        self.b.def_var(i, nx);
+        self.b.ins().brif(c, done, &[c.into()], head, &[]);
+        self.b.switch_to_block(tail);
+        let c = self.cmp_scalar(la, lb, false);
+        self.b.ins().jump(done, &[c.into()]);
+        self.b.switch_to_block(done);
+        Ok(res)
+    }
+
+    /// a, b (t の値のアドレス) の大小。derive(PartialOrd) と同じく、フィールド・要素を前から辞書順に比べる。
+    /// 手書きの partial_cmp / cmp があればそれを呼ぶ
+    fn cmp_at(&mut self, a: Value, b: Value, t: Ty) -> R<Value> {
+        Ok(match t {
+            Ty::Unit => self.b.ins().iconst(types::I32, 0),
+            t if t.is_int() || matches!(t, Ty::Bool | Ty::Char | Ty::Ptr(..)) => {
+                let ct = clif_ty(t).unwrap();
+                let x = self.b.ins().load(ct, mf(), a, 0);
+                let y = self.b.ins().load(ct, mf(), b, 0);
+                self.cmp_scalar(x, y, t.signed())
+            }
+            Ty::Ref(_, Ty::Str | Ty::Slice(_)) => {
+                let e = match t {
+                    Ty::Ref(_, Ty::Slice(e)) => **e,
+                    _ => Ty::U8,
+                };
+                let pa = self.b.ins().load(PTR, mf(), a, 0);
+                let la = self.b.ins().load(types::I64, mf(), a, 8);
+                let pb = self.b.ins().load(PTR, mf(), b, 0);
+                let lb = self.b.ins().load(types::I64, mf(), b, 8);
+                self.cmp_seq(pa, la, pb, lb, e)?
+            }
+            Ty::Ref(_, i) | Ty::Box(i) if !t.is_fat() => {
+                let pa = self.b.ins().load(PTR, mf(), a, 0);
+                let pb = self.b.ins().load(PTR, mf(), b, 0);
+                self.cmp_call(pa, pb, *i)?
+            }
+            Ty::Array(e, n) => {
+                let l = self.b.ins().iconst(types::I64, n as i64);
+                self.cmp_seq(a, l, b, l, *e)?
+            }
+            Ty::Struct(sid) => {
+                // Vec / String は中身の列
+                if let Some((fa, ft)) = self.deref_to_slice(a, sid, false) {
+                    let (fb, _) = self.deref_to_slice(b, sid, false).unwrap();
+                    return self.cmp_at(fa, fb, ft);
+                }
+                let user = ["partial_cmp", "cmp"]
+                    .into_iter()
+                    .find(|m| !self.prog.is_tuple(sid) && self.prog.method(sid, m).is_some());
+                if let Some(m) = user {
+                    // 手書きの impl: `__exr_pord_i32(&__a.partial_cmp(__b))`
+                    let r = Ty::Ref(false, intern(t));
+                    self.scopes.push(vec![]);
+                    self.bind("__exr_ca".into(), r, Some(a));
+                    self.bind("__exr_cb".into(), r, Some(b));
+                    let e: Expr = if m == "partial_cmp" {
+                        syn::parse_quote!(__exr_pord_i32::<()>(&__exr_ca.partial_cmp(__exr_cb)))
+                    } else {
+                        syn::parse_quote!(__exr_ord_i32::<()>(&__exr_ca.cmp(__exr_cb)))
+                    };
+                    let (v, _) = self.expr(&e, Some(Ty::I32))?;
+                    self.scopes.pop();
+                    return Ok(v.unwrap());
+                }
+                let sd = &self.prog.structs[sid as usize];
+                let is_enum = sd.is_enum;
+                let tag_ty = sd.tag;
+                let fields = sd.fields.clone();
+                let variants: Vec<(i64, Vec<(String, Ty, u32)>)> =
+                    sd.variants.iter().map(|v| (v.discr, v.fields.clone())).collect();
+                let done = self.b.create_block();
+                let res = self.b.append_block_param(done, types::I32);
+                if is_enum {
+                    // バリアントの判別値の順、同じバリアントならフィールドの辞書順
+                    let ct = clif_ty(tag_ty).unwrap();
+                    let ta = self.b.ins().load(ct, mf(), a, 0);
+                    let tb = self.b.ins().load(ct, mf(), b, 0);
+                    let c = self.cmp_scalar(ta, tb, true);
+                    self.cmp_chain(c, done);
+                    for (d, fs) in variants {
+                        if fs.is_empty() {
+                            continue;
+                        }
+                        let yes = self.b.create_block();
+                        let next = self.b.create_block();
+                        let is_v = self.b.ins().icmp_imm_s(IntCC::Equal, ta, d);
+                        self.b.ins().brif(is_v, yes, &[], next, &[]);
+                        self.b.switch_to_block(yes);
+                        for (_, ft, off) in fs {
+                            let (fa, fb) = (self.addr_plus(a, off as i32), self.addr_plus(b, off as i32));
+                            let c = self.cmp_call(fa, fb, ft)?;
+                            self.cmp_chain(c, done);
+                        }
+                        let z = self.b.ins().iconst(types::I32, 0);
+                        self.b.ins().jump(done, &[z.into()]);
+                        self.b.switch_to_block(next);
+                    }
+                } else {
+                    for (_, ft, off) in fields {
+                        let (fa, fb) = (self.addr_plus(a, off as i32), self.addr_plus(b, off as i32));
+                        let c = self.cmp_call(fa, fb, ft)?;
+                        self.cmp_chain(c, done);
+                    }
+                }
+                let z = self.b.ins().iconst(types::I32, 0);
+                self.b.ins().jump(done, &[z.into()]);
+                self.b.switch_to_block(done);
+                res
+            }
+            t => return Err(format!("`{}` cannot be compared with `<`", self.prog.tn(t))),
+        })
+    }
+
+    /// `a.cmp(&b)` / `a.partial_cmp(&b)` (手書きの impl がない型: 整数・タプル・derive した型など)
+    fn ord_method(&mut self, mc: &syn::ExprMethodCall) -> R<Option<V>> {
+        let name = mc.method.to_string();
+        if !matches!(name.as_str(), "cmp" | "partial_cmp") || mc.args.len() != 1 {
+            return Ok(None);
+        }
+        let helper = if name == "cmp" { "__exr_cmp_m" } else { "__exr_pcmp_m" };
+        if !self.prog.index.contains_key(helper) {
+            return Ok(None);
+        }
+        // 手書きの cmp があれば普通のメソッド呼び出し
+        if let Some(mut t) = self.peek(&mc.receiver) {
+            while let Ty::Ref(_, i) = t {
+                t = *i;
+            }
+            if let Ty::Struct(sid) = t {
+                if self.prog.method(sid, &name).is_some() {
+                    return Ok(None);
+                }
+            }
+        }
+        let (v, t) = self.operand(&mc.receiver, None, true)?;
+        let Some(v) = v else { return Ok(Some((None, Ty::Never))) };
+        let (ra, rt) = self.ord_addr(v, t);
+        if let Ty::Struct(sid) = rt {
+            if self.prog.method(sid, &name).is_some() {
+                return err(mc.span(), format!("call `{name}` on a named value"));
+            }
+        }
+        let arg = &mc.args[0];
+        let (av, at) = self.operand(arg, Some(Ty::Ref(false, intern(rt))), true)?;
+        let Some(av) = av else { return Ok(Some((None, Ty::Never))) };
+        let (aa, at2) = self.ord_addr(av, at);
+        if !matches!(at, Ty::Ref(..)) || at2 != rt {
+            return err(
+                arg.span(),
+                format!("mismatched types: expected `&{}`, found `{}`", self.prog.tn(rt), self.prog.tn(at)),
+            );
+        }
+        let r = Ty::Ref(false, intern(rt));
+        self.call_named(helper, vec![rt], &[(ra, r), (aa, r)], mc.span()).map(Some)
     }
 }

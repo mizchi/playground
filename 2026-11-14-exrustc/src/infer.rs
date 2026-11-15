@@ -1711,6 +1711,13 @@ impl Inf<'_> {
                     }
                     return self.var();
                 }
+                // 組み込みの比較 (`3.cmp(&5)` / derive した型の cmp): Ordering / Option<Ordering>
+                if callee.is_none() && matches!(n.as_str(), "cmp" | "partial_cmp") && args.len() == 1 {
+                    if let Some(&os) = self.prog.struct_index.get("Ordering") {
+                        let o = self.known(Ty::Struct(os));
+                        return if n == "cmp" { o } else { self.option_of(o) };
+                    }
+                }
                 if callee.is_none() && sid.is_none() {
                     // プリミティブ型への trait 実装のメソッド
                     if let Some(t) = self.resolve(rv) {

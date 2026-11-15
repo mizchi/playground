@@ -68,7 +68,7 @@ pub unsafe fn __core_write_volatile<T: Copy>(p: *mut T, v: T) {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Option<T> {
     None,
     Some(T),
@@ -214,7 +214,7 @@ impl<T> Option<&T> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Result<T, E> {
     Ok(T),
     Err(E),
@@ -524,6 +524,42 @@ impl<T: Ord> Vec<T> {
             i += 1;
         }
     }
+    pub fn sort_unstable(&mut self) {
+        self.sort();
+    }
+}
+
+impl<T> Vec<T> {
+    pub fn sort_by<F: FnMut(&T, &T) -> Ordering>(&mut self, f: F) {
+        let mut f = f;
+        let mut i = 1;
+        while i < self.len {
+            let mut j = i;
+            while j > 0 && __exr_ord_i32::<()>(&f(unsafe { &*self.ptr.add(j) }, unsafe { &*self.ptr.add(j - 1) })) < 0 {
+                self.swap(j, j - 1);
+                j -= 1;
+            }
+            i += 1;
+        }
+    }
+    pub fn sort_unstable_by<F: FnMut(&T, &T) -> Ordering>(&mut self, f: F) {
+        self.sort_by(f);
+    }
+    pub fn sort_by_key<K: Ord, F: FnMut(&T) -> K>(&mut self, f: F) {
+        let mut f = f;
+        let mut i = 1;
+        while i < self.len {
+            let mut j = i;
+            while j > 0 && __exr_cmp::<K>(&f(unsafe { &*self.ptr.add(j) }), &f(unsafe { &*self.ptr.add(j - 1) })) < 0 {
+                self.swap(j, j - 1);
+                j -= 1;
+            }
+            i += 1;
+        }
+    }
+    pub fn sort_unstable_by_key<K: Ord, F: FnMut(&T) -> K>(&mut self, f: F) {
+        self.sort_by_key(f);
+    }
 }
 
 impl<T> Drop for Vec<T> {
@@ -786,6 +822,68 @@ pub trait Iterator {
     }
     fn collect<C: __FromIter>(self) -> C {
         <C as __FromIter>::__from_iter(self)
+    }
+    fn max_by_key<B: Ord, F: FnMut(&Self::Item) -> B>(self, f: F) -> Option<Self::Item> {
+        let mut it = self;
+        let mut f = f;
+        let mut best = match it.next() {
+            Some(x) => x,
+            None => return None,
+        };
+        let mut bk = f(&best);
+        while let Some(x) = it.next() {
+            let k = f(&x);
+            if __exr_cmp::<B>(&k, &bk) >= 0 {
+                best = x;
+                bk = k;
+            }
+        }
+        Some(best)
+    }
+    fn min_by_key<B: Ord, F: FnMut(&Self::Item) -> B>(self, f: F) -> Option<Self::Item> {
+        let mut it = self;
+        let mut f = f;
+        let mut best = match it.next() {
+            Some(x) => x,
+            None => return None,
+        };
+        let mut bk = f(&best);
+        while let Some(x) = it.next() {
+            let k = f(&x);
+            if __exr_cmp::<B>(&k, &bk) < 0 {
+                best = x;
+                bk = k;
+            }
+        }
+        Some(best)
+    }
+    fn max_by<F: FnMut(&Self::Item, &Self::Item) -> Ordering>(self, f: F) -> Option<Self::Item> {
+        let mut it = self;
+        let mut f = f;
+        let mut best = match it.next() {
+            Some(x) => x,
+            None => return None,
+        };
+        while let Some(x) = it.next() {
+            if __exr_ord_i32::<()>(&f(&x, &best)) >= 0 {
+                best = x;
+            }
+        }
+        Some(best)
+    }
+    fn min_by<F: FnMut(&Self::Item, &Self::Item) -> Ordering>(self, f: F) -> Option<Self::Item> {
+        let mut it = self;
+        let mut f = f;
+        let mut best = match it.next() {
+            Some(x) => x,
+            None => return None,
+        };
+        while let Some(x) = it.next() {
+            if __exr_ord_i32::<()>(&f(&x, &best)) < 0 {
+                best = x;
+            }
+        }
+        Some(best)
     }
 }
 
@@ -1606,6 +1704,129 @@ impl String {
         self.vec.len -= 1;
     }
 }
+// --- 順序 (Ordering / 大小比較の glue。型ごとの比較の本体は codegen が作る __exr_cmp) ---
+
+pub trait PartialEq {
+    fn eq(&self, other: &Self) -> bool;
+}
+pub trait Eq {
+    fn __exr_eq_marker(&self) {}
+}
+pub trait PartialOrd {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering>;
+}
+pub trait Ord {
+    fn cmp(&self, other: &Self) -> Ordering;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Ordering {
+    Less = -1,
+    Equal = 0,
+    Greater = 1,
+}
+
+impl Ordering {
+    pub fn reverse(self) -> Ordering {
+        match self {
+            Ordering::Less => Ordering::Greater,
+            Ordering::Equal => Ordering::Equal,
+            Ordering::Greater => Ordering::Less,
+        }
+    }
+    pub fn then(self, o: Ordering) -> Ordering {
+        match self {
+            Ordering::Equal => o,
+            x => x,
+        }
+    }
+    pub fn then_with<F: FnOnce() -> Ordering>(self, f: F) -> Ordering {
+        match self {
+            Ordering::Equal => f(),
+            x => x,
+        }
+    }
+    pub fn is_eq(self) -> bool {
+        __exr_ord_i32::<()>(&self) == 0
+    }
+    pub fn is_ne(self) -> bool {
+        __exr_ord_i32::<()>(&self) != 0
+    }
+    pub fn is_lt(self) -> bool {
+        __exr_ord_i32::<()>(&self) < 0
+    }
+    pub fn is_le(self) -> bool {
+        __exr_ord_i32::<()>(&self) <= 0
+    }
+    pub fn is_gt(self) -> bool {
+        __exr_ord_i32::<()>(&self) > 0
+    }
+    pub fn is_ge(self) -> bool {
+        __exr_ord_i32::<()>(&self) >= 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Reverse<T>(pub T);
+
+impl<T> PartialOrd for Reverse<T> {
+    fn partial_cmp(&self, o: &Reverse<T>) -> Option<Ordering> {
+        Some(__exr_cmp_m::<T>(&o.0, &self.0))
+    }
+}
+impl<T> Ord for Reverse<T> {
+    fn cmp(&self, o: &Reverse<T>) -> Ordering {
+        __exr_cmp_m::<T>(&o.0, &self.0)
+    }
+}
+
+// a と b を比べて -1 / 0 / 1
+fn __exr_cmp<T>(a: &T, b: &T) -> i32 {
+    0
+}
+
+fn __exr_ordering<G>(c: i32) -> Ordering {
+    if c < 0 {
+        Ordering::Less
+    } else if c > 0 {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    }
+}
+
+fn __exr_cmp_m<T>(a: &T, b: &T) -> Ordering {
+    __exr_ordering::<()>(__exr_cmp::<T>(a, b))
+}
+
+fn __exr_pcmp_m<T>(a: &T, b: &T) -> Option<Ordering> {
+    Some(__exr_cmp_m::<T>(a, b))
+}
+
+fn __exr_ord_i32<G>(o: &Ordering) -> i32 {
+    match *o {
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
+    }
+}
+
+fn __exr_pord_i32<G>(o: &Option<Ordering>) -> i32 {
+    match *o {
+        Some(x) => __exr_ord_i32::<()>(&x),
+        None => 0,
+    }
+}
+
+// Ord::max / min (`a.max(b)` の a が整数でないとき)
+fn __exr_max<T>(a: T, b: T) -> T {
+    if __exr_cmp::<T>(&a, &b) > 0 { a } else { b }
+}
+
+fn __exr_min<T>(a: T, b: T) -> T {
+    if __exr_cmp::<T>(&a, &b) <= 0 { a } else { b }
+}
+
 // --- HashMap<K, V> (オープンアドレス法・線形探索。ハッシュは型ごとに codegen が作る __exr_hash) --
 
 fn __exr_hash<T>(x: &T) -> u64 {
@@ -2343,6 +2564,62 @@ fn is_iterator_trait(h: usize) -> bool {
         .any(|&(a, b)| matches!(&PRELUDE[a as usize..b as usize], "Iterator" | "IntoIter"))
 }
 
+/// 比較の trait (PartialEq / Eq / PartialOrd / Ord) の宣言か
+fn is_cmp_trait(h: usize) -> bool {
+    let it = &items()[h].0;
+    matches!(it.kind, ItemKind::TraitHeader)
+        && it
+            .idents
+            .iter()
+            .any(|&(a, b)| matches!(&PRELUDE[a as usize..b as usize], "PartialEq" | "Eq" | "PartialOrd" | "Ord"))
+}
+
+/// ユーザが比較の trait を手で実装しているか (`impl Ord for S` / `impl<T> PartialEq for W<T>`)
+fn impls_cmp_trait(src: &str) -> bool {
+    let b = src.as_bytes();
+    let mut i = 0;
+    while let Some(k) = src[i..].find("impl") {
+        let mut j = i + k + 4;
+        i = j;
+        let skip_ws = |j: &mut usize| {
+            while *j < b.len() && b[*j].is_ascii_whitespace() {
+                *j += 1;
+            }
+        };
+        skip_ws(&mut j);
+        if j < b.len() && b[j] == b'<' {
+            let mut depth = 0;
+            while j < b.len() {
+                match b[j] {
+                    b'<' => depth += 1,
+                    b'>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            skip_ws(&mut j);
+        }
+        let start = j;
+        while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_' || b[j] == b':') {
+            j += 1;
+        }
+        let name = src[start..j].rsplit("::").next().unwrap_or("");
+        if matches!(name, "PartialEq" | "Eq" | "PartialOrd" | "Ord") {
+            skip_ws(&mut j);
+            if src[j..].starts_with("for") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// 書式化で使う prelude の名前
 const FMT_NAMES: &[&str] = &[
     "String", "new", "Formatter", "Display", "Debug", "__exr_formatter", "__exr_fmt_spec",
@@ -2403,7 +2680,7 @@ fn owner(h: usize) -> Option<&'static str> {
                     .iter()
                     .map(|&(a, b)| &PRELUDE[a as usize..b as usize])
                     .find_map(|w| match w {
-                        "Vec" | "String" | "HashMap" => Some(w),
+                        "Vec" | "String" | "HashMap" | "Reverse" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,
@@ -2496,6 +2773,9 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
                 {
                     continue;
                 }
+                if *n == "cmp" && bytes.get(b as usize) == Some(&b':') {
+                    continue;
+                }
                 if !names.contains(n) {
                     names.push(n);
                 }
@@ -2557,6 +2837,39 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         || need.contains("chars")
         || chain
         || (producer && need.contains("next"));
+    // 大小比較: `<` は識別子として現れないので、比較を使いそうな名前 (Ord / sort / cmp など) で glue を付ける
+    // (イテレータの max / min も中で `>=` を使う)
+    const ORD_NAMES: &[&str] = &[
+        "Ord", "PartialOrd", "Ordering", "cmp", "partial_cmp", "sort", "sort_by", "sort_by_key",
+        "sort_unstable", "sort_unstable_by", "sort_unstable_by_key", "max_by_key", "min_by_key",
+        "max_by", "min_by", "Reverse",
+    ];
+    let cmp_impl = impls_cmp_trait(user_src);
+    // (再帰する型は Box / Vec を通るので、そのときは glue を付ける。それ以外の型の比較は codegen が直接展開する)
+    if ["Box", "Vec", "vec", "String"].iter().any(|n| need.contains(n)) {
+        need.insert("__exr_cmp");
+    }
+    if cmp_impl {
+        need.extend(["eq", "cmp", "partial_cmp", "__exr_eq_marker", "Ordering"]);
+    }
+    if ORD_NAMES.iter().any(|n| need.contains(n))
+        || (iter_lib && (need.contains("max") || need.contains("min")))
+    {
+        need.insert("__exr_cmp");
+        // (手書きの impl を glue が呼ぶときに Ordering を i32 にする)
+        if cmp_impl || need.contains("Ordering") {
+            need.extend(["__exr_ord_i32", "__exr_pord_i32"]);
+        }
+        if need.contains("Reverse") {
+            need.extend(["cmp", "partial_cmp"]);
+        }
+        if need.contains("cmp") || need.contains("partial_cmp") {
+            need.extend(["__exr_cmp_m", "__exr_pcmp_m"]);
+        }
+        if need.contains("max") || need.contains("min") {
+            need.extend(["__exr_max", "__exr_min"]);
+        }
+    }
     if iter_lib {
         need.insert("Iterator");
         if need.contains("iter") {
@@ -2579,6 +2892,10 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             // Iterator の (デフォルト) メソッドは Iterator を使うときだけ (`a.max(b)` の max では引かない)
             if let ItemKind::TraitMember(h) = it.kind {
                 if !iter_lib && is_iterator_trait(h as usize) {
+                    continue;
+                }
+                // 比較の trait の宣言は、ユーザが手で impl するときだけ (derive と境界は宣言なしで扱う)
+                if !cmp_impl && is_cmp_trait(h as usize) {
                     continue;
                 }
             }
