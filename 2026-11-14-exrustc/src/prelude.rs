@@ -394,6 +394,9 @@ fn add_idents(need: &mut HashSet<&'static str>, it: &SrcItem) {
         if w != "Iterator" && ITER_NAMES.contains(&w) && !method_call_at(bytes, a as usize, b as usize) {
             continue;
         }
+        if matches!(w, "width" | "precision" | "fill" | "sign_plus") && !method_call_at(bytes, a as usize, b as usize) {
+            continue;
+        }
         need.insert(w);
     }
 }
@@ -504,6 +507,10 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
                 // (ローカル変数の `count` や `sum` で Iterator を付けない)
                 // (`mem::take(..)` のようなパスの最後は数える)
                 let after_path = a >= 2 && &bytes[a as usize - 2..a as usize] == b"::";
+                // (Formatter の `width()` などもメソッド呼び出しの位置だけ: フィールドや変数の `width` で付けない)
+                if matches!(*n, "width" | "precision" | "fill" | "sign_plus") && !method_call_at(bytes, a as usize, b as usize) {
+                    continue;
+                }
                 if *n != "Iterator" && ITER_NAMES.contains(n) && !method_call_at(bytes, a as usize, b as usize) && !after_path {
                     continue;
                 }
@@ -713,6 +720,20 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     }
     if user_src.contains(".or_default()") {
         need.extend(["or_default", "__exr_default"]);
+    }
+    // (Formatter のビルダーの entries はイテレータを受け取る)
+    if user_src.contains(".entries(") {
+        need.extend(["Iterator", "iter", "next", "into_iter"]);
+    }
+    // `HashMap::from([..])` は vec![..] にする
+    if user_src.contains("::from([") {
+        need.extend(["from", "vec", "reverse", "pop", "insert"]);
+    }
+    if need.contains("extend") && need.contains("String") {
+        need.extend(["push_str", "as_str", "push"]);
+    }
+    if user_src.contains("].into_iter()") {
+        need.extend(["vec", "into_iter", "IntoIter", "Iterator", "next"]);
     }
     if need.contains("cycle") {
         need.extend(["Cycle", "__exr_clone"]);

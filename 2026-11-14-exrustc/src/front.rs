@@ -2883,6 +2883,23 @@ impl Program {
             return None;
         }
         let ty = p.path.segments[0].ident.to_string();
+        // `HashMap::from([(1, 2), ..])`: 配列を vec![..] にして `from(Vec)` を呼ぶ
+        if p.path.segments[1].ident == "from"
+            && matches!(ty.as_str(), "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "VecDeque" | "BinaryHeap")
+            && c.args.len() == 1
+        {
+            if let syn::Expr::Array(a) = &c.args[0] {
+                let es = &a.elems;
+                let f = &c.func;
+                return Some(syn::parse_quote!(#f(vec![#es])));
+            }
+        }
+        // `Ord::cmp(&a, &b)` / `PartialOrd::partial_cmp(..)` / `PartialEq::eq(..)`: メソッド呼び出しの形に
+        if matches!(ty.as_str(), "Ord" | "PartialOrd" | "PartialEq" | "Eq") && c.args.len() == 2 {
+            let m = &p.path.segments[1].ident;
+            let (a0, a1) = (&c.args[0], &c.args[1]);
+            return Some(syn::parse_quote!((#a0).#m(#a1)));
+        }
         let t = Ty::prim(&ty)?;
         if t == Ty::Char || t == Ty::Bool {
             return None;

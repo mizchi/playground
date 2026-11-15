@@ -2066,6 +2066,22 @@ impl Inf<'_> {
                 }
                 self.with(Shape::Clo(st, n))
             }
+            // 値としての `[a, b].into_iter()`: Vec の IntoIter (codegen が vec![..] にする)
+            Expr::MethodCall(mc)
+                if mc.method == "into_iter"
+                    && mc.args.is_empty()
+                    && matches!(&*mc.receiver, Expr::Array(_))
+                    && self.prog.struct_index.contains_key("IntoIter") =>
+            {
+                let Expr::Array(a) = &*mc.receiver else { unreachable!() };
+                let el = self.var();
+                for x in &a.elems {
+                    let v = self.expr(x);
+                    self.unify(el, v);
+                }
+                let ib = self.prog.struct_index["IntoIter"];
+                self.adt(ib, vec![el])
+            }
             Expr::MethodCall(mc)
                 if {
                     let r = self.expr_peek_elem(&mc.receiver);

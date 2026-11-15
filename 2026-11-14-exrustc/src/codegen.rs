@@ -2693,6 +2693,21 @@ impl Cx<'_, '_> {
     /// `recv.m(args)`: レシーバを自動 deref して struct を見つけ、
     /// メソッドの self 型に合わせて自動参照 (`&self` / `&mut self`) かコピー (`self`) で渡す
     fn method_call(&mut self, mc: &syn::ExprMethodCall, expected: Option<Ty>) -> R<V> {
+        // 値としての `[a, b].into_iter()`: Vec にしてから (配列の変数で要素が Copy なら iter().copied())
+        if mc.method == "into_iter" && mc.args.is_empty() {
+            if let Expr::Array(a) = strip_paren(&mc.receiver) {
+                let es = &a.elems;
+                let e: Expr = syn::parse_quote!(vec![#es].into_iter());
+                return self.expr(&e, expected);
+            }
+            if let Some(Ty::Array(el, _)) = self.peek(&mc.receiver) {
+                if !self.needs_drop(*el) && self.prog.struct_index.contains_key("Copied") {
+                    let r = &mc.receiver;
+                    let e: Expr = syn::parse_quote!((#r).iter().copied());
+                    return self.expr(&e, expected);
+                }
+            }
+        }
         // ブランケット impl のメソッドをプリミティブ型・&str で呼ぶ (`5.describe()` / `"x".describe()`)
         if let Some(&bid) = self.prog.blanket.get(&mc.method.to_string()) {
             let pt = self.peek(&mc.receiver);
@@ -9116,10 +9131,18 @@ impl Cx<'_, '_> {
         };
         let Ty::Struct(sid) = rt else { return Ok(None) };
         let bname = self.prog.structs[self.prog.base_of(sid) as usize].name.clone();
-        if !matches!(bname.as_str(), "Vec" | "BinaryHeap") || self.prog.method(sid, "__extend_ref").is_none() {
+        let is_vec = matches!(bname.as_str(), "Vec" | "BinaryHeap") && self.prog.method(sid, "__extend_ref").is_some();
+        // (ほかのコレクションと String は、引数をイテレータにしてから prelude の extend へ)
+        let other = matches!(bname.as_str(), "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "String" | "VecDeque")
+            && self.prog.method(sid, "extend").is_some();
+        if !is_vec && !other {
             return Ok(None);
         }
-        let elem = *self.prog.structs[sid as usize].args.first().ok_or("internal: bad Vec")?;
+        let elem = if is_vec {
+            *self.prog.structs[sid as usize].args.first().ok_or("internal: bad Vec")?
+        } else {
+            Ty::Unit
+        };
         let arg = &mc.args[0];
         let at = self.peek(arg);
         let iter_e: Option<Expr> = match at {
@@ -9168,7 +9191,7 @@ impl Cx<'_, '_> {
             return Ok(Some((None, Ty::Never)));
         }
         let item = self.prog.assoc_of(t, "Item");
-        let by_ref = matches!(item, Some(Ty::Ref(_, i)) if *i == elem);
+        let by_ref = is_vec && matches!(item, Some(Ty::Ref(_, i)) if *i == elem);
         self.bind("__exr_ext".into(), t, v);
         let r = &mc.receiver;
         let e: Expr = if by_ref {

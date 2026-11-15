@@ -1329,6 +1329,13 @@ fn __core_from_utf8<G>(b: &[u8]) -> Result<&str, Utf8Error> {
 }
 
 impl String {
+    // 要素が char / &char / &str / String のどれでも (codegen の __push_piece が型で選ぶ)
+    pub fn extend<I: Iterator>(&mut self, it: I) {
+        let mut it = it;
+        while let Some(x) = it.next() {
+            self.__push_piece(x);
+        }
+    }
     pub fn new() -> String {
         String { vec: Vec::new() }
     }
@@ -2677,20 +2684,143 @@ pub trait Debug {
     fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError>;
 }
 
+// `f.debug_struct("P").field("x", &self.x).finish()` などのビルダー (derive(Debug) と同じ部品で書く)
+pub struct DebugStruct {
+    f: *mut Formatter,
+    n: usize,
+    kind: u8,
+}
+
+impl DebugStruct {
+    pub fn field<T>(&mut self, name: &str, v: &T) -> &mut DebugStruct {
+        let f = unsafe { &mut *self.f };
+        __exr_dbg_item::<()>(f, self.n, name);
+        __exr_debug(v, f);
+        __exr_dbg_item_end::<()>(f);
+        self.n += 1;
+        self
+    }
+    pub fn finish(&mut self) -> Result<(), __FmtError> {
+        __exr_dbg_end::<()>(unsafe { &mut *self.f }, self.n, self.kind, false);
+        Ok(())
+    }
+    pub fn finish_non_exhaustive(&mut self) -> Result<(), __FmtError> {
+        let f = unsafe { &mut *self.f };
+        __exr_dbg_item::<()>(f, self.n, "");
+        f.buf.push_str("..");
+        __exr_dbg_item_end::<()>(f);
+        self.n += 1;
+        __exr_dbg_end::<()>(f, self.n, self.kind, false);
+        Ok(())
+    }
+}
+
+// debug_tuple / debug_list / debug_set (名前のない要素)
+pub struct DebugTuple {
+    f: *mut Formatter,
+    n: usize,
+    kind: u8,
+}
+
+impl DebugTuple {
+    pub fn field<T>(&mut self, v: &T) -> &mut DebugTuple {
+        self.entry(v)
+    }
+    pub fn entry<T>(&mut self, v: &T) -> &mut DebugTuple {
+        let f = unsafe { &mut *self.f };
+        __exr_dbg_item::<()>(f, self.n, "");
+        __exr_debug(v, f);
+        __exr_dbg_item_end::<()>(f);
+        self.n += 1;
+        self
+    }
+    pub fn entries<I: Iterator>(&mut self, it: I) -> &mut DebugTuple {
+        let mut it = it;
+        while let Some(x) = it.next() {
+            self.entry(&x);
+        }
+        self
+    }
+    pub fn finish(&mut self) -> Result<(), __FmtError> {
+        __exr_dbg_end::<()>(unsafe { &mut *self.f }, self.n, self.kind, false);
+        Ok(())
+    }
+}
+
+pub struct DebugMap {
+    f: *mut Formatter,
+    n: usize,
+}
+
+impl DebugMap {
+    pub fn entry<K, V>(&mut self, k: &K, v: &V) -> &mut DebugMap {
+        let f = unsafe { &mut *self.f };
+        __exr_dbg_item::<()>(f, self.n, "");
+        __exr_debug(k, f);
+        f.buf.push_str(": ");
+        __exr_debug(v, f);
+        __exr_dbg_item_end::<()>(f);
+        self.n += 1;
+        self
+    }
+    pub fn entries<K, V, I: Iterator<Item = (K, V)>>(&mut self, it: I) -> &mut DebugMap {
+        let mut it = it;
+        while let Some((k, v)) = it.next() {
+            self.entry(&k, &v);
+        }
+        self
+    }
+    pub fn finish(&mut self) -> Result<(), __FmtError> {
+        __exr_dbg_end::<()>(unsafe { &mut *self.f }, self.n, 3, false);
+        Ok(())
+    }
+}
+
 impl Formatter {
+    pub fn debug_struct(&mut self, name: &str) -> DebugStruct {
+        __exr_dbg_begin::<()>(self, name, 0);
+        DebugStruct { f: self as *mut Formatter, n: 0, kind: 0 }
+    }
+    pub fn debug_tuple(&mut self, name: &str) -> DebugTuple {
+        __exr_dbg_begin::<()>(self, name, 1);
+        DebugTuple { f: self as *mut Formatter, n: 0, kind: 1 }
+    }
+    pub fn debug_list(&mut self) -> DebugTuple {
+        __exr_dbg_begin::<()>(self, "", 2);
+        DebugTuple { f: self as *mut Formatter, n: 0, kind: 2 }
+    }
+    pub fn debug_set(&mut self) -> DebugTuple {
+        __exr_dbg_begin::<()>(self, "", 3);
+        DebugTuple { f: self as *mut Formatter, n: 0, kind: 3 }
+    }
+    pub fn debug_map(&mut self) -> DebugMap {
+        __exr_dbg_begin::<()>(self, "", 3);
+        DebugMap { f: self as *mut Formatter, n: 0 }
+    }
+    // 書式指定を読む
+    pub fn alternate(&self) -> bool {
+        self.alt
+    }
+    pub fn sign_plus(&self) -> bool {
+        self.plus
+    }
+    pub fn width(&self) -> Option<usize> {
+        if self.width > 0 { Some(self.width) } else { None }
+    }
+    pub fn precision(&self) -> Option<usize> {
+        if self.has_prec { Some(self.prec) } else { None }
+    }
+    // 幅・精度・寄せを効かせて文字列を書く
+    pub fn pad(&mut self, s: &str) -> Result<(), __FmtError> {
+        __exr_fmt_str::<()>(self, s);
+        Ok(())
+    }
     pub fn write_str(&mut self, s: &str) -> Result<(), __FmtError> {
         self.buf.push_str(s);
         Ok(())
     }
     pub fn write_char(&mut self, c: char) -> Result<(), __FmtError> {
         self.buf.push(c);
-        Ok(())
-    }
-    pub fn alternate(&self) -> bool {
-        self.alt
-    }
-    pub fn pad(&mut self, s: &str) -> Result<(), __FmtError> {
-        __exr_fmt_str::<()>(self, s);
         Ok(())
     }
 }
@@ -4729,6 +4859,16 @@ pub struct HashMap<K, V> {
 }
 
 impl<K, V> HashMap<K, V> {
+    // `HashMap::from([(k, v), ..])` (codegen が配列を vec![..] にして渡す)
+    pub fn from(v: Vec<(K, V)>) -> HashMap<K, V> {
+        let mut m = HashMap::new();
+        let mut v = v;
+        v.reverse();
+        while let Some((k, x)) = v.pop() {
+            m.insert(k, x);
+        }
+        m
+    }
     pub fn new() -> HashMap<K, V> {
         HashMap {
             st: core::ptr::null_mut(),
@@ -4887,6 +5027,50 @@ impl<K, V> HashMap<K, V> {
         }
         self.len -= 1;
         unsafe { Some(self.vs.add(i).read()) }
+    }
+    // f が false を返した組を消す
+    pub fn retain<F: FnMut(&K, &mut V) -> bool>(&mut self, f: F) {
+        let mut f = f;
+        let mut i = 0;
+        while i < self.cap {
+            if unsafe { *self.st.add(i) } == 1 {
+                let keep = unsafe { f(&*self.ks.add(i), &mut *self.vs.add(i)) };
+                if !keep {
+                    unsafe {
+                        self.st.add(i).write(2);
+                        __exr_drop_in_place(self.ks.add(i));
+                        __exr_drop_in_place(self.vs.add(i));
+                    }
+                    self.len -= 1;
+                }
+            }
+            i += 1;
+        }
+    }
+    // 全部の組を取り出して空にする
+    pub fn drain(&mut self) -> IntoIter<(K, V)> {
+        let mut v = Vec::with_capacity(self.len);
+        let mut i = 0;
+        while i < self.cap {
+            if unsafe { *self.st.add(i) } == 1 {
+                unsafe {
+                    v.push((self.ks.add(i).read(), self.vs.add(i).read()));
+                }
+            }
+            unsafe {
+                self.st.add(i).write(0);
+            }
+            i += 1;
+        }
+        self.len = 0;
+        self.used = 0;
+        v.into_iter()
+    }
+    pub fn extend<I: Iterator<Item = (K, V)>>(&mut self, it: I) {
+        let mut it = it;
+        while let Some((k, v)) = it.next() {
+            self.insert(k, v);
+        }
     }
     pub fn clear(&mut self) {
         let mut i = 0;
@@ -5171,6 +5355,21 @@ impl<T> HashSet<T> {
     pub fn new() -> HashSet<T> {
         HashSet { m: HashMap::new() }
     }
+    pub fn extend<I: Iterator<Item = T>>(&mut self, it: I) {
+        let mut it = it;
+        while let Some(x) = it.next() {
+            self.insert(x);
+        }
+    }
+    pub fn from(v: Vec<T>) -> HashSet<T> {
+        let mut s = HashSet::new();
+        let mut v = v;
+        v.reverse();
+        while let Some(x) = v.pop() {
+            s.insert(x);
+        }
+        s
+    }
     pub fn with_capacity(n: usize) -> HashSet<T> {
         HashSet { m: HashMap::with_capacity(n) }
     }
@@ -5302,6 +5501,21 @@ pub struct BTreeMap<K, V> {
 }
 
 impl<K, V> BTreeMap<K, V> {
+    pub fn extend<I: Iterator<Item = (K, V)>>(&mut self, it: I) {
+        let mut it = it;
+        while let Some((k, v)) = it.next() {
+            self.insert(k, v);
+        }
+    }
+    pub fn from(v: Vec<(K, V)>) -> BTreeMap<K, V> {
+        let mut m = BTreeMap::new();
+        let mut v = v;
+        v.reverse();
+        while let Some((k, x)) = v.pop() {
+            m.insert(k, x);
+        }
+        m
+    }
     pub fn new() -> BTreeMap<K, V> {
         BTreeMap { ks: Vec::new(), vs: Vec::new() }
     }
@@ -5580,6 +5794,21 @@ pub struct BTreeSet<T> {
 impl<T> BTreeSet<T> {
     pub fn new() -> BTreeSet<T> {
         BTreeSet { v: Vec::new() }
+    }
+    pub fn extend<I: Iterator<Item = T>>(&mut self, it: I) {
+        let mut it = it;
+        while let Some(x) = it.next() {
+            self.insert(x);
+        }
+    }
+    pub fn from(v: Vec<T>) -> BTreeSet<T> {
+        let mut s = BTreeSet::new();
+        let mut v = v;
+        v.reverse();
+        while let Some(x) = v.pop() {
+            s.insert(x);
+        }
+        s
     }
     fn bs_find(&self, x: &T) -> (usize, bool) {
         let mut lo = 0;
