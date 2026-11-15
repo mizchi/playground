@@ -1842,6 +1842,16 @@ impl Program {
                     "Copy" | "Clone" | "Sized" | "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Hash" | "Debug" | "Default"
                 ) && self.structs[sid as usize].fields.iter().all(|f| self.implements(f.1, tr))
             }
+            // prelude のコレクションと Option は Default (空 / None。中身が 0 のビット列)
+            Ty::Struct(sid)
+                if tr == "Default"
+                    && matches!(
+                        self.structs[self.base_of(sid) as usize].name.as_str(),
+                        "Vec" | "String" | "HashMap" | "BinaryHeap" | "Option"
+                    ) =>
+            {
+                true
+            }
             // eq / clone メソッドを持つ型 (prelude の String / Vec など)
             Ty::Struct(sid)
                 if (tr == "PartialEq" && self.method(sid, "eq").is_some())

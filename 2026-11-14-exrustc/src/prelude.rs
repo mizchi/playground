@@ -158,7 +158,7 @@ fn is_cmp_trait(h: usize) -> bool {
         && it
             .idents
             .iter()
-            .any(|&(a, b)| matches!(&PRELUDE[a as usize..b as usize], "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Clone" | "Copy"))
+            .any(|&(a, b)| matches!(&PRELUDE[a as usize..b as usize], "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Clone" | "Copy" | "Default"))
 }
 
 /// 演算子の trait (宣言はユーザが手で impl するときだけ付ける)
@@ -401,7 +401,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             "find", "position", "nth", "zip", "chain", "take", "skip", "take_while", "copied",
             "cloned", "format", "print", "println", "eprint", "eprintln", "write", "writeln",
             "split", "split_whitespace", "lines", "trim", "starts_with", "ends_with", "contains",
-            "clamp", "from_u32", "char", "join", "concat", "drain",
+            "clamp", "from_u32", "char", "join", "concat", "drain", "default",
         ]);
         // (先頭の 1 byte, 長さ) ごとの候補。prelude の名前が増えても 1 識別子あたりの比較は 0〜1 回
         let mut t: Vec<Vec<&'static str>> = vec![vec![]; 256 * 32];
@@ -434,7 +434,9 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             if let Some(n) = cands.iter().find(|n| **n == w) {
                 // Iterator のメソッド名は、メソッド呼び出しの位置 (`.count()`) でだけ数える
                 // (ローカル変数の `count` や `sum` で Iterator を付けない)
-                if *n != "Iterator" && ITER_NAMES.contains(n) && !method_call_at(bytes, a as usize, b as usize) {
+                // (`mem::take(..)` のようなパスの最後は数える)
+                let after_path = a >= 2 && &bytes[a as usize - 2..a as usize] == b"::";
+                if *n != "Iterator" && ITER_NAMES.contains(n) && !method_call_at(bytes, a as usize, b as usize) && !after_path {
                     continue;
                 }
                 // 書式化のマクロは `name!(` のときだけ (`p.write(..)` のメソッドは別物)
@@ -559,6 +561,10 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     if need.contains("flat_map") || need.contains("flatten") {
         need.extend(["__flat_prep", "__flat_next", "__Flat", "__flat_mark", "reverse", "pop", "take"]);
     }
+    // `T::default()` / `Default::default()` / `..Default::default()` / unwrap_or_default / mem::take
+    if ["default", "Default", "unwrap_or_default", "take"].iter().any(|n| need.contains(n)) {
+        need.insert("__exr_default");
+    }
     // `x.clone()` を codegen が __exr_clone::<T> にする (prelude の Vec::clone / cloned / to_vec の中も)
     // (drop の要らない型と、自分の clone を持つ型 (String / Vec) には要らない)
     if ["clone", "cloned", "to_vec", "resize"].iter().any(|n| need.contains(n)) {
@@ -595,7 +601,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     ];
     // (prelude の Reverse も PartialOrd / Ord を impl する)
     let user_impls = user_impl_traits(user_src);
-    let cmp_impl = user_impls.iter().any(|t| matches!(*t, "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Clone" | "Copy"))
+    let cmp_impl = user_impls.iter().any(|t| matches!(*t, "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Clone" | "Copy" | "Default"))
         || need.contains("Reverse");
     let op_impls: Vec<&str> = user_impls.iter().copied().filter(|t| OP_TRAITS.contains(t)).collect();
     // (再帰する型は Box / Vec を通るので、そのときは glue を付ける。それ以外の型の比較は codegen が直接展開する)

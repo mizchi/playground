@@ -39,15 +39,30 @@ pub fn __core_min<T: Ord + Copy>(a: T, b: T) -> T {
 pub fn __core_max<T: Ord + Copy>(a: T, b: T) -> T {
     if b < a { a } else { b }
 }
-pub fn __core_swap<T: Copy>(a: &mut T, b: &mut T) {
-    let t = *a;
-    *a = *b;
-    *b = t;
+pub fn __core_swap<T>(a: &mut T, b: &mut T) {
+    unsafe {
+        let pa = a as *mut T;
+        let pb = b as *mut T;
+        let t = pa.read();
+        pa.write(pb.read());
+        pb.write(t);
+    }
 }
-pub fn __core_replace<T: Copy>(dest: &mut T, src: T) -> T {
-    let old = *dest;
-    *dest = src;
-    old
+pub fn __core_replace<T>(dest: &mut T, src: T) -> T {
+    unsafe {
+        let p = dest as *mut T;
+        let old = p.read();
+        p.write(src);
+        old
+    }
+}
+pub fn __core_take<T>(dest: &mut T) -> T {
+    __core_replace(dest, __exr_default::<T>())
+}
+// `T::default()` / `Default::default()` / derive(Default): 本体は型ごとに codegen が作る
+// (0 で埋めてから、手書きの impl Default を持つフィールドはそれを呼ぶ)
+fn __exr_default<T>() -> T {
+    loop {}
 }
 pub unsafe fn __core_read_volatile<T: Copy>(p: *const T) -> T {
     unsafe { *p }
@@ -65,6 +80,21 @@ pub enum Option<T> {
 }
 
 impl<T> Option<T> {
+    pub fn unwrap_or_default(self) -> T {
+        match self {
+            Some(x) => x,
+            None => __exr_default::<T>(),
+        }
+    }
+    pub fn as_deref<G>(&self) -> Option<&str>
+    where
+        T: __AsStr,
+    {
+        match self {
+            Some(x) => Some(x.__as_str()),
+            None => None,
+        }
+    }
     pub fn expect(self, msg: &str) -> T {
         match self {
             Some(x) => x,
@@ -275,6 +305,12 @@ pub enum Result<T, E> {
 }
 
 impl<T, E> Result<T, E> {
+    pub fn unwrap_or_default(self) -> T {
+        match self {
+            Ok(x) => x,
+            Err(_) => __exr_default::<T>(),
+        }
+    }
     pub fn expect(self, msg: &str) -> T {
         match self {
             Ok(x) => x,
@@ -2764,6 +2800,20 @@ pub trait PartialEq {
 }
 pub trait Eq {
     fn __exr_eq_marker(&self) {}
+}
+// `Option<String>::as_deref()` 用 (String を &str に)
+pub trait __AsStr {
+    fn __as_str(&self) -> &str;
+}
+
+impl __AsStr for String {
+    fn __as_str(&self) -> &str {
+        self.as_str()
+    }
+}
+
+pub trait Default {
+    fn default() -> Self;
 }
 pub trait Clone {
     fn clone(&self) -> Self;

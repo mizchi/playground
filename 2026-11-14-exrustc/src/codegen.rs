@@ -317,6 +317,8 @@ impl Worker {
                 cx.cmp_glue_body(sig)
             } else if prog.index.get("__exr_clone") == Some(&body_id) {
                 cx.clone_glue_body(sig)
+            } else if prog.index.get("__exr_default") == Some(&body_id) {
+                cx.default_glue_body(sig)
             } else if prog.index.get("__exr_display") == Some(&body_id) {
                 cx.fmt_glue_body(sig, false)
             } else if prog.index.get("__exr_debug") == Some(&body_id) {
@@ -1827,8 +1829,41 @@ impl Cx<'_, '_> {
         let Some(sid) = self.prog.struct_by_path(&s.path, self.self_sid) else {
             return err(s.path.span(), "cannot find struct");
         };
-        if s.rest.is_some() || s.dot2_token.is_some() {
-            return err(s.span(), "functional update syntax `..` is not supported");
+        // `S { a: 1, ..base }`: base を一時変数に置き、書かれていないフィールドをそこからムーブする
+        // (書いたフィールドの元の値は、一時変数のスコープの終わりで drop される)
+        if let Some(base) = &s.rest {
+            let st = match expected {
+                Some(Ty::Struct(x)) if self.prog.base_of(x) == self.prog.base_of(sid) => Some(Ty::Struct(x)),
+                _ if self.prog.structs[sid as usize].generics.is_empty() => Some(Ty::Struct(sid)),
+                _ => None,
+            };
+            self.scopes.push(vec![]);
+            let (bv, bt) = self.expr(base, st)?;
+            if bt == Ty::Never {
+                self.scopes.pop();
+                return Ok((None, Ty::Never));
+            }
+            self.bind("__exr_base".into(), bt, bv);
+            let Ty::Struct(bsid) = bt else {
+                return err(base.span(), "the base of `..` must be a struct");
+            };
+            let all: Vec<String> = self.prog.structs[bsid as usize].fields.iter().map(|f| f.0.clone()).collect();
+            let mut ns = s.clone();
+            ns.rest = None;
+            ns.dot2_token = None;
+            for f in all {
+                let given = s.fields.iter().any(|fv| match &fv.member {
+                    syn::Member::Named(id) => *id == f,
+                    syn::Member::Unnamed(i) => i.index.to_string() == f,
+                });
+                if !given {
+                    let fi = syn::Ident::new(&f, base.span());
+                    ns.fields.push(syn::parse_quote!(#fi: __exr_base.#fi));
+                }
+            }
+            let r = self.struct_lit(&ns, Some(bt))?;
+            self.pop_scope();
+            return Ok(r);
         }
         let fields = self.prog.structs[sid as usize].fields.clone();
         let mut args = vec![];
@@ -2400,6 +2435,9 @@ impl Cx<'_, '_> {
     }
 
     fn call(&mut self, c: &syn::ExprCall, expected: Option<Ty>) -> R<V> {
+        if let Some(r) = self.default_call(c, expected)? {
+            return Ok(r);
+        }
         if let Expr::Path(p) = &*c.func {
             if let Some((sid, vi)) = self.prog.variant_by_path(&p.path, self.self_sid) {
                 let v = &self.prog.structs[sid as usize].variants[vi];
@@ -8488,6 +8526,166 @@ impl Cx<'_, '_> {
                 self.b.ins().store(mf(), v, dst, 0);
             }
             None => {}
+        }
+        Ok(())
+    }
+}
+
+// --- Default ---------------------------------------------------------------------
+
+impl Cx<'_, '_> {
+    /// `Default::default()` / `T::default()` / `i32::default()` / `Vec::default()` (手書きの default がない型)
+    fn default_call(&mut self, c: &syn::ExprCall, expected: Option<Ty>) -> R<Option<V>> {
+        let Expr::Path(p) = &*c.func else { return Ok(None) };
+        if !c.args.is_empty() || p.path.segments.last().map(|s| s.ident != "default").unwrap_or(true) {
+            return Ok(None);
+        }
+        if !self.prog.index.contains_key("__exr_default") {
+            return Ok(None);
+        }
+        // `X::default()` で X 自身の default がある (手書きの impl Default for X / 自分の関数) ならそれを呼ぶ
+        if p.qself.is_none() && p.path.segments.len() == 2 && p.path.segments[0].ident != "Default" {
+            if let Some(id) = self.prog.fn_by_path(&p.path, self.self_sid) {
+                if self.prog.sigs[id as usize].has_body {
+                    return Ok(None);
+                }
+            }
+            if self.callee(&c.func).is_some_and(|(id, _)| self.prog.sigs[id as usize].has_body) {
+                return Ok(None);
+            }
+        }
+        let exp = expected.or_else(|| self.lets.get(&(c as *const syn::ExprCall as usize)).copied());
+        let t = if let Some(q) = &p.qself {
+            self.prog.parse_ty(&q.ty, &self.env).ok()
+        } else {
+            let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            match segs.as_slice() {
+                [d, _] if d == "Default" => exp,
+                [x, _] => {
+                    let ty: syn::Type = syn::Type::Path(syn::TypePath {
+                        qself: None,
+                        path: syn::Path::from(p.path.segments[0].ident.clone()),
+                    });
+                    match self.prog.parse_ty(&ty, &self.env) {
+                        Ok(t) => Some(t),
+                        // ジェネリックな型の名前だけ (`Vec::default()`): 期待型から
+                        Err(_) => exp.filter(|&e| matches!(e, Ty::Struct(sid) if self.prog.structs[self.prog.base_of(sid) as usize].name == *x)),
+                    }
+                }
+                [_, _, ..] if segs.len() >= 3 && segs[segs.len() - 2] == "Default" => exp,
+                _ => None,
+            }
+        };
+        let Some(t) = t else {
+            return err(c.span(), "cannot infer the type of `default()`; annotate it");
+        };
+        self.call_named("__exr_default", vec![t], &[], c.span()).map(Some)
+    }
+
+    /// `__exr_default::<T>() -> T` の本体
+    fn default_glue_body(&mut self, sig: &FnSig) -> R<()> {
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        self.b.switch_to_block(entry);
+        self.b.seal_block(entry);
+        let ps = self.b.block_params(entry).to_vec();
+        let t = sig.ret;
+        if is_sret(sig) {
+            self.default_into(ps[0], t)?;
+            self.b.ins().return_(&[]);
+        } else {
+            match clif_ty(t) {
+                Some(ct) => {
+                    let tmp = self.temp(t);
+                    self.default_into(tmp, t)?;
+                    let v = self.b.ins().load(ct, mf(), tmp, 0);
+                    self.b.ins().return_(&[v]);
+                }
+                None => {
+                    self.b.ins().return_(&[]);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// dst に t の既定値を書く
+    fn default_into(&mut self, dst: Value, t: Ty) -> R<()> {
+        // 手書きの `impl Default for S`
+        if let Ty::Struct(sid) = t {
+            let bname = self.prog.structs[self.prog.base_of(sid) as usize].name.clone();
+            if let Some(&id) = self.prog.index.get(&format!("{bname}::default")) {
+                let sig0 = self.prog.sigs[id as usize].clone();
+                let (fid, sig) = if sig0.is_generic() {
+                    let mut sol = vec![None; sig0.generics.len()];
+                    self.prog.match_ty(sig0.ret, t, &mut sol);
+                    self.resolve_call(id, &[], sol, Some(t), proc_macro2::Span::call_site())?
+                } else {
+                    (id, sig0)
+                };
+                let f = self.fref(fid, &sig);
+                if is_sret(&sig) {
+                    self.b.ins().call(f, &[dst]);
+                } else {
+                    let call = self.b.ins().call(f, &[]);
+                    if let Some(&v) = self.b.inst_results(call).first() {
+                        self.b.ins().store(mf(), v, dst, 0);
+                    }
+                }
+                return Ok(());
+            }
+        }
+        // それ以外は 0 で埋め、フィールド (と Box の中身) を辿る
+        let (size, _) = self.prog.size_align(t);
+        if size > 0 {
+            let z = self.b.ins().iconst(types::I8, 0);
+            let n = self.b.ins().iconst(types::I64, size as i64);
+            let _ = (z, n);
+            let zero = self.b.ins().iconst(types::I64, 0);
+            let mut off = 0;
+            while off + 8 <= size {
+                self.b.ins().store(mf(), zero, dst, off as i32);
+                off += 8;
+            }
+            let z8 = self.b.ins().iconst(types::I8, 0);
+            while off < size {
+                self.b.ins().store(mf(), z8, dst, off as i32);
+                off += 1;
+            }
+        }
+        match t {
+            Ty::Struct(sid) if !self.prog.structs[sid as usize].is_enum => {
+                let fields = self.prog.structs[sid as usize].fields.clone();
+                for (_, ft, off) in fields {
+                    if matches!(ft, Ty::Struct(_) | Ty::Box(_) | Ty::Array(..)) {
+                        let d = self.addr_plus(dst, off as i32);
+                        self.default_into(d, ft)?;
+                    }
+                }
+            }
+            Ty::Array(e, n) => {
+                let (es, _) = self.prog.size_align(*e);
+                if matches!(e, Ty::Struct(_) | Ty::Box(_)) {
+                    for i in 0..n {
+                        let d = self.addr_plus(dst, (i * es) as i32);
+                        self.default_into(d, *e)?;
+                    }
+                }
+            }
+            Ty::Box(inner) => {
+                let Some(&alloc) = self.prog.index.get(crate::prelude::BOX_ALLOC) else {
+                    return Err("internal: the allocator is missing from the prelude".into());
+                };
+                let (size, _) = self.prog.size_align(*inner);
+                let asig = self.prog.sigs[alloc as usize].clone();
+                let fr = self.fref(alloc, &asig);
+                let sz = self.b.ins().iconst(types::I64, size.max(1) as i64);
+                let call = self.b.ins().call(fr, &[sz]);
+                let np = self.b.inst_results(call)[0];
+                self.default_into(np, *inner)?;
+                self.b.ins().store(mf(), np, dst, 0);
+            }
+            _ => {}
         }
         Ok(())
     }
