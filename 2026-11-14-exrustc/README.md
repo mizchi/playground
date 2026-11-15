@@ -167,6 +167,10 @@ bench/regress.sh
     - サイズ予算は既存の項目をどれも変えていない（BinaryHeap は名前があるときだけ付く）。
     - callgrind: prelude が大きくなった分、プロセスごとに 1 回の prelude の字句解析が +0.5M 命令（hello で +3.8%、約 0.1 ms）。gen1000 のビルドは ±0%。
       check の計測は 1000 関数で ±8% ほど揺れる（HEAD 同士でも 1.82G〜1.92G）ので、3 回ずつ測って差がないことを見た。
+  - BinaryHeap の append / extend の追加時
+    - 型推論が `Vec<T>::extend` の `Item = T` を `v.extend(w.iter())` の `&i32` と単一化して、`v` を `Vec<&i32>` にしていた。extend は引数の要素型（参照なら中身。`&str` は除く）から v の要素型を決めるようにした。
+    - 途中で見つけた既存のバグ：`&&str` の `to_string()` の型を推論できず、`a.iter().map(|s| s.to_string())` のクロージャの戻り値が決まらなかった。
+    - サイズ予算・callgrind（gen1000 / hello / vec_string / binary_heap）はどれも ±1% 以内。
 
 ## 対応している言語サブセット（no_std の範囲）
 
@@ -256,6 +260,8 @@ bench/regress.sh
   - `sort` / `sort_by` / `sort_by_key` / `sort_by_cached_key` / `sort_unstable*`（安定なマージソート。Vec・配列・スライス・`v[a..b]`）、`binary_search` / `binary_search_by` / `binary_search_by_key`（同じ値が並ぶときに返す位置も std と同じ）、`clamp`（整数・Ord な型。`lo > hi` なら panic）、イテレータの `max` / `min` / `max_by_key` / `min_by_key` / `max_by` / `min_by`
   - `BinaryHeap`（`examples/binary_heap.rs`）：`new` / `with_capacity` / `from(vec)` / `collect` / `push` / `pop` / `peek` / `len` / `is_empty` / `clear` / `iter` / `into_iter` / `into_vec` / `into_sorted_vec` / `{:?}`。
     sift の手順を std と同じにしてあるので、`iter` / `into_vec` / `{:?}` の並びも rustc と一致する。`Reverse` で最小ヒープ
+  - `BinaryHeap::append` / `extend`（`examples/binary_heap_extend.rs`）：std と同じ `rebuild_tail`（足す数が多ければ全体を作り直し、少なければ 1 つずつ sift_up。2048 要素を超えたら別の閾値）なので、足した後の並びも一致する
+  - `Vec::extend`。引数は Vec・配列・`&v` / `&[..]`・範囲・イテレータ（IntoIterator の代わりに codegen が `into_iter()` / `iter()` を補う。要素の参照なら Copy として足す）
   - 比較の本体は型ごとに codegen が作る（`__exr_cmp::<T>`。Box / Vec を使わないプログラムではその場で展開する）
 - Drop（`examples/drop.rs`、`examples/drop_more.rs`。drop の順序を rustc と比べ、valgrind でリーク・二重解放がないことを確かめる）：
   - `impl Drop for S`（ジェネリックな impl も）、`drop(x)`
@@ -335,7 +341,7 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
 - イテレータの制限：`rev`（値として。`for` の中なら可）、`DoubleEndedIterator` / `ExactSizeIterator`、`peekable` / `flat_map` / `step_by`、`collect` は `Vec<T>` / `String` / `HashMap<K, V>` だけ、`sum` / `product` は整数だけ
 - 関連型の制限：trait の関連型は `Self::X` / `T::X` / `<T as Tr>::X` の形だけ。関連型に境界（`type Item: Copy;`）は付けられない
 - 書式化の制限：`{:e}`、`{:p}`、`impl Debug for S` の手書きで `f.debug_struct(..)` などのビルダー、`Formatter` のフラグを読むメソッド（`f.alternate()` など）、`format_args!`
-- 比較の制限：浮動小数点がないので `partial_cmp` は常に `Some`。`Ord::cmp(&a, &b)` の UFCS。BinaryHeap の `append` / `extend` / `drain` / `retain` / `peek_mut`
+- 比較の制限：浮動小数点がないので `partial_cmp` は常に `Some`。`Ord::cmp(&a, &b)` の UFCS。BinaryHeap の `drain` / `retain` / `peek_mut`。`extend` は Vec / BinaryHeap だけ（HashMap / String の `extend`、一般の `IntoIterator` 境界はない）
 - HashMap の制限：`HashSet`、`BTreeMap`、`HashMap::from([..])`、`retain` / `drain`、キーに `impl Hash` を手書きすること
 - Drop の制限
   - panic では drop しない（unwind しない）

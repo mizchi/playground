@@ -2386,6 +2386,9 @@ impl Cx<'_, '_> {
         if let Some(r) = self.ord_method(mc)? {
             return Ok(r);
         }
+        if let Some(r) = self.extend_call(mc, expected)? {
+            return Ok(r);
+        }
         // `x.clamp(lo, hi)` (整数も Ord な型も): prelude の __exr_clamp
         if mc.method == "clamp" && mc.args.len() == 2 && self.prog.index.contains_key("__exr_clamp") {
             let own = match self.peek(&mc.receiver).map(|t| self.strip_refs(t)) {
@@ -7613,5 +7616,95 @@ impl Cx<'_, '_> {
         }
         let r = Ty::Ref(false, intern(rt));
         self.call_named(helper, vec![rt], &[(ra, r), (aa, r)], mc.span()).map(Some)
+    }
+}
+
+impl Cx<'_, '_> {
+    /// 型 t がイテレータ (next を持つ struct) か
+    fn is_iterator_ty(&self, t: Ty) -> bool {
+        match t {
+            Ty::Struct(sid) => self.prog.method(sid, "next").is_some() || self.prog.default_method(sid, "next").is_some(),
+            _ => false,
+        }
+    }
+
+    /// `v.extend(arg)` (Vec / BinaryHeap): IntoIterator の代わりに、イテレータでない arg を
+    /// `arg.into_iter()` (値) / `arg.iter()` (参照・配列) にする。要素が `&T` なら __extend_ref (T: Copy)
+    fn extend_call(&mut self, mc: &syn::ExprMethodCall, expected: Option<Ty>) -> R<Option<V>> {
+        if mc.method != "extend" || mc.args.len() != 1 {
+            return Ok(None);
+        }
+        // (下で作り直した `recv.extend(__exr_ext)` は普通のメソッド呼び出し)
+        if matches!(&mc.args[0], Expr::Path(p) if p.path.is_ident("__exr_ext")) {
+            return Ok(None);
+        }
+        let Some(rt) = self.peek(&mc.receiver).map(|t| self.strip_refs(t)) else {
+            return Ok(None);
+        };
+        let Ty::Struct(sid) = rt else { return Ok(None) };
+        let bname = self.prog.structs[self.prog.base_of(sid) as usize].name.clone();
+        if !matches!(bname.as_str(), "Vec" | "BinaryHeap") || self.prog.method(sid, "__extend_ref").is_none() {
+            return Ok(None);
+        }
+        let elem = *self.prog.structs[sid as usize].args.first().ok_or("internal: bad Vec")?;
+        let arg = &mc.args[0];
+        let at = self.peek(arg);
+        let iter_e: Option<Expr> = match at {
+            None => None,
+            Some(t) if self.is_iterator_ty(t) => None,
+            Some(Ty::Ref(_, Ty::Array(..))) if matches!(strip_paren(arg), Expr::Reference(_)) => {
+                Some(syn::parse_quote!(__exr_arr.iter()))
+            }
+            Some(Ty::Ref(_, _)) => match strip_paren(arg) {
+                Expr::Reference(r) => {
+                    let inner = &r.expr;
+                    Some(syn::parse_quote!((#inner).iter()))
+                }
+                _ => Some(syn::parse_quote!((#arg).iter())),
+            },
+            Some(Ty::Array(e, _)) => {
+                if self.needs_drop(*e) {
+                    return err(arg.span(), "`extend` with an array of values that need drop is not supported");
+                }
+                Some(syn::parse_quote!(__exr_arr.iter()))
+            }
+            Some(_) => Some(syn::parse_quote!((#arg).into_iter())),
+        };
+        self.scopes.push(vec![]);
+        // 配列は一度ローカルに置いてから iter() する (リテラルの `[1, 2].iter()` は場所でないため)
+        match (at, strip_paren(arg)) {
+            (Some(Ty::Array(..)), _) => {
+                let (v, t) = self.expr(arg, None)?;
+                self.bind("__exr_arr".into(), t, v);
+            }
+            (Some(Ty::Ref(_, Ty::Array(e, _))), Expr::Reference(r)) => {
+                if self.needs_drop(**e) {
+                    return err(arg.span(), "`extend` with an array of values that need drop is not supported");
+                }
+                let (v, t) = self.expr(&r.expr, None)?;
+                self.bind("__exr_arr".into(), t, v);
+            }
+            _ => {}
+        }
+        let (v, t) = match &iter_e {
+            Some(e) => self.expr(e, None)?,
+            None => self.expr(arg, None)?,
+        };
+        if t == Ty::Never {
+            self.scopes.pop();
+            return Ok(Some((None, Ty::Never)));
+        }
+        let item = self.prog.assoc_of(t, "Item");
+        let by_ref = matches!(item, Some(Ty::Ref(_, i)) if *i == elem);
+        self.bind("__exr_ext".into(), t, v);
+        let r = &mc.receiver;
+        let e: Expr = if by_ref {
+            syn::parse_quote!((#r).__extend_ref(__exr_ext))
+        } else {
+            syn::parse_quote!((#r).extend(__exr_ext))
+        };
+        let res = self.expr(&e, expected)?;
+        self.pop_scope();
+        Ok(Some(res))
     }
 }

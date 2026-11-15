@@ -463,6 +463,20 @@ impl<T> Vec<T> {
         self.len += other.len;
         other.len = 0;
     }
+    // `v.extend(it)`。イテレータでない引数 (Vec / 配列 / 参照) は codegen が into_iter / iter にする
+    pub fn extend<I: Iterator<Item = T>>(&mut self, it: I) {
+        let mut it = it;
+        while let Some(x) = it.next() {
+            self.push(x);
+        }
+    }
+    // 要素の参照のイテレータ (`v.extend(&w)` / `v.extend(w.iter())`。T: Copy)
+    pub fn __extend_ref<I: Iterator<Item = &T>>(&mut self, it: I) {
+        let mut it = it;
+        while let Some(x) = it.next() {
+            self.push(*x);
+        }
+    }
     pub fn as_slice(&self) -> &[T] {
         unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
     }
@@ -2543,6 +2557,55 @@ impl<T> BinaryHeap<T> {
     pub fn into_iter(self) -> IntoIter<T> {
         self.into_vec().into_iter()
     }
+    // std と同じ: 要素の多い方に少ない方を足し、足した末尾を rebuild_tail で直す
+    pub fn append(&mut self, other: &mut BinaryHeap<T>) {
+        if self.data.len < other.data.len {
+            let (p, c, l) = (self.data.ptr, self.data.cap, self.data.len);
+            self.data.ptr = other.data.ptr;
+            self.data.cap = other.data.cap;
+            self.data.len = other.data.len;
+            other.data.ptr = p;
+            other.data.cap = c;
+            other.data.len = l;
+        }
+        let start = self.data.len;
+        self.data.append(&mut other.data);
+        self.rebuild_tail(start);
+    }
+    pub fn extend<I: Iterator<Item = T>>(&mut self, it: I) {
+        let start = self.data.len;
+        self.data.extend(it);
+        self.rebuild_tail(start);
+    }
+    pub fn __extend_ref<I: Iterator<Item = &T>>(&mut self, it: I) {
+        let start = self.data.len;
+        self.data.__extend_ref(it);
+        self.rebuild_tail(start);
+    }
+    // std と同じ判定: 足した数が多ければ全体を作り直し、少なければ 1 つずつ sift_up
+    fn rebuild_tail(&mut self, start: usize) {
+        let len = self.data.len;
+        if start == len {
+            return;
+        }
+        let tail = len - start;
+        let rebuild = if start < tail {
+            true
+        } else if len <= 2048 {
+            2 * len < tail * ((64 - start.leading_zeros() - 1) as usize)
+        } else {
+            2 * len < tail * 11
+        };
+        if rebuild {
+            self.rebuild();
+        } else {
+            let mut i = start;
+            while i < len {
+                self.sift_up(0, i);
+                i += 1;
+            }
+        }
+    }
     // 穴 (hole) を上へ動かす: 親より大きい間だけ親を下ろす
     fn sift_up(&mut self, start: usize, pos: usize) -> usize {
         let p = self.data.ptr;
@@ -3198,6 +3261,10 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     }
     if need.contains("HashMap") {
         need.extend(["__exr_hash", "__exr_hash_bytes"]);
+    }
+    // `x.extend(arg)`: codegen が arg を into_iter / iter にし、要素が参照なら __extend_ref を呼ぶ
+    if need.contains("extend") {
+        need.extend(["__extend_ref", "into_iter", "iter", "Iterator"]);
     }
     let iter_lib = need.contains("Iterator")
         || need.contains("HashMap")

@@ -5,6 +5,9 @@ arrays.object_bytes 12373
 binary_heap.binary_bytes 93122
 binary_heap.cache_bytes 153301
 binary_heap.object_bytes 165614
+binary_heap_extend.binary_bytes 65864
+binary_heap_extend.cache_bytes 119032
+binary_heap_extend.object_bytes 122984
 closures.binary_bytes 13902
 closures.cache_bytes 22947
 closures.object_bytes 22612

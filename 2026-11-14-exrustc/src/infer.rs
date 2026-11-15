@@ -815,6 +815,29 @@ impl Inf<'_> {
 
     /// 参照型の変数を辿って中身へ。参照を通ったら束縛モードを Ref にする
     /// FromIterator の代わり: collect の結果が Vec<T> なら Item = T、HashMap<K, V> なら Item = (K, V)
+    /// `extend` の引数の要素の型 (Vec / BinaryHeap は要素、参照・配列は要素の参照、イテレータは Item)
+    fn extend_item(&self, t: Ty) -> Option<Ty> {
+        let elem_of = |t: Ty| -> Option<Ty> {
+            match t {
+                Ty::Array(e, _) | Ty::Slice(e) => Some(*e),
+                Ty::Struct(s)
+                    if matches!(
+                        self.prog.structs[self.prog.base_of(s) as usize].name.as_str(),
+                        "Vec" | "BinaryHeap"
+                    ) =>
+                {
+                    self.prog.structs[s as usize].args.first().copied()
+                }
+                _ => None,
+            }
+        };
+        match t {
+            Ty::Ref(_, i) => elem_of(*i).map(|e| Ty::Ref(false, intern(e))),
+            Ty::Array(e, _) => Some(Ty::Ref(false, e)),
+            t => elem_of(t).or_else(|| self.prog.assoc_of(t, "Item")),
+        }
+    }
+
     fn finish_collects(&mut self) {
         let cs = std::mem::take(&mut self.collects);
         for (recv, r) in cs {
@@ -1735,6 +1758,35 @@ impl Inf<'_> {
                     }
                     return self.scalar_method(mc, r, rv, args);
                 }
+                // `v.extend(arg)` (Vec / BinaryHeap): arg の要素 (参照なら中身) が v の要素
+                if n == "extend" && args.len() == 1 {
+                    if let Some(b) = sid {
+                        let bn = self.prog.structs[self.prog.base_of(b) as usize].name.as_str();
+                        if matches!(bn, "Vec" | "BinaryHeap") {
+                            let root = self.find(rv);
+                            let elem = match self.shape[root as usize] {
+                                Some(Shape::Adt(_, st, l)) => self.adt_vars_of(st, l).first().copied(),
+                                Some(Shape::Known(Ty::Struct(s))) => {
+                                    self.prog.structs[s as usize].args.first().copied().map(|t| self.known(t))
+                                }
+                                _ => None,
+                            };
+                            let known_elem = elem.is_some_and(|ev| self.resolve(ev).is_some());
+                            if let (Some(ev), Some(at), false) = (elem, self.resolve(args[0]), known_elem) {
+                                if let Some(it) = self.extend_item(at) {
+                                    // (`&T` の要素は T を足す。`&str` / `&[T]` はそれ自体が要素)
+                                    let it = match it {
+                                        Ty::Ref(_, i) if !matches!(i, Ty::Str | Ty::Slice(_) | Ty::Dyn(_)) => *i,
+                                        t => t,
+                                    };
+                                    let k = self.known(it);
+                                    self.unify(ev, k);
+                                }
+                            }
+                            return self.known(Ty::Unit);
+                        }
+                    }
+                }
                 let r = self.apply_recv(callee, args, rv);
                 if n == "collect" {
                     self.collects.push((rv, r));
@@ -1763,6 +1815,10 @@ impl Inf<'_> {
                 // prelude の &str の関数 (split などのイテレータは分からないまま)
                 "trim" | "trim_start" | "trim_end" => self.known(Ty::Ref(false, intern(Ty::Str))),
                 "starts_with" | "ends_with" | "contains" => self.known(Ty::Bool),
+                "to_string" | "to_owned" => match self.prog.struct_index.get("String") {
+                    Some(&s) => self.known(Ty::Struct(s)),
+                    None => self.var(),
+                },
                 "find" => {
                     let u = self.known(Ty::Usize);
                     self.option_of(u)
