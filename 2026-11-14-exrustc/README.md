@@ -180,6 +180,11 @@ bench/regress.sh
       - String の新しいメソッドはジェネリック `<G>` にした（メソッド名だけで生きているとみなされ、Vec の `pop` などで String の `pop` までコンパイルされていた）
       - chars で回していた helper は UTF-8 を直接読み、イテレータの部品を付けない
       既存の予算は 1 byte も緩めていない。
+  - 浮動小数点・i128・標準入出力・Rc/RefCell・`impl Iterator` の戻り値などを足した時（probe を 73 本に増やし、すべて rustc と一致）
+    - 10 進変換は glibc の `ecvt_r` が桁を間違える場合があったので、1e9 進の多倍長で正確に行う。`examples/float_fuzz.rs`（6000 行）・`examples/int128.rs` の乱数の照合が rustc と一致する。
+    - サイズ予算は、新しい prelude の型を「名前が出たときだけ付ける」（owner の gating）にして、ほとんどの項目を変えずに済ませた。上限を上げたのは iterators（+68 B）・text_more（+0.4%）・hashmap（+0.3%、Iterator の既定メソッドの `cycle` の分）だけ。
+    - callgrind（命令数）：hello は作業前 9.96M → 9.95M（prelude の項目表を作るときの `Vec` の確保をやめて、増えた分を打ち消した）。gen1000 は 2.43G で、HEAD のビルド同士でも ±2% 揺れる範囲で差はない。
+    - 途中で見つけた既存のバグ：`?` で String のエラーを返すと二重解放、`{ return None; }` が `()` 型、enum の `==` が使っていないバリアントのポインタを辿る、`saturating_add` がベクトル用の命令、`struct Node { children: Vec<Node> }` が「無限の大きさ」、`Node<T>` が `Option<Box<Node<T>>>` を持つと具体化が止まらない、char のリテラルパターン、型推論の中で作り直した式のアドレスが codegen のノードと重なる、など。
     - `|a| a + 1` の戻り値を呼び先の境界 (`B`) で決めようとして、まだ決まっていない `B` を親の型推論より優先していた（`map(|w| w.parse().unwrap())`）。
   - イテレータ・Vec・clone の追加時
     - **これまで `#[derive(Clone)]` の型の `.clone()` は使えず、`Vec<String>` の clone と `cloned()` はビットごとのコピー（二重解放）だった**。clone の glue を足して直した。
