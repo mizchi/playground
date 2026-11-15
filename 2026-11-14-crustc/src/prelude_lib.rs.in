@@ -774,6 +774,71 @@ impl<T: Copy> Vec<T> {
     }
 }
 
+// 型の違う比較 (std と同じ組み合わせ): `==` が右辺の型で impl を選ぶ。要素も型が違ってよい (`Vec<String> == [&str; N]`)
+fn __exr_seq_eq<T, U>(a: &[T], b: &[U]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if !(a[i] == b[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+impl<T, U, const N: usize> PartialEq<[U; N]> for Vec<T> {
+    fn eq(&self, other: &[U; N]) -> bool {
+        __exr_seq_eq(self.as_slice(), other)
+    }
+}
+impl<T, U, const N: usize> PartialEq<&[U; N]> for Vec<T> {
+    fn eq(&self, other: &&[U; N]) -> bool {
+        __exr_seq_eq(self.as_slice(), *other)
+    }
+}
+impl<T, U> PartialEq<&[U]> for Vec<T> {
+    fn eq(&self, other: &&[U]) -> bool {
+        __exr_seq_eq(self.as_slice(), *other)
+    }
+}
+impl<T, U> PartialEq<[U]> for Vec<T> {
+    fn eq(&self, other: &[U]) -> bool {
+        __exr_seq_eq(self.as_slice(), other)
+    }
+}
+impl<T, U> PartialEq<Vec<U>> for [T] {
+    fn eq(&self, other: &Vec<U>) -> bool {
+        __exr_seq_eq(self, other.as_slice())
+    }
+}
+impl<T, U> PartialEq<Vec<U>> for Vec<T> {
+    fn eq(&self, other: &Vec<U>) -> bool {
+        __exr_seq_eq(self.as_slice(), other.as_slice())
+    }
+}
+impl<T, U, const N: usize> PartialEq<[U; N]> for [T] {
+    fn eq(&self, other: &[U; N]) -> bool {
+        __exr_seq_eq(self, other)
+    }
+}
+impl<T, U, const N: usize> PartialEq<[U]> for [T; N] {
+    fn eq(&self, other: &[U]) -> bool {
+        __exr_seq_eq(self, other)
+    }
+}
+impl<T, U, const N: usize> PartialEq<&[U]> for [T; N] {
+    fn eq(&self, other: &&[U]) -> bool {
+        __exr_seq_eq(self, *other)
+    }
+}
+impl<T, U, const N: usize> PartialEq<[U; N]> for [T; N] {
+    fn eq(&self, other: &[U; N]) -> bool {
+        __exr_seq_eq(self, other)
+    }
+}
+
 impl<T: PartialEq> Vec<T> {
     pub fn dedup(&mut self) {
         if self.len < 2 {

@@ -845,6 +845,8 @@ pub struct Program {
     pub has_drop: bool,
     /// impl の関連型の定義
     pub assocs: Vec<AssocDef>,
+    /// 右辺の型を持つ比較の impl の eq (`Vec::<PartialEq<[T;N]>>::eq` など)。`a == b` の型が違うとき探す
+    pub peq: Vec<u32>,
 }
 
 /// `impl<..> Trait for S<..> { type Name = Value; }`
@@ -1208,6 +1210,7 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
             // Display と Debug はどちらも fmt なので、trait 名で区別する (`P::<Display>::fmt`)
             let name = match ow.impl_trait.as_deref() {
                 Some(t @ ("Display" | "Debug")) => format!("{}::<{t}>::{}", ow.base, f.sig.ident),
+                Some(t) if t.starts_with("PartialEq<") => format!("{}::<{t}>::{}", ow.base, f.sig.ident),
                 // (参照への impl のメソッドは名前を分ける: `impl Add for &M` の add は `M::__ref_add`)
                 _ if matches!(ow.self_ty, TySyn::Ref(..)) => format!("{}::__ref_{}", ow.base, f.sig.ident),
                 _ => format!("{}::{}", ow.base, f.sig.ident),
@@ -1225,10 +1228,23 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
                     return err(tr.span(), "negative impls are not supported");
                 }
                 // `fmt::Display` などは最後のセグメント
-                let Some(id) = tr.segments.last().map(|s| &s.ident) else {
+                let Some(last) = tr.segments.last() else {
                     return err(tr.span(), "unsupported trait path");
                 };
+                let id = &last.ident;
                 sm.impl_trait = Some(id.to_string());
+                // `impl PartialEq<[U; N]> for Vec<T>`: 右辺の型が self 型と違う比較は trait 名に型引数を残す
+                // (`PartialEq<[U;N]>`。メソッドは `Vec::<PartialEq<[U;N]>>::eq` になり、`==` が右辺の型で選ぶ)
+                if id == "PartialEq" {
+                    if let syn::PathArguments::AngleBracketed(ab) = &last.arguments {
+                        use quote::ToTokens;
+                        let rhs: String = ab.to_token_stream().to_string().chars().filter(|c| !c.is_whitespace()).collect();
+                        let selfs: String = im.self_ty.to_token_stream().to_string().chars().filter(|c| !c.is_whitespace()).collect();
+                        if rhs != format!("<{selfs}>") && rhs != "<Self>" {
+                            sm.impl_trait = Some(format!("PartialEq{rhs}"));
+                        }
+                    }
+                }
             }
             collect_generics(&im.generics, &mut sm.impl_generics)?;
             // `impl Add for &M`: M のメソッド `__ref_add` (self は &M) として持つ
@@ -1236,6 +1252,12 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
                 syn::Type::Reference(r) if im.trait_.is_some() => &*r.elem,
                 t => t,
             };
+            // `impl .. for [T; N]` / `for [T]`: 名前は `__array` / `__slice` (比較の impl だけが使う)
+            if matches!(self_path, syn::Type::Array(_) | syn::Type::Slice(_)) && im.trait_.is_some() {
+                sm.impl_self = Some(if matches!(self_path, syn::Type::Array(_)) { "__array" } else { "__slice" }.to_string());
+                sm.impl_self_ty = Some(parse_tysyn(&im.self_ty, None)?);
+                return Ok(sm);
+            }
             let syn::Type::Path(tp) = self_path else {
                 return err(im.self_ty.span(), "unsupported impl self type");
             };
@@ -1574,6 +1596,7 @@ impl Program {
             drop_impls: Default::default(),
             has_drop: false,
             assocs: vec![],
+            peq: vec![],
         };
         // 0. const / static の名前 (配列の長さで使うので型より先に)
         for (ii, sm) in sums.iter().enumerate() {
@@ -1783,7 +1806,7 @@ impl Program {
                 };
                 let mut blanket = false;
                 let impl_of = match &ss.impl_of {
-                    Some(n) if Ty::prim(n).is_some() => None,
+                    Some(n) if Ty::prim(n).is_some() || n == "__array" || n == "__slice" => None,
                     Some(n) => match p.struct_index.get(n) {
                         Some(&sid) => Some(sid),
                         // ブランケット impl (`impl<T: Display> Describe for T`): どの型のメソッドとしても探す
@@ -1876,11 +1899,21 @@ impl Program {
                 p.traits.entry(tr.clone()).or_default();
             }
         }
+        p.peq = (0..p.names.len() as u32)
+            .filter(|&i| {
+                let n = &p.names[i as usize];
+                n.ends_with("::eq") && n.contains("::<PartialEq<")
+            })
+            .collect();
         // 4. trait の実装 (impl ヘッダの要約から)
         for (it, sm) in items.iter().zip(sums) {
             let (Some(sn), Some(tr)) = (&sm.impl_self, &sm.impl_trait) else {
                 continue;
             };
+            // (右辺の型を持つ比較の impl と、配列・スライスへの impl は、`==` が関数を直接選ぶので数えない)
+            if tr.starts_with("PartialEq<") || sn == "__array" || sn == "__slice" {
+                continue;
+            }
             if !p.traits.contains_key(tr) {
                 return Err(format!("{}:1: cannot find trait `{tr}`", it.line));
             }
@@ -1988,6 +2021,10 @@ impl Program {
 
     /// 型 t が trait tr を実装しているか
     pub fn implements(&self, t: Ty, tr: &str) -> bool {
+        // (const ジェネリクスの引数は長さを持つ配列型)
+        if tr == CONST_GENERIC {
+            return matches!(t, Ty::Array(Ty::Unit, _));
+        }
         // `Iterator<Item = T>` は trait の名前で見る (関連型の制約は呼び出し側で解く)
         if let Some(i) = tr.find('<') {
             if parse_fn_bound(tr).is_none() {
@@ -2180,7 +2217,11 @@ impl Program {
             TySyn::Array(inner, len) => {
                 let n = match len {
                     ArrLen::Lit(n) => *n,
-                    ArrLen::Const(c) => self.const_usize(c)?,
+                    // (const ジェネリクスの N)
+                    ArrLen::Const(c) => match names(c) {
+                        Some(Ty::Param(i)) => (CONST_LEN_BASE + i as u32) as u64,
+                        _ => self.const_usize(c)?,
+                    },
                 };
                 Ty::Array(intern(r(inner)?), n as u32)
             }
@@ -2558,6 +2599,7 @@ impl Program {
     pub fn has_param(&self, t: Ty) -> bool {
         match t {
             Ty::Param(_) => true,
+            Ty::Array(_, n) if n >= CONST_LEN_BASE => true,
             Ty::Ref(_, i) | Ty::Ptr(_, i) | Ty::Array(i, _) | Ty::Slice(i) | Ty::Box(i) => {
                 self.has_param(*i)
             }
@@ -2595,7 +2637,13 @@ impl Program {
             Ty::Param(i) => args[i as usize],
             Ty::Ref(m, i) => Ty::Ref(m, intern(self.subst(*i, args))),
             Ty::Ptr(m, i) => Ty::Ptr(m, intern(self.subst(*i, args))),
-            Ty::Array(i, n) => Ty::Array(intern(self.subst(*i, args)), n),
+            Ty::Array(i, n) => {
+                let n = match n.checked_sub(CONST_LEN_BASE).map(|k| args[k as usize]) {
+                    Some(Ty::Array(_, m)) => m,
+                    _ => n,
+                };
+                Ty::Array(intern(self.subst(*i, args)), n)
+            }
             Ty::Slice(i) => Ty::Slice(intern(self.subst(*i, args))),
             Ty::Box(i) => Ty::Box(intern(self.subst(*i, args))),
             Ty::Assoc(a) => {
@@ -2655,6 +2703,10 @@ impl Program {
             | (Ty::Ptr(_, a), Ty::Ptr(_, b))
             | (Ty::Slice(a), Ty::Slice(b))
             | (Ty::Box(a), Ty::Box(b)) => self.match_ty(*a, *b, sol),
+            // (const ジェネリクスの長さ: 長さを持つ Ty::Array(Unit, m) で解く)
+            (Ty::Array(a, n), Ty::Array(b, m)) if n >= CONST_LEN_BASE && m < CONST_LEN_BASE => {
+                self.match_ty(Ty::Param((n - CONST_LEN_BASE) as u8), Ty::Array(intern(Ty::Unit), m), sol) && self.match_ty(*a, *b, sol)
+            }
             (Ty::Array(a, n), Ty::Array(b, m)) => n == m && self.match_ty(*a, *b, sol),
             (Ty::Fn(a), Ty::Fn(b)) if a != b => {
                 a.params.len() == b.params.len()
@@ -3684,9 +3736,8 @@ fn collect_generics(g: &syn::Generics, out: &mut Vec<(String, Vec<String>)>) -> 
             syn::GenericParam::Type(tp) => {
                 out.push((tp.ident.to_string(), bound_names(&tp.bounds)?))
             }
-            syn::GenericParam::Const(c) => {
-                return err(c.span(), "const generics are not supported");
-            }
+            // `const N: usize`: 配列の長さのパラメータ (型の引数の位置に長さを持つ Ty::Array(Unit, n) を入れる)
+            syn::GenericParam::Const(c) => out.push((c.ident.to_string(), vec![CONST_GENERIC.to_string()])),
         }
     }
     if let Some(w) = &g.where_clause {
@@ -3711,6 +3762,11 @@ fn collect_generics(g: &syn::Generics, out: &mut Vec<(String, Vec<String>)>) -> 
     }
     Ok(())
 }
+
+/// const ジェネリクスの印 (境界の名前の位置に入れる)
+pub const CONST_GENERIC: &str = "__const";
+/// `[T; N]` の N が型パラメータ i のとき、Ty::Array の長さは CONST_LEN_BASE + i
+pub const CONST_LEN_BASE: u32 = 0xFFFF_FF00;
 
 /// owner: impl / trait のメンバならその所有者
 /// 戻り値位置の `impl Trait` の仮の型名
@@ -3782,6 +3838,10 @@ fn parse_sig(
         // ローカルシンボル。短く保つことで .o / シンボル表を小さくする
         Some(o) => match o.impl_trait.as_deref() {
             Some(t @ ("Display" | "Debug")) => format!("_x{}.{t}.{name}", o.base),
+            Some(t) if t.starts_with("PartialEq<") => {
+                let t: String = t.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+                format!("_x{}.{t}.{name}", o.base)
+            }
             _ => format!("_x{}.{name}", o.base),
         },
         None => format!("_x{name}"),

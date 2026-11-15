@@ -416,6 +416,14 @@ fn bucket(first: u8, len: usize) -> usize {
     first as usize * 32 + len.min(31)
 }
 
+/// `impl<T, U ..> PartialEq<..> for [T..]` (配列・スライスどうしの型の違う比較) の impl ヘッダか
+fn is_seq_eq_impl(h: usize) -> bool {
+    let it = &items()[h].0;
+    matches!(it.kind, ItemKind::ImplHeader)
+        && PRELUDE[it.start..it.end].starts_with("impl<T, U")
+        && PRELUDE[it.start..it.end].contains("PartialEq<")
+}
+
 /// Vec / String の impl ヘッダなら、その型名
 fn owner(h: usize) -> Option<&'static str> {
     static OWNERS: OnceLock<Vec<Option<&'static str>>> = OnceLock::new();
@@ -967,6 +975,13 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         }
     }
     let mut chosen = vec![false; all.len()];
+    // (配列・スライスと Vec の型の違う比較: `v == [1, 2]`)
+    if !user_src.contains("no_std")
+        && user_src.contains('[')
+        && (user_src.contains("==") || user_src.contains("!=") || user_src.contains("assert_eq!") || user_src.contains("assert_ne!"))
+    {
+        need.insert("__exr_seq_eq");
+    }
     // (書式つきの panic は書式化を使うプログラムだけ: String と Vec を引き込むため)
     if !user_src.contains("no_std") && need.contains("__exr_formatter") {
         need.insert("__exr_panic_fmt");
@@ -998,6 +1013,21 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
                     && (is_iterator_trait(h as usize)
                         || matches!(name.as_deref(), Some("iter" | "iter_mut" | "into_iter" | "chars" | "bytes")))
                 {
+                    continue;
+                }
+            }
+            // 配列・スライスの型の違う比較 (`impl PartialEq<[U]> for [T; N]` など) は、比較と配列があるときだけ
+            if let ItemKind::ImplMember(h) = it.kind {
+                if is_seq_eq_impl(h as usize) {
+                    if need.contains("__exr_seq_eq") && owner(h as usize).is_none_or(|o| need.contains(o)) {
+                        chosen[i] = true;
+                        changed = true;
+                        add_idents(&mut need, it);
+                        if !chosen[h as usize] {
+                            chosen[h as usize] = true;
+                            add_idents(&mut need, &all[h as usize].0);
+                        }
+                    }
                     continue;
                 }
             }

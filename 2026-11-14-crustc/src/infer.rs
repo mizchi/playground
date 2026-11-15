@@ -347,6 +347,40 @@ impl Inf<'_> {
         self.int_lit[to as usize] |= self.int_lit[from as usize];
         self.float_lit[to as usize] |= self.float_lit[from as usize];
     }
+    /// `==` の両辺: Vec と配列 (`PartialEq<[U; N]> for Vec<T>`) なら要素の型どうし、それ以外は普通に単一化する
+    fn seq_unify(&mut self, a: u32, b: u32) {
+        let (fa, fb) = (self.find(a), self.find(b));
+        let elem = |s: &mut Self, v: u32| -> Option<u32> {
+            match s.shape[v as usize] {
+                Some(Shape::Arr(x, _)) | Some(Shape::Slc(x)) => Some(x),
+                Some(Shape::Adt(vb, st, 1)) if s.is_vec(vb) => Some(s.adt_args[st as usize]),
+                Some(Shape::Known(Ty::Struct(sid))) if s.is_vec(s.prog.base_of(sid)) => {
+                    s.prog.structs[sid as usize].args.first().map(|&t| s.known(t))
+                }
+                Some(Shape::Known(Ty::Array(e, _) | Ty::Slice(e))) => Some(s.known(*e)),
+                _ => None,
+            }
+        };
+        let same_kind = std::mem::discriminant(&self.shape[fa as usize]) == std::mem::discriminant(&self.shape[fb as usize]);
+        match (elem(self, fa), elem(self, fb)) {
+            (Some(x), Some(y)) if !same_kind || matches!(self.shape[fa as usize], Some(Shape::Adt(..) | Shape::Known(Ty::Struct(_)))) => {
+                // (要素どうしも型が違ってよい (`Vec<String> == [&str]`): 片方が分からないときだけ決める)
+                self.elem_hint(x, y)
+            }
+            _ => self.unify(a, b),
+        }
+    }
+
+    /// 要素の型: 片方がまだ決まっていなければ単一化する (数のリテラルを相手の型にする)
+    fn elem_hint(&mut self, x: u32, y: u32) {
+        let (fx, fy) = (self.find(x), self.find(y));
+        // (数のリテラルだけ: 要素の型がまだ決まっていない Vec と文字列の配列は単一化しない)
+        let lit = |s: &Self, v: u32| s.shape[v as usize].is_none() && s.int_lit[v as usize];
+        if lit(self, fx) || lit(self, fy) {
+            self.unify(x, y);
+        }
+    }
+
     fn unify(&mut self, a: u32, b: u32) {
         let (a, b) = (self.find(a), self.find(b));
         if a == b {
@@ -1883,7 +1917,17 @@ impl Inf<'_> {
                         self.unify(r, k);
                         k
                     }
-                    Eq(_) | Ne(_) | Lt(_) | Le(_) | Gt(_) | Ge(_) => {
+                    Eq(_) | Ne(_) => {
+                        // (`v == &a` / `&s[..] == v`: 片方だけ参照なら中身どうし。Vec と配列・スライスは要素どうし)
+                        let (fl, fr) = (self.find(l), self.find(r));
+                        match (self.shape[fl as usize], self.shape[fr as usize]) {
+                            (Some(Shape::Ref(_, x)), Some(s)) if !matches!(s, Shape::Ref(..)) => self.seq_unify(x, r),
+                            (Some(s), Some(Shape::Ref(_, y))) if !matches!(s, Shape::Ref(..)) => self.seq_unify(l, y),
+                            _ => self.seq_unify(l, r),
+                        }
+                        self.known(Ty::Bool)
+                    }
+                    Lt(_) | Le(_) | Gt(_) | Ge(_) => {
                         self.unify(l, r);
                         self.known(Ty::Bool)
                     }

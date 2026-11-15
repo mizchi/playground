@@ -1031,7 +1031,7 @@ impl Cx<'_, '_> {
                             },
                             e => e,
                         };
-                        !matches!(e, Expr::Lit(syn::ExprLit { lit: Lit::Str(_), .. }) | Expr::Array(_))
+                        !matches!(e, Expr::Lit(syn::ExprLit { lit: Lit::Str(_), .. }))
                     };
                     let other = match name.as_str() {
                         "__exr_r" => Some("__exr_l"),
@@ -4017,6 +4017,13 @@ impl Cx<'_, '_> {
             };
             return Ok((Some(self.b.ins().icmp_imm_s(cc, c, 0)), Ty::Bool));
         }
+        // 型の違う `==` / `!=`: 右辺の型を持つ PartialEq の impl (`impl PartialEq<[T; N]> for Vec<T>` など) を探して eq を呼ぶ
+        if matches!(b.op, Eq(_) | Ne(_)) && lt != rt {
+            if let Some(e) = self.trait_eq(l, lt, r, rt, b.span())? {
+                let e = if matches!(b.op, Ne(_)) { self.b.ins().bxor_imm_u(e, 1) } else { e };
+                return Ok((Some(e), Ty::Bool));
+            }
+        }
         if is_cmp(&b.op) {
             self.same(b.right.span(), rt, lt)?;
             // 集約型の == / != : 手書きの eq があればそれ、なければ構造的に比べる (derive(PartialEq) 相当)
@@ -4065,6 +4072,56 @@ impl Cx<'_, '_> {
         }
         let v = self.arith(b, &b.op, l, lt, r, rt)?;
         Ok((Some(v), lt))
+    }
+
+    /// `l == r` (型が違う) を PartialEq<R> の impl で。self 型 S と右辺 R は、値の型そのものか、
+    /// 参照の先 (`&[T]` と `impl .. for [T]`、`&[T; N]` と `PartialEq<[T; N]>`) で合わせる
+    fn trait_eq(&mut self, l: Value, lt: Ty, r: Value, rt: Ty, span: proc_macro2::Span) -> R<Option<Value>> {
+        let cands = self.prog.peq.clone();
+        // (値の型 t, 参照を足すか): 値そのものなら &t を、参照なら中身をその型として渡す
+        let views = |t: Ty| -> Vec<(Ty, bool)> {
+            match t {
+                Ty::Ref(_, i) => vec![(t, true), (*i, false)],
+                t => vec![(t, true)],
+            }
+        };
+        for id in cands {
+            let sig = &self.prog.sigs[id as usize];
+            let (Some(&Ty::Ref(_, ps)), Some(&Ty::Ref(_, pr))) = (sig.params.first(), sig.params.get(1)) else {
+                continue;
+            };
+            let ng = sig.generics.len();
+            for &(xl, addl) in &views(lt) {
+                for &(xr, addr) in &views(rt) {
+                    let mut sol = vec![None; ng];
+                    if !(self.prog.match_ty(*ps, xl, &mut sol) && self.prog.match_ty(*pr, xr, &mut sol)) {
+                        continue;
+                    }
+                    let Some(targs) = sol.into_iter().collect::<Option<Vec<Ty>>>() else { continue };
+                    let la = if addl { self.addr_of_value(l, lt) } else { l };
+                    let ra = if addr { self.addr_of_value(r, rt) } else { r };
+                    let name = self.prog.names[id as usize].clone();
+                    let (v, _) = self.call_named(
+                        &name,
+                        targs,
+                        &[(la, Ty::Ref(false, intern(xl))), (ra, Ty::Ref(false, intern(xr)))],
+                        span,
+                    )?;
+                    return Ok(v);
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// t 型の値 v (集約型ならアドレス) への参照
+    fn addr_of_value(&mut self, v: Value, t: Ty) -> Value {
+        if t.is_agg() {
+            return v;
+        }
+        let a = self.temp(t);
+        self.b.ins().store(mf(), v, a, 0);
+        a
     }
 
     /// a, b (t 型の値。集約型ならアドレス) が等しいか (i8 の 0/1)
@@ -4743,8 +4800,14 @@ impl Cx<'_, '_> {
     fn array_lit(&mut self, a: &syn::ExprArray, expected: Option<Ty>) -> R<V> {
         let mut elem = match expected {
             Some(Ty::Array(t, _)) | Some(Ty::Slice(t)) => Some(*t),
+            // (`v == []` / `v == [1, 2]`: 比べる相手の Vec の要素の型)
+            Some(Ty::Struct(sid)) if self.prog.structs[self.prog.base_of(sid) as usize].name == "Vec" => {
+                self.prog.structs[sid as usize].args.first().copied()
+            }
             _ => None,
         };
+        // (Vec から取った要素の型は目安: 要素の型が違えばそちらにする (`v == ["a"]` で v: Vec<String>))
+        let mut soft = matches!(expected, Some(Ty::Struct(_)));
         // `[&a as &dyn Tr, &b]`: 要素のどれかが `&dyn` なら全体をそれに揃える
         if !matches!(elem, Some(Ty::Ref(_, Ty::Dyn(_)))) {
             if let Some(d) = a.elems.iter().find_map(|e| match e {
@@ -4764,9 +4827,11 @@ impl Cx<'_, '_> {
                 return Ok((None, Ty::Never));
             }
             match elem {
+                Some(et) if soft && t != et => elem = Some(t),
                 Some(et) => self.same(e.span(), t, et)?,
                 None => elem = Some(t),
             }
+            soft = false;
             vals.push(v);
         }
         let Some(elem) = elem else {
@@ -8120,6 +8185,13 @@ impl Cx<'_, '_> {
     fn operand(&mut self, e: &Expr, hint: Option<Ty>, cmp: bool) -> R<V> {
         if !cmp {
             return self.expr(e, hint);
+        }
+        // `a[..2] == [1, 2]`: サイズ不定のスライスは参照で比べる (`[T]` の PartialEq の &self)
+        if let Expr::Index(ix) = strip_paren(e) {
+            if matches!(&*ix.index, Expr::Range(_)) {
+                let r: Expr = syn::parse_quote!(&#e);
+                return self.expr(&r, None);
+            }
         }
         // (`None` などローカル変数でない名前は値として評価する)
         let non_local = matches!(strip_paren(e), Expr::Path(p)
