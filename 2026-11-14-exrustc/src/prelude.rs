@@ -1,9 +1,31 @@
 //! 組み込みの prelude。core の代わりに、よく使う型をこのコンパイラが扱えるサブセットで書いたもの。
 //! ユーザのソースの後ろに付けて一緒にコンパイルする (使われたものだけがコード生成される)。
 
+/// `Box::new` が呼ぶアロケータ (libc の malloc)
+pub const BOX_ALLOC: &str = "__exr_malloc";
+
 pub const PRELUDE: &str = r#"
 pub struct PanicInfo {
     _private: u8,
+}
+
+unsafe extern "C" {
+    #[link_name = "malloc"]
+    fn __exr_malloc(size: usize) -> *mut u8;
+}
+
+// 関数ポインタを `dyn Fn` にするときの vtable の中身 (データは関数ポインタを置いた場所)
+fn __exr_fnptr0<R>(f: &fn() -> R) -> R {
+    (*f)()
+}
+fn __exr_fnptr1<A, R>(f: &fn(A) -> R, a: A) -> R {
+    (*f)(a)
+}
+fn __exr_fnptr2<A, B, R>(f: &fn(A, B) -> R, a: A, b: B) -> R {
+    (*f)(a, b)
+}
+fn __exr_fnptr3<A, B, C, R>(f: &fn(A, B, C) -> R, a: A, b: B, c: C) -> R {
+    (*f)(a, b, c)
 }
 
 // core::cmp / core::mem / core::ptr の関数。ユーザが同じ名前の関数を定義してもぶつからないよう
@@ -296,7 +318,7 @@ pub fn select(user_src: &str, user_items: &[SrcItem]) -> String {
     static NAMES: OnceLock<Vec<Vec<&'static str>>> = OnceLock::new();
     let by_first = NAMES.get_or_init(|| {
         let mut h: Vec<&'static str> = all.iter().filter_map(|x| x.1.as_deref()).collect();
-        h.extend(["Some", "None", "Ok", "Err", "core", "std"]);
+        h.extend(["Some", "None", "Ok", "Err", "core", "std", "Box", "dyn"]);
         let mut t: Vec<Vec<&'static str>> = vec![vec![]; 256];
         for n in h {
             if !t[n.as_bytes()[0] as usize].contains(&n) {
@@ -340,7 +362,10 @@ pub fn select(user_src: &str, user_items: &[SrcItem]) -> String {
             } || (name.as_deref() == Some("Option")
                 && (need.contains("Some") || need.contains("None")))
                 || (name.as_deref() == Some("Result")
-                    && (need.contains("Ok") || need.contains("Err")));
+                    && (need.contains("Ok") || need.contains("Err")))
+                || (name.as_deref() == Some(BOX_ALLOC) && need.contains("Box"))
+                || (name.as_deref().is_some_and(|n| n.starts_with("__exr_fnptr"))
+                    && need.contains("dyn"));
             if wanted {
                 chosen[i] = true;
                 changed = true;

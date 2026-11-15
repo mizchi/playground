@@ -58,7 +58,9 @@ pub enum Ty {
     Ptr(bool, &'static Ty),
     /// `dyn Trait` (サイズ不定。`&dyn Trait` = (データ, vtable) の中身としてだけ現れる)。
     /// 中身は trait 境界の文字列 (`Shape` / `Fn(i32) -> i32`)
-    Dyn(&'static str),
+    Dyn(&'static String),
+    /// 関数ポインタ `fn(A) -> R` (関数アイテムを値として使ったものもこれ)
+    Fn(&'static FnTy),
 }
 
 impl Ty {
@@ -73,13 +75,32 @@ impl Ty {
 }
 
 /// 文字列の intern 表 (`dyn` の trait 境界)
-pub fn intern_str(s: &str) -> &'static str {
-    static TABLE: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+/// (`Ty` を 16 byte に保つため、fat な `&str` ではなく `&String` を持つ)
+pub fn intern_str(s: &str) -> &'static String {
+    static TABLE: OnceLock<Mutex<HashSet<&'static String>>> = OnceLock::new();
     let mut tab = TABLE.get_or_init(Default::default).lock().unwrap();
-    if let Some(&r) = tab.get(s) {
+    if let Some(&r) = tab.get(&s.to_string()) {
         return r;
     }
-    let r: &'static str = Box::leak(s.to_string().into_boxed_str());
+    let r: &'static String = Box::leak(Box::new(s.to_string()));
+    tab.insert(r);
+    r
+}
+
+/// 関数ポインタ型 `fn(A, B) -> R` の中身
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FnTy {
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+}
+
+pub fn intern_fn(f: FnTy) -> &'static FnTy {
+    static TABLE: OnceLock<Mutex<HashSet<&'static FnTy>>> = OnceLock::new();
+    let mut tab = TABLE.get_or_init(Default::default).lock().unwrap();
+    if let Some(&r) = tab.get(&f) {
+        return r;
+    }
+    let r: &'static FnTy = Box::leak(Box::new(f));
     tab.insert(r);
     r
 }
@@ -178,7 +199,7 @@ impl Ty {
             Ty::I8 | Ty::U8 | Ty::Bool => 8,
             Ty::I16 | Ty::U16 => 16,
             Ty::I32 | Ty::U32 | Ty::Char => 32,
-            Ty::I64 | Ty::U64 | Ty::Isize | Ty::Usize | Ty::Ptr(..) => 64,
+            Ty::I64 | Ty::U64 | Ty::Isize | Ty::Usize | Ty::Ptr(..) | Ty::Fn(_) => 64,
             Ty::Ref(..) if self.is_fat() => 0,
             Ty::Ref(..) => 64,
             Ty::Unit
@@ -211,6 +232,8 @@ pub enum TySyn {
     Ptr(bool, Box<TySyn>),
     /// `dyn Trait` (境界の文字列)
     Dyn(String),
+    /// `fn(A, B) -> R` (最後が戻り値)
+    FnPtr(Vec<TySyn>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -232,6 +255,20 @@ pub fn parse_tysyn(t: &syn::Type, self_ty: Option<&TySyn>) -> R<TySyn> {
                 .collect::<R<_>>()?,
         ),
         syn::Type::Paren(p) => parse_tysyn(&p.elem, self_ty)?,
+        syn::Type::BareFn(bf) => {
+            if bf.variadic.is_some() || bf.abi.is_some() {
+                return err(bf.span(), "only Rust ABI fn pointers are supported");
+            }
+            let mut v = vec![];
+            for a in &bf.inputs {
+                v.push(parse_tysyn(&a.ty, self_ty)?);
+            }
+            v.push(match &bf.output {
+                syn::ReturnType::Default => TySyn::Prim(Ty::Unit),
+                syn::ReturnType::Type(_, t) => parse_tysyn(t, self_ty)?,
+            });
+            TySyn::FnPtr(v)
+        }
         syn::Type::TraitObject(to) => {
             let mut tr = None;
             for b in &to.bounds {
@@ -1019,10 +1056,21 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
                 let syn::ForeignItem::Fn(f) = fi else {
                     return err(fi.span(), "only fns are supported in extern blocks");
                 };
-                sm.fns.push((
-                    f.sig.ident.to_string(),
-                    parse_sig(&f.sig, true, false, None)?,
-                ));
+                let mut sig = parse_sig(&f.sig, true, false, None)?;
+                // `#[link_name = "malloc"]`: シンボル名だけ変える
+                for a in &f.attrs {
+                    if let syn::Meta::NameValue(nv) = &a.meta {
+                        if nv.path.is_ident("link_name") {
+                            if let syn::Expr::Lit(syn::ExprLit {
+                                lit: syn::Lit::Str(l), ..
+                            }) = &nv.value
+                            {
+                                sig.symbol = l.value();
+                            }
+                        }
+                    }
+                }
+                sm.fns.push((f.sig.ident.to_string(), sig));
             }
         }
         syn::Item::Enum(e) => {
@@ -1575,6 +1623,11 @@ impl Program {
                 tr == "Sized" || (matches!(tr, "Copy" | "Clone") && self.implements(*e, tr))
             }
             Ty::Slice(_) | Ty::Str | Ty::Dyn(_) => false,
+            // 関数ポインタ: Fn 系 (引数の数が合うもの) と Copy
+            Ty::Fn(f) => match parse_fn_bound(tr) {
+                Some((_, ps, _)) => ps.len() == f.params.len(),
+                None => matches!(tr, "Fn" | "FnMut" | "FnOnce" | "Copy" | "Clone" | "Sized" | "PartialEq" | "Eq"),
+            },
             // 組み込み型: マーカー trait と比較・既定値など (core が実装しているもの)
             Ty::Ref(true, _) => tr == "Sized",
             Ty::Ptr(..) | Ty::Ref(..) => {
@@ -1661,8 +1714,11 @@ impl Program {
             TySyn::Ptr(m, inner) => Ty::Ptr(*m, intern(r(inner)?)),
             TySyn::Slice(inner) => Ty::Slice(intern(r(inner)?)),
             TySyn::Str => Ty::Str,
-            TySyn::Dyn(s) => {
-                Ty::Dyn(intern_str(s))
+            TySyn::Dyn(s) => Ty::Dyn(intern_str(s)),
+            TySyn::FnPtr(v) => {
+                let mut ts = v.iter().map(r).collect::<R<Vec<Ty>>>()?;
+                let ret = ts.pop().unwrap_or(Ty::Unit);
+                Ty::Fn(intern_fn(FnTy { params: ts, ret }))
             }
             TySyn::Array(inner, len) => {
                 let n = match len {
@@ -1680,6 +1736,10 @@ impl Program {
                     Some(_) => return Err(format!("missing generics for `{n}`")),
                     None => return Err(format!("cannot find type `{n}`")),
                 }
+            }
+            // `Box<T>` は所有する `&mut T` として扱う (ヒープに置き、解放はしない)
+            TySyn::App(n, args) if n == "Box" && args.len() == 1 && !self.struct_index.contains_key(n) => {
+                Ty::Ref(true, intern(r(&args[0])?))
             }
             TySyn::App(n, args) => {
                 let Some(&id) = self.struct_index.get(n) else {
@@ -1920,6 +1980,7 @@ impl Program {
                 .args
                 .iter()
                 .any(|&a| self.has_param(a)),
+            Ty::Fn(f) => f.params.iter().chain([&f.ret]).any(|&a| self.has_param(a)),
             _ => false,
         }
     }
@@ -1932,6 +1993,10 @@ impl Program {
             Ty::Ptr(m, i) => Ty::Ptr(m, intern(self.subst(*i, args))),
             Ty::Array(i, n) => Ty::Array(intern(self.subst(*i, args)), n),
             Ty::Slice(i) => Ty::Slice(intern(self.subst(*i, args))),
+            Ty::Fn(f) if self.has_param(t) => Ty::Fn(intern_fn(FnTy {
+                params: f.params.iter().map(|&p| self.subst(p, args)).collect(),
+                ret: self.subst(f.ret, args),
+            })),
             Ty::Struct(sid) if self.has_param(t) => {
                 let sd = &self.structs[sid as usize];
                 let na: Vec<Ty> = sd.args.iter().map(|&a| self.subst(a, args)).collect();
@@ -1972,6 +2037,14 @@ impl Program {
             | (Ty::Ptr(_, a), Ty::Ptr(_, b))
             | (Ty::Slice(a), Ty::Slice(b)) => self.match_ty(*a, *b, sol),
             (Ty::Array(a, n), Ty::Array(b, m)) => n == m && self.match_ty(*a, *b, sol),
+            (Ty::Fn(a), Ty::Fn(b)) if a != b => {
+                a.params.len() == b.params.len()
+                    && a.params
+                        .iter()
+                        .zip(&b.params)
+                        .chain([(&a.ret, &b.ret)])
+                        .all(|(&p, &q)| self.match_ty(p, q, sol))
+            }
             (Ty::Struct(a), Ty::Struct(b)) if a != b => {
                 let (sa, sb) = (&self.structs[a as usize], &self.structs[b as usize]);
                 match (sa.base, sb.base) {
@@ -1996,6 +2069,9 @@ impl Program {
             Ty::Array(i, n) => TySyn::Array(Box::new(self.ty_syn(*i)), ArrLen::Lit(n as u64)),
             Ty::Str => TySyn::Str,
             Ty::Dyn(s) => TySyn::Dyn(s.to_string()),
+            Ty::Fn(f) => TySyn::FnPtr(
+                f.params.iter().chain([&f.ret]).map(|&t| self.ty_syn(t)).collect(),
+            ),
             Ty::Struct(id) => {
                 let sd = &self.structs[id as usize];
                 match sd.base {
@@ -2058,6 +2134,8 @@ impl Program {
                         }
                     }
                 }
+                // `Box<T>` はポインタなので T のレイアウトは要らない
+                TySyn::App(n, _) if n == "Box" && !self.struct_index.contains_key(&n) => {}
                 TySyn::App(n, args) => {
                     if let Some(&sid) = self.struct_index.get(&n) {
                         if visited_bases.insert(sid) {
@@ -2317,6 +2395,13 @@ impl Program {
             Ty::Slice(i) => format!("[{}]", self.tn(*i)),
             Ty::Str => "str".into(),
             Ty::Dyn(s) => format!("dyn {}", s.replace(" (", "(").replace("( ", "(").replace(" )", ")")),
+            Ty::Fn(f) => {
+                let ps: Vec<String> = f.params.iter().map(|&p| self.tn(p)).collect();
+                match f.ret {
+                    Ty::Unit => format!("fn({})", ps.join(", ")),
+                    r => format!("fn({}) -> {}", ps.join(", "), self.tn(r)),
+                }
+            }
             t => format!("{t:?}").to_lowercase(),
         }
     }
@@ -2364,6 +2449,12 @@ impl Program {
                 h.add(&(108u8, s));
                 for &f in self.traits.get(s).map(|v| &v[..]).unwrap_or(&[]) {
                     h.add(&self.names[f as usize]);
+                }
+            }
+            Ty::Fn(f) => {
+                h.add(&(109u8, f.params.len()));
+                for &p in f.params.iter().chain([&f.ret]) {
+                    self.hash_ty(p, h);
                 }
             }
             t => h.add(&ty_code(t)),
@@ -2443,6 +2534,8 @@ impl Program {
         let mut stack = vec![self.index["main"]];
         stack.extend((0..self.names.len() as u32).filter(|&i| self.sigs[i as usize].export));
         stack.extend(self.panic_handler);
+        // `Box::new` が呼ぶアロケータ (prelude にあるのは Box が使われたときだけ)
+        stack.extend(self.index.get(crate::prelude::BOX_ALLOC).copied());
         while let Some(i) = stack.pop() {
             if std::mem::replace(&mut seen[i as usize], true) {
                 continue;
@@ -2526,6 +2619,10 @@ impl Enc for TySyn {
                 out.push(31);
                 n.enc(out);
             }
+            TySyn::FnPtr(v) => {
+                out.push(32);
+                v.enc(out);
+            }
         }
     }
     fn dec(r: &mut Rd) -> Option<Self> {
@@ -2541,6 +2638,7 @@ impl Enc for TySyn {
             28 => TySyn::Str,
             c @ (29 | 30) => TySyn::Ptr(c == 30, Box::new(TySyn::dec(r)?)),
             31 => TySyn::Dyn(String::dec(r)?),
+            32 => TySyn::FnPtr(Vec::dec(r)?),
             _ => return None,
         })
     }

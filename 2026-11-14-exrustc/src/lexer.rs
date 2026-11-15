@@ -76,7 +76,29 @@ impl St<'_> {
 
         // 記号同士が空白なしで連続しているか (`&&` と `& &` の区別) だけを入れる。
         // それ以外の空白はハッシュに影響しない
-        let op = kind == 5 && b"&|=<>!-+*/%^.:#@~?$".contains(&self.s[st]);
+        // (`b"..".contains` は memchr になり、文字列の配置で速度が変わるので matches! にする)
+        let op = kind == 5
+            && matches!(
+                self.s[st],
+                b'&' | b'|'
+                    | b'='
+                    | b'<'
+                    | b'>'
+                    | b'!'
+                    | b'-'
+                    | b'+'
+                    | b'*'
+                    | b'/'
+                    | b'%'
+                    | b'^'
+                    | b'.'
+                    | b':'
+                    | b'#'
+                    | b'@'
+                    | b'~'
+                    | b'?'
+                    | b'$'
+            );
         let joint = op && self.prev_punct && !self.prev_ws;
         // (種類, 長さ, 本体) の列にする。長さを入れるので曖昧さがない
         self.buf.push(kind << 1 | joint as u8);

@@ -11,6 +11,9 @@ dyn_trait.object_bytes 9903
 enums.binary_bytes 10264
 enums.cache_bytes 8491
 enums.object_bytes 8937
+fn_ptr_box.binary_bytes 10096
+fn_ptr_box.cache_bytes 11664
+fn_ptr_box.object_bytes 12213
 gen1000.binary_bytes 443545
 gen1000.cache_bytes 537575
 gen1000.object_bytes 634418

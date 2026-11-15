@@ -112,6 +112,11 @@ bench/regress.sh
   - 速度（クロージャ・dyn の追加時）
     - HEAD との A/B で、LSP の 1 関数編集に +4% が出た。型推論の呼び出しごとの `Vec` の clone と、struct のハッシュに名前を入れていたことが原因で、どちらも外した。
     - callgrind の命令数で見ると、1 関数編集（`Session::check`）は HEAD より少なくなった。didOpen（cold）は約 +2% で、criterion でも有意差はない。
+  - 関数ポインタ・Box の追加時
+    - `Ty` が 16 → 24 byte になっていた（前回の `Dyn(&'static str)` が fat pointer だったため）。`&'static String` にして 16 byte に戻した。
+    - criterion では LSP の 1 関数編集が +14%、lexer が +10% と出た。ただ lexer のコードは変えていない。
+    - callgrind で見ると、`lexer::St::tok` の `b"..".contains(&c)` が memchr になっていた。呼び出し回数は同じで、命令数だけ +32% 増えていた（静的な文字列の配置の違い）。
+    - `matches!` に替えた結果、ベースラインより LSP の 1 関数編集 −5%、no-op ビルド −13%、lexer −6% になった。
 
 ## 対応している言語サブセット（no_std の範囲）
 
@@ -124,7 +129,7 @@ bench/regress.sh
 検証は、そうしたプログラムを rustc でもビルドし、実行結果（標準出力と終了コード）が一致することで行う。
 
 - rustc 側は libcore だけでビルドする（`-C panic=abort`）。
-- 比較は `tests/compare.sh` が行う。対象は `examples/*.rs` の 15 本で、そのうち no_std は 6 本（`nostd_calc` は字句解析と後置記法の電卓で、ジェネリック struct・`?`・const 配列・`&&str` の自動 deref を使う）。
+- 比較は `tests/compare.sh` が行う。対象は `examples/*.rs` の 16 本で、そのうち no_std は 6 本（`nostd_calc` は字句解析と後置記法の電卓で、ジェネリック struct・`?`・const 配列・`&&str` の自動 deref を使う）。
 
 ### 言語
 
@@ -157,6 +162,15 @@ bench/regress.sh
   - `&dyn Trait` / `&mut dyn Trait`。`&T` からの暗黙の変換（引数・let・フィールド・配列・戻り値）と `as &dyn Trait`
   - デフォルトメソッド、ジェネリックな impl（`impl<T> Tr for W<T>`）、プリミティブ型への impl を vtable 経由で呼ぶ
   - `&dyn Fn(A) -> B`（クロージャを vtable 経由で呼ぶ）
+- 関数ポインタ（`examples/fn_ptr_box.rs`）：
+  - `fn(A, B) -> R` 型。関数アイテムを値として使う（引数・戻り値・let・struct のフィールド・配列）、`(op.f)(a, b)`
+  - `F: Fn(A) -> B` に関数を渡す（`apply(double, 5)`、`o.map(double)`）
+  - ジェネリック関数は turbofish（`id::<i64>`）か期待型（`let f: fn(i64) -> i64 = id;`）で型引数を決める
+  - `&dyn Fn` / `Box<dyn Fn>` にする（引数 3 個まで。prelude の中継関数 `__exr_fnptrN` が vtable に入る）
+- `Box<T>`（`examples/fn_ptr_box.rs`）：
+  - `Box::new(x)` は libc の `malloc` でヒープに置く。型としては「所有する `&mut T`」として扱う
+  - `Box<dyn Trait>` / `Box<dyn Fn(A) -> B>`、自動 deref、`*b`、`Option<Box<Node>>` のような再帰的な型
+  - **解放はしない**（Drop を実装していないので、Box はリークする。出力は変わらない）
 - 型：
   - 整数（`i8`〜`i64`、`u8`〜`u64`、`isize`、`usize`）、`bool`、`char`、`()`、`!`
   - `&T`、`&mut T`、`*const T`、`*mut T`
@@ -226,7 +240,8 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
 
 - alloc（`Vec` / `Box` / `String`）
 - 書式化（`write!` / `core::fmt`）
-- `Box<dyn Trait>`（alloc が要る）、関数ポインタ・関数アイテムを値として渡すこと（`apply(double, 3)`）
+- Drop（Box の解放を含む）、`Vec` / `String`
+- `Box<[T]>`、`Box::into_raw` などの Box の関数（`new` 以外）。型としては `&mut T` と区別しないので、エラーメッセージには `&mut T` と出る
 - クロージャの制限
   - マクロの引数の中のクロージャ（`assert!(f(|x| x))` の `|x| x`）
   - Fn / FnMut / FnOnce を区別しない（`FnMut` のクロージャを `&dyn Fn` にしてもエラーにならない）
@@ -261,6 +276,8 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
   - キャプチャ・引数・戻り値の型がすべて struct の型引数に入る。そのためクロージャの型だけで本体のインスタンスが決まり、既存の単相化とインスタンス単位のキャッシュにそのまま乗る。
   - 本体は親のアイテムを parse し直し、k 番目を取り出して普通の fn にしてコンパイルする。キャプチャは `__env` のフィールドとしてスコープに入る。
   - 呼ばれないクロージャも、作った時点でインスタンスを要求する（本体のエラーを報告するため。未使用なら `--gc-sections` で消える）。
+- **関数ポインタ**：関数のアドレス 1 語。`func_addr` で取り、`call_indirect` で呼ぶ（ABI は普通の呼び出しと同じ）。
+- **`Box<T>`**：ヒープへのポインタ（`Box<dyn ..>` は fat pointer）。型の上では `&mut T` と同じなので、自動 deref・`&mut T → &T`・dyn への変換がそのまま使える。
 - **`&dyn Trait`**：(データのポインタ, vtable のアドレス) の 16 byte。
   - vtable は trait のメソッドの宣言順に並べた関数アドレスの列で、Blob に「関数 ID の列」として持つ。
   - キャッシュには関数名（インスタンスなら元の関数名と型引数）で保存する。
@@ -403,7 +420,7 @@ rustc 側はほとんどが std 由来。
 ## 次にやること
 
 - **言語**
-  - モジュール、`core::fmt` 相当の書式化、関数ポインタ
+  - モジュール、`core::fmt` 相当の書式化、Drop（Box の解放）
   - 浮動小数点、オーバーフロー検査（debug ビルドの rustc と同じ panic）
   - 単相化をレイアウトでキーにして共有する（`Vec<A>` と `Vec<B>` を 1 つにする。blaze の polymorph）
   - 最小の自前 std（relax 方式）

@@ -377,6 +377,7 @@ impl Inf<'_> {
     /// 具体型のクロージャ (struct のインスタンス / `&dyn Fn`) の引数と戻り値の型
     fn closure_sig(&self, t: Ty) -> Option<(Vec<Ty>, Ty)> {
         match t {
+            Ty::Fn(f) => Some((f.params.clone(), f.ret)),
             Ty::Struct(sid) => {
                 let cid = *self.prog.closure_of_struct.get(&self.prog.base_of(sid))?;
                 let args = &self.prog.structs[sid as usize].args;
@@ -1107,7 +1108,24 @@ impl Inf<'_> {
                 .and_then(|id| self.lookup(&id.to_string()))
             {
                 Some(v) => v,
-                None => self.var(),
+                // 値として使われた (ジェネリックでない) 関数は関数ポインタ
+                None => match self.prog.fn_by_path(&p.path, self.self_sid) {
+                    Some(id)
+                        if !self.prog.sigs[id as usize].is_generic()
+                            && !self
+                                .prog
+                                .const_index
+                                .contains_key(&p.path.segments.last().unwrap().ident.to_string()) =>
+                    {
+                        let s = &self.prog.sigs[id as usize];
+                        let f = crate::front::intern_fn(crate::front::FnTy {
+                            params: s.params.clone(),
+                            ret: s.ret,
+                        });
+                        self.known(Ty::Fn(f))
+                    }
+                    _ => self.var(),
+                },
             },
             Expr::Unary(u) => {
                 let v = self.expr(&u.expr);
@@ -1248,6 +1266,18 @@ impl Inf<'_> {
                     _ => None,
                 };
                 let args: Vec<u32> = c.args.iter().map(|a| self.expr(a)).collect();
+                // `Box::new(x)` は `&mut T` (所有する参照として扱う)
+                if let Expr::Path(p) = &*c.func {
+                    let n = p.path.segments.len();
+                    if callee.is_none()
+                        && n >= 2
+                        && p.path.segments[n - 1].ident == "new"
+                        && p.path.segments[n - 2].ident == "Box"
+                        && args.len() == 1
+                    {
+                        return self.with(Shape::Ref(true, args[0]));
+                    }
+                }
                 if callee.is_none() {
                     // クロージャ (の参照) / `&dyn Fn` の呼び出し
                     let f = self.expr(&c.func);

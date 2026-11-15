@@ -451,6 +451,15 @@ struct Cx<'a, 'p> {
     closure_hint: Option<(Vec<Ty>, Option<Ty>)>,
 }
 
+/// 間接呼び出しの呼び先
+#[derive(Clone, Copy)]
+enum Indirect {
+    /// `&dyn` の (データ, vtable) のアドレスと vtable の番号。データのポインタを第 1 引数に渡す
+    Vtable(Value, usize),
+    /// 関数ポインタ
+    Ptr(Value),
+}
+
 fn strip_paren(e: &Expr) -> &Expr {
     match e {
         Expr::Paren(p) => strip_paren(&p.expr),
@@ -1087,6 +1096,12 @@ impl Cx<'_, '_> {
                 return Ok((Some(fat), want));
             }
         }
+        // `&mut T` → `&T` (`Box<T>` も `&mut T` なのでここで `&T` になる)
+        if let (Some(want @ Ty::Ref(false, wi)), Ty::Ref(true, gi)) = (expected, t) {
+            if wi == gi {
+                return Ok((v, want));
+            }
+        }
         // `&T` → `&dyn Trait` (データのポインタ + vtable)
         if let (Some(want @ Ty::Ref(m2, Ty::Dyn(tr))), Some(v), Ty::Ref(m1, inner)) = (expected, v, t)
         {
@@ -1148,6 +1163,10 @@ impl Cx<'_, '_> {
                 })?;
                 self.same(p.span(), vt, t)?;
                 Ok((v, t))
+            }
+            Expr::Path(p) if self.fn_item(p).is_some() => {
+                let id = self.fn_item(p).unwrap();
+                self.fn_value(p, id, expected)
             }
             Expr::Path(_) | Expr::Field(_) => {
                 let p = self.place(e)?;
@@ -1369,7 +1388,8 @@ impl Cx<'_, '_> {
                 return self.slice_range(&ix.expr, rg, m);
             }
         }
-        if is_place_expr(&r.expr) {
+        let fn_item = matches!(&*r.expr, Expr::Path(p) if self.fn_item(p).is_some());
+        if is_place_expr(&r.expr) && !fn_item {
             return match self.place(&r.expr)? {
                 Place::Mem(a, o, t) => Ok((Some(self.addr_plus(a, o)), Ty::Ref(m, intern(t)))),
                 Place::Zst(t) => {
@@ -1635,7 +1655,21 @@ impl Cx<'_, '_> {
     /// `&T` (アドレス v) を `&dyn tr` の fat pointer にする
     fn to_dyn(&mut self, v: Value, t: Ty, tr: &str, span: proc_macro2::Span) -> R<Value> {
         let mut fns = vec![];
-        if crate::front::parse_fn_bound(tr).is_some() {
+        if let (Some((_, bps, _)), Ty::Fn(f)) = (crate::front::parse_fn_bound(tr), t) {
+            // 関数ポインタ: データ (関数ポインタを置いた場所) から呼ぶ prelude の中継関数
+            if bps.len() != f.params.len() {
+                return err(span, format!("expected a function with {} arguments", bps.len()));
+            }
+            let Some(&shim) = self.prog.index.get(&format!("__exr_fnptr{}", f.params.len())) else {
+                return err(span, "fn pointers with more than 3 arguments cannot be used as `dyn Fn`");
+            };
+            let args: Vec<Ty> = f.params.iter().copied().chain([f.ret]).collect();
+            let mut g = self.insts.lock().unwrap();
+            let iid = g.request(self.prog, shim, args).or_else(|e| err(span, e))?;
+            drop(g);
+            self.requested.push(iid);
+            fns.push(iid);
+        } else if crate::front::parse_fn_bound(tr).is_some() {
             let cid = match t {
                 Ty::Struct(sid) => self.prog.closure_of_struct.get(&self.prog.base_of(sid)).copied(),
                 _ => None,
@@ -1710,6 +1744,18 @@ impl Cx<'_, '_> {
         args: &[&Expr],
         span: proc_macro2::Span,
     ) -> R<V> {
+        self.indirect_call(Indirect::Vtable(fat, idx), params, ret, args, span)
+    }
+
+    /// 関数ポインタ / vtable 経由の呼び出し
+    fn indirect_call(
+        &mut self,
+        callee: Indirect,
+        params: &[Ty],
+        ret: Ty,
+        args: &[&Expr],
+        span: proc_macro2::Span,
+    ) -> R<V> {
         if params.len() != args.len() {
             return err(
                 span,
@@ -1717,13 +1763,19 @@ impl Cx<'_, '_> {
             );
         }
         let mut sig = self.prog.sigs[0].clone();
-        sig.params = std::iter::once(Ty::Ptr(false, intern(Ty::U8)))
+        let env = matches!(callee, Indirect::Vtable(..));
+        sig.params = env
+            .then_some(Ty::Ptr(false, intern(Ty::U8)))
+            .into_iter()
             .chain(params.iter().copied())
             .collect();
         sig.ret = ret;
         sig.is_main = false;
         sig.is_extern = false;
-        let data = self.b.ins().load(PTR, mf(), fat, 0);
+        let data = match callee {
+            Indirect::Vtable(fat, _) => Some(self.b.ins().load(PTR, mf(), fat, 0)),
+            Indirect::Ptr(_) => None,
+        };
         let mut vals = vec![];
         for (a, &pt) in args.iter().zip(params) {
             let (v, t) = self.expr(a, Some(pt))?;
@@ -1733,8 +1785,13 @@ impl Cx<'_, '_> {
             self.same(a.span(), t, pt)?;
             vals.push(v);
         }
-        let vt = self.b.ins().load(PTR, mf(), fat, 8);
-        let fp = self.b.ins().load(PTR, mf(), vt, 8 * idx as i32);
+        let fp = match callee {
+            Indirect::Vtable(fat, idx) => {
+                let vt = self.b.ins().load(PTR, mf(), fat, 8);
+                self.b.ins().load(PTR, mf(), vt, 8 * idx as i32)
+            }
+            Indirect::Ptr(fp) => fp,
+        };
         let mut cv = vec![];
         let sret = if is_sret(&sig) {
             let a = self.temp(ret);
@@ -1743,7 +1800,7 @@ impl Cx<'_, '_> {
         } else {
             None
         };
-        cv.push(data);
+        cv.extend(data);
         for (v, &pt) in vals.into_iter().zip(params) {
             if let Some(v) = v {
                 self.push_arg(&mut cv, v, pt);
@@ -1815,6 +1872,9 @@ impl Cx<'_, '_> {
 
     /// クロージャの型 (struct のインスタンス) なら、その引数と戻り値の型
     fn closure_sig(&self, t: Ty) -> Option<(Vec<Ty>, Ty)> {
+        if let Ty::Fn(f) = t {
+            return Some((f.params.clone(), f.ret));
+        }
         let Ty::Struct(sid) = t else { return None };
         let cid = *self.prog.closure_of_struct.get(&self.prog.base_of(sid))?;
         let args = &self.prog.structs[sid as usize].args;
@@ -1867,6 +1927,7 @@ impl Cx<'_, '_> {
                 self.call_fn(cid, Some(recv), &args, None, expected, c.span())
             }
             Ty::Ref(_, Ty::Dyn(s)) => self.dyn_fn_call(v, s, &args, c.span()),
+            Ty::Fn(f) => self.indirect_call(Indirect::Ptr(v), &f.params, f.ret, &args, c.span()),
             t => err(
                 c.func.span(),
                 format!("expected a function, found `{}`", self.prog.tn(t)),
@@ -2222,6 +2283,11 @@ impl Cx<'_, '_> {
                     self.b.ins().load(PTR, mf(), val, 0)
                 });
                 t = *inner;
+            }
+            if let (Ty::Ref(false, wi), Ty::Ref(true, gi)) = (want, t) {
+                if wi == gi {
+                    t = want;
+                }
             }
             self.prog.match_ty(pt, t, &mut sol);
             vals.push((v.unwrap(), t, a.span()));
@@ -4055,6 +4121,36 @@ impl Cx<'_, '_> {
         };
         let last = p.path.segments.last().unwrap();
         let name = last.ident.to_string();
+        // `Box::new(x)`: ヒープに置いて、所有する `&mut T` として返す (解放はしない)
+        let n = p.path.segments.len();
+        if name == "new"
+            && n >= 2
+            && p.path.segments[n - 2].ident == "Box"
+            && !self.prog.struct_index.contains_key("Box")
+        {
+            if c.args.len() != 1 {
+                return err(c.span(), "`Box::new` takes 1 argument");
+            }
+            let inner = match expected {
+                Some(Ty::Ref(true, t)) if !matches!(t, Ty::Dyn(_) | Ty::Slice(_) | Ty::Str) => Some(*t),
+                _ => None,
+            };
+            let (v, t) = self.expr(&c.args[0], inner)?;
+            if t == Ty::Never {
+                return Ok(Some((None, Ty::Never)));
+            }
+            let Some(&alloc) = self.prog.index.get(crate::prelude::BOX_ALLOC) else {
+                return err(c.span(), "internal: the allocator is missing from the prelude");
+            };
+            let (size, _) = self.prog.size_align(t);
+            let asig = self.prog.sigs[alloc as usize].clone();
+            let fr = self.fref(alloc, &asig);
+            let sz = self.b.ins().iconst(types::I64, size.max(1) as i64);
+            let call = self.b.ins().call(fr, &[sz]);
+            let ptr = self.b.inst_results(call)[0];
+            self.write(Place::Mem(ptr, 0, t), v);
+            return Ok(Some((Some(ptr), Ty::Ref(true, intern(t)))));
+        }
         if !matches!(name.as_str(), "size_of" | "align_of" | "null" | "null_mut") {
             return Ok(None);
         }
@@ -4112,7 +4208,64 @@ impl Cx<'_, '_> {
     }
 
     /// 変数でもバリアントでもないパス: `u32::MAX` などの関連定数、`core::ptr::null()` 以外のパス
+    /// 値として使われた関数のパス (`apply(double, 3)` の `double`、`S::f`) ならその関数
+    fn fn_item(&self, p: &syn::ExprPath) -> Option<u32> {
+        if p.qself.is_some() {
+            return None;
+        }
+        if let Some(id) = p.path.get_ident() {
+            let n = id.to_string();
+            if self.lookup(&n).is_some() || self.prog.const_index.contains_key(&n) {
+                return None;
+            }
+        }
+        let id = self.prog.fn_by_path(&p.path, self.self_sid)?;
+        let s = &self.prog.sigs[id as usize];
+        (!s.is_main && s.has_body || s.is_extern).then_some(id)
+    }
+
+    /// 関数アイテムを関数ポインタの値にする。ジェネリックなら turbofish か期待型 (`fn(i64) -> i64`) で型引数を決める
+    fn fn_value(&mut self, p: &syn::ExprPath, id: u32, expected: Option<Ty>) -> R<V> {
+        let sig0 = self.prog.sigs[id as usize].clone();
+        let tf = match &p.path.segments.last().unwrap().arguments {
+            syn::PathArguments::AngleBracketed(a) => Some(a),
+            _ => None,
+        };
+        let mut sol = self.turbofish_sol(&sig0, tf)?;
+        if let Some(Ty::Fn(f)) = expected {
+            for (&a, &b) in sig0.params.iter().zip(&f.params) {
+                self.prog.match_ty(a, b, &mut sol);
+            }
+            self.prog.match_ty(sig0.ret, f.ret, &mut sol);
+        }
+        let (target, sig) = if sig0.is_generic() {
+            if let Some(i) = sol.iter().position(|s| s.is_none()) {
+                return err(
+                    p.span(),
+                    format!(
+                        "cannot infer type parameter `{}`; use turbofish (`f::<T>`) or annotate the fn pointer type",
+                        sig0.generics[i].0
+                    ),
+                );
+            }
+            let ats: Vec<Ty> = sig0.params.iter().map(|&t| self.prog.partial_subst(t, &sol)).collect();
+            self.resolve_call(id, &ats, sol, None, p.span())?
+        } else {
+            (id, sig0)
+        };
+        let f = self.fref(target, &sig);
+        let v = self.b.ins().func_addr(PTR, f);
+        let t = Ty::Fn(crate::front::intern_fn(crate::front::FnTy {
+            params: sig.params.clone(),
+            ret: sig.ret,
+        }));
+        Ok((Some(v), t))
+    }
+
     fn path_value(&mut self, p: &syn::ExprPath, _expected: Option<Ty>) -> R<V> {
+        if let Some(id) = self.fn_item(p) {
+            return self.fn_value(p, id, _expected);
+        }
         let segs: Vec<String> = p
             .path
             .segments
