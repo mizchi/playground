@@ -46,7 +46,7 @@ impl Server {
         match method {
             "initialize" => vec![reply(json!({
                 "capabilities": { "textDocumentSync": 1 },
-                "serverInfo": { "name": "exrustc", "version": env!("CARGO_PKG_VERSION") }
+                "serverInfo": { "name": "crustc", "version": env!("CARGO_PKG_VERSION") }
             }))],
             "shutdown" => {
                 self.shutdown = true;
@@ -106,7 +106,7 @@ impl Server {
                 json!({
                     "range": { "start": {"line": l, "character": c}, "end": {"line": l, "character": c + 1} },
                     "severity": 1,
-                    "source": "exrustc",
+                    "source": "crustc",
                     "message": d.msg,
                 })
             })

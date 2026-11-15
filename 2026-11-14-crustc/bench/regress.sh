@@ -3,7 +3,7 @@
 #   bench/regress.sh save    今の状態をベースライン "main" として保存する (機能追加の前に)
 #   bench/regress.sh         ベースラインと比べる。criterion が「回帰」と判定したもの、
 #                            サイズ予算 (bench/budget.txt) 超過、rustc との出力差があれば失敗する
-# 環境変数 EXRUSTC_BENCH_LINKER でリンカを固定できる (ベースラインと同じ条件で比べること)。
+# 環境変数 CRUSTC_BENCH_LINKER でリンカを固定できる (ベースラインと同じ条件で比べること)。
 set -uo pipefail
 cd "$(dirname "$0")/.."
 cargo build --release -q || exit 1

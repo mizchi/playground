@@ -1,8 +1,8 @@
 [package]
-name = "exrustc"
+name = "crustc"
 version = "0.1.0"
 edition = "2024"
-# examples/ は exrustc でコンパイルする入力 (Cargo の example ではない。no_std のものもある)
+# examples/ は crustc でコンパイルする入力 (Cargo の example ではない。no_std のものもある)
 autoexamples = false
 
 # 他の実験と干渉しないよう、このディレクトリ単独のワークスペースにする

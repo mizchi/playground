@@ -178,7 +178,7 @@ fn compiler_id() -> (u64, u128) {
 
 pub fn cache_path(output: &Path) -> PathBuf {
     let mut s = output.as_os_str().to_owned();
-    s.push(".exrc");
+    s.push(".crcache");
     PathBuf::from(s)
 }
 
@@ -739,7 +739,7 @@ fn with_prelude<'a>(
     cache.user_items = items.len();
     let extra = crate::prelude::select_with(src, &items, cache);
     // (デバッグ用: 付けた prelude をソースの後ろに続く行番号つきで stderr に出す)
-    if std::env::var_os("EXRUSTC_DUMP_PRELUDE").is_some() {
+    if std::env::var_os("CRUSTC_DUMP_PRELUDE").is_some() {
         let l0 = src.bytes().filter(|&c| c == b'\n').count() + 2;
         for (i, l) in extra.lines().enumerate() {
             eprintln!("{:5} {l}", l0 + i);

@@ -1,14 +1,14 @@
-//! `exrustc lsp` を実際に起動し、stdio 越しに診断が返ることを確かめる。
+//! `crustc lsp` を実際に起動し、stdio 越しに診断が返ることを確かめる。
 
 use std::io::{BufReader, Write};
 use std::process::{Command, Stdio};
 
-use exrustc::lsp::{read_msg, write_msg};
+use crustc::lsp::{read_msg, write_msg};
 use serde_json::{Value, json};
 
 #[test]
 fn diagnostics_roundtrip() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_exrustc"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_crustc"))
         .arg("lsp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -1,4 +1,4 @@
-# exrustc
+# crustc
 
 自分用の Rust (サブセット) コンパイラ。Rust で書き、バックエンドは Cranelift。
 **インクリメンタルな開発ビルド**に特化して、次の 4 つを小さくすることを狙う。
@@ -14,25 +14,25 @@
 
 ```bash
 cargo build --release
-./target/release/exrustc examples/hello.rs -o out/hello --time
+./target/release/crustc examples/hello.rs -o out/hello --time
 ./out/hello
 ```
 
 ```bash
-./target/release/exrustc check examples/traits.rs
+./target/release/crustc check examples/traits.rs
 ```
 
 型検査だけを行い、全関数の診断を表示する。
 
 ```bash
-./target/release/exrustc lsp
+./target/release/crustc lsp
 ```
 
 LSP サーバ（stdio）。対応は initialize / didOpen / didChange（全文同期）/ didClose / shutdown で、publishDiagnostics を返す。
 
 | オプション | 意味 |
 |---|---|
-| `-o PATH` | 出力パス。同じ場所に `PATH.o`、`PATH.exrc`（キャッシュ）、`PATH.link`（リンク行）を置く |
+| `-o PATH` | 出力パス。同じ場所に `PATH.o`、`PATH.crcache`（キャッシュ）、`PATH.link`（リンク行）を置く |
 | `-O` | Cranelift の `speed_and_size` と backtracking regalloc を使う。既定は `none` + `single_pass` |
 | `--linker=wild\|mold\|lld\|bfd\|PATH` | リンカを選ぶ。既定は PATH にある順に wild > mold > ld.lld > ld |
 | `--time` | フェーズごとの時間とピーク RSS を表示する |
@@ -53,7 +53,7 @@ cargo test --release
 tests/compare.sh
 ```
 
-`examples/*.rs` を exrustc と rustc の両方でビルドし、実行結果が一致するかを確かめる。
+`examples/*.rs` を crustc と rustc の両方でビルドし、実行結果が一致するかを確かめる。
 
 ```bash
 python3 bench/run.py 1000 5000
@@ -626,9 +626,9 @@ src.rs ──lexer(自前)──▶ アイテム列 + 正規化ハッシュ
 
 | tool | cold ms | no-op ms | 1 関数編集 ms | peak RSS (cold) | binary | cache / incr dir |
 |---|---:|---:|---:|---:|---:|---:|
-| exrustc（wild を直接起動） | 128 | 11.7 | **19.0** | **13.4 MiB** | 413 KiB | **498 KiB** |
-| exrustc（bfd を直接起動） | 129 | 12.1 | 33.2 | 13.2 MiB | 422 KiB | 498 KiB |
-| exrustc（lld を直接起動） | 141 | 12.0 | 36.7 | 58.7 MiB | 412 KiB | 498 KiB |
+| crustc（wild を直接起動） | 128 | 11.7 | **19.0** | **13.4 MiB** | 413 KiB | **498 KiB** |
+| crustc（bfd を直接起動） | 129 | 12.1 | 33.2 | 13.2 MiB | 422 KiB | 498 KiB |
+| crustc（lld を直接起動） | 141 | 12.0 | 36.7 | 58.7 MiB | 412 KiB | 498 KiB |
 | rustc `-Cincremental -Cdebuginfo=0` | 887 | 217 | 461 | 164 MiB | 5013 KiB | 22151 KiB |
 | rustc `-Cincremental -Cdebuginfo=2` | 1015 | 218 | 563 | 183 MiB | 5557 KiB | 24592 KiB |
 | rustc `-O`（参考、非 incremental） | 12445 | - | - | 147 MiB | 382 KiB | - |
@@ -637,15 +637,15 @@ src.rs ──lexer(自前)──▶ アイテム列 + 正規化ハッシュ
 
 | tool | cold ms | no-op ms | 1 関数編集 ms | peak RSS (cold) | binary | cache / incr dir |
 |---|---:|---:|---:|---:|---:|---:|
-| exrustc（wild を直接起動） | 497 | 63.6 | **87.0** | **34.4 MiB** | 2030 KiB | **2479 KiB** |
-| exrustc（bfd を直接起動） | 471 | 53.9 | 87.0 | 34.6 MiB | 2038 KiB | 2479 KiB |
+| crustc（wild を直接起動） | 497 | 63.6 | **87.0** | **34.4 MiB** | 2030 KiB | **2479 KiB** |
+| crustc（bfd を直接起動） | 471 | 53.9 | 87.0 | 34.6 MiB | 2038 KiB | 2479 KiB |
 | rustc `-Cincremental -Cdebuginfo=0` | 3810 | 756 | 1911 | 499 MiB | 8040 KiB | 113644 KiB |
 
 rustc と比べると、1 関数編集は 20〜24 倍速く、cold の RSS は 1/12〜1/14、キャッシュは 1/45 になった。
 5000 関数の no-op が 60ms 前後あるのは、ファイル全体の lex、`.o` の作り直し、キャッシュの読み書きが N に比例するため。
 マルチファイル化してファイル単位の要約にすれば、ここも O(変更量) にできる。
 
-1 関数を編集したときの exrustc の内訳（`--time`、N=1000）：
+1 関数を編集したときの crustc の内訳（`--time`、N=1000）：
 
 | フェーズ | ms |
 |---|---:|
@@ -659,7 +659,7 @@ rustc と比べると、1 関数編集は 20〜24 倍速く、cold の RSS は 1
 | link（wild） | 5.6 |
 | **合計** | **15.9（ピーク RSS 12 MiB）** |
 
-hello（`examples/hello.rs`）の出力サイズは、exrustc で 6.0 KiB、rustc の debug（strip あり）で 333 KiB。
+hello（`examples/hello.rs`）の出力サイズは、crustc で 6.0 KiB、rustc の debug（strip あり）で 333 KiB。
 rustc 側はほとんどが std 由来。
 
 ### 途中で分かったこと

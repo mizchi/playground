@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use exrustc::{Options, Session, cache_path, testgen::program};
+use crustc::{Options, Session, cache_path, testgen::program};
 
 const BUDGET: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bench/budget.txt");
 
@@ -24,9 +24,9 @@ fn measure() -> BTreeMap<String, u64> {
     }
     for (name, src) in &cases {
         let out = dir.join(name);
-        // リンカで大きさが変わるので bfd ではなく既定 (自動選択) を使う。CI では EXRUSTC_BENCH_LINKER で固定
+        // リンカで大きさが変わるので bfd ではなく既定 (自動選択) を使う。CI では CRUSTC_BENCH_LINKER で固定
         let o = Options {
-            linker: std::env::var("EXRUSTC_BENCH_LINKER").ok(),
+            linker: std::env::var("CRUSTC_BENCH_LINKER").ok(),
             ..Options::default()
         };
         let mut s = Session::new(o);

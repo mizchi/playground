@@ -1,8 +1,8 @@
-"""exrustc と rustc (incremental) のビルド時間・ピークメモリ・ディスク消費・バイナリサイズを比べる。
+"""crustc と rustc (incremental) のビルド時間・ピークメモリ・ディスク消費・バイナリサイズを比べる。
 usage: python3 bench/run.py [N ...]   (このディレクトリで実行。事前に cargo build --release)"""
 import os, resource, shutil, subprocess, sys, time
 
-EXR = os.path.abspath("target/release/exrustc")
+EXR = os.path.abspath("target/release/crustc")
 W = os.path.abspath("out/bench")
 
 
@@ -44,12 +44,12 @@ def bench(n):
         rows.append((tool, cold, noop, edit, os.path.getsize(out), du(store), r1))
 
     exe = os.path.join(d, "exr")
-    scenario("exrustc (auto)", [EXR, src, "-o", exe], exe, exe + ".exrc")
+    scenario("crustc (auto)", [EXR, src, "-o", exe], exe, exe + ".crcache")
     for lk in ["bfd", "lld", "wild"]:
         if lk == "wild" and not shutil.which("wild"):
             continue
         exe2 = os.path.join(d, "exr-" + lk)
-        scenario(f"exrustc (--linker={lk})", [EXR, src, "-o", exe2, f"--linker={lk}"], exe2, exe2 + ".exrc")
+        scenario(f"crustc (--linker={lk})", [EXR, src, "-o", exe2, f"--linker={lk}"], exe2, exe2 + ".crcache")
     for name, flags in [("rustc -Cincremental dbg=0", ["-Cdebuginfo=0"]),
                         ("rustc -Cincremental dbg=2", ["-Cdebuginfo=2"])][: 1 if n > 1000 else 2]:
         inc = os.path.join(d, "inc-" + flags[0][-1])

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# よく使う Rust の機能の小さなプログラム (tests/probe/*.rs) を rustc と exrustc でビルドして出力を比べ、
+# よく使う Rust の機能の小さなプログラム (tests/probe/*.rs) を rustc と crustc でビルドして出力を比べ、
 # 通った数を出す。機能を足すたびに数が増えるのを見る (落ちたものは理由の 1 行目も出す)。
 #   tests/probe.sh          全部
 #   tests/probe.sh NAME..   指定したものだけ
@@ -25,7 +25,7 @@ for n in "${names[@]}"; do
   [ -f "tests/probe/$n.in" ] && input="tests/probe/$n.in"
   "$out/$n.r" < "$input" > "$out/$n.r.out" 2>/dev/null
   rc_r=$?
-  if ! err=$(target/release/exrustc "$f" -o "$out/$n.e" 2>&1); then
+  if ! err=$(target/release/crustc "$f" -o "$out/$n.e" 2>&1); then
     echo "FAIL $n: $(echo "$err" | head -1 | sed 's/^error: [^ ]*: //')"
     continue
   fi

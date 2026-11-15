@@ -1,5 +1,5 @@
 //! check (LSP の診断) はエラーがあっても止まらず、全関数の診断を返す
-use exrustc::{Options, Session};
+use crustc::{Options, Session};
 
 #[test]
 fn reports_all_errors_and_recovers() {

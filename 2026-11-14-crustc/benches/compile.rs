@@ -5,22 +5,22 @@
 //! - front/* : 字句解析だけ (no-op の下限)
 //!
 //! 使い方は bench/regress.sh を参照 (ベースライン保存と比較)。
-//! リンカは環境変数 EXRUSTC_BENCH_LINKER で固定できる (未指定なら自動選択)。
+//! リンカは環境変数 CRUSTC_BENCH_LINKER で固定できる (未指定なら自動選択)。
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use exrustc::lsp::Server;
-use exrustc::testgen::program;
-use exrustc::{Options, Session};
+use crustc::lsp::Server;
+use crustc::testgen::program;
+use crustc::{Options, Session};
 use serde_json::json;
 
 const N: usize = 1000;
 
 fn opts() -> Options {
     Options {
-        linker: std::env::var("EXRUSTC_BENCH_LINKER").ok(),
+        linker: std::env::var("CRUSTC_BENCH_LINKER").ok(),
         ..Options::default()
     }
 }
@@ -103,7 +103,7 @@ fn build(c: &mut Criterion) {
 
     // CLI と同じく build → save_cache (今回使ったエントリだけを残す) の流れ
     let out = dir.join("noop");
-    let cp = exrustc::cache_path(&out);
+    let cp = crustc::cache_path(&out);
     let mut s = Session::new(opts());
     s.build(&v[0], &out).unwrap();
     s.save_cache(&cp).unwrap();
@@ -116,7 +116,7 @@ fn build(c: &mut Criterion) {
     });
 
     let out = dir.join("edit");
-    let cp = exrustc::cache_path(&out);
+    let cp = crustc::cache_path(&out);
     let mut s = Session::new(opts());
     s.build(&v[1], &out).unwrap();
     s.save_cache(&cp).unwrap();
@@ -135,7 +135,7 @@ fn build(c: &mut Criterion) {
 fn front(c: &mut Criterion) {
     let v = program(N, 0);
     c.bench_function(&format!("front/lex/{N}"), |b| {
-        b.iter(|| exrustc::lexer::split(&v).unwrap().len())
+        b.iter(|| crustc::lexer::split(&v).unwrap().len())
     });
 }
 

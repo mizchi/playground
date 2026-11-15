@@ -1,15 +1,15 @@
-//! exrustc の CLI。
-//!   exrustc <input.rs> [-o out] [...]   ビルド
-//!   exrustc check <input.rs>            型検査だけ (全診断を表示)
-//!   exrustc lsp                         LSP サーバ (stdio)
+//! crustc の CLI。
+//!   crustc <input.rs> [-o out] [...]   ビルド
+//!   crustc check <input.rs>            型検査だけ (全診断を表示)
+//!   crustc lsp                         LSP サーバ (stdio)
 
 use std::path::PathBuf;
 
-use exrustc::{Options, Session, cache_path};
+use crustc::{Options, Session, cache_path};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: exrustc <input.rs> [-o out] [-O] [--regalloc=fast|good] [--linker=NAME] [--time] [-j N] [--no-cache]\n       exrustc check <input.rs>\n       exrustc lsp"
+        "usage: crustc <input.rs> [-o out] [-O] [--regalloc=fast|good] [--linker=NAME] [--time] [-j N] [--no-cache]\n       crustc check <input.rs>\n       crustc lsp"
     );
     std::process::exit(2)
 }
@@ -27,10 +27,10 @@ fn main() {
         }
         Some("lsp") => {
             std::process::exit(
-                match exrustc::lsp::run(std::io::stdin().lock(), std::io::stdout().lock()) {
+                match crustc::lsp::run(std::io::stdin().lock(), std::io::stdout().lock()) {
                     Ok(()) => 0,
                     Err(e) => {
-                        eprintln!("exrustc lsp: {e}");
+                        eprintln!("crustc lsp: {e}");
                         1
                     }
                 },

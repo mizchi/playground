@@ -1,4 +1,4 @@
-//! exrustc: インクリメンタル開発ビルド特化の小さな Rust (サブセット) コンパイラ。
+//! crustc: インクリメンタル開発ビルド特化の小さな Rust (サブセット) コンパイラ。
 //! CLI (`src/main.rs`)・LSP (`lsp`)・ベンチ (`benches/`) はすべて [`Session`] を通る。
 
 pub mod cache;
