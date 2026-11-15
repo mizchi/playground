@@ -333,6 +333,9 @@ impl Worker {
                 closure_ix,
                 closure_hint: None,
                 seg_self: None,
+                loop_bounds: vec![],
+                pending_bound: None,
+                checked: (None, vec![]),
                 in_fmt_args: 0,
                 owned: vec![],
                 temps: vec![],
@@ -494,6 +497,13 @@ fn addr_taken(f: &syn::ItemFn) -> (HashSet<String>, Vec<(usize, usize)>) {
     (v.0, v.1)
 }
 
+/// 添字の検査を覚えるときの長さ (定数なら値で比べる: 配列の長さは場所ごとに iconst を作り直すため)
+#[derive(Clone, Copy, PartialEq)]
+enum LenKey {
+    Const(i64),
+    Val(Value),
+}
+
 /// 式の評価結果。Unit / Never のとき値は None。struct のときはアドレス。
 type V = (Option<Value>, Ty);
 
@@ -599,6 +609,12 @@ struct Cx<'a, 'p> {
     closure_hint: Option<(Vec<Ty>, Option<Ty>)>,
     /// `Buf::<8>::new()` の型のセグメントの型 (呼ぶ関数の self 型から型引数を解く)
     seg_self: Option<Ty>,
+    /// `for k in 0..C` (C は定数) のループ変数の場所と、その上限 (これより小さい)。配列の添字の検査を省く
+    loop_bounds: Vec<(Loc, u64)>,
+    /// for_range が次の for_body に渡す上限
+    pending_bound: Option<u64>,
+    /// 直前の添字の検査: (検査を通ったあとのブロック, (添字, 長さ)) の列。同じブロックの中なら同じ検査を省く
+    checked: (Option<Block>, Vec<(Value, LenKey)>),
     /// 書式マクロの引数を評価している深さ (型推論の記録をソース上の位置で引く)
     in_fmt_args: u32,
     /// drop の責任を持つローカル変数 (スコープの深さ順) と、文の終わりで drop する一時値
@@ -1567,6 +1583,17 @@ impl Cx<'_, '_> {
                     return err(ix.span(), "index diverges");
                 };
                 self.same(ix.index.span(), it, Ty::Usize)?;
+                // (`for k in 0..3` の k で長さ 3 以上の配列を引くなら、範囲内と分かっている)
+                let in_range = match (&*ix.index, self.iconst_of(len)) {
+                    (Expr::Path(p), Some(n)) => p.path.get_ident().and_then(|id| self.lookup(&id.to_string())).is_some_and(|(l, _)| {
+                        self.loop_bounds.iter().any(|&(bl, h)| bl == l && h <= n as u64)
+                    }),
+                    _ => false,
+                };
+                if in_range {
+                    let addr = self.elem_addr(base, i, elem);
+                    return Ok(Place::Mem(addr, 0, elem));
+                }
                 // 範囲外なら panic (rustc と同じく境界検査する)
                 let ok = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
                 // (rustc の場所: Vec など Index の impl を通るものは `[`、配列・スライスは式の先頭)
@@ -6340,6 +6367,15 @@ impl Cx<'_, '_> {
             None => Place::Zst(vt),
         };
         self.pat_bind(&f.pat, place, BindMode::Move)?;
+        let bound = self.pending_bound.take();
+        let nb = self.loop_bounds.len();
+        if let (Some(h), Pat::Ident(pi)) = (bound, &*f.pat) {
+            if pi.mutability.is_none() && pi.by_ref.is_none() {
+                if let Some((l, _)) = self.lookup(&pi.ident.to_string()) {
+                    self.loop_bounds.push((l, h));
+                }
+            }
+        }
         self.loops.push(Loop {
             cont: step,
             brk: exit,
@@ -6353,6 +6389,7 @@ impl Cx<'_, '_> {
         });
         let (_, bt) = self.block(&f.body, Some(Ty::Unit))?;
         self.loops.pop();
+        self.loop_bounds.truncate(nb);
         self.pop_scope();
         if bt != Ty::Never {
             self.same(f.body.span(), bt, Ty::Unit)?;
@@ -6404,7 +6441,34 @@ impl Cx<'_, '_> {
         } else {
             IntCC::UnsignedLessThanOrEqual
         };
+        // (`for k in 0..3`: 下限が 0 以上・上限が定数なら、k はその上限より小さい)
+        self.pending_bound = match (self.iconst_of(lo), self.iconst_of(hi)) {
+            (Some(l), Some(h)) if l >= 0 && h >= 0 => Some(h as u64 + inclusive as u64),
+            _ => None,
+        };
+        // -O: 回数が定数で小さい (4 回まで) ループは展開する (`for k in 0..3`: k が定数になり、添字がアドレスの定数に畳まれる)
+        if self.prog.opt && !enumerate {
+            if let (Some(l), Some(h)) = (self.iconst_of(lo), self.iconst_of(hi)) {
+                let h = h + inclusive as i64;
+                if l <= h && h - l <= 4 {
+                    let bound = self.pending_bound;
+                    let exit = self.b.create_block();
+                    let vals: Vec<i64> = if rev { (l..h).rev().collect() } else { (l..h).collect() };
+                    for v in vals {
+                        let step = self.b.create_block();
+                        let iv = self.b.ins().iconst(ct, v);
+                        self.pending_bound = bound;
+                        self.for_body(f, Some(iv), lt, step, exit)?;
+                        self.b.switch_to_block(step);
+                    }
+                    self.b.ins().jump(exit, &[]);
+                    self.b.switch_to_block(exit);
+                    return Ok((None, Ty::Unit));
+                }
+            }
+        }
         let i = self.b.declare_var(ct);
+        // (enumerate の番号。enumerate でなければ数えない)
         let n = self.b.declare_var(types::I64);
         let z = self.b.ins().iconst(types::I64, 0);
         self.b.def_var(n, z);
@@ -6440,9 +6504,11 @@ impl Cx<'_, '_> {
         self.for_body(f, val, vt, step, exit)?;
         self.b.switch_to_block(step);
         let iv = self.b.use_var(i);
-        let nv = self.b.use_var(n);
-        let nn = self.b.ins().iadd_imm_s(nv, 1);
-        self.b.def_var(n, nn);
+        if enumerate {
+            let nv = self.b.use_var(n);
+            let nn = self.b.ins().iadd_imm_s(nv, 1);
+            self.b.def_var(n, nn);
+        }
         // 最後の要素を処理したら抜ける (lo..=MAX でも溢れない)
         let last = if !rev {
             if inclusive {
@@ -6868,6 +6934,41 @@ impl Cx<'_, '_> {
             self.panic_unless_at(ok, 12, span, Some("index out of bounds".into()));
             return;
         }
+        // (同じブロックの中で、同じ添字と長さの検査はもう通っている)
+        let key = match self.iconst_of(len) {
+            Some(n) => LenKey::Const(n),
+            None => LenKey::Val(len),
+        };
+        let cur = self.b.current_block();
+        if self.checked.0 != cur {
+            self.checked = (cur, vec![]);
+        }
+        if self.checked.1.contains(&(i, key)) {
+            return;
+        }
+        // -O: 場所ごとに冷たいブロックを作り、場所の定数はそこで作る (熱い道で定数をレジスタに置かない)
+        if self.prog.opt {
+            let pb = self.b.create_block();
+            self.b.set_cold_block(pb);
+            let cont = self.b.create_block();
+            self.b.ins().brif(ok, cont, &[], pb, &[]);
+            self.b.switch_to_block(pb);
+            let (sl, sc) = self.loc(span);
+            let ln = self.b.ins().iconst(types::I32, sl as i64);
+            let cl = self.b.ins().iconst(types::I32, sc as i64);
+            let _ = self.call_named(
+                "__exr_panic_index",
+                vec![Ty::Unit],
+                &[(len, Ty::Usize), (i, Ty::Usize), (ln, Ty::U32), (cl, Ty::U32)],
+                span,
+            );
+            self.b.ins().trap(TrapCode::unwrap_user(3));
+            self.b.switch_to_block(cont);
+            let prev = std::mem::take(&mut self.checked.1);
+            self.checked = (Some(cont), prev);
+            self.checked.1.push((i, key));
+            return;
+        }
         let pb = match self.index_panic_block {
             Some(b) => b,
             None => {
@@ -6897,6 +6998,9 @@ impl Cx<'_, '_> {
         let cont = self.b.create_block();
         self.b.ins().brif(ok, cont, &[], pb, &[len.into(), i.into(), ln.into(), cl.into()]);
         self.b.switch_to_block(cont);
+        let prev = std::mem::take(&mut self.checked.1);
+        self.checked = (Some(cont), prev);
+        self.checked.1.push((i, key));
     }
 
     /// cond が偽なら panic する (kind と msg は std のプログラムでの panic のメッセージ)

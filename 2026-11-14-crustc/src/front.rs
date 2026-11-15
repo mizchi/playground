@@ -817,6 +817,8 @@ pub struct Program {
     pub prelude_from: u32,
     /// 算術のオーバーフロー検査をするか (-O でなければ)
     pub overflow_checks: bool,
+    /// -O (最適化ビルド)
+    pub opt: bool,
     /// ブランケット impl のメソッド (名前 → 関数 id) と、その self 型の型パラメータ名
     pub blanket: FxMap<String, u32>,
     pub blanket_selfs: std::collections::HashSet<String>,
@@ -1587,6 +1589,7 @@ impl Program {
             opaque: vec![],
             prelude_from: u32::MAX,
             overflow_checks: false,
+            opt: false,
             blanket: FxMap::default(),
             blanket_selfs: Default::default(),
             by_last: FxMap::default(),

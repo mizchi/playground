@@ -888,13 +888,13 @@ impl<T: PartialEq> Vec<T> {
 
 impl<T: Ord> Vec<T> {
     pub fn sort(&mut self) {
-        __exr_merge_sort(self.ptr, self.len, |a: &T, b: &T| a < b);
+        __exr_merge_sort_lt(self.ptr, self.len);
     }
     pub fn sort_unstable(&mut self) {
         self.sort();
     }
     pub fn binary_search(&self, x: &T) -> Result<usize, usize> {
-        __exr_bsearch_by(self.ptr, self.len, |e: &T| __exr_cmp_m::<T>(e, x))
+        __exr_bsearch_lt(self.ptr, self.len, x)
     }
 }
 
@@ -908,7 +908,7 @@ impl<T> Vec<T> {
     }
     pub fn sort_by_key<K: Ord, F: FnMut(&T) -> K>(&mut self, f: F) {
         let mut f = f;
-        __exr_merge_sort(self.ptr, self.len, |a: &T, b: &T| __exr_cmp::<K>(&f(a), &f(b)) < 0);
+        __exr_merge_sort_key(self.ptr, self.len, f);
     }
     pub fn sort_unstable_by_key<K: Ord, F: FnMut(&T) -> K>(&mut self, f: F) {
         self.sort_by_key(f);
@@ -1175,6 +1175,169 @@ fn __exr_merge_sort<T, F: FnMut(&T, &T) -> bool>(p: *mut T, n: usize, lt: F) {
     }
 }
 
+// `<` で並べる版 (sort / sort_unstable)。比較をクロージャの呼び出しにせず、整数なら命令 1 つにする
+fn __exr_merge_sort_lt<T>(p: *mut T, n: usize) {
+    let sz = core::mem::size_of::<T>();
+    if n < 2 || sz == 0 {
+        return;
+    }
+    let run = 16;
+    let mut s = 0;
+    while s < n {
+        let e = if s + run < n { s + run } else { n };
+        let mut i = s + 1;
+        while i < e {
+            unsafe {
+                let x = p.add(i).read();
+                let mut j = i;
+                while j > s && x < *p.add(j - 1) {
+                    p.add(j).write(p.add(j - 1).read());
+                    j -= 1;
+                }
+                p.add(j).write(x);
+            }
+            i += 1;
+        }
+        s = e;
+    }
+    if n <= run {
+        return;
+    }
+    let buf = unsafe { __exr_realloc(0usize as *mut u8, n * sz) } as *mut T;
+    let mut src = p;
+    let mut dst = buf;
+    let mut w = run;
+    while w < n {
+        let mut lo = 0;
+        while lo < n {
+            let mid = if lo + w < n { lo + w } else { n };
+            let hi = if lo + 2 * w < n { lo + 2 * w } else { n };
+            let mut i = lo;
+            let mut j = mid;
+            let mut k = lo;
+            unsafe {
+                while i < mid && j < hi {
+                    // 右が真に小さいときだけ右を先に出す (安定)。分岐を使わずに選ぶ (比較の結果は予測できない)
+                    let t = (*src.add(j) < *src.add(i)) as usize;
+                    dst.add(k).write(src.add(i + (j - i) * t).read());
+                    j += t;
+                    i += 1 - t;
+                    k += 1;
+                }
+                while i < mid {
+                    dst.add(k).write(src.add(i).read());
+                    i += 1;
+                    k += 1;
+                }
+                while j < hi {
+                    dst.add(k).write(src.add(j).read());
+                    j += 1;
+                    k += 1;
+                }
+            }
+            lo = hi;
+        }
+        let t = src;
+        src = dst;
+        dst = t;
+        w *= 2;
+    }
+    if src != p {
+        let mut i = 0;
+        while i < n {
+            unsafe {
+                p.add(i).write(src.add(i).read());
+            }
+            i += 1;
+        }
+    }
+    unsafe {
+        __exr_free(buf as *mut u8);
+    }
+}
+
+// キーで並べる版 (sort_by_key): 比較ごとにキーの関数を直接 2 回呼ぶ (比較のクロージャを挟まない)
+fn __exr_merge_sort_key<T, K: Ord, F: FnMut(&T) -> K>(p: *mut T, n: usize, f: F) {
+    let mut f = f;
+    let sz = core::mem::size_of::<T>();
+    if n < 2 || sz == 0 {
+        return;
+    }
+    let run = 16;
+    let mut s = 0;
+    while s < n {
+        let e = if s + run < n { s + run } else { n };
+        let mut i = s + 1;
+        while i < e {
+            unsafe {
+                let x = p.add(i).read();
+                let mut j = i;
+                while j > s && f(&x) < f(&*p.add(j - 1)) {
+                    p.add(j).write(p.add(j - 1).read());
+                    j -= 1;
+                }
+                p.add(j).write(x);
+            }
+            i += 1;
+        }
+        s = e;
+    }
+    if n <= run {
+        return;
+    }
+    let buf = unsafe { __exr_realloc(0usize as *mut u8, n * sz) } as *mut T;
+    let mut src = p;
+    let mut dst = buf;
+    let mut w = run;
+    while w < n {
+        let mut lo = 0;
+        while lo < n {
+            let mid = if lo + w < n { lo + w } else { n };
+            let hi = if lo + 2 * w < n { lo + 2 * w } else { n };
+            let mut i = lo;
+            let mut j = mid;
+            let mut k = lo;
+            unsafe {
+                while i < mid && j < hi {
+                    // 右が真に小さいときだけ右を先に出す (安定)。分岐を使わずに選ぶ (比較の結果は予測できない)
+                    let t = (f(&*src.add(j)) < f(&*src.add(i))) as usize;
+                    dst.add(k).write(src.add(i + (j - i) * t).read());
+                    j += t;
+                    i += 1 - t;
+                    k += 1;
+                }
+                while i < mid {
+                    dst.add(k).write(src.add(i).read());
+                    i += 1;
+                    k += 1;
+                }
+                while j < hi {
+                    dst.add(k).write(src.add(j).read());
+                    j += 1;
+                    k += 1;
+                }
+            }
+            lo = hi;
+        }
+        let t = src;
+        src = dst;
+        dst = t;
+        w *= 2;
+    }
+    if src != p {
+        let mut i = 0;
+        while i < n {
+            unsafe {
+                p.add(i).write(src.add(i).read());
+            }
+            i += 1;
+        }
+    }
+    unsafe {
+        __exr_free(buf as *mut u8);
+    }
+}
+
 // キーを 1 要素 1 回だけ計算して (前から順に)、添字をキーで安定にソートしてから並べ替える
 fn __exr_sort_cached<T, K: Ord, F: FnMut(&T) -> K>(p: *mut T, n: usize, f: F) {
     let mut f = f;
@@ -1219,6 +1382,31 @@ fn __exr_sort_cached<T, K: Ord, F: FnMut(&T) -> K>(p: *mut T, n: usize, f: F) {
 }
 
 // std と同じ二分探索 (同じ値が並ぶときに返す位置も std に合わせる)
+// binary_search: `<=` と `==` で直接比べる (__exr_bsearch_by と同じ位置を返す)
+fn __exr_bsearch_lt<T>(p: *mut T, n: usize, x: &T) -> Result<usize, usize> {
+    let mut size = n;
+    if size == 0 {
+        return Err(0);
+    }
+    let mut base = 0;
+    while size > 1 {
+        let half = size / 2;
+        let mid = base + half;
+        if unsafe { *p.add(mid) <= *x } {
+            base = mid;
+        }
+        size -= half;
+    }
+    let e = unsafe { &*p.add(base) };
+    if *e == *x {
+        Ok(base)
+    } else if *e < *x {
+        Err(base + 1)
+    } else {
+        Err(base)
+    }
+}
+
 fn __exr_bsearch_by<T, F: FnMut(&T) -> Ordering>(p: *mut T, n: usize, f: F) -> Result<usize, usize> {
     let mut f = f;
     let mut size = n;
@@ -1247,7 +1435,7 @@ fn __exr_bsearch_by<T, F: FnMut(&T) -> Ordering>(p: *mut T, n: usize, f: F) -> R
 
 // 配列・スライスの sort / binary_search (codegen が `a.sort()` をこれにする)
 fn __exr_slice_sort<T: Ord>(s: &mut [T]) {
-    __exr_merge_sort(s.as_mut_ptr(), s.len(), |a: &T, b: &T| a < b);
+    __exr_merge_sort_lt(s.as_mut_ptr(), s.len());
 }
 fn __exr_slice_sort_by<T, F: FnMut(&T, &T) -> Ordering>(s: &mut [T], f: F) {
     let mut f = f;
@@ -1255,13 +1443,13 @@ fn __exr_slice_sort_by<T, F: FnMut(&T, &T) -> Ordering>(s: &mut [T], f: F) {
 }
 fn __exr_slice_sort_by_key<T, K: Ord, F: FnMut(&T) -> K>(s: &mut [T], f: F) {
     let mut f = f;
-    __exr_merge_sort(s.as_mut_ptr(), s.len(), |a: &T, b: &T| __exr_cmp::<K>(&f(a), &f(b)) < 0);
+    __exr_merge_sort_key(s.as_mut_ptr(), s.len(), f);
 }
 fn __exr_slice_sort_by_cached_key<T, K: Ord, F: FnMut(&T) -> K>(s: &mut [T], f: F) {
     __exr_sort_cached(s.as_mut_ptr(), s.len(), f);
 }
 fn __exr_slice_bsearch<T: Ord>(s: &[T], x: &T) -> Result<usize, usize> {
-    __exr_bsearch_by(s.as_ptr() as *mut T, s.len(), |e: &T| __exr_cmp_m::<T>(e, x))
+    __exr_bsearch_lt(s.as_ptr() as *mut T, s.len(), x)
 }
 fn __exr_slice_bsearch_by<T, F: FnMut(&T) -> Ordering>(s: &[T], f: F) -> Result<usize, usize> {
     __exr_bsearch_by(s.as_ptr() as *mut T, s.len(), f)

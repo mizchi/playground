@@ -351,6 +351,7 @@ impl Session {
         let mut prog = Program::build(&items, &sums)?;
         prog.prelude_from = self.sel.user_items as u32;
         prog.overflow_checks = !self.opts.opt;
+        prog.opt = self.opts.opt;
         prog.resolve_opaque(src, &items)?;
         let mut refs = Vec::with_capacity(prog.item_of.len());
         let mut srefs = Vec::with_capacity(prog.item_of.len());
