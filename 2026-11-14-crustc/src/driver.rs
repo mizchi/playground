@@ -148,47 +148,48 @@ impl ObjCode {
     fn load(path: &Path) -> ObjCode {
         let data = std::fs::read(path).unwrap_or_default();
         let mut index = FxMap::default();
-        let rd = |o: usize, n: usize| -> Option<u64> {
-            let b = data.get(o..o + n)?;
+        let rd = |d: &[u8], o: usize, n: usize| -> Option<u64> {
+            let b = d.get(o..o + n)?;
             let mut v = [0u8; 8];
             v[..n].copy_from_slice(b);
             Some(u64::from_le_bytes(v))
         };
         // ELF64 の symtab を辿り、実行可能なセクションにある関数のシンボル (位置と大きさ) の機械語を全部ハッシュする
+        // (`.text` が圧縮されていれば解凍してから。data は解凍した .text をつないだもの)
+        let raw = data;
+        let mut data = vec![];
         (|| -> Option<()> {
-            if data.get(..4)? != b"\x7fELF" || data[4] != 2 {
-                return None;
-            }
-            let shoff = rd(0x28, 8)? as usize;
-            let shentsize = rd(0x3A, 2)? as usize;
-            let mut shnum = rd(0x3C, 2)? as usize;
-            if shnum == 0 {
-                shnum = rd(shoff + 0x20, 8)? as usize;
-            }
-            let sh = |i: usize| -> Option<(u64, u64, usize, usize, u64)> {
-                let h = shoff + i * shentsize;
-                Some((rd(h + 4, 4)?, rd(h + 8, 8)?, rd(h + 0x18, 8)? as usize, rd(h + 0x20, 8)? as usize, rd(h + 0x38, 8)?))
-            };
-            for i in 0..shnum {
-                let (ty, _, off, size, entsize) = sh(i)?;
-                if ty != 2 || entsize != 24 {
+            let secs = crate::elfz::sections(&raw)?;
+            let mut text_at: FxMap<usize, usize> = FxMap::default();
+            for (i, s) in secs.iter().enumerate() {
+                if s.ty != 2 || s.entsize != 24 {
                     continue; // SHT_SYMTAB
                 }
-                for k in 0..size / 24 {
-                    let e = off + k * 24;
-                    let info = *data.get(e + 4)?;
-                    let shndx = rd(e + 6, 2)? as usize;
-                    let (value, sz) = (rd(e + 8, 8)? as usize, rd(e + 16, 8)? as usize);
-                    if info & 0xF != 2 || sz == 0 || shndx == 0 || shndx >= shnum {
+                for k in 0..s.size / 24 {
+                    let e = s.off + k * 24;
+                    let info = *raw.get(e + 4)?;
+                    let shndx = rd(&raw, e + 6, 2)? as usize;
+                    let (value, sz) = (rd(&raw, e + 8, 8)? as usize, rd(&raw, e + 16, 8)? as usize);
+                    if info & 0xF != 2 || sz == 0 || shndx == 0 || shndx >= secs.len() {
                         continue; // STT_FUNC で、定義されているもの
                     }
-                    let (sty, sflags, soff, _, _) = sh(shndx)?;
-                    if sty != 1 || sflags & 4 == 0 {
+                    let ts = &secs[shndx];
+                    if ts.ty != 1 || ts.flags & 4 == 0 {
                         continue;
                     }
-                    let code = data.get(soff + value..soff + value + sz)?;
-                    index.insert((sz as u32, crate::cache::code_hash(code)), (soff + value, sz));
+                    let base = match text_at.get(&shndx) {
+                        Some(&b) => b,
+                        None => {
+                            let b = data.len();
+                            data.extend_from_slice(&crate::elfz::section_bytes(&raw, ts)?);
+                            text_at.insert(shndx, b);
+                            b
+                        }
+                    };
+                    let code = data.get(base + value..base + value + sz)?;
+                    index.insert((sz as u32, crate::cache::code_hash(code)), (base + value, sz));
                 }
+                let _ = i;
             }
             Some(())
         })();
@@ -627,6 +628,8 @@ impl Session {
         let mut n_compiled = 0;
         let mut wave = user_live.clone();
         let mut old_code: Option<ObjCode> = None;
+        // 今回コンパイルした関数 (`.o` を作ってからキャッシュに書く)
+        let mut fresh: Vec<(u32, Key)> = vec![];
         while !wave.is_empty() {
             let mut misses = vec![];
             let mut keys: FxMap<u32, Key> = FxMap::default();
@@ -671,10 +674,7 @@ impl Session {
             )?;
             n_compiled += misses.len();
             for (id, b) in compiled {
-                let mut buf = vec![];
-                // (機械語は出力の `.o` に入るので、キャッシュには長さとハッシュだけ書く)
-                cache::encode_blob(&b, &a.prog, &insts.lock().unwrap(), &mut buf, true);
-                self.put(keys[&id], buf);
+                fresh.push((id, keys[&id]));
                 blobs.insert(id, b);
             }
             wave = std::mem::take(&mut insts.lock().unwrap().pending);
@@ -717,7 +717,16 @@ impl Session {
             ),
         );
 
-        let obj = emit_object(&a.prog, &insts, &live, &user_live, &blobs, self.isa.clone())?;
+        let (obj, placed) = emit_object(&a.prog, &insts, &live, &user_live, &blobs, self.isa.clone())?;
+        // 機械語が `.o` に入った関数は (長さ, ハッシュ) だけ、入らなかった (どこからも呼ばれない) 関数は機械語ごと書く
+        {
+            let g = &insts;
+            for (id, k) in fresh {
+                let mut buf = vec![];
+                cache::encode_blob(&blobs[&id], &a.prog, g, &mut buf, placed.contains(&id));
+                self.put(k, buf);
+            }
+        }
         let mut oh = KeyHasher::new();
         oh.add(&obj[..]);
         oh.add(&self.opts.linker); // リンカを変えたら再リンク
@@ -731,14 +740,30 @@ impl Session {
         let last = self.get(link_key).map(|d| d.to_vec());
         let obj_path = output.with_extension("o");
         let mut linked = false;
+        let mut object_bytes = std::fs::metadata(&obj_path).map(|m| m.len() as usize).unwrap_or(obj.len());
         if last.as_deref() == Some(&obj_key.to_le_bytes()[..])
             && output.exists()
             && obj_path.exists()
         {
             tm.lap("link", "skipped (object unchanged)");
         } else {
-            std::fs::write(&obj_path, &obj).map_err(|e| e.to_string())?;
-            let used = link::link(self.opts.linker.as_deref(), &obj_path, output)?;
+            // 残す `.o` は機械語を zstd で圧縮したもの (次のビルドのキャッシュが機械語をここから引く)。
+            // wild は圧縮したセクションをそのまま読む。ほかのリンカには圧縮しない `.o` を一時ファイルで渡す
+            let objz = crate::elfz::compress_text(&obj);
+            tm.lap("compress", format!("{} -> {} bytes", obj.len(), objz.len()));
+            std::fs::write(&obj_path, &objz).map_err(|e| e.to_string())?;
+            let wild = link::pick(self.opts.linker.as_deref())
+                .is_ok_and(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("wild")));
+            let used = if wild || objz.len() == obj.len() {
+                link::link(self.opts.linker.as_deref(), &obj_path, output)?
+            } else {
+                let tmp = output.with_extension("tmp.o");
+                std::fs::write(&tmp, &obj).map_err(|e| e.to_string())?;
+                let r = link::link(self.opts.linker.as_deref(), &tmp, output);
+                let _ = std::fs::remove_file(&tmp);
+                r?
+            };
+            object_bytes = objz.len();
             linked = true;
             tm.lap("link", format!("{used}"));
         }
@@ -750,7 +775,7 @@ impl Session {
             fns_live: user_live.len() + insts.list.len(),
             fns_compiled: n_compiled,
             items_parsed: a.n_parsed,
-            object_bytes: obj.len(),
+            object_bytes,
             linked,
             binary_bytes,
             cache_bytes: 0,
@@ -1046,7 +1071,7 @@ fn emit_object(
     user_live: &[u32],
     blobs: &FxMap<u32, Blob>,
     isa: OwnedTargetIsa,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, FxSet<u32>), String> {
     let cc = isa.default_call_conv();
     let mut b = ObjectBuilder::new(isa, "exr", cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
@@ -1342,7 +1367,7 @@ fn emit_object(
         }
         m.define_data(tid, &desc).map_err(|e| e.to_string())?;
     }
-    m.finish().emit().map_err(|e| e.to_string())
+    Ok((m.finish().emit().map_err(|e| e.to_string())?, reach))
 }
 
 pub fn peak_rss_kib() -> u64 {

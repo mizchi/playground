@@ -6,6 +6,7 @@ pub mod closure;
 pub mod codegen;
 pub mod consteval;
 pub mod driver;
+pub mod elfz;
 pub mod enc;
 pub mod front;
 pub mod fxhash;
