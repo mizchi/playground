@@ -118,7 +118,7 @@ crustc（debug / `-O`）と rustc（`-Cincremental` / `-O`）でビルドし、c
 tests/probe.sh
 ```
 
-よく使う機能の小さいプログラム（`tests/probe/*.rs`、86 本）を rustc と比べ、通った数を出す。
+よく使う機能の小さいプログラム（`tests/probe/*.rs`、87 本）を rustc と比べ、通った数を出す。
 
 ```bash
 tests/selfhost.sh
@@ -129,6 +129,7 @@ tests/selfhost.sh
 - `src/prelude.rs`（prelude の項目を名前で選ぶ。lexer / fxhash / KeyHasher と、build.rs が作る 46 万文字の表 `PRELUDE_ITEMS` を含む）：probe と examples の 125 ファイルをユーザのソースとして、選ばれた prelude の長さ・行数・ハッシュが rustc 版と一致する（-O で rustc 版 0.13 秒に対し 0.40 秒）。
 - `src/link.rs`（リンカを探して直接起動する）と `src/testgen.rs`：C の `.o` を自分でリンクして実行し（2 回目は保存したリンク行で）、出力が rustc 版と一致する。`std::path` と `std::process::Command` を使う。
 - `src/elfz.rs`（`.o` のセクションを SHF_COMPRESSED にする）：zstd クレートの代わりに同じ API の小さな RLE を付けて、C の `.o` を圧縮・解凍し、セクションとシンボルが rustc 版と一致する。
+- `src/macros.rs`（`macro_rules!` の展開と `include_str!`）：proc_macro2 の代わりに使う分だけの字句解析器（`tests/selfhost/mini_pm2.rs`、トークン木・位置・Spacing）を付けて、probe / examples / src の 147 ファイルを展開し、結果が rustc 版と一致する。
 - `src/enc.rs`（キャッシュの直列化。`enc_struct!` マクロと trait の静的呼び出し `T::dec(r)`）と `src/fxhash.rs`（FxHasher / `FxMap`）：構造体・Vec・Option・タプルを符号化して戻し、バイト列とハッシュが rustc 版と一致する（-O でも）。
 
 環境変数：`CRUSTC_DUMP_PRELUDE=1` は付けた prelude を stderr に出す。`CRUSTC_NO_STRIP=1` は出力のシンボルを残す（callgrind などで関数名を見るため）。
@@ -960,6 +961,19 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
 
 - `std::borrow::Cow`（`Cow<[T]>` / `Cow<str>`：`Borrowed` / `Owned`、`into_owned`、Deref）
 - スライス・配列・Vec の `copy_from_slice` / `clone_from_slice`
+
+#### セルフホストの第 6 段階: macros.rs
+
+- struct と同じ名前のバリアント（`TokenTree::Punct(Punct { .. })`：裸の名前は struct を優先）
+- `&a == &b`（a, b が struct などの参照どうし）、`impl PartialEq` と `impl PartialEq<str>` の両方
+- `Option::flatten`、HashMap の `clone`（以前は浅いコピーで二重解放になっていた）、`String::replace_range` / `into_bytes`
+- 修正：`None` などの大文字の名前のパターンをクロージャのキャプチャ候補に数えていた
+- 修正：`include_str!` の展開が、同じ行の 2 つ目以降のコメント・文字列の中のものも展開していた
+
+ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen）と、
+依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。
+残りの front / infer / consteval / closure / codegen / driver / cache は syn と cranelift の上に書かれていて、
+それらのクレート自体（syn 約 6 万行、cranelift 数十万行）をコンパイルする必要がある。
 
 ### 途中で分かったこと
 

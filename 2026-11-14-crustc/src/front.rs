@@ -3078,7 +3078,11 @@ impl Program {
                 "Some" | "None" => "Option",
                 "Ok" | "Err" => "Result",
                 // `use Expr::*;` したバリアント (大文字で始まり、ほかの enum と名前が重ならないもの)
+                // (同じ名前の struct があればそちら: `TokenTree::Punct(Punct { .. })`)
                 _ if n.starts_with(|c: char| c.is_ascii_uppercase()) => {
+                    if self.struct_index.get(&n).is_some_and(|&id| !self.structs[id as usize].is_enum) {
+                        return None;
+                    }
                     return self.variant_names.get(&n).copied().flatten();
                 }
                 _ => return None,

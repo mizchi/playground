@@ -3001,6 +3001,17 @@ impl Cx<'_, '_> {
                 self.b.ins().store(mf(), v, a, 0);
             }
         }
+        // `o.flatten()` (Option<Option<T>>): `o.unwrap_or(None)`
+        if mc.method == "flatten" && mc.args.is_empty() {
+            if let Some(Ty::Struct(sid)) = self.peek(&mc.receiver) {
+                let opt = |this: &Self, s: u32| this.prog.structs[this.prog.base_of(s) as usize].name == "Option";
+                if opt(self, sid) && matches!(self.prog.structs[sid as usize].args.first(), Some(Ty::Struct(i)) if opt(self, *i)) {
+                    let r = &mc.receiver;
+                    let e: Expr = syn::parse_quote!((#r).unwrap_or(None));
+                    return self.expr(&e, expected);
+                }
+            }
+        }
         // `it.flatten()` (要素が &Vec<T> / &[T] / &[T; N]): `it.flat_map(|x| x.iter())`
         if mc.method == "flatten" && mc.args.is_empty() {
             let item = self.peek(&mc.receiver).filter(|&t| !self.prog.has_param(t)).and_then(|t| self.prog.assoc_of(t, "Item"));
@@ -4399,6 +4410,25 @@ impl Cx<'_, '_> {
         // 型の違う `==` / `!=`: 右辺の型を持つ PartialEq の impl (`impl PartialEq<[T; N]> for Vec<T>` など) を探して eq を呼ぶ
         if matches!(b.op, Eq(_) | Ne(_)) && lt != rt {
             if let Some(e) = self.trait_eq(l, lt, r, rt, b.span())? {
+                let e = if matches!(b.op, Ne(_)) { self.b.ins().bxor_imm_u(e, 1) } else { e };
+                return Ok((Some(e), Ty::Bool));
+            }
+        }
+        // `&a == &b` (a, b は struct など): 参照を外して中身を比べる
+        if matches!(b.op, Eq(_) | Ne(_)) && lt == rt && matches!(lt, Ty::Ref(..)) {
+            let (mut l, mut r, mut t) = (l, r, lt);
+            while let Ty::Ref(_, i) = t {
+                if i.is_fat() || !matches!(i, Ty::Ref(..)) && !i.is_agg() {
+                    break;
+                }
+                if !i.is_agg() {
+                    l = self.b.ins().load(PTR, mf(), l, 0);
+                    r = self.b.ins().load(PTR, mf(), r, 0);
+                }
+                t = *i;
+            }
+            if t.is_agg() {
+                let e = self.agg_eq(l, r, t, b.span())?;
                 let e = if matches!(b.op, Ne(_)) { self.b.ins().bxor_imm_u(e, 1) } else { e };
                 return Ok((Some(e), Ty::Bool));
             }

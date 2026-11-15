@@ -2014,6 +2014,20 @@ impl String {
     pub fn into_owned(self) -> String {
         self
     }
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.vec
+    }
+    pub fn replace_range(&mut self, r: Range<usize>, with: &str) {
+        let b = self.as_bytes();
+        if r.start > r.end || r.end > b.len() {
+            panic!("range end index {} out of range for slice of length {}", r.end, b.len());
+        }
+        let mut v: Vec<u8> = Vec::with_capacity(b.len() - (r.end - r.start) + with.len());
+        v.extend_from_slice(&b[..r.start]);
+        v.extend_from_slice(with.as_bytes());
+        v.extend_from_slice(&b[r.end..]);
+        self.vec = v;
+    }
     pub fn as_str(&self) -> &str {
         unsafe { core::str::from_utf8_unchecked(self.vec.as_slice()) }
     }
@@ -6551,6 +6565,32 @@ pub struct HashMap<K, V> {
     cap: usize,
     len: usize,
     used: usize,
+}
+
+// (同じ容量・同じ位置に写すので、反復の順も元と同じ)
+impl<K: Clone, V: Clone> HashMap<K, V> {
+    pub fn clone(&self) -> HashMap<K, V> {
+        let mut m = HashMap::new();
+        if self.cap == 0 {
+            return m;
+        }
+        m.alloc(self.cap);
+        let mut i = 0;
+        while i < self.cap {
+            unsafe {
+                let s = *self.st.add(i);
+                if s == 1 {
+                    m.ks.add(i).write((*self.ks.add(i)).clone());
+                    m.vs.add(i).write((*self.vs.add(i)).clone());
+                }
+                m.st.add(i).write(s);
+            }
+            i += 1;
+        }
+        m.len = self.len;
+        m.used = self.used;
+        m
+    }
 }
 
 impl<K, V> HashMap<K, V> {

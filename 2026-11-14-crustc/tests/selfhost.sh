@@ -6,6 +6,8 @@
 #            → probe / examples をユーザのソースとして、選ばれた prelude の長さとハッシュを出す
 #   link:  src/link.rs (リンカを探して直接起動する) と src/testgen.rs → C の .o をリンクして実行する (std::path / process::Command)
 #   elfz:  src/elfz.rs (.o のセクションの圧縮。zstd の代わりに同じ API の RLE を付ける) → C の .o を圧縮・解凍して中身を比べる
+#   macros: src/macros.rs (macro_rules! の展開と include_str!。proc_macro2 の代わりに tests/selfhost/mini_pm2.rs を付ける)
+#           → probe / examples / src を展開して、結果の長さとハッシュを出す
 #   enc:   src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と src/fxhash.rs (FxHasher / FxMap)
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -82,6 +84,21 @@ for opt in "" -O; do
     echo "ok   elfz $opt ($(wc -l < "$out/elfz.rustc.out") lines)"
   else
     echo "DIFF elfz $opt"; diff "$out/elfz.rustc.out" "$out/elfz.crustc.out" | head; fail=1
+  fi
+done
+python3 tests/selfhost/build_macros.py > "$out/macros_main.rs"
+rustc --edition 2024 -O -Awarnings "$out/macros_main.rs" -o "$out/macros_rustc" || exit 1
+min=(tests/probe/*.rs examples/*.rs src/*.rs)
+"$out/macros_rustc" "${min[@]}" > "$out/macros.rustc.out"
+for opt in "" -O; do
+  if ! target/release/crustc "$out/macros_main.rs" -o "$out/macros_crustc" $opt; then
+    echo "FAIL macros $opt (crustc)"; fail=1; continue
+  fi
+  "$out/macros_crustc" "${min[@]}" > "$out/macros.crustc.out"
+  if cmp -s "$out/macros.rustc.out" "$out/macros.crustc.out"; then
+    echo "ok   macros $opt (${#min[@]} files, $(grep -c expanded "$out/macros.rustc.out") expanded)"
+  else
+    echo "DIFF macros $opt"; diff "$out/macros.rustc.out" "$out/macros.crustc.out" | head; fail=1
   fi
 done
 python3 tests/selfhost/build_enc.py > "$out/enc_main.rs"

@@ -591,8 +591,11 @@ pub fn expand_includes(src: &str, dir: &std::path::Path) -> Result<Option<String
             (None, None) => break,
         };
         let head = if bytes { "include_bytes!(" } else { "include_str!(" };
-        let line_start = rest[..i].rfind('\n').map(|k| k + 1).unwrap_or(0);
-        let in_comment = rest[line_start..i].contains("//");
+        // (コメントの中と、文字列の中 (`"include_str!("`) のものは展開しない)
+        let abs = src.len() - rest.len() + i;
+        let line_start = src[..abs].rfind('\n').map(|k| k + 1).unwrap_or(0);
+        let in_comment = src[line_start..abs].contains("//")
+            || src[..abs].ends_with(|c: char| c == '"' || c == '_' || c.is_alphanumeric());
         let after = &rest[i + head.len()..];
         let lit = after.trim_start();
         let parsed = (!in_comment && lit.starts_with('"'))

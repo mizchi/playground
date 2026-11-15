@@ -73,7 +73,15 @@ pub fn pat_idents(p: &Pat, out: &mut Vec<String>) {
     struct V<'a>(&'a mut Vec<String>);
     impl<'a> Visit<'a> for V<'_> {
         fn visit_pat_ident(&mut self, pi: &'a syn::PatIdent) {
-            self.0.push(pi.ident.to_string());
+            // (`None` や const など大文字で始まる裸の名前は束縛ではなくパスのパターン)
+            let n = pi.ident.to_string();
+            let path_like = n.starts_with(|c: char| c.is_ascii_uppercase())
+                && pi.subpat.is_none()
+                && pi.by_ref.is_none()
+                && pi.mutability.is_none();
+            if !path_like {
+                self.0.push(n);
+            }
             syn::visit::visit_pat_ident(self, pi);
         }
         fn visit_expr(&mut self, _: &'a Expr) {}
