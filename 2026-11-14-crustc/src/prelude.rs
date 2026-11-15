@@ -361,7 +361,7 @@ const FMT_NAMES: &[&str] = &[
     "__exr_fmt_lit", "__exr_fmt_int", "__exr_fmt_str", "__exr_fmt_bool", "__exr_fmt_char",
     "__exr_fmt_str_debug", "__exr_fmt_char_debug", "__exr_dbg_begin", "__exr_dbg_item",
     "__exr_dbg_item_end", "__exr_dbg_end", "__exr_print", "__exr_eprint", "__exr_display",
-    "__exr_debug", "__exr_fmt_ok", "fmt", "__FmtError",
+    "__exr_debug", "__exr_fmt_ok", "fmt", "__FmtError", "__exr_string_cap",
 ];
 
 /// 書式の引数つきの panic 系マクロ (`panic!("bad {}", x)` など) があるか

@@ -758,6 +758,20 @@ impl Cx<'_, '_> {
     /// struct のコピー (サイズは静的に分かるので展開する)
     fn copy(&mut self, dst: Value, src: Value, t: Ty) {
         let (size, align) = self.prog.size_align(t);
+        // (アラインメントの小さい型 (`[u8; 24]` など) も 8 byte ずつ写す: x86-64 は揃っていない読み書きができる)
+        if align < 8 && size >= 8 {
+            let mut fl = MemFlagsData::new();
+            fl.set_notrap();
+            let mut off = 0;
+            for (n, ty) in [(8, types::I64), (4, types::I32), (2, types::I16), (1, types::I8)] {
+                while off + n <= size {
+                    let v = self.b.ins().load(ty, fl, src, off as i32);
+                    self.b.ins().store(fl, v, dst, off as i32);
+                    off += n;
+                }
+            }
+            return;
+        }
         let chunk = align.min(8);
         let ty = match chunk {
             1 => types::I8,
@@ -4651,9 +4665,69 @@ impl Cx<'_, '_> {
         })
     }
 
+    /// 型だけで決まる条件 (`__exr_int_kind::<T>() == 0` / `needs_drop::<T>()` と `!` / `||` / `&&`) の値。
+    /// prelude の型ごとの分岐を、使わない側をコンパイルせずに済ませる (インスタンスも作らない)
+    fn type_cond(&self, e: &Expr) -> Option<bool> {
+        let targ = |c: &syn::ExprCall| -> Option<(String, Ty)> {
+            let Expr::Path(p) = &*c.func else { return None };
+            let last = p.path.segments.last()?;
+            let syn::PathArguments::AngleBracketed(a) = &last.arguments else { return None };
+            let Some(syn::GenericArgument::Type(t)) = a.args.first() else { return None };
+            Some((last.ident.to_string(), self.prog.parse_ty(t, &self.env).ok()?))
+        };
+        let int_of = |e: &Expr| -> Option<i64> {
+            match strip_paren(e) {
+                Expr::Lit(syn::ExprLit { lit: Lit::Int(i), .. }) => i.base10_parse().ok(),
+                _ => None,
+            }
+        };
+        match strip_paren(e) {
+            Expr::Unary(u) if matches!(u.op, UnOp::Not(_)) => self.type_cond(&u.expr).map(|b| !b),
+            Expr::Binary(b) => match b.op {
+                BinOp::Or(_) => match self.type_cond(&b.left) {
+                    Some(true) => Some(true),
+                    Some(false) => self.type_cond(&b.right),
+                    None => None,
+                },
+                BinOp::And(_) => match self.type_cond(&b.left) {
+                    Some(false) => Some(false),
+                    Some(true) => self.type_cond(&b.right),
+                    None => None,
+                },
+                BinOp::Eq(_) | BinOp::Ne(_) => {
+                    let Expr::Call(c) = strip_paren(&b.left) else { return None };
+                    let (name, t) = targ(c)?;
+                    if name != "__exr_int_kind" || self.prog.has_param(t) {
+                        return None;
+                    }
+                    let k = if t.is_int() && t.bits() <= 64 { 1 + t.signed() as i64 } else { 0 };
+                    let n = int_of(&b.right)?;
+                    Some((k == n) == matches!(b.op, BinOp::Eq(_)))
+                }
+                _ => None,
+            },
+            Expr::Call(c) => {
+                let (name, t) = targ(c)?;
+                (name == "needs_drop" && !self.prog.has_param(t)).then(|| self.needs_drop(t))
+            }
+            _ => None,
+        }
+    }
+
     fn if_(&mut self, i: &syn::ExprIf, expected: Option<Ty>) -> R<V> {
         if let Expr::Let(l) = &*i.cond {
             return self.if_let(i, l, expected);
+        }
+        // (型で決まる条件なら、通る側だけ)
+        match self.type_cond(&i.cond) {
+            Some(true) => return self.block(&i.then_branch, expected),
+            Some(false) => {
+                return match &i.else_branch {
+                    Some((_, e)) => self.expr(e, expected),
+                    None => Ok((None, Ty::Unit)),
+                };
+            }
+            None => {}
         }
         let (c, ct) = self.expr(&i.cond, Some(Ty::Bool))?;
         self.same(i.cond.span(), ct, Ty::Bool)?;
@@ -5070,6 +5144,26 @@ impl Cx<'_, '_> {
         let t = Ty::Array(intern(elem), n);
         let base = self.temp(t);
         let (size, _) = self.prog.size_align(elem);
+        // (定数の整数の配列 (`[0u8; 24]`): 値を並べた 8 byte ずつ書く)
+        if let (Some(c), true) = (v.and_then(|v| self.iconst_of(v)), elem.is_int() && size <= 4 && size * n >= 8) {
+            let mask = if size == 8 { u64::MAX } else { (1u64 << (size * 8)) - 1 };
+            let mut pat = 0u64;
+            for k in 0..(8 / size) {
+                pat |= ((c as u64) & mask) << (k * size * 8);
+            }
+            let total = size * n;
+            let mut fl = MemFlagsData::new();
+            fl.set_notrap();
+            let mut off = 0;
+            for (w, ty) in [(8u32, types::I64), (4, types::I32), (2, types::I16), (1, types::I8)] {
+                while off + w <= total {
+                    let pv = self.b.ins().iconst(ty, (pat & if w == 8 { u64::MAX } else { (1u64 << (w * 8)) - 1 }) as i64);
+                    self.b.ins().store(fl, pv, base, off as i32);
+                    off += w;
+                }
+            }
+            return Ok((Some(base), t));
+        }
         if n <= 16 {
             for i in 0..n {
                 self.write(Place::Mem(base, (i * size) as i32, elem), v);
@@ -7213,7 +7307,7 @@ impl Cx<'_, '_> {
             let m = name == "from_raw_parts_mut";
             return Ok(Some((Some(fat), Ty::Ref(m, intern(Ty::Slice(e))))));
         }
-        if !matches!(name.as_str(), "size_of" | "align_of" | "null" | "null_mut") {
+        if !matches!(name.as_str(), "size_of" | "align_of" | "null" | "null_mut" | "needs_drop" | "__exr_int_kind") {
             return Ok(None);
         }
         // ユーザが同名の関数を定義していればそちら
@@ -7235,6 +7329,22 @@ impl Cx<'_, '_> {
                 let (sz, al) = self.prog.size_align(t);
                 let v = if name == "size_of" { sz } else { al };
                 (Some(self.b.ins().iconst(types::I64, v as i64)), Ty::Usize)
+            }
+            // `__exr_int_kind::<T>()`: 0 = 整数でない、1 = 符号なし、2 = 符号つき (prelude の基数ソートが使う)
+            "__exr_int_kind" => {
+                let Some(t) = targ else {
+                    return err(c.span(), "`__exr_int_kind` needs a type");
+                };
+                let v = if t.is_int() && t.bits() <= 64 { 1 + t.signed() as i64 } else { 0 };
+                (Some(self.b.ins().iconst(types::I8, v)), Ty::U8)
+            }
+            // `core::mem::needs_drop::<T>()`: drop の glue が要る型か (定数。`Vec<u8>` の truncate で要素ごとの drop を省く)
+            "needs_drop" => {
+                let Some(t) = targ else {
+                    return err(c.span(), "`needs_drop` needs a type: `needs_drop::<T>()`");
+                };
+                let v = self.needs_drop(t) as i64;
+                (Some(self.b.ins().iconst(types::I8, v)), Ty::Bool)
             }
             _ => {
                 let elem = match (targ, expected) {
@@ -9251,7 +9361,17 @@ impl Cx<'_, '_> {
                 }
             }
             None => {
-                let (s, _) = self.call_named("String::new", vec![], &[], span)?;
+                // (format! の String は、決まった部分の長さ + 引数 1 つあたり 8 byte を先に確保する: 伸ばすたびの realloc を省く)
+                let (s, _) = if self.prog.index.contains_key("__exr_string_cap") {
+                    let lits: usize = pieces.iter().map(|p| match p {
+                        FmtPiece::Lit(l) => l.len(),
+                        _ => 8,
+                    }).sum();
+                    let n = self.b.ins().iconst(types::I64, lits.max(8) as i64);
+                    self.call_named("__exr_string_cap", vec![Ty::Unit], &[(n, Ty::Usize)], span)?
+                } else {
+                    self.call_named("String::new", vec![], &[], span)?
+                };
                 let s = s.unwrap();
                 owned_string = Some(s);
                 self.call_named("__exr_formatter", vec![Ty::Unit], &[(s, sref)], span)?.0.unwrap()

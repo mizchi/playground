@@ -419,6 +419,11 @@ unsafe extern "C" {
     fn __exr_realloc(p: *mut u8, size: usize) -> *mut u8;
 }
 
+unsafe extern "C" {
+    #[link_name = "memcpy"]
+    fn __exr_memcpy(d: *mut u8, s: *const u8, n: usize) -> *mut u8;
+}
+
 pub struct Vec<T> {
     ptr: *mut T,
     cap: usize,
@@ -479,6 +484,13 @@ impl<T> Vec<T> {
         self.cap
     }
     pub fn truncate(&mut self, n: usize) {
+        // (drop の要らない要素 (`Vec<u8>` など) は長さを変えるだけ)
+        if !core::mem::needs_drop::<T>() {
+            if n < self.len {
+                self.len = n;
+            }
+            return;
+        }
         while self.len > n {
             self.len -= 1;
             unsafe {
@@ -767,10 +779,15 @@ impl<T> Vec<T> {
 
 impl<T: Copy> Vec<T> {
     pub fn extend_from_slice(&mut self, xs: &[T]) {
-        self.reserve(xs.len());
-        for &x in xs {
-            self.push(x);
+        let n = xs.len();
+        self.reserve(n);
+        // (T: Copy なのでバイト列として写す)
+        if n > 0 {
+            unsafe {
+                __exr_memcpy(self.ptr.add(self.len) as *mut u8, xs.as_ptr() as *const u8, n * core::mem::size_of::<T>());
+            }
         }
+        self.len += n;
     }
 }
 
@@ -888,7 +905,7 @@ impl<T: PartialEq> Vec<T> {
 
 impl<T: Ord> Vec<T> {
     pub fn sort(&mut self) {
-        __exr_merge_sort_lt(self.ptr, self.len);
+        __exr_sort_lt(self.ptr, self.len);
     }
     pub fn sort_unstable(&mut self) {
         self.sort();
@@ -907,8 +924,7 @@ impl<T> Vec<T> {
         self.sort_by(f);
     }
     pub fn sort_by_key<K: Ord, F: FnMut(&T) -> K>(&mut self, f: F) {
-        let mut f = f;
-        __exr_merge_sort_key(self.ptr, self.len, f);
+        __exr_sort_by_key(self.ptr, self.len, f);
     }
     pub fn sort_unstable_by_key<K: Ord, F: FnMut(&T) -> K>(&mut self, f: F) {
         self.sort_by_key(f);
@@ -1256,6 +1272,199 @@ fn __exr_merge_sort_lt<T>(p: *mut T, n: usize) {
     }
 }
 
+// 整数のキーを、符号なしの大小と同じ順の u64 にする (符号つきは符号ビットを反転)
+fn __exr_radix_key<K>(k: &K) -> u64 {
+    let sz: usize = core::mem::size_of::<K>();
+    let p = k as *const K;
+    let v: u64 = unsafe {
+        if sz == 8 {
+            *(p as *const u64)
+        } else if sz == 4 {
+            *(p as *const u32) as u64
+        } else if sz == 2 {
+            *(p as *const u16) as u64
+        } else {
+            *(p as *const u8) as u64
+        }
+    };
+    if __exr_int_kind::<K>() == 2 {
+        // (符号の拡張をせずに上位ビットを反転: 幅 sz の中での符号ビット)
+        v ^ (1u64 << ((8 * sz - 1) as u64))
+    } else {
+        v
+    }
+}
+
+// __exr_radix_key の逆 (キーから整数の値を書き戻す)
+fn __exr_radix_unkey<K>(v: u64, out: *mut K) {
+    let sz: usize = core::mem::size_of::<K>();
+    let v = if __exr_int_kind::<K>() == 2 { v ^ (1u64 << ((8 * sz - 1) as u64)) } else { v };
+    unsafe {
+        if sz == 8 {
+            *(out as *mut u64) = v;
+        } else if sz == 4 {
+            *(out as *mut u32) = v as u32;
+        } else if sz == 2 {
+            *(out as *mut u16) = v as u16;
+        } else {
+            *(out as *mut u8) = v as u8;
+        }
+    }
+}
+
+// 安定な LSD 基数ソート: keys の順に (keys と) vals を並べる。全要素で同じバイトの桁は飛ばす
+fn __exr_radix_sort<T>(keys: *mut u64, vals: *mut T, n: usize, with_vals: bool) {
+    let sz = core::mem::size_of::<T>();
+    let kb = unsafe { __exr_realloc(0usize as *mut u8, n * 8) } as *mut u64;
+    let vb = if with_vals && sz > 0 { (unsafe { __exr_realloc(0usize as *mut u8, n * sz) }) as *mut T } else { vals };
+    let mut diff: u64 = 0;
+    let k0 = unsafe { *keys };
+    let mut i: usize = 0;
+    while i < n {
+        diff |= unsafe { *keys.add(i) } ^ k0;
+        i += 1;
+    }
+    let (mut ks, mut kd, mut vs, mut vd) = (keys, kb, vals, vb);
+    let mut count = [0usize; 256];
+    let cp = count.as_mut_ptr();
+    let mut shift: u64 = 0;
+    while shift < 64 {
+        if (diff >> shift) & 0xFF != 0 {
+            let mut c: usize = 0;
+            while c < 256 {
+                unsafe {
+                    *cp.add(c) = 0;
+                }
+                c += 1;
+            }
+            i = 0;
+            while i < n {
+                unsafe {
+                    let d = ((*ks.add(i) >> shift) & 0xFF) as usize;
+                    *cp.add(d) += 1;
+                }
+                i += 1;
+            }
+            let mut sum: usize = 0;
+            c = 0;
+            while c < 256 {
+                unsafe {
+                    let t = *cp.add(c);
+                    *cp.add(c) = sum;
+                    sum += t;
+                }
+                c += 1;
+            }
+            i = 0;
+            while i < n {
+                unsafe {
+                    let k = *ks.add(i);
+                    let d = ((k >> shift) & 0xFF) as usize;
+                    let at = *cp.add(d);
+                    *cp.add(d) = at + 1;
+                    *kd.add(at) = k;
+                }
+                i += 1;
+            }
+            // (値も並べ替えるなら、同じ行き先にもう 1 回: ループの中で分岐しない)
+            if with_vals && sz > 0 {
+                c = 0;
+                let mut s2: usize = 0;
+                while c < 256 {
+                    unsafe {
+                        let t = *cp.add(c);
+                        *cp.add(c) = s2;
+                        s2 = t;
+                    }
+                    c += 1;
+                }
+                i = 0;
+                while i < n {
+                    unsafe {
+                        let d = ((*ks.add(i) >> shift) & 0xFF) as usize;
+                        let at = *cp.add(d);
+                        *cp.add(d) = at + 1;
+                        vd.add(at).write(vs.add(i).read());
+                    }
+                    i += 1;
+                }
+            }
+            let t = ks;
+            ks = kd;
+            kd = t;
+            let tv = vs;
+            vs = vd;
+            vd = tv;
+        }
+        shift += 8;
+    }
+    // (奇数回の並べ替えなら、結果は作業領域にある: 元に戻す)
+    if ks != keys {
+        unsafe {
+            __exr_memcpy(keys as *mut u8, ks as *const u8, n * 8);
+            if with_vals && sz > 0 {
+                __exr_memcpy(vals as *mut u8, vs as *const u8, n * sz);
+            }
+        }
+    }
+    unsafe {
+        __exr_free(kb as *mut u8);
+        if with_vals && sz > 0 {
+            __exr_free(vb as *mut u8);
+        }
+    }
+}
+
+// sort_by_key: キーが 64 bit 以下の整数なら、キーを要素ごとに 1 回だけ計算して安定な基数ソート
+// (std は比較ごとにキーの関数を呼ぶので、キーの関数の呼ばれる回数は std と違う)
+fn __exr_sort_by_key<T, K: Ord, F: FnMut(&T) -> K>(p: *mut T, n: usize, f: F) {
+    let mut f = f;
+    if __exr_int_kind::<K>() == 0 || n < 64 {
+        __exr_merge_sort_key(p, n, f);
+        return;
+    }
+    let keys = unsafe { __exr_realloc(0usize as *mut u8, n * 8) } as *mut u64;
+    let mut i: usize = 0;
+    while i < n {
+        let k = f(unsafe { &*p.add(i) });
+        unsafe {
+            *keys.add(i) = __exr_radix_key(&k);
+        }
+        i += 1;
+    }
+    __exr_radix_sort(keys, p, n, true);
+    unsafe {
+        __exr_free(keys as *mut u8);
+    }
+}
+
+// sort (`<` の順): 要素が 64 bit 以下の整数なら基数ソート (等しい整数は区別できないので安定かどうかは見えない)
+fn __exr_sort_lt<T>(p: *mut T, n: usize) {
+    if __exr_int_kind::<T>() == 0 || n < 64 {
+        __exr_merge_sort_lt(p, n);
+        return;
+    }
+    let keys = unsafe { __exr_realloc(0usize as *mut u8, n * 8) } as *mut u64;
+    let mut i: usize = 0;
+    while i < n {
+        unsafe {
+            *keys.add(i) = __exr_radix_key(&*p.add(i));
+        }
+        i += 1;
+    }
+    __exr_radix_sort(keys, p, n, false);
+    i = 0;
+    while i < n {
+        unsafe {
+            __exr_radix_unkey(*keys.add(i), p.add(i));
+        }
+        i += 1;
+    }
+    unsafe {
+        __exr_free(keys as *mut u8);
+    }
+}
+
 // キーで並べる版 (sort_by_key): 比較ごとにキーの関数を直接 2 回呼ぶ (比較のクロージャを挟まない)
 fn __exr_merge_sort_key<T, K: Ord, F: FnMut(&T) -> K>(p: *mut T, n: usize, f: F) {
     let mut f = f;
@@ -1435,15 +1644,14 @@ fn __exr_bsearch_by<T, F: FnMut(&T) -> Ordering>(p: *mut T, n: usize, f: F) -> R
 
 // 配列・スライスの sort / binary_search (codegen が `a.sort()` をこれにする)
 fn __exr_slice_sort<T: Ord>(s: &mut [T]) {
-    __exr_merge_sort_lt(s.as_mut_ptr(), s.len());
+    __exr_sort_lt(s.as_mut_ptr(), s.len());
 }
 fn __exr_slice_sort_by<T, F: FnMut(&T, &T) -> Ordering>(s: &mut [T], f: F) {
     let mut f = f;
     __exr_merge_sort(s.as_mut_ptr(), s.len(), |a: &T, b: &T| __exr_ord_i32::<()>(&f(a, b)) < 0);
 }
 fn __exr_slice_sort_by_key<T, K: Ord, F: FnMut(&T) -> K>(s: &mut [T], f: F) {
-    let mut f = f;
-    __exr_merge_sort_key(s.as_mut_ptr(), s.len(), f);
+    __exr_sort_by_key(s.as_mut_ptr(), s.len(), f);
 }
 fn __exr_slice_sort_by_cached_key<T, K: Ord, F: FnMut(&T) -> K>(s: &mut [T], f: F) {
     __exr_sort_cached(s.as_mut_ptr(), s.len(), f);
@@ -3085,6 +3293,13 @@ impl Formatter {
     }
 }
 
+// format! の書き込み先: 書く長さの見積もりだけ先に確保した String
+fn __exr_string_cap<G>(n: usize) -> String {
+    let mut s = String::new();
+    s.vec.reserve(n);
+    s
+}
+
 fn __exr_formatter<G>(buf: &mut String) -> Formatter {
     Formatter {
         buf: buf,
@@ -3196,6 +3411,31 @@ fn __exr_fmt_base<G>(f: &Formatter) -> u64 {
 }
 
 fn __exr_fmt_int<G>(f: &mut Formatter, mag: u64, neg: bool) {
+    // 10 進で幅も符号の指定もない (`{}` の大半): 桁を後ろから詰め、まとめて足す (10 の割り算は掛け算になる)
+    if f.radix == 0 && !f.plus && f.width == 0 {
+        let mut d = [0u8; 24];
+        let p = d.as_mut_ptr();
+        let mut k: usize = 24;
+        let mut v = mag;
+        loop {
+            k -= 1;
+            unsafe {
+                *p.add(k) = b'0' + (v % 10) as u8;
+            }
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        if neg {
+            k -= 1;
+            unsafe {
+                *p.add(k) = b'-';
+            }
+        }
+        f.buf.vec.extend_from_slice(unsafe { core::slice::from_raw_parts(p.add(k) as *const u8, 24 - k) });
+        return;
+    }
     let base = __exr_fmt_base::<()>(f);
     let mut digits = [0u8; 64];
     let mut n = 0;
@@ -7036,15 +7276,19 @@ impl Iterator for Split {
         if self.mode == 2 && self.i >= self.len {
             return None;
         }
+        // (フィールドをローカルに写して回す: ループの中で self を読み書きしない)
+        let (p, len, sep) = (self.p, self.len, self.sep);
         let st = self.i;
-        while self.i < self.len && unsafe { *self.p.add(self.i) } != self.sep {
-            self.i += 1;
+        let mut i = st;
+        while i < len && unsafe { *p.add(i) } != sep {
+            i += 1;
         }
-        let mut end = self.i;
-        if self.i >= self.len {
+        let mut end = i;
+        if i >= len {
             self.done = true;
+            self.i = i;
         } else {
-            self.i += 1;
+            self.i = i + 1;
         }
         // lines は末尾の \r も取る
         if self.mode == 2 && end > st && unsafe { *self.p.add(end - 1) } == 13 {

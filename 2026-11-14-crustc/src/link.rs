@@ -116,6 +116,12 @@ pub fn link(requested: Option<&str>, obj: &Path, out: &Path) -> Result<String, S
             a
         }
     };
+    // (プロファイル用: CRUSTC_NO_STRIP があればシンボルを残す)
+    let args: Vec<String> = if std::env::var_os("CRUSTC_NO_STRIP").is_some() {
+        args.into_iter().filter(|a| a != "-s").collect()
+    } else {
+        args
+    };
     let st = Command::new(&linker)
         .args(&args)
         .status()
