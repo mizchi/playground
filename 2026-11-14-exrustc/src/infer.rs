@@ -37,6 +37,8 @@ fn is_builtin_scalar_method(n: &str) -> bool {
             | "next_power_of_two"
             | "isqrt"
             | "try_into"
+            | "checked_abs"
+            | "checked_neg"
             | "leading_ones"
             | "trailing_ones"
             | "saturating_add"
@@ -2546,6 +2548,7 @@ impl Inf<'_> {
                 self.option_of(rv)
             }
             "leading_ones" | "trailing_ones" => self.known(Ty::U32),
+            "checked_abs" | "checked_neg" => self.option_of(rv),
             // `x.try_into()`: Result<T, TryFromIntError> (T は使われ方から)
             "try_into" => match (self.prog.struct_index.get("Result"), self.prog.struct_index.get("TryFromIntError")) {
                 (Some(&rb), Some(&eb)) => {

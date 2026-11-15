@@ -294,6 +294,11 @@ impl Worker {
                 loops: vec![],
                 ret: sig.ret,
                 is_main: sig.is_main,
+                // (ユーザのコードだけ検査する: prelude は折り返す演算 (ハッシュなど) を書いている)
+                user_code: prog.item_of.get(body_id as usize).copied().flatten().is_some_and(|i| i < prog.prelude_from),
+                overflow_checks: prog.overflow_checks
+                    && (prog.item_of.get(body_id as usize).copied().flatten().is_some_and(|i| i < prog.prelude_from)
+                        || f.attrs.iter().any(|a| a.path().is_ident("rustc_inherit_overflow_checks"))),
                 self_sid: env.self_sid,
                 sret: None,
                 frefs: HashMap::new(),
@@ -489,6 +494,10 @@ struct Cx<'a, 'p> {
     pending_label: Option<String>,
     ret: Ty,
     is_main: bool,
+    /// ユーザのコード (prelude でない) か。0 除算の検査はこれだけで入れる
+    user_code: bool,
+    /// 算術のオーバーフロー検査 (rustc の debug ビルドと同じ。-O なら入れない)
+    overflow_checks: bool,
     /// impl の中なら self 型
     self_sid: Option<u32>,
     /// struct を返す関数の、戻り値の書き込み先
@@ -813,6 +822,12 @@ impl Cx<'_, '_> {
                 };
                 self.scopes.last_mut().unwrap().push((n, loc, t));
             }
+        }
+        // std のプログラムの main: trap (添字の範囲外・unwrap の失敗・panic!) を rustc の panic と同じく
+        // 終了コード 101 にするシグナルハンドラを最初に登録する
+        if self.is_main && self.prog.panic_handler.is_none() && self.prog.index.contains_key("__exr_rt_init") {
+            let span = proc_macro2::Span::call_site();
+            let _ = self.call_named("__exr_rt_init", vec![Ty::Unit], &[], span);
         }
         let (v, t) = self.block(&f.block, Some(self.ret))?;
         if t == Ty::Never {
@@ -3627,10 +3642,32 @@ impl Cx<'_, '_> {
                 return self.expr(&e, expected);
             }
         }
+        // 負のリテラル (`-128i8` / `-2147483648`) はその場で値にする (検査で MIN の符号反転にしない)
+        if let (UnOp::Neg(_), Expr::Lit(syn::ExprLit { lit: Lit::Int(i), .. })) = (&u.op, strip_paren(&u.expr)) {
+            let lit_e: &Expr = strip_paren(&u.expr);
+            let ty = Ty::from_suffix(i.suffix())
+                .or(expected.filter(|t| t.is_int()))
+                .or_else(|| self.lets.get(&(lit_e as *const Expr as usize)).copied().filter(|t| t.is_int()))
+                .or_else(|| self.lets.get(&(e_addr_of_unary(u))).copied().filter(|t| t.is_int()))
+                .unwrap_or(Ty::I32);
+            if ty.signed() {
+                if let Ok(n) = i.base10_parse::<u128>() {
+                    let v = self.int_const(ty, (n as i128).wrapping_neg());
+                    return Ok((Some(v), ty));
+                }
+            }
+        }
         let (v, t) = self.expr(&u.expr, expected)?;
         let Some(v) = v else { return Ok((None, t)) };
         match u.op {
-            UnOp::Neg(_) if t.is_int() && t.signed() => Ok((Some(self.b.ins().ineg(v)), t)),
+            UnOp::Neg(_) if t.is_int() && t.signed() => {
+                if self.overflow_checks {
+                    let min = self.int_const(t, crate::front::prim_assoc_const(t, "MIN").unwrap());
+                    let bad = self.b.ins().icmp(IntCC::Equal, v, min);
+                    self.ovf_panic(bad, 6, u.span());
+                }
+                Ok((Some(self.b.ins().ineg(v)), t))
+            }
             UnOp::Neg(_) if t.is_float() => Ok((Some(self.b.ins().fneg(v)), t)),
             UnOp::Not(_) if t == Ty::Bool => Ok((Some(self.b.ins().bxor_imm_u(v, 1)), t)),
             UnOp::Not(_) if t.is_int() => Ok((Some(self.b.ins().bnot(v)), t)),
@@ -4145,6 +4182,11 @@ impl Cx<'_, '_> {
             if !lt.is_int() || !rt.is_int() {
                 return err(b.span(), "shift of non-integer");
             }
+            if self.overflow_checks && !self.iconst_of(r).is_some_and(|k| (0..lt.bits() as i64).contains(&k)) {
+                // 型の幅以上のシフト (負の量も符号なしで大きい)
+                let bad = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, r, lt.bits() as i64);
+                self.ovf_panic(bad, if matches!(op, Shl(_)) { 7 } else { 8 }, b.span());
+            }
             let ins = self.b.ins();
             return Ok(match op {
                 Shl(_) => ins.ishl(l, r),
@@ -4189,6 +4231,61 @@ impl Cx<'_, '_> {
         // 128 bit の除算は Cranelift にないので prelude の関数
         if lt.bits() == 128 && matches!(op, Div(_) | Rem(_)) {
             return self.div128(l, r, lt, matches!(op, Rem(_)), b.span());
+        }
+        // 0 除算と MIN / -1 は (rustc と同じく最適化しても) panic
+        if lt.is_int() && matches!(op, Div(_) | Rem(_)) && self.user_code {
+            let rem = matches!(op, Rem(_));
+            let cr = self.iconst_of(r);
+            if cr.is_none() || cr == Some(0) {
+                let zero = self.b.ins().icmp_imm_u(IntCC::Equal, r, 0);
+                self.ovf_panic(zero, if rem { 4 } else { 3 }, b.span());
+            }
+            if s && (cr.is_none() || cr == Some(-1)) {
+                let min = self.int_const(lt, crate::front::prim_assoc_const(lt, "MIN").unwrap());
+                let am = self.b.ins().icmp(IntCC::Equal, l, min);
+                let bm = self.b.ins().icmp_imm_s(IntCC::Equal, r, -1);
+                let both = self.b.ins().band(am, bm);
+                self.ovf_panic(both, if rem { 10 } else { 9 }, b.span());
+            }
+        }
+        // 足し算・引き算・掛け算のオーバーフロー
+        if lt.is_int() && self.overflow_checks && matches!(op, Add(_) | Sub(_) | Mul(_)) {
+            let kind = match op {
+                Add(_) => 0,
+                Sub(_) => 1,
+                _ => 2,
+            };
+            if lt.bits() < 128 {
+                let (v, of) = match (kind, s) {
+                    (0, true) => self.b.ins().sadd_overflow(l, r),
+                    (0, false) => self.b.ins().uadd_overflow(l, r),
+                    (1, true) => self.b.ins().ssub_overflow(l, r),
+                    (1, false) => self.b.ins().usub_overflow(l, r),
+                    (_, true) => self.b.ins().smul_overflow(l, r),
+                    (_, false) => self.b.ins().umul_overflow(l, r),
+                };
+                self.ovf_panic(of, kind, b.span());
+                return Ok(v);
+            }
+            // (128 bit: 足し算・引き算は結果の符号と大小で見る。掛け算は検査しない)
+            if kind < 2 {
+                let v = if kind == 0 { self.b.ins().iadd(l, r) } else { self.b.ins().isub(l, r) };
+                let of = if !s {
+                    if kind == 0 {
+                        self.b.ins().icmp(IntCC::UnsignedLessThan, v, l)
+                    } else {
+                        self.b.ins().icmp(IntCC::UnsignedLessThan, l, r)
+                    }
+                } else {
+                    let x = if kind == 0 { self.b.ins().bxor(l, v) } else { self.b.ins().bxor(l, r) };
+                    let y = if kind == 0 { self.b.ins().bxor(r, v) } else { self.b.ins().bxor(l, v) };
+                    let m = self.b.ins().band(x, y);
+                    let z = self.int_const(lt, 0);
+                    self.b.ins().icmp(IntCC::SignedLessThan, m, z)
+                };
+                self.ovf_panic(of, kind, b.span());
+                return Ok(v);
+            }
         }
         let ins = self.b.ins();
         Ok(match op {
@@ -5184,6 +5281,8 @@ impl Cx<'_, '_> {
             "next_power_of_two",
             "isqrt",
             "try_into",
+            "checked_abs",
+            "checked_neg",
             "leading_ones",
             "trailing_ones",
             "saturating_add",
@@ -5271,7 +5370,28 @@ impl Cx<'_, '_> {
                 };
                 (Some(v), t)
             }
-            "abs" => (Some(self.b.ins().iabs(a)), t),
+            "abs" => {
+                // (debug と同じく MIN の abs は panic)
+                if self.overflow_checks && s {
+                    let min = self.int_const(t, crate::front::prim_assoc_const(t, "MIN").unwrap());
+                    let bad = self.b.ins().icmp(IntCC::Equal, a, min);
+                    self.ovf_panic(bad, 6, mc.span());
+                }
+                (Some(self.b.ins().iabs(a)), t)
+            }
+            "checked_abs" | "checked_neg" => {
+                let v = if name == "checked_abs" { self.b.ins().iabs(a) } else { self.b.ins().ineg(a) };
+                let bad = if s {
+                    let min = self.int_const(t, crate::front::prim_assoc_const(t, "MIN").unwrap());
+                    self.b.ins().icmp(IntCC::Equal, a, min)
+                } else if name == "checked_neg" {
+                    // (符号なしは 0 だけ)
+                    self.b.ins().icmp_imm_u(IntCC::NotEqual, a, 0)
+                } else {
+                    self.b.ins().iconst(types::I8, 0)
+                };
+                self.option_if(v, t, bad)?
+            }
             "abs_diff" => {
                 let b = arg(self, 0, t)?;
                 let ins = self.b.ins();
@@ -5347,7 +5467,7 @@ impl Cx<'_, '_> {
             ),
             "pow" | "wrapping_pow" | "checked_pow" | "saturating_pow" | "overflowing_pow" => {
                 // 繰り返し二乗法 (あふれの印も持つ: 掛けた結果と、まだ使う二乗)
-                let checked = name != "pow" && name != "wrapping_pow" && t.bits() < 128;
+                let checked = ((name != "pow" && name != "wrapping_pow") || (name == "pow" && self.overflow_checks)) && t.bits() < 128;
                 let e0 = arg(self, 0, Ty::U32)?;
                 let ofv = self.b.declare_var(types::I8);
                 let f0 = self.b.ins().iconst(types::I8, 0);
@@ -5401,6 +5521,10 @@ impl Cx<'_, '_> {
                 match name.as_str() {
                     "checked_pow" => self.option_if(v, t, of)?,
                     "overflowing_pow" => self.pair_with_bool(v, t, of)?,
+                    "pow" if checked => {
+                        self.ovf_panic(of, 2, mc.span());
+                        (Some(v), t)
+                    }
                     "saturating_pow" => {
                         // 負の底の奇数乗なら MIN、それ以外は MAX
                         let max = self.int_const(t, crate::front::prim_assoc_const(t, "MAX").unwrap());
@@ -6018,6 +6142,35 @@ impl Cx<'_, '_> {
     }
 
     // --- panic / マクロ / `?` ---------------------------------------------
+
+    /// cond が立っていれば、算術の検査の panic (kind: 0 足し算 1 引き算 2 掛け算 3 0 除算 4 0 の剰余
+    /// 5 (未使用) 6 符号反転 7 左シフト 8 右シフト 9 割り算のあふれ 10 剰余のあふれ)
+    fn ovf_panic(&mut self, cond: Value, kind: u8, span: proc_macro2::Span) {
+        let _ = (kind, span);
+        // std のプログラム: 条件つき trap (main が登録したハンドラが panic として 101 で終わらせる)。
+        // 分岐とブロックを増やさないので、検査のコンパイルの重さは命令 1 つ分
+        if self.prog.panic_handler.is_none() {
+            self.b.ins().trapnz(cond, TrapCode::unwrap_user(4));
+            return;
+        }
+        // (`#[panic_handler]` があればそれを呼ぶ)
+        let cont = self.b.create_block();
+        let pb = self.b.create_block();
+        self.b.set_cold_block(pb);
+        self.b.ins().brif(cond, pb, &[], cont, &[]);
+        self.b.switch_to_block(pb);
+        self.panic_call();
+        self.b.switch_to_block(cont);
+    }
+
+    /// 値が整数の定数ならその値 (`x % 4` の 0 除算の検査を省く)
+    fn iconst_of(&self, v: Value) -> Option<i64> {
+        let ir::ValueDef::Result(inst, _) = self.b.func.dfg.value_def(v) else { return None };
+        match self.b.func.dfg.insts[inst] {
+            ir::InstructionData::UnaryImm { opcode: ir::Opcode::Iconst, imm } => Some(imm.bits()),
+            _ => None,
+        }
+    }
 
     /// panic する: `#[panic_handler]` があればそれを呼び (戻らない)、なければ trap する
     fn panic_call(&mut self) -> V {
@@ -10273,4 +10426,9 @@ impl Cx<'_, '_> {
             _ => return None,
         })
     }
+}
+
+/// (`-1` の式全体のアドレス: 型推論はリテラルでなく単項演算の式を記録していることがある)
+fn e_addr_of_unary(u: &syn::ExprUnary) -> usize {
+    u as *const syn::ExprUnary as usize
 }

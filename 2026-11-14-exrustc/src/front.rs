@@ -811,6 +811,10 @@ pub struct Program {
     pub variant_names: FxMap<String, Option<(u32, usize)>>,
     /// 戻り値が本体から決まる `impl Trait` の関数
     pub opaque: Vec<u32>,
+    /// これ以降のアイテムは prelude (オーバーフロー検査をしない)
+    pub prelude_from: u32,
+    /// 算術のオーバーフロー検査をするか (-O でなければ)
+    pub overflow_checks: bool,
     /// ブランケット impl のメソッド (名前 → 関数 id) と、その self 型の型パラメータ名
     pub blanket: FxMap<String, u32>,
     pub blanket_selfs: std::collections::HashSet<String>,
@@ -1552,6 +1556,8 @@ impl Program {
             struct_index: FxMap::default(),
             variant_names: FxMap::default(),
             opaque: vec![],
+            prelude_from: u32::MAX,
+            overflow_checks: false,
             blanket: FxMap::default(),
             blanket_selfs: Default::default(),
             by_last: FxMap::default(),

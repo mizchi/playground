@@ -453,6 +453,8 @@ pub fn select(user_src: &str, user_items: &[SrcItem]) -> String {
 #[derive(Default)]
 pub struct SelectCache {
     map: crate::fxhash::FxMap<crate::cache::Key, (Vec<&'static str>, bool)>,
+    /// 直前の選択でのユーザのアイテムの数 (これより後ろのアイテムは prelude)
+    pub user_items: usize,
 }
 
 pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCache) -> String {
@@ -737,6 +739,11 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     }
     if need.contains("cycle") {
         need.extend(["Cycle", "__exr_clone"]);
+    }
+    // 算術の検査の panic (no_std で panic_handler を持つプログラムは使わない)
+    if !user_src.contains("no_std") {
+        need.extend(["__exr_err_str", "__exr_fflush", "__exr_write", "__exr_exit"]);
+        need.extend(["__exr_rt_init", "__exr_on_trap", "__exr_signal"]);
     }
     if user_src.contains("process::exit") {
         need.insert("process_exit");

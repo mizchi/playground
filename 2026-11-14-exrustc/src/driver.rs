@@ -349,6 +349,8 @@ impl Session {
             }
         }
         let mut prog = Program::build(&items, &sums)?;
+        prog.prelude_from = self.sel.user_items as u32;
+        prog.overflow_checks = !self.opts.opt;
         prog.resolve_opaque(src, &items)?;
         let mut refs = Vec::with_capacity(prog.item_of.len());
         let mut srefs = Vec::with_capacity(prog.item_of.len());
@@ -728,6 +730,7 @@ fn with_prelude<'a>(
     let hoisted = lexer::hoist_nested_items(src).or(flat.clone());
     let src: &str = hoisted.as_deref().unwrap_or(src);
     let mut items = lexer::split(src)?;
+    cache.user_items = items.len();
     let extra = crate::prelude::select_with(src, &items, cache);
     // (デバッグ用: 付けた prelude をソースの後ろに続く行番号つきで stderr に出す)
     if std::env::var_os("EXRUSTC_DUMP_PRELUDE").is_some() {

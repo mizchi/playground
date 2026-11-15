@@ -16,6 +16,10 @@ pub trait Drop {
     fn drop(&mut self);
 }
 pub fn __core_drop<T>(_x: T) {}
+// `std::hint::black_box(x)`: 値をそのまま返す (最適化はしないので何もしなくてよい)
+pub fn __core_black_box<T>(x: T) -> T {
+    x
+}
 
 // 関数ポインタを `dyn Fn` にするときの vtable の中身 (データは関数ポインタを置いた場所)
 fn __exr_fnptr0<R>(f: &fn() -> R) -> R {
@@ -1588,6 +1592,8 @@ pub trait Iterator {
         n
     }
     // (Item = S の制約は型推論の手がかり: `let s: i64 = (1..=10).sum();` の 1 を i64 にする)
+    // (std と同じく、呼び出し側のオーバーフロー検査の設定に従う)
+    #[rustc_inherit_overflow_checks]
     fn sum<S>(self) -> S
     where
         Self: Iterator<Item = S>,
@@ -1599,6 +1605,7 @@ pub trait Iterator {
         }
         acc
     }
+    #[rustc_inherit_overflow_checks]
     fn product<S>(self) -> S
     where
         Self: Iterator<Item = S>,
@@ -4215,6 +4222,9 @@ fn __exr_print<G>(s: &String) {
 unsafe extern "C" {
     #[link_name = "getchar"]
     fn __exr_getchar() -> i32;
+}
+
+unsafe extern "C" {
     #[link_name = "fflush"]
     fn __exr_fflush(f: *mut u8) -> i32;
 }
@@ -4385,6 +4395,36 @@ unsafe extern "C" {
     fn __exr_exit(code: i32);
 }
 
+fn __exr_err_str<G>(s: &str) {
+    unsafe {
+        __exr_write(2, s.as_ptr(), s.len());
+    }
+}
+
+
+unsafe extern "C" {
+    #[link_name = "signal"]
+    fn __exr_signal(sig: i32, h: fn(i32)) -> usize;
+}
+
+// trap (ud2 の SIGILL) で止まったら panic として 101 で終わる (stdout は exit が書き出す)
+fn __exr_on_trap(sig: i32) {
+    let _ = sig;
+    unsafe {
+        __exr_fflush(core::ptr::null_mut());
+    }
+    __exr_err_str::<()>("thread 'main' panicked (exrustc: a check failed: arithmetic overflow, division by zero, index out of bounds, unwrap on None/Err or an explicit panic)\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n");
+    unsafe {
+        __exr_exit(101);
+    }
+}
+
+fn __exr_rt_init<G>() {
+    unsafe {
+        __exr_signal(4, __exr_on_trap);
+    }
+}
+
 // `std::process::exit(code)`: stdio を書き出してから終わる
 pub fn __core_process_exit(code: i32) -> ! {
     unsafe {
@@ -4402,6 +4442,9 @@ fn __exr_eprint<G>(s: &String) {
 unsafe extern "C" {
     #[link_name = "putchar"]
     fn __exr_putchar(c: i32) -> i32;
+}
+
+unsafe extern "C" {
     #[link_name = "write"]
     fn __exr_write(fd: i32, p: *const u8, n: usize) -> isize;
 }
