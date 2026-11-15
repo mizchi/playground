@@ -8128,6 +8128,7 @@ impl Cx<'_, '_> {
         let sty = self.string_ty().or_else(|e| err(span, e))?;
         let sref = Ty::Ref(true, intern(sty));
         let mut owned_string = None;
+        let mut writer: Option<(Value, Ty, u32)> = None;
         let f = match &dest {
             Some(d) => {
                 let (v, t) = self.read_no_move(d)?;
@@ -8146,6 +8147,17 @@ impl Cx<'_, '_> {
                     v
                 } else if t == sty {
                     self.call_named("__exr_formatter", vec![Ty::Unit], &[(v, sref)], span)?.0.unwrap()
+                } else if let Some(id) = match t {
+                    Ty::Struct(sid) => self.prog.method(sid, "write_str"),
+                    _ => None,
+                } {
+                    // `write_str` を持つ書き込み先 (Stdout / BufWriter / fmt::Write を実装した型):
+                    // いったん String に書いてから渡す
+                    writer = Some((v, t, id));
+                    let (s, _) = self.call_named("String::new", vec![], &[], span)?;
+                    let s = s.unwrap();
+                    owned_string = Some(s);
+                    self.call_named("__exr_formatter", vec![Ty::Unit], &[(s, sref)], span)?.0.unwrap()
                 } else {
                     return err(
                         d.span(),
@@ -8277,6 +8289,14 @@ impl Cx<'_, '_> {
                     self.call_named(g, vec![t], &[(v, Ty::Ref(false, intern(t))), (f, fref)], span)?;
                 }
             }
+        }
+        if let Some((wv, wt, id)) = writer {
+            let s = owned_string.unwrap();
+            let str_ref = Ty::Ref(false, intern(Ty::Str));
+            let (sv, _) = self.call_named("String::as_str", vec![], &[(s, Ty::Ref(false, intern(sty)))], span)?;
+            let r = self.call_fn_vals(id, &[(wv, Ty::Ref(true, intern(wt))), (sv.unwrap(), str_ref)], span)?;
+            self.own_temp_at(s, sty);
+            return Ok(r);
         }
         match name {
             "format" => Ok((owned_string, sty)),

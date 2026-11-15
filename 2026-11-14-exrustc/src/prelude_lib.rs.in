@@ -4058,6 +4058,176 @@ fn __exr_print<G>(s: &String) {
     }
 }
 
+// --- 標準入出力 (libc の stdio: print! と同じ putchar のバッファを通す) ---
+
+unsafe extern "C" {
+    #[link_name = "getchar"]
+    fn __exr_getchar() -> i32;
+    #[link_name = "fflush"]
+    fn __exr_fflush(f: *mut u8) -> i32;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IoError {
+    code: i32,
+}
+
+impl Display for IoError {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_fmt_str::<()>(f, "I/O error");
+        Ok(())
+    }
+}
+
+// 1 行 (改行まで。改行も入れる) を buf の後ろに足す。読んだバイト数 (0 なら終わり)
+fn __exr_read_line<G>(buf: &mut String) -> usize {
+    let mut n = 0;
+    loop {
+        let c = unsafe { __exr_getchar() };
+        if c < 0 {
+            break;
+        }
+        buf.vec.push(c as u8);
+        n += 1;
+        if c == 10 {
+            break;
+        }
+    }
+    n
+}
+
+pub struct Stdin {
+    _x: u8,
+}
+
+pub struct StdinLock {
+    _x: u8,
+}
+
+pub fn __core_stdin() -> Stdin {
+    Stdin { _x: 0 }
+}
+
+impl Stdin {
+    pub fn read_line(&self, buf: &mut String) -> Result<usize, IoError> {
+        Ok(__exr_read_line::<()>(buf))
+    }
+    pub fn read_to_string(&mut self, buf: &mut String) -> Result<usize, IoError> {
+        let mut n = 0;
+        loop {
+            let k = __exr_read_line::<()>(buf);
+            if k == 0 {
+                break;
+            }
+            n += k;
+        }
+        Ok(n)
+    }
+    pub fn lock(&self) -> StdinLock {
+        StdinLock { _x: 0 }
+    }
+    pub fn lines(self) -> StdinLines {
+        StdinLines { _x: 0 }
+    }
+}
+
+impl StdinLock {
+    pub fn read_line(&mut self, buf: &mut String) -> Result<usize, IoError> {
+        Ok(__exr_read_line::<()>(buf))
+    }
+    pub fn lines(self) -> StdinLines {
+        StdinLines { _x: 0 }
+    }
+}
+
+pub struct StdinLines {
+    _x: u8,
+}
+
+impl Iterator for StdinLines {
+    type Item = Result<String, IoError>;
+    fn next(&mut self) -> Option<Result<String, IoError>> {
+        let mut s = String::new();
+        if __exr_read_line::<()>(&mut s) == 0 {
+            return None;
+        }
+        // 末尾の \n / \r\n は落とす
+        if s.vec.len > 0 && s.vec[s.vec.len - 1] == 10 {
+            s.vec.pop();
+            if s.vec.len > 0 && s.vec[s.vec.len - 1] == 13 {
+                s.vec.pop();
+            }
+        }
+        Some(Ok(s))
+    }
+}
+
+pub struct Stdout {
+    _x: u8,
+}
+
+pub struct StdoutLock {
+    _x: u8,
+}
+
+pub fn __core_stdout() -> Stdout {
+    Stdout { _x: 0 }
+}
+
+fn __exr_out_str<G>(s: &str) {
+    for &b in s.as_bytes() {
+        unsafe {
+            __exr_putchar(b as i32);
+        }
+    }
+}
+
+impl Stdout {
+    pub fn lock(&self) -> StdoutLock {
+        StdoutLock { _x: 0 }
+    }
+    pub fn write_str(&mut self, s: &str) -> Result<(), IoError> {
+        __exr_out_str::<()>(s);
+        Ok(())
+    }
+    pub fn flush(&mut self) -> Result<(), IoError> {
+        unsafe {
+            __exr_fflush(core::ptr::null_mut());
+        }
+        Ok(())
+    }
+}
+
+impl StdoutLock {
+    pub fn write_str(&mut self, s: &str) -> Result<(), IoError> {
+        __exr_out_str::<()>(s);
+        Ok(())
+    }
+    pub fn flush(&mut self) -> Result<(), IoError> {
+        unsafe {
+            __exr_fflush(core::ptr::null_mut());
+        }
+        Ok(())
+    }
+}
+
+// `BufWriter::new(stdout.lock())`: 書き込みはそのまま中身へ (stdio がバッファする)
+pub struct BufWriter<W> {
+    w: W,
+}
+
+impl<W> BufWriter<W> {
+    pub fn new(w: W) -> BufWriter<W> {
+        BufWriter { w: w }
+    }
+    pub fn write_str(&mut self, s: &str) -> Result<(), IoError> {
+        self.w.write_str(s)
+    }
+    pub fn flush(&mut self) -> Result<(), IoError> {
+        self.w.flush()
+    }
+}
+
 fn __exr_eprint<G>(s: &String) {
     unsafe {
         __exr_write(2, s.vec.ptr as *const u8, s.vec.len);
@@ -6325,6 +6495,13 @@ fn __exr_str_find_fn<F: FnMut(char) -> bool>(s: &str, f: F) -> Option<usize> {
         a += __exr_utf8_len(c);
     }
     None
+}
+
+fn __exr_str_split_at<G>(s: &str, mid: usize) -> (&str, &str) {
+    if mid > s.len() || !__exr_str_is_char_boundary::<()>(s, mid) {
+        panic!("byte index is not a char boundary");
+    }
+    (__exr_sub::<()>(s.as_ptr(), mid), __exr_sub::<()>(unsafe { s.as_ptr().add(mid) }, s.len() - mid))
 }
 
 fn __exr_str_strip_prefix<G>(s: &str, p: &str) -> Option<&str> {

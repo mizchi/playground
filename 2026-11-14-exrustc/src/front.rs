@@ -1729,6 +1729,10 @@ impl Program {
                     ));
                 }
                 let last = name.rsplit("::").next().unwrap().to_string();
+                // (`io::stdin()` / `mem::swap(..)` は prelude の `__core_*`: 名前の後ろで引けるようにする)
+                if let Some(short) = last.strip_prefix("__core_") {
+                    p.by_last.entry(short.to_string()).or_default().push(p.names.len() as u32);
+                }
                 p.by_last
                     .entry(last)
                     .or_default()
@@ -3150,6 +3154,8 @@ impl Program {
             // (書式化の部品と Display / Debug の impl も、codegen が名前を書かずに呼ぶ)
             matches!(s.impl_trait.as_deref(), Some("Drop"))
                 || (s.has_self && self.names[i as usize].ends_with("::eq"))
+                // (`write!(w, ..)` は codegen が w.write_str(..) を呼ぶ)
+                || (s.has_self && self.names[i as usize].ends_with("::write_str"))
                 // (libm などの prelude の extern は codegen が名前を書かずに呼ぶ。宣言だけなのでコードは増えない)
                 || (s.is_extern && self.names[i as usize].starts_with("__exr_"))
                 // (演算子 `a + b` は codegen が `a.add(b)` にする)

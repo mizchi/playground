@@ -20,13 +20,16 @@ for n in "${names[@]}"; do
     echo "SKIP $n (rustc がビルドできない)"
     continue
   fi
-  "$out/$n.r" > "$out/$n.r.out" 2>/dev/null
+  # (tests/probe/NAME.in があれば標準入力に渡す)
+  input=/dev/null
+  [ -f "tests/probe/$n.in" ] && input="tests/probe/$n.in"
+  "$out/$n.r" < "$input" > "$out/$n.r.out" 2>/dev/null
   rc_r=$?
   if ! err=$(target/release/exrustc "$f" -o "$out/$n.e" 2>&1); then
     echo "FAIL $n: $(echo "$err" | head -1 | sed 's/^error: [^ ]*: //')"
     continue
   fi
-  "$out/$n.e" > "$out/$n.e.out" 2>/dev/null
+  "$out/$n.e" < "$input" > "$out/$n.e.out" 2>/dev/null
   rc_e=$?
   if cmp -s "$out/$n.r.out" "$out/$n.e.out" && [ $rc_r -eq $rc_e ]; then
     pass=$((pass + 1))

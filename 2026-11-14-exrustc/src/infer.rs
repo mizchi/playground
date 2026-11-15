@@ -2209,6 +2209,12 @@ impl Inf<'_> {
                         if self.prog.structs[self.prog.base_of(b) as usize].name == "String" {
                             let h = if n == "split" && args.first().is_some_and(|&a| self.resolve(a) != Some(Ty::Char)) {
                                 "split_str".to_string()
+                            } else if n == "split_whitespace" {
+                                "split_ws".to_string()
+                            } else if matches!(mc.args.first(), Some(Expr::Closure(_)))
+                                && self.prog.index.contains_key(&format!("__exr_str_{n}_fn"))
+                            {
+                                format!("{n}_fn")
                             } else {
                                 n.clone()
                             };

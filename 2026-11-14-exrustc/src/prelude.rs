@@ -420,7 +420,8 @@ fn owner(h: usize) -> Option<&'static str> {
                         | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" | "Rev" | "StepBy" | "Peekable"
                         | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks"
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
-                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "RangeFrom" | "TryFromIntError" => Some(w),
+                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "RangeFrom" | "TryFromIntError" | "Stdin" | "StdinLock" | "StdinLines" | "Stdout" | "StdoutLock"
+                        | "BufWriter" | "IoError" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,
@@ -432,16 +433,10 @@ fn owner(h: usize) -> Option<&'static str> {
 
 /// `fn x` / `struct X` / `enum X` の名前 (`__core_x` は x として引かれる)
 fn defined_name(src: &str, it: &SrcItem) -> Option<String> {
-    let ids: Vec<&str> = it
-        .idents
-        .iter()
-        .map(|&(a, b)| &src[a as usize..b as usize])
-        .collect();
-    let k = ids
-        .iter()
-        .position(|w| matches!(*w, "fn" | "struct" | "enum"))?;
-    ids.get(k + 1)
-        .map(|s| s.strip_prefix("__core_").unwrap_or(s).to_string())
+    // (起動時に prelude の全アイテムで呼ぶので、Vec を作らずに辿る)
+    let mut ids = it.idents.iter().map(|&(a, b)| &src[a as usize..b as usize]);
+    ids.find(|w| matches!(*w, "fn" | "struct" | "enum"))?;
+    ids.next().map(|s| s.strip_prefix("__core_").unwrap_or(s).to_string())
 }
 
 /// ユーザのコードから (識別子を辿って) 使われうる prelude のアイテムだけを、ソースとして返す。
@@ -718,6 +713,13 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     }
     if user_src.contains(".or_default()") {
         need.extend(["or_default", "__exr_default"]);
+    }
+    // 標準入出力
+    if user_src.contains("stdin") {
+        need.extend(["Stdin", "StdinLock", "StdinLines", "__core_stdin", "IoError", "Result", "Option", "next"]);
+    }
+    if user_src.contains("stdout") || need.contains("BufWriter") {
+        need.extend(["Stdout", "StdoutLock", "__core_stdout", "IoError", "Result", "write_str", "flush", "as_str"]);
     }
     if user_src.contains("try_into") {
         need.extend(["TryFromIntError", "Result"]);
