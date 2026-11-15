@@ -2245,6 +2245,20 @@ impl<T: Copy + Ord> Iterator for Range<T> {
     }
 }
 
+// `(1..)`: 終わりのない範囲
+pub struct RangeFrom<T> {
+    pub start: T,
+}
+
+impl<T: Copy + Ord> Iterator for RangeFrom<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        let v = self.start;
+        self.start = v + 1;
+        Some(v)
+    }
+}
+
 impl<T: Copy + Ord> Range<T> {
     pub fn next_back(&mut self) -> Option<T> {
         if self.start < self.end {
@@ -3330,6 +3344,109 @@ fn __exr_float_digits<G>(x: f64, is32: bool, out: &mut Vec<u8>) -> i32 {
 }
 
 // `{}` / `{:?}` / `{:.N}` (Rust と同じ: Display は指数を使わず、Debug は 1e16 以上と 1e-5 未満を指数にし、整数なら `.0` を付ける)
+// `{:e}` / `{:E}`: 仮数の桁 (最短か、精度があれば prec + 1 桁に偶数丸め) と指数
+fn __exr_fmt_exp<G>(f: &mut Formatter, x: f64, is32: bool, upper: bool) {
+    if x != x {
+        __exr_pad::<()>(f, "NaN", 2);
+        return;
+    }
+    let neg = x.is_sign_negative();
+    let a = if neg { -x } else { x };
+    let mut s = String::new();
+    if neg {
+        s.push('-');
+    } else if f.plus {
+        s.push('+');
+    }
+    if a == 1.0 / 0.0 {
+        s.push_str("inf");
+        __exr_pad::<()>(f, s.as_str(), 2);
+        return;
+    }
+    let mut d: Vec<u8> = Vec::new();
+    let mut dp = 1;
+    if a == 0.0 {
+        d.push(b'0');
+    } else if f.has_prec {
+        dp = __exr_exact_digits::<()>(a, &mut d);
+        __exr_round_digits::<()>(&mut d, f.prec + 1, &mut dp, false);
+    } else {
+        dp = __exr_float_digits::<()>(a, is32, &mut d);
+    }
+    // (末尾の 0 は精度がなければ落とす)
+    if !f.has_prec {
+        while d.len > 1 && d[d.len - 1] == b'0' {
+            d.pop();
+        }
+    }
+    __exr_exp_tail::<()>(&mut s, &d, dp - 1, if f.has_prec { f.prec + 1 } else { d.len }, upper);
+    __exr_pad::<()>(f, s.as_str(), 2);
+}
+
+fn __exr_fmt_exp_int<G>(f: &mut Formatter, mag: u128, neg: bool, upper: bool) {
+    let mut s = String::new();
+    if neg {
+        s.push('-');
+    } else if f.plus {
+        s.push('+');
+    }
+    let mut d: Vec<u8> = Vec::new();
+    let mut v = mag;
+    loop {
+        d.push(b'0' + __exr_udiv128::<()>(v, 10, true) as u8);
+        v = __exr_udiv128::<()>(v, 10, false);
+        if v == 0 {
+            break;
+        }
+    }
+    d.reverse();
+    let e = d.len as i32 - 1;
+    let mut dp = d.len as i32;
+    if f.has_prec {
+        __exr_round_digits::<()>(&mut d, f.prec + 1, &mut dp, false);
+    }
+    if !f.has_prec {
+        while d.len > 1 && d[d.len - 1] == b'0' {
+            d.pop();
+        }
+    }
+    let _ = e;
+    __exr_exp_tail::<()>(&mut s, &d, dp - 1, if f.has_prec { f.prec + 1 } else { d.len }, upper);
+    __exr_pad::<()>(f, s.as_str(), 2);
+}
+
+// 仮数 d (n 桁まで 0 で埋める) と指数 e を `d.ddde-5` の形で書く
+fn __exr_exp_tail<G>(s: &mut String, d: &Vec<u8>, e: i32, n: usize, upper: bool) {
+    s.push(d[0] as char);
+    if n > 1 {
+        s.push('.');
+        let mut i = 1;
+        while i < n {
+            s.push(if i < d.len { d[i] as char } else { '0' });
+            i += 1;
+        }
+    }
+    s.push(if upper { 'E' } else { 'e' });
+    if e < 0 {
+        s.push('-');
+    }
+    let mut v = if e < 0 { -e } else { e };
+    let mut t = [0u8; 8];
+    let mut k = 0;
+    loop {
+        t[k] = b'0' + (v % 10) as u8;
+        k += 1;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    while k > 0 {
+        k -= 1;
+        s.push(t[k] as char);
+    }
+}
+
 fn __exr_fmt_float<G>(f: &mut Formatter, x: f64, is32: bool, debug: bool) {
     let mut s = String::new();
     let neg = x.is_sign_negative();
@@ -6609,6 +6726,51 @@ fn __exr_str_parse<T: __FromStr>(s: &str) -> Result<T, T::Err> {
 }
 
 // char のメソッド (Unicode の表は持たないので、ASCII と Latin-1 / ギリシャ文字 / キリル文字 / 仮名・漢字の範囲で近似する)
+// `char::is_ascii_digit` のような関数の値 (std では &self を取る)
+fn __exr_charfn_is_ascii_digit<G>(c: &char) -> bool {
+    (*c).is_ascii_digit()
+}
+
+fn __exr_charfn_is_ascii_alphabetic<G>(c: &char) -> bool {
+    (*c).is_ascii_alphabetic()
+}
+
+fn __exr_charfn_is_ascii_alphanumeric<G>(c: &char) -> bool {
+    (*c).is_ascii_alphanumeric()
+}
+
+fn __exr_charfn_is_ascii_uppercase<G>(c: &char) -> bool {
+    (*c).is_ascii_uppercase()
+}
+
+fn __exr_charfn_is_ascii_lowercase<G>(c: &char) -> bool {
+    (*c).is_ascii_lowercase()
+}
+
+fn __exr_charfn_is_ascii_whitespace<G>(c: &char) -> bool {
+    (*c).is_ascii_whitespace()
+}
+
+fn __exr_charfn_is_ascii_punctuation<G>(c: &char) -> bool {
+    (*c).is_ascii_punctuation()
+}
+
+fn __exr_charfn_is_ascii_hexdigit<G>(c: &char) -> bool {
+    (*c).is_ascii_hexdigit()
+}
+
+fn __exr_charfn_is_ascii<G>(c: &char) -> bool {
+    (*c).is_ascii()
+}
+
+fn __exr_charfn_to_ascii_uppercase<G>(c: &char) -> char {
+    (*c).to_ascii_uppercase()
+}
+
+fn __exr_charfn_to_ascii_lowercase<G>(c: &char) -> char {
+    (*c).to_ascii_lowercase()
+}
+
 fn __exr_char_is_alphabetic<G>(c: char) -> bool {
     let u = c as u32;
     if u < 0x80 {

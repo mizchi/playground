@@ -286,6 +286,42 @@ fn impls_cmp_trait(src: &str) -> bool {
     false
 }
 
+/// `(1..)` のような終わりのない範囲を値として使っていそうか (`..)` があるか)
+fn open_range(src: &str) -> bool {
+    // `(1..)` / `(start..)`: `(` と `..)` の間が識別子か数字だけ
+    let b = src.as_bytes();
+    src.match_indices("..)").any(|(i, _)| {
+        let mut k = i;
+        while k > 0 && (b[k - 1].is_ascii_alphanumeric() || b[k - 1] == b'_') {
+            k -= 1;
+        }
+        k < i && k > 0 && b[k - 1] == b'('
+    })
+}
+
+/// 書式に `{:e}` / `{:.2E}` のような指数表記の指定があるか
+fn fmt_uses_exp(src: &str) -> bool {
+    let b = src.as_bytes();
+    let mut i = 0;
+    while let Some(k) = src[i..].find('{') {
+        let st = i + k + 1;
+        let mut j = st;
+        while j < b.len() && b[j] != b'}' && b[j] != b'{' && b[j] != b'\n' && j - st < 24 {
+            j += 1;
+        }
+        if j < b.len() && b[j] == b'}' && j > st && matches!(b[j - 1], b'e' | b'E') {
+            if let Some(c) = src[st..j].find(':') {
+                let sp = &src[st + c + 1..j - 1];
+                if sp.bytes().all(|x| x.is_ascii_digit() || matches!(x, b'.' | b'+' | b'#' | b'<' | b'>' | b'^' | b'$')) {
+                    return true;
+                }
+            }
+        }
+        i = st;
+    }
+    false
+}
+
 /// `vec![x; n]` の x がリテラルでないものがあるか
 fn vec_repeat_nonliteral(src: &str) -> bool {
     let b = src.as_bytes();
@@ -384,7 +420,7 @@ fn owner(h: usize) -> Option<&'static str> {
                         | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" | "Rev" | "StepBy" | "Peekable"
                         | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks"
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
-                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" => Some(w),
+                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "RangeFrom" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,
@@ -648,6 +684,25 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     // Rc は deref の先のメソッドを呼ぶ
     if need.contains("Rc") {
         need.insert("deref");
+    }
+    // `char::is_ascii_digit` を関数の値として
+    if user_src.contains("char::is_ascii") || user_src.contains("char::to_ascii") {
+        for (_, name, _) in items() {
+            if let Some(n) = name.as_deref() {
+                if let Some(m) = n.strip_prefix("__exr_charfn_") {
+                    if user_src.contains(&format!("char::{m}")) {
+                        need.insert(n);
+                    }
+                }
+            }
+        }
+    }
+    if open_range(user_src) {
+        need.insert("RangeFrom");
+    }
+    // `{:e}` / `{:.3E}`: 指数表記
+    if fmt_uses_exp(user_src) {
+        need.extend(["__exr_fmt_exp", "__exr_fmt_exp_int", "__exr_udiv128", "__exr_fmt_float"]);
     }
     // `x.into()` は期待型の from を呼ぶ
     if user_src.contains(".into()") {

@@ -377,6 +377,9 @@ bench/regress.sh
   - `String::from_utf8` / `std::str::from_utf8`（検査と `Utf8Error` の表示は std と同じ）、`trim_matches` 系（パターンは &str / char / クロージャ）、`split` / `lines` / `split_whitespace` の `rev()`
   - `Rc`（`clone` / `strong_count` / `ptr_eq`。弱参照はない）、`RefCell`（`borrow` / `borrow_mut` は参照を返すだけで、借用の検査はしない）、`Cell`
   - メソッドが見つからないときの `deref` 先での検索（`rc.borrow_mut()`）。`struct Node { children: Vec<Node> }` や `Vec<Rc<RefCell<Node>>>` のような再帰型
+  - 書式の `{:e}` / `{:E}`（精度つきも）、幅・精度を引数から取る `{:w$}` / `{:.p$}` / `{:.*}`、`{:12e}` のような幅と型の組み合わせ
+  - `println!` などの書式マクロの引数の中の型推論（parse し直したノードの型はソース上の位置で codegen に渡す）
+  - 終わりのない範囲 `(1..)`、`char::is_ascii_digit` などを関数の値として渡すこと
   - `const fn` を const の初期化式から呼ぶこと、範囲パターンの端に const（`i32::MIN..=-1`）、`?Sized` 境界
 - panic：
   - `#[panic_handler]` があればそれを呼ぶ（範囲外アクセス・`unwrap`・`assert!`・`panic!` など）
@@ -418,7 +421,7 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
 - `String + &str` / `Vec` のスライスメソッドの一部（prelude に書いたもの以外。`&v` を `&[T]` にすれば組み込みのスライスメソッドは使える）
 - イテレータの制限：`rev`（値として。`for` の中なら可）、`DoubleEndedIterator` / `ExactSizeIterator`、`peekable` / `flat_map` / `step_by`、`collect` は `Vec<T>` / `String` / `HashMap<K, V>` だけ
 - 関連型の制限：trait の関連型は `Self::X` / `T::X` / `<T as Tr>::X` の形だけ。関連型に境界（`type Item: Copy;`）は付けられない
-- 書式化の制限：`{:e}`、`{:p}`、`impl Debug for S` の手書きで `f.debug_struct(..)` などのビルダー、`Formatter` のフラグを読むメソッド（`f.alternate()` など）、`format_args!`
+- 書式化の制限：`{:p}`、`impl Debug for S` の手書きで `f.debug_struct(..)` などのビルダー、`Formatter` のフラグを読むメソッド（`f.alternate()` など）、`format_args!`
 - 比較の制限：`partial_cmp` は浮動小数点の NaN 以外では常に `Some`。`Ord::cmp(&a, &b)` の UFCS。BinaryHeap の `drain` / `retain` / `peek_mut`。`extend` は Vec / BinaryHeap だけ（HashMap / String の `extend`、一般の `IntoIterator` 境界はない）
 - HashMap の制限：`HashSet`、`BTreeMap`、`HashMap::from([..])`、`retain` / `drain`、キーに `impl Hash` を手書きすること
 - Drop の制限
@@ -431,10 +434,10 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
   - Fn / FnMut / FnOnce を区別しない（`FnMut` のクロージャを `&dyn Fn` にしてもエラーにならない）
   - ローカル変数をキャプチャするクロージャを `impl Fn` で返すこと（引数のキャプチャだけ対応）
 - `dyn` の制限：`Self` やジェネリクスを使うメソッド（object safe でないもの）は dyn 経由で呼べない。`dyn A + B` は不可
-- 浮動小数点の制限：`{:e}` 書式
 - 別ファイルのモジュール（`mod x;`）。1 ファイルの中のモジュールは平らにするので、別のモジュールに同じ名前のアイテムがあるとぶつかる
 - `macro_rules!` の制限：衛生 (hygiene) はない（展開はテキストの置き換え）。`$x:expr` などは次の区切りまでのトークン列として取る近似
 - イテレータのアダプタ（`for` の中で直接使う形以外）
+- `-> impl Iterator<Item = T>` のような、クロージャ以外の `impl Trait` の戻り値（要約の段階で具体型が決まらないため）
 - 参照の Vec を `iter().flatten()` すること（`into_iter().flatten()` は可）、型パラメータのある trait（`From<T>` は名前だけ持ち、同じ型への `From` の impl は 1 つまで）
 - `impl Trait for [T; N]` のような、プリミティブ以外の組み込み型への impl
 

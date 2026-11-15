@@ -303,6 +303,7 @@ impl Worker {
                 root,
                 closure_ix,
                 closure_hint: None,
+                in_fmt_args: 0,
                 owned: vec![],
                 temps: vec![],
                 owned_binds: 0,
@@ -510,6 +511,8 @@ struct Cx<'a, 'p> {
     closure_ix: HashMap<(usize, usize), u32>,
     /// 次に作るクロージャの引数・戻り値の型の手がかり (呼び先の `F: Fn(A) -> B` から)
     closure_hint: Option<(Vec<Ty>, Option<Ty>)>,
+    /// 書式マクロの引数を評価している深さ (型推論の記録をソース上の位置で引く)
+    in_fmt_args: u32,
     /// drop の責任を持つローカル変数 (スコープの深さ順) と、文の終わりで drop する一時値
     owned: Vec<Owned>,
     temps: Vec<Owned>,
@@ -995,6 +998,12 @@ impl Cx<'_, '_> {
         // 型推論が記録した型があればそれ (呼び出し・メソッド呼び出し・構築など)
         if let Some(&t) = self.lets.get(&(e as *const Expr as usize)) {
             return Some(t);
+        }
+        // (書式マクロの引数の中は位置で記録されている)
+        if self.in_fmt_args > 0 {
+            if let Some(&t) = self.lets.get(&crate::infer::pos_key(e)) {
+                return Some(t);
+            }
         }
         self.peek_syn(e)
     }
@@ -1506,7 +1515,13 @@ impl Cx<'_, '_> {
                 Expr::Lit(_) | Expr::Struct(_) | Expr::Call(_) | Expr::Path(_)
             ) =>
             {
-                self.lets.get(&(e as *const Expr as usize)).copied()
+                self.lets.get(&(e as *const Expr as usize)).copied().or_else(|| {
+                    if self.in_fmt_args > 0 {
+                        self.lets.get(&crate::infer::pos_key(e)).copied()
+                    } else {
+                        None
+                    }
+                })
             }
             None => None,
         };
@@ -2508,9 +2523,27 @@ impl Cx<'_, '_> {
     /// 値としての `a..b` / `a..=b`: prelude の Range / RangeInclusive
     fn range_value(&mut self, rg: &syn::ExprRange, expected: Option<Ty>) -> R<V> {
         let incl = matches!(rg.limits, syn::RangeLimits::Closed(_));
+        // `(1..)`: 終わりのない範囲
+        if let (Some(lo), None, false) = (&rg.start, &rg.end, incl) {
+            let Some(&base) = self.prog.struct_index.get("RangeFrom") else {
+                return err(rg.span(), "ranges can only be used directly in `for` loops here");
+            };
+            let et = match expected {
+                Some(Ty::Struct(sid)) if self.prog.base_of(sid) == base => self.prog.structs[sid as usize].args.first().copied(),
+                _ => None,
+            }
+            .or_else(|| self.peek(lo));
+            let (lv, lt) = self.expr(lo, et)?;
+            let sid = self.prog.instantiate(base, vec![lt]).or_else(|e| err(rg.span(), e))?;
+            let st = Ty::Struct(sid);
+            let a = self.temp(st);
+            let (_, ft, off) = self.prog.structs[sid as usize].fields[0];
+            self.write(Place::Mem(a, off as i32, ft), lv);
+            return Ok((Some(a), st));
+        }
         let name = if incl { "RangeInclusive" } else { "Range" };
         let (Some(lo), Some(hi)) = (&rg.start, &rg.end) else {
-            return err(rg.span(), "only `a..b` / `a..=b` ranges can be used as values");
+            return err(rg.span(), "only `a..b` / `a..=b` / `a..` ranges can be used as values");
         };
         let Some(&base) = self.prog.struct_index.get(name) else {
             return err(rg.span(), "ranges can only be used directly in `for` loops here");
@@ -7638,6 +7671,8 @@ struct FmtSpec {
     width: usize,
     /// `{:w$}` / `{:1$}`: 幅を引数から取る (引数の番号)
     width_arg: Option<usize>,
+    /// `{:.p$}` / `{:.1$}` / `{:.*}`: 精度を引数から取る
+    prec_arg: Option<usize>,
     fill: char,
     align: u8,
     flags: u8,
@@ -7699,7 +7734,8 @@ fn parse_fmt(
             Some((a, s)) => (a.trim().to_string(), s.to_string()),
             None => (inner.trim().to_string(), String::new()),
         };
-        let arg = if a.is_empty() {
+        let implicit = a.is_empty();
+        let mut arg = if a.is_empty() {
             next += 1;
             next - 1
         } else if let Ok(k) = a.parse::<usize>() {
@@ -7764,20 +7800,61 @@ fn parse_fmt(
                     }
                 },
             });
-        } else if let Ok(w) = wtok.parse::<usize>() {
-            spec.width = w;
         } else {
-            // 数字でなければ型の指定 (`x` / `b` など)
+            // 先頭の数字だけが幅で、残りは型の指定 (`12e` / `x` / `b` など)
             j = ws;
+            let mut w = 0;
+            let mut any = false;
+            while let Some(d) = sc.get(j).and_then(|c| c.to_digit(10)) {
+                w = w * 10 + d as usize;
+                j += 1;
+                any = true;
+            }
+            if any {
+                spec.width = w;
+            }
         }
         if sc.get(j) == Some(&'.') {
             j += 1;
-            let mut p = 0;
-            while let Some(d) = sc.get(j).and_then(|c| c.to_digit(10)) {
-                p = p * 10 + d as usize;
+            let ps = j;
+            while sc.get(j).is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_') {
                 j += 1;
             }
-            spec.prec = Some(p);
+            let ptok: String = sc[ps..j].iter().collect();
+            if sc.get(ps) == Some(&'*') {
+                // `.*`: 次の位置引数が精度で、その次が値
+                j = ps + 1;
+                spec.prec = Some(0);
+                if implicit {
+                    spec.prec_arg = Some(arg);
+                    arg = next;
+                } else {
+                    spec.prec_arg = Some(next);
+                }
+                next += 1;
+            } else if sc.get(j) == Some(&'$') {
+                j += 1;
+                spec.prec = Some(0);
+                spec.prec_arg = Some(match ptok.parse::<usize>() {
+                    Ok(k) => k,
+                    Err(_) => match named.iter().position(|n| *n == ptok) {
+                        Some(k) => n_pos + k,
+                        None => {
+                            named.push(ptok);
+                            n_pos + named.len() - 1
+                        }
+                    },
+                });
+            } else {
+                // 数字だけ取り、残りは型の指定
+                j = ps;
+                let mut p = 0;
+                while let Some(d) = sc.get(j).and_then(|c| c.to_digit(10)) {
+                    p = p * 10 + d as usize;
+                    j += 1;
+                }
+                spec.prec = Some(p);
+            }
         }
         let ty: String = sc[j..].iter().collect();
         let (debug, radix) = match ty.as_str() {
@@ -7789,6 +7866,8 @@ fn parse_fmt(
             "o" => (false, 4),
             "x?" => (true, 1),
             "X?" => (true, 2),
+            "e" => (false, 5),
+            "E" => (false, 6),
             t => return err(span, format!("unsupported format specifier `{t}`")),
         };
         spec.radix = radix;
@@ -7939,48 +8018,18 @@ impl Cx<'_, '_> {
         // 幅に使う引数 (`{:w$}`) は usize
         let width_args: Vec<usize> = pieces
             .iter()
-            .filter_map(|p| match p {
-                FmtPiece::Arg { spec, .. } => spec.width_arg,
-                _ => None,
+            .flat_map(|p| match p {
+                FmtPiece::Arg { spec, .. } => vec![spec.width_arg, spec.prec_arg],
+                _ => vec![],
             })
+            .flatten()
             .collect();
-        for (ai, a) in all.iter().enumerate() {
-            let (v, t) = if is_place_expr(a) {
-                match self.place(a)? {
-                    Place::Mem(p, o, t) => (self.addr_plus(p, o), t),
-                    Place::Var(var, t) => {
-                        let x = self.b.use_var(var);
-                        let ss = self.slot(t);
-                        self.b.ins().stack_store(PTR, x, ss, 0);
-                        (self.b.ins().stack_addr(PTR, ss, 0), t)
-                    }
-                    Place::Zst(t) => (self.b.ins().iconst(PTR, 0), t),
-                }
-            } else {
-                let exp = width_args.contains(&ai).then_some(Ty::Usize);
-                let (v, t) = self.expr(a, exp)?;
-                if t == Ty::Never {
-                    return Ok((None, Ty::Never));
-                }
-                let v = match v {
-                    Some(v) if t.is_agg() => {
-                        self.own_temp_at(v, t);
-                        v
-                    }
-                    Some(v) => {
-                        let ss = self.slot(t);
-                        self.b.ins().stack_store(PTR, v, ss, 0);
-                        let a = self.b.ins().stack_addr(PTR, ss, 0);
-                        if self.needs_drop(t) {
-                            self.own_temp_at(a, t);
-                        }
-                        a
-                    }
-                    None => self.b.ins().iconst(PTR, 0),
-                };
-                (v, t)
-            };
-            vals.push((v, t, a.span()));
+        self.in_fmt_args += 1;
+        let r = self.fmt_eval_args(&all, &width_args, &mut vals);
+        self.in_fmt_args -= 1;
+        r?;
+        if vals.len() < all.len() {
+            return Ok((None, Ty::Never));
         }
         let mut cur = FmtSpec {
             fill: ' ',
@@ -8007,7 +8056,7 @@ impl Cx<'_, '_> {
                             ),
                         );
                     }
-                    if *spec != cur || spec.width_arg.is_some() {
+                    if *spec != cur || spec.width_arg.is_some() || spec.prec_arg.is_some() {
                         let c = |this: &mut Self, ty: ir::Type, x: i64| this.b.ins().iconst(ty, x);
                         let w = match spec.width_arg {
                             Some(k) => {
@@ -8022,7 +8071,16 @@ impl Cx<'_, '_> {
                         let fill = c(self, types::I32, spec.fill as i64);
                         let al = c(self, types::I8, spec.align as i64);
                         let fl = c(self, types::I8, spec.flags as i64);
-                        let pr = c(self, types::I64, spec.prec.unwrap_or(0) as i64);
+                        let pr = match spec.prec_arg {
+                            Some(k) => {
+                                let Some(&(pv, pt, psp)) = vals.get(k) else {
+                                    return err(span, "missing precision argument");
+                                };
+                                self.same(psp, pt, Ty::Usize)?;
+                                self.b.ins().load(types::I64, mf(), pv, 0)
+                            }
+                            None => c(self, types::I64, spec.prec.unwrap_or(0) as i64),
+                        };
                         let hp = c(self, types::I8, spec.prec.is_some() as i64);
                         let rx = c(self, types::I8, spec.radix as i64);
                         self.call_named(
@@ -8042,6 +8100,32 @@ impl Cx<'_, '_> {
                         )?;
                         cur = spec.clone();
                     }
+                    // `{:e}` / `{:E}`: 数値を指数表記で (prelude の __exr_fmt_exp)
+                    if spec.radix >= 5 && (t.is_int() || t.is_float()) {
+                        let ct = clif_ty(t).unwrap();
+                        let x = self.b.ins().load(ct, mf(), v, 0);
+                        let up = self.b.ins().iconst(types::I8, (spec.radix == 6) as i64);
+                        if t.is_float() {
+                            let x = if t == Ty::F32 { self.b.ins().fpromote(types::F64, x) } else { x };
+                            let is32 = self.b.ins().iconst(types::I8, (t == Ty::F32) as i64);
+                            self.call_named("__exr_fmt_exp", vec![Ty::Unit], &[(f, fref), (x, Ty::F64), (is32, Ty::Bool), (up, Ty::Bool)], span)?;
+                        } else {
+                            // (絶対値を u128 にして渡す)
+                            let w = if ct == types::I128 {
+                                x
+                            } else if t.signed() {
+                                self.b.ins().sextend(types::I128, x)
+                            } else {
+                                self.b.ins().uextend(types::I128, x)
+                            };
+                            let z = self.int_const(Ty::I128, 0);
+                            let neg = if t.signed() { self.b.ins().icmp(IntCC::SignedLessThan, w, z) } else { self.b.ins().iconst(types::I8, 0) };
+                            let nw = self.b.ins().ineg(w);
+                            let mag = self.b.ins().select(neg, nw, w);
+                            self.call_named("__exr_fmt_exp_int", vec![Ty::Unit], &[(f, fref), (mag, Ty::U128), (neg, Ty::Bool), (up, Ty::Bool)], span)?;
+                        }
+                        continue;
+                    }
                     let g = if *debug { "__exr_debug" } else { "__exr_display" };
                     self.call_named(g, vec![t], &[(v, Ty::Ref(false, intern(t))), (f, fref)], span)?;
                 }
@@ -8058,6 +8142,54 @@ impl Cx<'_, '_> {
             }
             _ => self.call_named("__exr_fmt_ok", vec![Ty::Unit], &[], span),
         }
+    }
+
+    /// 書式マクロの引数を 1 回ずつ評価してアドレスにする (発散したらそこで止める: vals が足りなくなる)
+    fn fmt_eval_args(
+        &mut self,
+        all: &[Expr],
+        width_args: &[usize],
+        vals: &mut Vec<(Value, Ty, proc_macro2::Span)>,
+    ) -> R<()> {
+        for (ai, a) in all.iter().enumerate() {
+            let (v, t) = if is_place_expr(a) {
+                match self.place(a)? {
+                    Place::Mem(p, o, t) => (self.addr_plus(p, o), t),
+                    Place::Var(var, t) => {
+                        let x = self.b.use_var(var);
+                        let ss = self.slot(t);
+                        self.b.ins().stack_store(PTR, x, ss, 0);
+                        (self.b.ins().stack_addr(PTR, ss, 0), t)
+                    }
+                    Place::Zst(t) => (self.b.ins().iconst(PTR, 0), t),
+                }
+            } else {
+                let exp = width_args.contains(&ai).then_some(Ty::Usize);
+                let (v, t) = self.expr(a, exp)?;
+                if t == Ty::Never {
+                    return Ok(());
+                }
+                let v = match v {
+                    Some(v) if t.is_agg() => {
+                        self.own_temp_at(v, t);
+                        v
+                    }
+                    Some(v) => {
+                        let ss = self.slot(t);
+                        self.b.ins().stack_store(PTR, v, ss, 0);
+                        let a = self.b.ins().stack_addr(PTR, ss, 0);
+                        if self.needs_drop(t) {
+                            self.own_temp_at(a, t);
+                        }
+                        a
+                    }
+                    None => self.b.ins().iconst(PTR, 0),
+                };
+                (v, t)
+            };
+            vals.push((v, t, a.span()));
+        }
+        Ok(())
     }
 
     /// `x.to_string()` (Display を実装した型): `format!("{}", x)` と同じ

@@ -2852,7 +2852,11 @@ impl Program {
                         "from" => "from_u8".to_string(),
                         _ => m,
                     };
-                    return self.index.get(&format!("__exr_char_{m}")).copied();
+                    return self
+                        .index
+                        .get(&format!("__exr_char_{m}"))
+                        .or_else(|| self.index.get(&format!("__exr_charfn_{m}")))
+                        .copied();
                 }
                 let ty = if ty == "Self" {
                     self.structs[self.base_of(self_sid?) as usize].name.clone()

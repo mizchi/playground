@@ -131,6 +131,8 @@ struct Inf<'p> {
     assoc_later: Vec<(u32, String, u32)>,
     /// 0 でなければ式の型を記録しない (一時的に parse したノードの推論中)
     no_record: u32,
+    /// 0 でなければ式の型をソース上の位置で記録する (マクロの引数: codegen も同じ位置のノードを parse し直す)
+    pos_record: u32,
     /// `it.collect()` の (受け手, 結果): 最後に結果が Vec<T> / HashMap<K, V> なら Item と単一化する
     collects: Vec<(u32, u32)>,
     /// 次の apply_recv に渡すメソッド呼び出しの turbofish
@@ -173,6 +175,7 @@ pub fn infer_full(
         brk: vec![],
         assoc_later: vec![],
         no_record: 0,
+        pos_record: 0,
         collects: vec![],
         turbofish: None,
     };
@@ -849,6 +852,67 @@ impl Inf<'_> {
         self.known_g(ret, &mut pv)
     }
 
+    /// 書式マクロの引数 (`println!("{}", (1..4).map(..))`) も推論する。parse し直したノードは捨てるので、
+    /// 型はソース上の位置で記録する (codegen も同じ位置のノードを parse して引く)
+    fn fmt_args(&mut self, m: &syn::Macro) {
+        use syn::parse::Parser;
+        let Ok(args) = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated.parse2(m.tokens.clone()) else {
+            return;
+        };
+        let xs: Vec<Expr> = args
+            .into_iter()
+            .filter(|a| !matches!(a, Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(_), .. })))
+            .map(|a| match a {
+                // 名前つき引数 `w = expr`
+                Expr::Assign(asg) => *asg.right,
+                a => a,
+            })
+            .collect();
+        if xs.is_empty() {
+            return;
+        }
+        self.no_record += 1;
+        self.pos_record += 1;
+        let ki = self.keep.len();
+        self.keep.push(xs);
+        for i in 0..self.keep[ki].len() {
+            let x: *const Expr = &self.keep[ki][i];
+            self.expr(unsafe { &*x });
+        }
+        self.pos_record -= 1;
+        self.no_record -= 1;
+    }
+
+    /// 書式文字列の幅・精度に名前で使う変数 (`{:w$}` / `{:.p$}`) は usize
+    fn fmt_width_vars(&mut self, m: &syn::Macro) {
+        self.fmt_args(m);
+        let Some(lit) = m.tokens.clone().into_iter().find_map(|t| match t {
+            proc_macro2::TokenTree::Literal(l) => syn::parse_str::<syn::LitStr>(&l.to_string()).ok(),
+            _ => None,
+        }) else {
+            return;
+        };
+        let s = lit.value();
+        if !s.contains('$') {
+            return;
+        }
+        let b = s.as_bytes();
+        for (i, _) in s.match_indices('$') {
+            let mut k = i;
+            while k > 0 && (b[k - 1].is_ascii_alphanumeric() || b[k - 1] == b'_') {
+                k -= 1;
+            }
+            let name = &s[k..i];
+            if name.is_empty() || name.as_bytes()[0].is_ascii_digit() {
+                continue;
+            }
+            if let Some(v) = self.lookup(name) {
+                let u = self.known(Ty::Usize);
+                self.unify(v, u);
+            }
+        }
+    }
+
     /// 書かれた型の型変数 (`Vec<_>` の `_` は新しい型変数)
     fn syn_ty_var(&mut self, t: &syn::Type) -> u32 {
         if let Ok(k) = self.prog.parse_ty(t, self.env) {
@@ -1247,7 +1311,9 @@ impl Inf<'_> {
                         let k = self.known(t);
                         self.unify(v, k);
                     }
-                    self.lets.push((let_key(l), v));
+                    if self.no_record == 0 {
+                        self.lets.push((let_key(l), v));
+                    }
                     match pat {
                         Pat::Ident(pi) if pi.subpat.is_none() => self
                             .scopes
@@ -1268,6 +1334,7 @@ impl Inf<'_> {
                     }
                 }
                 Stmt::Macro(m) if i + 1 == n && diverging_macro(&m.mac) => res = Some(self.var()),
+                Stmt::Macro(m) if is_fmt_macro(&m.mac) => self.fmt_width_vars(&m.mac),
                 _ => {}
             }
         }
@@ -1336,6 +1403,8 @@ impl Inf<'_> {
             if let Expr::MethodCall(mc) = e {
                 self.lets.push((mc as *const syn::ExprMethodCall as usize, v));
             }
+        } else if self.pos_record > 0 && matches!(e, Expr::Lit(_) | Expr::Call(_) | Expr::MethodCall(_) | Expr::Path(_) | Expr::Struct(_) | Expr::Index(_) | Expr::Field(_)) {
+            self.lets.push((pos_key(e), v));
         }
         v
     }
@@ -1347,6 +1416,8 @@ impl Inf<'_> {
             Expr::Range(rg) => {
                 let name = if matches!(rg.limits, syn::RangeLimits::Closed(_)) {
                     "RangeInclusive"
+                } else if rg.end.is_none() {
+                    "RangeFrom"
                 } else {
                     "Range"
                 };
@@ -1362,8 +1433,13 @@ impl Inf<'_> {
             }
             // `format!(..)`: String
             Expr::Macro(m) if m.mac.path.is_ident("format") && self.prog.struct_index.contains_key("String") => {
+                self.fmt_width_vars(&m.mac);
                 let ss = self.prog.struct_index["String"];
                 self.known(Ty::Struct(ss))
+            }
+            Expr::Macro(m) if is_fmt_macro(&m.mac) => {
+                self.fmt_width_vars(&m.mac);
+                self.var()
             }
             // `vec![a, b]` / `vec![x; n]`: Vec<要素の型>
             Expr::Macro(m)
@@ -2271,4 +2347,22 @@ fn diverges(e: &Expr) -> bool {
 
 fn diverging_macro(m: &syn::Macro) -> bool {
     m.path.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(), "panic" | "unreachable" | "todo" | "unimplemented"))
+}
+
+fn is_fmt_macro(m: &syn::Macro) -> bool {
+    m.path.segments.last().is_some_and(|s| {
+        matches!(s.ident.to_string().as_str(), "print" | "println" | "eprint" | "eprintln" | "write" | "writeln" | "format" | "panic")
+    })
+}
+
+/// マクロの引数の式の記録に使う、ソース上の位置のキー (アドレスのキーと重ならないよう最上位ビットを立てる)
+pub fn pos_key(e: &Expr) -> usize {
+    use syn::spanned::Spanned;
+    let sp = e.span();
+    let (a, b) = (sp.start(), sp.end());
+    (1usize << 63)
+        | ((a.line & 0xFFFFF) << 43)
+        | ((a.column & 0x7FF) << 32)
+        | ((b.line & 0xFFFFF) << 12)
+        | (b.column & 0xFFF)
 }
