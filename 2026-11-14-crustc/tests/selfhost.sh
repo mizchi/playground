@@ -5,6 +5,7 @@
 #   prelude: src/prelude.rs (prelude の項目を名前で選ぶ。lexer / fxhash / KeyHasher と、build.rs が作る表を含む)
 #            → probe / examples をユーザのソースとして、選ばれた prelude の長さとハッシュを出す
 #   link:  src/link.rs (リンカを探して直接起動する) と src/testgen.rs → C の .o をリンクして実行する (std::path / process::Command)
+#   elfz:  src/elfz.rs (.o のセクションの圧縮。zstd の代わりに同じ API の RLE を付ける) → C の .o を圧縮・解凍して中身を比べる
 #   enc:   src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と src/fxhash.rs (FxHasher / FxMap)
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -56,6 +57,31 @@ for opt in "" -O; do
     echo "ok   link $opt ($(wc -l < "$out/link.rustc.out") lines)"
   else
     echo "DIFF link $opt"; diff "$out/link.rustc.out" "$out/link.crustc.out" | head; fail=1
+  fi
+done
+python3 tests/selfhost/build_elfz.py > "$out/elfz_main.rs"
+cat > "$out/many.c" <<'EOF2'
+#include <stdio.h>
+static int tbl[256];
+int f1(int x) { return x * 3 + 1; }
+int f2(int x) { return f1(x) ^ 7; }
+double g(double a) { return a * 0.5; }
+const char *names[] = {"a", "bb", "ccc"};
+const int zeros[2048] = {1, 2, 3};
+int main(void) { for (int i = 0; i < 256; i++) tbl[i] = f2(i); printf("%d %f %s %d\n", tbl[9], g(3.0), names[2], zeros[1]); return 0; }
+EOF2
+cc -O1 -c "$out/many.c" -o "$out/many.o" || exit 1
+rustc --edition 2024 -O -Awarnings "$out/elfz_main.rs" -o "$out/elfz_rustc" || exit 1
+"$out/elfz_rustc" "$out/hello.o" "$out/many.o" > "$out/elfz.rustc.out"
+for opt in "" -O; do
+  if ! target/release/crustc "$out/elfz_main.rs" -o "$out/elfz_crustc" $opt; then
+    echo "FAIL elfz $opt (crustc)"; fail=1; continue
+  fi
+  "$out/elfz_crustc" "$out/hello.o" "$out/many.o" > "$out/elfz.crustc.out"
+  if cmp -s "$out/elfz.rustc.out" "$out/elfz.crustc.out"; then
+    echo "ok   elfz $opt ($(wc -l < "$out/elfz.rustc.out") lines)"
+  else
+    echo "DIFF elfz $opt"; diff "$out/elfz.rustc.out" "$out/elfz.crustc.out" | head; fail=1
   fi
 done
 python3 tests/selfhost/build_enc.py > "$out/enc_main.rs"

@@ -2359,6 +2359,22 @@ impl Program {
             {
                 Ty::Struct(self.struct_index["__DynError"])
             }
+            // `Cow<'a, [T]>` は prelude の `Cow<T>` (借りたスライスか Vec)、`Cow<'a, str>` は `__CowStr`
+            TySyn::App(n, args) if n == "Cow" && args.len() == 1 && matches!(args[0], TySyn::Slice(_) | TySyn::Str) => {
+                match &args[0] {
+                    TySyn::Slice(e) => {
+                        let Some(&id) = self.struct_index.get("Cow") else {
+                            return Err("cannot find type `Cow`".into());
+                        };
+                        let e = r(e)?;
+                        Ty::Struct(self.instantiate(id, vec![e])?)
+                    }
+                    _ => match self.struct_index.get("__CowStr") {
+                        Some(&id) => Ty::Struct(id),
+                        None => return Err("cannot find type `Cow`".into()),
+                    },
+                }
+            }
             TySyn::App(n, args) if n == "Box" && args.len() == 1 && !self.struct_index.contains_key(n) => {
                 Ty::Box(intern(r(&args[0])?))
             }

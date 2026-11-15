@@ -462,7 +462,7 @@ fn owner(h: usize) -> Option<&'static str> {
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
                         | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "OnceLock" | "RangeFrom" | "TryFromIntError" | "TryFromSliceError" | "Stdin" | "StdinLock" | "StdinLines" | "Stdout" | "StdoutLock"
                         | "BufWriter" | "IoError" | "__DynError" | "Args" | "DefaultHasher" | "VarError"
-                        | "PathBuf" | "__PathExt" | "__AsPathStr" | "Command" | "__ExitStatus" => Some(w),
+                        | "PathBuf" | "__PathExt" | "__AsPathStr" | "Command" | "__ExitStatus" | "Cow" | "__CowStr" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,
@@ -515,6 +515,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             "cloned", "format", "print", "println", "eprint", "eprintln", "write", "writeln",
             "split", "split_whitespace", "lines", "trim", "starts_with", "ends_with", "contains",
             "clamp", "from_u32", "char", "join", "concat", "drain", "default", "f64", "f32", "i128", "u128", "Iterator", "into", "split_at_mut",
+            "copy_from_slice", "clone_from_slice",
         ]);
         // (先頭の 1 byte, 長さ) ごとの候補。prelude の名前が増えても 1 識別子あたりの比較は 0〜1 回
         let mut t: Vec<Vec<&'static str>> = vec![vec![]; 256 * 32];
@@ -607,6 +608,9 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     // (イテレータの列は必ず作るもの (iter / into_iter / chars / 範囲 / 自前の impl Iterator) から始まる。
     //  Option::map や自分の型の fold だけでは付けない)
     let producer = ["iter", "iter_mut", "into_iter"].iter().any(|n| need.contains(n));
+    if user_src.contains("Cow") {
+        need.extend(["Cow", "__CowStr", "Deref", "deref", "into_owned", "to_vec", "__exr_slice_to_vec", "Vec", "String"]);
+    }
     // std::path / std::process::Command / env::var_os / split_paths / fs::remove_file
     if ["std::path", "PathBuf", "Path::", "&Path", "process::Command", "Command::new", "var_os", "split_paths", "remove_file", "OsStr"]
         .iter()
@@ -744,6 +748,8 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         ("windows", "__exr_slice_windows"),
         ("chunks", "__exr_slice_chunks"),
         ("to_vec", "__exr_slice_to_vec"),
+        ("copy_from_slice", "__exr_slice_copy_from"),
+        ("clone_from_slice", "__exr_slice_clone_from"),
         ("split_at", "__exr_slice_split_at"),
         ("split_at_mut", "__exr_slice_split_at_mut"),
     ] {
@@ -974,6 +980,9 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     // (prelude の PathBuf は Deref と From を impl する)
     if need.contains("PathBuf") {
         op_impls.extend(["Deref", "From", "IntoIterator"]);
+    }
+    if need.contains("Cow") {
+        op_impls.push("Deref");
     }
     if op_impls.contains(&"IntoIterator") {
         need.extend(["__into_iter_mark", "Iterator", "next", "iter"]);

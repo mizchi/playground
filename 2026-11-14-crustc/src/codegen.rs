@@ -5466,6 +5466,8 @@ impl Cx<'_, '_> {
             "windows" => Some(("__exr_slice_windows", false)),
             "chunks" => Some(("__exr_slice_chunks", false)),
             "to_vec" => Some(("__exr_slice_to_vec", false)),
+            "copy_from_slice" => Some(("__exr_slice_copy_from", true)),
+            "clone_from_slice" => Some(("__exr_slice_clone_from", true)),
             "split_at" => Some(("__exr_slice_split_at", false)),
             "split_at_mut" => Some(("__exr_slice_split_at_mut", true)),
             _ => None,
@@ -5594,7 +5596,9 @@ impl Cx<'_, '_> {
                 return r;
             }
         }
-        if let (Some((f, m)), Ty::Array(..) | Ty::Ref(_, Ty::Slice(_))) = (slice_fn, rt) {
+        // (Vec も、Vec 自身に同名のメソッドがなければスライスとして: `v.copy_from_slice(..)`)
+        let vec_slice = matches!(rt, Ty::Struct(sid) if self.vec_fields(sid).is_some() && self.prog.method(sid, &name).is_none());
+        if let (Some((f, m)), true) = (slice_fn, vec_slice || matches!(rt, Ty::Array(..) | Ty::Ref(_, Ty::Slice(_)))) {
             if let Some(&id) = self.prog.index.get(f) {
                 // 受け手を `&[T]` / `&mut [T]` にして、引数 (クロージャも) は元の式のまま渡す
                 let (base, len, elem) = self.indexable(&mc.receiver)?;

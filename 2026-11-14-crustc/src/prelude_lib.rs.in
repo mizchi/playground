@@ -1065,6 +1065,28 @@ fn __exr_slice_chunks<T>(s: &[T], n: usize) -> Chunks<T> {
     Chunks { ptr: s.as_ptr(), len: s.len(), n: n, i: 0 }
 }
 
+fn __exr_slice_copy_from<T: Copy>(d: &mut [T], s: &[T]) {
+    if d.len() != s.len() {
+        panic!("source slice length ({}) does not match destination slice length ({})", s.len(), d.len());
+    }
+    let mut i = 0;
+    while i < s.len() {
+        d[i] = s[i];
+        i += 1;
+    }
+}
+
+fn __exr_slice_clone_from<T: Clone>(d: &mut [T], s: &[T]) {
+    if d.len() != s.len() {
+        panic!("destination and source slices have different lengths");
+    }
+    let mut i = 0;
+    while i < s.len() {
+        d[i] = s[i].clone();
+        i += 1;
+    }
+}
+
 fn __exr_slice_contains<T: PartialEq>(s: &[T], x: &T) -> bool {
     let mut i = 0;
     while i < s.len() {
@@ -5088,6 +5110,65 @@ pub fn __exr_env_var<K>(key: K) -> Result<String, VarError> {
         return Err(VarError::NotPresent);
     }
     Ok(String::from(__exr_cstr::<()>(p)))
+}
+
+// --- std::borrow::Cow (スライスの Cow<[T]> は Cow<T>、Cow<str> は __CowStr) ---
+
+pub enum Cow<T> {
+    Borrowed(&[T]),
+    Owned(Vec<T>),
+}
+
+impl<T: Clone> Cow<T> {
+    pub fn into_owned(self) -> Vec<T> {
+        match self {
+            Cow::Borrowed(s) => s.to_vec(),
+            Cow::Owned(v) => v,
+        }
+    }
+    pub fn is_borrowed(&self) -> bool {
+        match self {
+            Cow::Borrowed(_) => true,
+            Cow::Owned(_) => false,
+        }
+    }
+    pub fn is_owned(&self) -> bool {
+        !self.is_borrowed()
+    }
+}
+
+impl<T> Deref for Cow<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        match self {
+            Cow::Borrowed(s) => *s,
+            Cow::Owned(v) => v.as_slice(),
+        }
+    }
+}
+
+pub enum __CowStr {
+    Borrowed(&str),
+    Owned(String),
+}
+
+impl __CowStr {
+    pub fn into_owned(self) -> String {
+        match self {
+            __CowStr::Borrowed(s) => String::from(s),
+            __CowStr::Owned(v) => v,
+        }
+    }
+}
+
+impl Deref for __CowStr {
+    type Target = str;
+    fn deref(&self) -> &str {
+        match self {
+            __CowStr::Borrowed(s) => *s,
+            __CowStr::Owned(v) => v.as_str(),
+        }
+    }
 }
 
 // --- std::path / std::ffi (パスは UTF-8 の文字列として持つ: Path = str、OsString = String) ---
