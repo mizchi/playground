@@ -829,7 +829,7 @@ impl Inf<'_> {
                 _ => continue,
             };
             let name = self.prog.structs[b as usize].name.clone();
-            if name == "Vec" && vars.len() == 1 {
+            if matches!(name.as_str(), "Vec" | "BinaryHeap") && vars.len() == 1 {
                 self.unify(item, vars[0]);
             } else if name == "HashMap" && vars.len() == 2 {
                 let tb = self.prog.tuple_base(2);

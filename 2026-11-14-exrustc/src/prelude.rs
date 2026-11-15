@@ -538,6 +538,9 @@ impl<T> Vec<T> {
     pub fn sort_unstable_by_key<K: Ord, F: FnMut(&T) -> K>(&mut self, f: F) {
         self.sort_by_key(f);
     }
+    pub fn sort_by_cached_key<K: Ord, F: FnMut(&T) -> K>(&mut self, f: F) {
+        __exr_sort_cached(self.ptr, self.len, f);
+    }
     pub fn binary_search_by<F: FnMut(&T) -> Ordering>(&self, f: F) -> Result<usize, usize> {
         __exr_bsearch_by(self.ptr, self.len, f)
     }
@@ -633,6 +636,49 @@ fn __exr_merge_sort<T, F: FnMut(&T, &T) -> bool>(p: *mut T, n: usize, lt: F) {
     }
 }
 
+// キーを 1 要素 1 回だけ計算して (前から順に)、添字をキーで安定にソートしてから並べ替える
+fn __exr_sort_cached<T, K: Ord, F: FnMut(&T) -> K>(p: *mut T, n: usize, f: F) {
+    let mut f = f;
+    if n < 2 {
+        return;
+    }
+    let mut keys: Vec<K> = Vec::with_capacity(n);
+    let mut idx: Vec<usize> = Vec::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        keys.push(f(unsafe { &*p.add(i) }));
+        idx.push(i);
+        i += 1;
+    }
+    let kp = keys.ptr;
+    __exr_merge_sort(idx.ptr, n, |a: &usize, b: &usize| {
+        let c = unsafe { __exr_cmp::<K>(&*kp.add(*a), &*kp.add(*b)) };
+        c < 0
+    });
+    let sz = core::mem::size_of::<T>();
+    if sz == 0 {
+        return;
+    }
+    let buf = unsafe { __exr_realloc(0usize as *mut u8, n * sz) } as *mut T;
+    i = 0;
+    while i < n {
+        unsafe {
+            buf.add(i).write(p.add(*idx.ptr.add(i)).read());
+        }
+        i += 1;
+    }
+    i = 0;
+    while i < n {
+        unsafe {
+            p.add(i).write(buf.add(i).read());
+        }
+        i += 1;
+    }
+    unsafe {
+        __exr_free(buf as *mut u8);
+    }
+}
+
 // std と同じ二分探索 (同じ値が並ぶときに返す位置も std に合わせる)
 fn __exr_bsearch_by<T, F: FnMut(&T) -> Ordering>(p: *mut T, n: usize, f: F) -> Result<usize, usize> {
     let mut f = f;
@@ -671,6 +717,9 @@ fn __exr_slice_sort_by<T, F: FnMut(&T, &T) -> Ordering>(s: &mut [T], f: F) {
 fn __exr_slice_sort_by_key<T, K: Ord, F: FnMut(&T) -> K>(s: &mut [T], f: F) {
     let mut f = f;
     __exr_merge_sort(s.as_mut_ptr(), s.len(), |a: &T, b: &T| __exr_cmp::<K>(&f(a), &f(b)) < 0);
+}
+fn __exr_slice_sort_by_cached_key<T, K: Ord, F: FnMut(&T) -> K>(s: &mut [T], f: F) {
+    __exr_sort_cached(s.as_mut_ptr(), s.len(), f);
 }
 fn __exr_slice_bsearch<T: Ord>(s: &[T], x: &T) -> Result<usize, usize> {
     __exr_bsearch_by(s.as_ptr() as *mut T, s.len(), |e: &T| __exr_cmp_m::<T>(e, x))
@@ -2410,6 +2459,185 @@ impl<K, V> __FromIter for HashMap<K, V> {
     }
 }
 
+// --- BinaryHeap<T> (最大ヒープ。std と同じ sift の手順なので、iter / into_vec の並びも std と同じ) ---
+
+pub struct BinaryHeap<T> {
+    data: Vec<T>,
+}
+
+impl<T> BinaryHeap<T> {
+    pub fn new() -> BinaryHeap<T> {
+        BinaryHeap { data: Vec::new() }
+    }
+    pub fn with_capacity(n: usize) -> BinaryHeap<T> {
+        BinaryHeap { data: Vec::with_capacity(n) }
+    }
+    pub fn from(v: Vec<T>) -> BinaryHeap<T> {
+        let mut h = BinaryHeap { data: v };
+        h.rebuild();
+        h
+    }
+    pub fn len(&self) -> usize {
+        self.data.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.data.len == 0
+    }
+    pub fn capacity(&self) -> usize {
+        self.data.cap
+    }
+    pub fn clear(&mut self) {
+        self.data.clear();
+    }
+    pub fn peek(&self) -> Option<&T> {
+        if self.data.len == 0 {
+            None
+        } else {
+            Some(unsafe { &*self.data.ptr })
+        }
+    }
+    pub fn push(&mut self, x: T) {
+        let old = self.data.len;
+        self.data.push(x);
+        self.sift_up(0, old);
+    }
+    pub fn pop(&mut self) -> Option<T> {
+        match self.data.pop() {
+            None => None,
+            Some(x) => {
+                let mut item = x;
+                if self.data.len > 0 {
+                    unsafe {
+                        let top = self.data.ptr.read();
+                        self.data.ptr.write(item);
+                        item = top;
+                    }
+                    self.sift_down_to_bottom(0);
+                }
+                Some(item)
+            }
+        }
+    }
+    pub fn into_vec(self) -> Vec<T> {
+        // 中身の Vec を取り出す (h の drop では何も解放しないよう空にしておく)
+        let mut h = self;
+        let v = Vec { ptr: h.data.ptr, cap: h.data.cap, len: h.data.len };
+        h.data.ptr = 0usize as *mut T;
+        h.data.cap = 0;
+        h.data.len = 0;
+        v
+    }
+    pub fn into_sorted_vec(self) -> Vec<T> {
+        let mut h = self;
+        let mut end = h.data.len;
+        while end > 1 {
+            end -= 1;
+            h.data.swap(0, end);
+            h.sift_down_range(0, end);
+        }
+        h.into_vec()
+    }
+    pub fn iter(&self) -> Iter<T> {
+        self.data.iter()
+    }
+    pub fn into_iter(self) -> IntoIter<T> {
+        self.into_vec().into_iter()
+    }
+    // 穴 (hole) を上へ動かす: 親より大きい間だけ親を下ろす
+    fn sift_up(&mut self, start: usize, pos: usize) -> usize {
+        let p = self.data.ptr;
+        let mut pos = pos;
+        unsafe {
+            let elem = p.add(pos).read();
+            while pos > start {
+                let parent = (pos - 1) / 2;
+                if elem <= *p.add(parent) {
+                    break;
+                }
+                p.add(pos).write(p.add(parent).read());
+                pos = parent;
+            }
+            p.add(pos).write(elem);
+        }
+        pos
+    }
+    fn sift_down_range(&mut self, pos: usize, end: usize) {
+        let p = self.data.ptr;
+        let mut pos = pos;
+        unsafe {
+            let elem = p.add(pos).read();
+            let mut child = 2 * pos + 1;
+            while end >= 2 && child <= end - 2 {
+                if *p.add(child) <= *p.add(child + 1) {
+                    child += 1;
+                }
+                if elem >= *p.add(child) {
+                    p.add(pos).write(elem);
+                    return;
+                }
+                p.add(pos).write(p.add(child).read());
+                pos = child;
+                child = 2 * pos + 1;
+            }
+            if end >= 1 && child == end - 1 && elem < *p.add(child) {
+                p.add(pos).write(p.add(child).read());
+                pos = child;
+            }
+            p.add(pos).write(elem);
+        }
+    }
+    fn sift_down_to_bottom(&mut self, pos: usize) {
+        let end = self.data.len;
+        let start = pos;
+        let p = self.data.ptr;
+        let mut pos = pos;
+        unsafe {
+            let elem = p.add(pos).read();
+            let mut child = 2 * pos + 1;
+            while end >= 2 && child <= end - 2 {
+                if *p.add(child) <= *p.add(child + 1) {
+                    child += 1;
+                }
+                p.add(pos).write(p.add(child).read());
+                pos = child;
+                child = 2 * pos + 1;
+            }
+            if end >= 1 && child == end - 1 {
+                p.add(pos).write(p.add(child).read());
+                pos = child;
+            }
+            p.add(pos).write(elem);
+        }
+        self.sift_up(start, pos);
+    }
+    fn rebuild(&mut self) {
+        let mut n = self.data.len / 2;
+        while n > 0 {
+            n -= 1;
+            let end = self.data.len;
+            self.sift_down_range(n, end);
+        }
+    }
+}
+
+impl<T> __FromIter for BinaryHeap<T> {
+    fn __from_iter<I: Iterator>(it: I) -> BinaryHeap<T> {
+        let mut it = it;
+        let mut v = Vec::new();
+        while let Some(x) = it.next() {
+            v.push(x);
+        }
+        BinaryHeap::from(v)
+    }
+}
+
+impl<T> Debug for BinaryHeap<T> {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_debug(&self.data, f);
+        Ok(())
+    }
+}
+
 // --- &str の分割・検索 (split / split_whitespace / lines / trim / starts_with / ends_with / contains) ---
 
 // 文字列の大小 (バイト列の辞書順): 負 / 0 / 正
@@ -2815,7 +3043,7 @@ fn owner(h: usize) -> Option<&'static str> {
                     .iter()
                     .map(|&(a, b)| &PRELUDE[a as usize..b as usize])
                     .find_map(|w| match w {
-                        "Vec" | "String" | "HashMap" | "Reverse" => Some(w),
+                        "Vec" | "String" | "HashMap" | "Reverse" | "BinaryHeap" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,
@@ -2983,9 +3211,10 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         "Ord", "PartialOrd", "Ordering", "cmp", "partial_cmp", "sort", "sort_by", "sort_by_key",
         "sort_unstable", "sort_unstable_by", "sort_unstable_by_key", "max_by_key", "min_by_key",
         "max_by", "min_by", "Reverse", "clamp", "binary_search", "binary_search_by",
-        "binary_search_by_key",
+        "binary_search_by_key", "BinaryHeap", "sort_by_cached_key",
     ];
-    let cmp_impl = impls_cmp_trait(user_src);
+    // (prelude の Reverse も PartialOrd / Ord を impl する)
+    let cmp_impl = impls_cmp_trait(user_src) || need.contains("Reverse");
     // (再帰する型は Box / Vec を通るので、そのときは glue を付ける。それ以外の型の比較は codegen が直接展開する)
     if ["Box", "Vec", "vec", "String"].iter().any(|n| need.contains(n)) {
         need.insert("__exr_cmp");
@@ -3021,6 +3250,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             ("sort_unstable_by", "__exr_slice_sort_by"),
             ("sort_by_key", "__exr_slice_sort_by_key"),
             ("sort_unstable_by_key", "__exr_slice_sort_by_key"),
+            ("sort_by_cached_key", "__exr_slice_sort_by_cached_key"),
             ("binary_search", "__exr_slice_bsearch"),
             ("binary_search_by", "__exr_slice_bsearch_by"),
             ("binary_search_by_key", "__exr_slice_bsearch_by_key"),

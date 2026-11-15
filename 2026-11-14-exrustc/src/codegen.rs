@@ -3723,6 +3723,7 @@ impl Cx<'_, '_> {
             "sort" | "sort_unstable" => Some(("__exr_slice_sort", true)),
             "sort_by" | "sort_unstable_by" => Some(("__exr_slice_sort_by", true)),
             "sort_by_key" | "sort_unstable_by_key" => Some(("__exr_slice_sort_by_key", true)),
+            "sort_by_cached_key" => Some(("__exr_slice_sort_by_cached_key", true)),
             "binary_search" => Some(("__exr_slice_bsearch", false)),
             "binary_search_by" => Some(("__exr_slice_bsearch_by", false)),
             "binary_search_by_key" => Some(("__exr_slice_bsearch_by_key", false)),

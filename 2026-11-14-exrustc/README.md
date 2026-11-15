@@ -163,6 +163,10 @@ bench/regress.sh
       - `&mut u64` / `&u64` を受け手にした整数のメソッド（`s.wrapping_mul(..)`）が、指す先ではなくアドレスを計算していた。
       - `std::cmp::Ordering::Less` のような 3 段以上のパスのバリアントを、2 段目の名前（`cmp`）で探していた。
       - 生ポインタの `==` / `!=` が使えなかった。
+  - BinaryHeap・sort_by_cached_key の追加時
+    - サイズ予算は既存の項目をどれも変えていない（BinaryHeap は名前があるときだけ付く）。
+    - callgrind: prelude が大きくなった分、プロセスごとに 1 回の prelude の字句解析が +0.5M 命令（hello で +3.8%、約 0.1 ms）。gen1000 のビルドは ±0%。
+      check の計測は 1000 関数で ±8% ほど揺れる（HEAD 同士でも 1.82G〜1.92G）ので、3 回ずつ測って差がないことを見た。
 
 ## 対応している言語サブセット（no_std の範囲）
 
@@ -249,7 +253,9 @@ bench/regress.sh
   - 手書きの `impl PartialOrd` / `impl Ord`（`impl PartialEq` / `impl Eq for S {}` も）。`<` と sort はそれを呼ぶ
   - `cmp` / `partial_cmp`（整数にも）、`Ordering` と `reverse` / `then` / `then_with` / `is_lt` など、`std::cmp::Reverse`
   - `max` / `min`（Ord な struct・タプル・String にも）、`std::cmp::max` / `min`
-  - `sort` / `sort_by` / `sort_by_key` / `sort_unstable*`（安定なマージソート。Vec・配列・スライス・`v[a..b]`）、`binary_search` / `binary_search_by` / `binary_search_by_key`（同じ値が並ぶときに返す位置も std と同じ）、`clamp`（整数・Ord な型。`lo > hi` なら panic）、イテレータの `max` / `min` / `max_by_key` / `min_by_key` / `max_by` / `min_by`
+  - `sort` / `sort_by` / `sort_by_key` / `sort_by_cached_key` / `sort_unstable*`（安定なマージソート。Vec・配列・スライス・`v[a..b]`）、`binary_search` / `binary_search_by` / `binary_search_by_key`（同じ値が並ぶときに返す位置も std と同じ）、`clamp`（整数・Ord な型。`lo > hi` なら panic）、イテレータの `max` / `min` / `max_by_key` / `min_by_key` / `max_by` / `min_by`
+  - `BinaryHeap`（`examples/binary_heap.rs`）：`new` / `with_capacity` / `from(vec)` / `collect` / `push` / `pop` / `peek` / `len` / `is_empty` / `clear` / `iter` / `into_iter` / `into_vec` / `into_sorted_vec` / `{:?}`。
+    sift の手順を std と同じにしてあるので、`iter` / `into_vec` / `{:?}` の並びも rustc と一致する。`Reverse` で最小ヒープ
   - 比較の本体は型ごとに codegen が作る（`__exr_cmp::<T>`。Box / Vec を使わないプログラムではその場で展開する）
 - Drop（`examples/drop.rs`、`examples/drop_more.rs`。drop の順序を rustc と比べ、valgrind でリーク・二重解放がないことを確かめる）：
   - `impl Drop for S`（ジェネリックな impl も）、`drop(x)`
@@ -329,7 +335,7 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
 - イテレータの制限：`rev`（値として。`for` の中なら可）、`DoubleEndedIterator` / `ExactSizeIterator`、`peekable` / `flat_map` / `step_by`、`collect` は `Vec<T>` / `String` / `HashMap<K, V>` だけ、`sum` / `product` は整数だけ
 - 関連型の制限：trait の関連型は `Self::X` / `T::X` / `<T as Tr>::X` の形だけ。関連型に境界（`type Item: Copy;`）は付けられない
 - 書式化の制限：`{:e}`、`{:p}`、`impl Debug for S` の手書きで `f.debug_struct(..)` などのビルダー、`Formatter` のフラグを読むメソッド（`f.alternate()` など）、`format_args!`
-- 比較の制限：浮動小数点がないので `partial_cmp` は常に `Some`。`BinaryHeap`、`Ord::cmp(&a, &b)` の UFCS、`sort_by_cached_key`
+- 比較の制限：浮動小数点がないので `partial_cmp` は常に `Some`。`Ord::cmp(&a, &b)` の UFCS。BinaryHeap の `append` / `extend` / `drain` / `retain` / `peek_mut`
 - HashMap の制限：`HashSet`、`BTreeMap`、`HashMap::from([..])`、`retain` / `drain`、キーに `impl Hash` を手書きすること
 - Drop の制限
   - panic では drop しない（unwind しない）
