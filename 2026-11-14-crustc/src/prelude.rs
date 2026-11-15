@@ -576,7 +576,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     }
     // `vec![..]` は Vec::with_capacity + push に、`"..".to_string()` は String::from になる
     if need.contains("vec") {
-        need.extend(["Vec", "with_capacity", "push"]);
+        need.extend(["Vec", "with_capacity", "push", "__exr_memset"]);
     }
     if need.contains("to_string") || need.contains("to_owned") {
         need.extend(["String", "from"]);

@@ -1142,11 +1142,95 @@ fn emit_object(
             .symbol
             .cmp(&insts.get(*b).unwrap().sig.symbol)
     });
+    // 同じ機械語になるインスタンスは 1 つだけ置く (`Vec<u32>::push` と `Vec<i32>::push` など。ICF)。
+    // 比べるのは機械語・リロケーション (呼び先は代表に直して)・データ・vtable・panic の場所。呼び先が畳まれると
+    // 呼び出し側も同じになりうるので、変わらなくなるまで (高々 4 回) 繰り返す
+    let mut fold: FxMap<u32, u32> = FxMap::default();
+    for _ in 0..4 {
+        let canon = |f: u32, fold: &FxMap<u32, u32>| *fold.get(&f).unwrap_or(&f);
+        let mut seen: HashMap<Vec<u8>, u32> = HashMap::new();
+        let mut changed = false;
+        for &iid in &order {
+            if fold.contains_key(&iid) {
+                continue;
+            }
+            let b = &blobs[&iid];
+            let sig = &insts.get(iid).unwrap().sig;
+            let mut key = Vec::with_capacity(b.code.len() + 64);
+            key.extend_from_slice(&b.align.to_le_bytes());
+            key.extend_from_slice(&(b.code.len() as u32).to_le_bytes());
+            key.extend_from_slice(&b.code);
+            // (呼び出し規約も同じでなければならない: 引数・戻り値の ABI)
+            key.extend_from_slice(format!("{:?}", codegen::clif_sig(sig, cc)).as_bytes());
+            for r in &b.relocs {
+                key.extend_from_slice(&r.offset.to_le_bytes());
+                key.push(r.kind);
+                key.extend_from_slice(&r.addend.to_le_bytes());
+                match r.target {
+                    Target::Func(f) => {
+                        key.push(0);
+                        key.extend_from_slice(&canon(f, &fold).to_le_bytes());
+                    }
+                    Target::SelfOffset(o) => {
+                        key.push(1);
+                        key.extend_from_slice(&o.to_le_bytes());
+                    }
+                    Target::Data(k) => {
+                        key.push(2);
+                        key.extend_from_slice(&b.datas[k as usize]);
+                        key.push(0xFF);
+                    }
+                    Target::Static(c) => {
+                        key.push(3);
+                        key.extend_from_slice(&c.to_le_bytes());
+                    }
+                    Target::Vtable(k) => {
+                        key.push(4);
+                        for &f in &b.vtables[k as usize] {
+                            key.extend_from_slice(&canon(f, &fold).to_le_bytes());
+                        }
+                        key.push(0xFF);
+                    }
+                }
+            }
+            for &(o, i, mi) in &b.traps {
+                key.extend_from_slice(&o.to_le_bytes());
+                key.extend_from_slice(&i.to_le_bytes());
+                if mi != u32::MAX {
+                    key.extend_from_slice(&b.datas[mi as usize]);
+                }
+                key.push(0xFE);
+            }
+            match seen.get(&key) {
+                Some(&r) => {
+                    fold.insert(iid, r);
+                    changed = true;
+                }
+                None => {
+                    seen.insert(key, iid);
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let folded: Vec<u32> = order.iter().copied().filter(|i| fold.contains_key(i)).collect();
+    order.retain(|i| !fold.contains_key(i));
     for &iid in &order {
         let sig = &insts.get(iid).unwrap().sig;
         let id = m
             .declare_function(&sig.symbol, Linkage::Local, &codegen::clif_sig(sig, cc))
             .map_err(|e| e.to_string())?;
+        ids.insert(iid, id);
+    }
+    // (畳んだインスタンスへの参照は代表へ: 代表が畳まれていても辿る)
+    for &iid in &folded {
+        let mut r = fold[&iid];
+        while let Some(&n) = fold.get(&r) {
+            r = n;
+        }
+        let id = ids[&r];
         ids.insert(iid, id);
     }
     // static: コードから参照されているもの (と、その初期値から参照されているもの) だけを置く

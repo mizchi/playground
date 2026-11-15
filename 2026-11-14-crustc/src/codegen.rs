@@ -337,7 +337,9 @@ impl Worker {
                 seg_self: None,
                 loop_bounds: vec![],
                 pending_bound: None,
+                pending_pair: None,
                 checked: (None, vec![]),
+                hoisted: vec![],
                 in_fmt_args: 0,
                 owned: vec![],
                 temps: vec![],
@@ -616,8 +618,12 @@ struct Cx<'a, 'p> {
     loop_bounds: Vec<(Loc, u64)>,
     /// for_range が次の for_body に渡す上限
     pending_bound: Option<u64>,
+    /// enumerate の (番号, 値, 値の型): 組を作らずに for_body のタプルのパターンへ
+    pending_pair: Option<(Value, Option<Value>, Ty)>,
     /// 直前の添字の検査: (検査を通ったあとのブロック, (添字, 長さ)) の列。同じブロックの中なら同じ検査を省く
     checked: (Option<Block>, Vec<(Value, LenKey)>),
+    /// -O: ループの前で読んでおいた添字の受け手 (`c` / `c[i]`) の (式の字句, 先頭, 長さ, 要素の型, 外側の添字の検査)
+    hoisted: Vec<(String, Value, Value, Ty, Option<(Value, Value, Value)>)>,
     /// 書式マクロの引数を評価している深さ (型推論の記録をソース上の位置で引く)
     in_fmt_args: u32,
     /// drop の責任を持つローカル変数 (スコープの深さ順) と、文の終わりで drop する一時値
@@ -1852,6 +1858,11 @@ impl Cx<'_, '_> {
                 let header = self.b.create_block();
                 let body = self.b.create_block();
                 let exit = self.b.create_block();
+                // -O: 条件と本体で変わらない添字の受け手は、ループの前で読んでおく
+                let nh = self.hoisted.len();
+                if self.prog.opt {
+                    self.hoist_index_bases(&w.body, None, Some(&w.cond))?;
+                }
                 self.b.ins().jump(header, &[]);
                 self.b.switch_to_block(header);
                 let t0 = self.temps.len();
@@ -1887,6 +1898,7 @@ impl Cx<'_, '_> {
                 }
                 self.b.switch_to_block(exit);
                 self.drop_temps(t0);
+                self.hoisted.truncate(nh);
                 Ok((None, Ty::Unit))
             }
             Expr::Loop(l) => {
@@ -3631,6 +3643,17 @@ impl Cx<'_, '_> {
                 *a = *b;
             }
         }
+        // (drop の要らない型の `__exr_drop_in_place::<T>` / `drop(x)` は何もしない: インスタンスも作らない)
+        if matches!(self.prog.names[id as usize].as_str(), "__exr_drop_in_place" | "__core_drop") && arg_tys.len() == 1 {
+            let t = match arg_tys[0] {
+                Ty::Ptr(_, t) if self.prog.names[id as usize] == "__exr_drop_in_place" => Some(*t),
+                t if self.prog.names[id as usize] == "__core_drop" => Some(t),
+                _ => None,
+            };
+            if t.is_some_and(|t| !self.prog.has_param(t) && !self.needs_drop(t)) {
+                return Ok((None, Ty::Unit));
+            }
+        }
         let (target, sig) = self.resolve_call(id, &arg_tys, sol0, expected, span)?;
         let mut cv = vec![];
         let sret = if is_sret(&sig) {
@@ -4931,6 +4954,21 @@ impl Cx<'_, '_> {
 
     /// 添字アクセスの対象 (配列 / スライス / それらへの参照) の (先頭アドレス, 長さ, 要素型)
     fn indexable(&mut self, e: &Expr) -> R<(Value, Value, Ty)> {
+        // (-O: ループの前で読んでおいたもの)
+        if !self.hoisted.is_empty() {
+            use quote::ToTokens;
+            let key = e.to_token_stream().to_string();
+            if let Some(&(_, b, l, t, chk)) = self.hoisted.iter().rev().find(|h| h.0 == key) {
+                if let Some((ok, len, i)) = chk {
+                    let sp = match e {
+                        Expr::Index(ix) => ix.bracket_token.span.open(),
+                        _ => e.span(),
+                    };
+                    self.index_check(ok, len, i, sp);
+                }
+                return Ok((b, l, t));
+            }
+        }
         let is_const = matches!(e, Expr::Path(p) if self.const_of(p).is_some());
         let mut p = if is_place_expr(e) && !is_const {
             self.place(e)?
@@ -6415,7 +6453,12 @@ impl Cx<'_, '_> {
             Some(m) => (Some(addr), Ty::Ref(m, intern(elem))),
             None => self.read(Place::Mem(addr, 0, elem)),
         };
-        let (val, vt) = if enumerate {
+        // (`for (i, x) in v.iter().enumerate()`: 組を作らずに i と x をそれぞれ束縛する)
+        let tuple_pat = matches!(&*f.pat, Pat::Tuple(t) if t.elems.len() == 2);
+        let (val, vt) = if enumerate && tuple_pat {
+            self.pending_pair = Some((idx, val, vt));
+            (None, Ty::Unit)
+        } else if enumerate {
             self.make_pair(idx, val, vt)?
         } else {
             (val, vt)
@@ -6454,16 +6497,24 @@ impl Cx<'_, '_> {
         exit: Block,
     ) -> R<()> {
         self.scopes.push(vec![]);
-        let place = match val {
+        let to_place = |this: &mut Self, val: Option<Value>, vt: Ty| match val {
             Some(a) if vt.is_agg() => Place::Mem(a, 0, vt),
             Some(v) => {
-                let var = self.b.declare_var(clif_ty(vt).unwrap());
-                self.b.def_var(var, v);
+                let var = this.b.declare_var(clif_ty(vt).unwrap());
+                this.b.def_var(var, v);
                 Place::Var(var, vt)
             }
             None => Place::Zst(vt),
         };
-        self.pat_bind(&f.pat, place, BindMode::Move)?;
+        if let (Some((idx, v, t)), Pat::Tuple(tp)) = (self.pending_pair.take(), &*f.pat) {
+            let pi = to_place(self, Some(idx), Ty::Usize);
+            self.pat_bind(&tp.elems[0], pi, BindMode::Move)?;
+            let pv = to_place(self, v, t);
+            self.pat_bind(&tp.elems[1], pv, BindMode::Move)?;
+        } else {
+            let place = to_place(self, val, vt);
+            self.pat_bind(&f.pat, place, BindMode::Move)?;
+        }
         let bound = self.pending_bound.take();
         let nb = self.loop_bounds.len();
         if let (Some(h), Pat::Ident(pi)) = (bound, &*f.pat) {
@@ -6589,10 +6640,20 @@ impl Cx<'_, '_> {
         self.b.def_var(i, first);
         self.b.ins().brif(nonempty, head, &[], exit, &[]);
         self.b.switch_to_block(head);
+        // -O: ループの中で変わらない添字の受け手の先頭と長さを、ループの前で読んでおく
+        let nh = self.hoisted.len();
+        if self.prog.opt {
+            self.hoist_index_bases(&f.body, Some(&f.pat), None)?;
+        }
         self.b.ins().jump(body, &[]);
         self.b.switch_to_block(body);
         let iv = self.b.use_var(i);
-        let (val, vt) = if enumerate {
+        let tuple_pat = matches!(&*f.pat, Pat::Tuple(t) if t.elems.len() == 2);
+        let (val, vt) = if enumerate && tuple_pat {
+            let nv = self.b.use_var(n);
+            self.pending_pair = Some((nv, Some(iv), lt));
+            (None, Ty::Unit)
+        } else if enumerate {
             let nv = self.b.use_var(n);
             self.make_pair(nv, Some(iv), lt)?
         } else {
@@ -6628,7 +6689,211 @@ impl Cx<'_, '_> {
         self.b.def_var(i, nx);
         self.b.ins().jump(body, &[]);
         self.b.switch_to_block(exit);
+        self.hoisted.truncate(nh);
         Ok((None, Ty::Unit))
+    }
+
+    /// ループの本体 body で、添字の受け手 `x` / `x[i]` (x はローカルの Vec、i は本体で変わらない変数) が
+    /// ループの中で変わらないなら、その先頭と長さをここ (ループの前) で読み、indexable がそれを使う。
+    /// 変わらない: 本体の中で x が `x[..]..` の形 (読むか、要素がスカラーの代入) でしか現れず、
+    /// x や i を束縛し直さず、x を含むマクロもクロージャもない。`x[i]` の i の検査は本体の中で (前で比べた値で) 行う
+    fn hoist_index_bases(&mut self, body: &syn::Block, pat: Option<&Pat>, cond: Option<&Expr>) -> R<()> {
+        use quote::ToTokens;
+        struct Scan {
+            /// 現れた添字の鎖: (根の名前, 受け手の式の列 (`x`, `x[i]`, ..), 代入の左辺か)
+            chains: Vec<(String, Vec<Expr>, bool)>,
+            /// 鎖でない形で現れた名前 (メソッドの受け手・&mut・値として・マクロの中・束縛)
+            other: std::collections::HashSet<String>,
+            assigned: std::collections::HashSet<String>,
+            bail: bool,
+        }
+        fn root(e: &Expr) -> Option<String> {
+            match e {
+                Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+                Expr::Index(ix) => root(&ix.expr),
+                Expr::Paren(p) => root(&p.expr),
+                _ => None,
+            }
+        }
+        fn chain(e: &Expr, out: &mut Vec<Expr>) -> bool {
+            match e {
+                Expr::Path(p) if p.path.get_ident().is_some() => {
+                    out.push(e.clone());
+                    true
+                }
+                Expr::Index(ix) if !matches!(&*ix.index, Expr::Range(_)) => {
+                    if !chain(&ix.expr, out) {
+                        return false;
+                    }
+                    out.push(e.clone());
+                    true
+                }
+                _ => false,
+            }
+        }
+        impl<'ast> Visit<'ast> for Scan {
+            fn visit_expr(&mut self, e: &'ast Expr) {
+                match e {
+                    Expr::Index(ix) if !matches!(&*ix.index, Expr::Range(_)) => {
+                        let mut c = vec![];
+                        if chain(e, &mut c) {
+                            c.pop(); // (いちばん外の添字は要素そのもの: 受け手は手前まで)
+                            self.chains.push((root(e).unwrap(), c, false));
+                            // 添字の式の中も見る
+                            let mut x = e;
+                            while let Expr::Index(ix) = x {
+                                self.visit_expr(&ix.index);
+                                x = &ix.expr;
+                            }
+                            return;
+                        }
+                        syn::visit::visit_expr(self, e);
+                        let _ = ix;
+                    }
+                    Expr::Assign(a) => {
+                        self.assign_target(&a.left);
+                        self.visit_expr(&a.right);
+                    }
+                    Expr::Binary(b) if matches!(b.op, BinOp::AddAssign(_) | BinOp::SubAssign(_) | BinOp::MulAssign(_)
+                        | BinOp::DivAssign(_) | BinOp::RemAssign(_) | BinOp::BitAndAssign(_) | BinOp::BitOrAssign(_)
+                        | BinOp::BitXorAssign(_) | BinOp::ShlAssign(_) | BinOp::ShrAssign(_)) => {
+                        self.assign_target(&b.left);
+                        self.visit_expr(&b.right);
+                    }
+                    Expr::Path(p) => {
+                        if let Some(i) = p.path.get_ident() {
+                            self.other.insert(i.to_string());
+                        }
+                    }
+                    Expr::Closure(_) => self.bail = true,
+                    _ => syn::visit::visit_expr(self, e),
+                }
+            }
+            fn visit_macro(&mut self, m: &'ast syn::Macro) {
+                // (マクロの引数の名前は全部「鎖でない」とみなす)
+                fn idents(ts: proc_macro2::TokenStream, out: &mut std::collections::HashSet<String>) {
+                    for t in ts {
+                        match t {
+                            proc_macro2::TokenTree::Ident(i) => {
+                                out.insert(i.to_string());
+                            }
+                            proc_macro2::TokenTree::Group(g) => idents(g.stream(), out),
+                            _ => {}
+                        }
+                    }
+                }
+                idents(m.tokens.clone(), &mut self.other);
+            }
+            fn visit_pat_ident(&mut self, p: &'ast syn::PatIdent) {
+                self.other.insert(p.ident.to_string());
+                self.assigned.insert(p.ident.to_string());
+            }
+            fn visit_item(&mut self, _: &'ast syn::Item) {}
+        }
+        impl Scan {
+            fn assign_target(&mut self, t: &Expr) {
+                let mut c = vec![];
+                if matches!(t, Expr::Index(_)) && chain(t, &mut c) {
+                    c.pop();
+                    self.chains.push((root(t).unwrap(), c, true));
+                    let mut x = t;
+                    while let Expr::Index(ix) = x {
+                        self.visit_expr(&ix.index);
+                        x = &ix.expr;
+                    }
+                } else {
+                    if let Some(r) = root(t) {
+                        self.assigned.insert(r.clone());
+                        self.other.insert(r);
+                    }
+                    self.visit_expr(t);
+                }
+            }
+        }
+        let mut sc = Scan { chains: vec![], other: Default::default(), assigned: Default::default(), bail: false };
+        sc.visit_block(body);
+        if let Some(p) = pat {
+            sc.visit_pat(p);
+        }
+        if let Some(c) = cond {
+            sc.visit_expr(c);
+        }
+        if sc.bail {
+            return Ok(());
+        }
+        // 代入の左辺の要素はスカラーでなければならない (行 `c[i] = vec![]` は受け手を変える)
+        let mut bad: std::collections::HashSet<String> = sc.other.clone();
+        for (r, c, is_assign) in &sc.chains {
+            if *is_assign {
+                let full = c.last().map(|b| b.to_token_stream().to_string());
+                let _ = full;
+                // (左辺の型: 受け手の要素の型)
+                // (根の型から添字の数だけ要素の型をたどる)
+                let elem_of = |this: &Self, t: Ty| -> Option<Ty> {
+                    match this.strip_refs(t) {
+                        Ty::Struct(sid) => this.vec_fields(sid).map(|f| f.2),
+                        Ty::Array(e, _) | Ty::Slice(e) => Some(*e),
+                        _ => None,
+                    }
+                };
+                let mut t = self.lookup(r).map(|x| x.1);
+                for _ in 0..c.len() {
+                    t = t.and_then(|t| elem_of(self, t));
+                }
+                let elem_scalar = t.is_some_and(|t| !t.is_agg());
+                if !elem_scalar {
+                    bad.insert(r.clone());
+                }
+            }
+        }
+        let mut done: std::collections::HashSet<String> = Default::default();
+        for (r, c, _) in sc.chains.clone() {
+            if bad.contains(&r) {
+                continue;
+            }
+            // 根はループの前からあるローカルの Vec
+            // (`&Vec` / `&mut Vec` の引数も: 本体で変えるならメソッド呼び出しか代入として現れる)
+            let Some((_, rt)) = self.lookup(&r) else { continue };
+            let Ty::Struct(rsid) = self.strip_refs(rt) else { continue };
+            if self.vec_fields(rsid).is_none() {
+                continue;
+            }
+            for (k, b) in c.iter().enumerate() {
+                let key = b.to_token_stream().to_string();
+                if done.contains(&key) || self.hoisted.iter().any(|h| h.0 == key) {
+                    continue;
+                }
+                if k == 0 {
+                    let (base, len, elem) = self.indexable(b)?;
+                    self.hoisted.push((key.clone(), base, len, elem, None));
+                    done.insert(key);
+                    continue;
+                }
+                // `x[i]`: i はループの前からある、本体で代入も束縛し直しもされない変数
+                let Expr::Index(ix) = b else { break };
+                let Expr::Path(ip) = &*ix.index else { break };
+                let Some(iname) = ip.path.get_ident().map(|i| i.to_string()) else { break };
+                if sc.assigned.contains(&iname) || self.lookup(&iname).is_none() {
+                    break;
+                }
+                let pkey = c[k - 1].to_token_stream().to_string();
+                let Some(&(_, pb, pl, pe, _)) = self.hoisted.iter().rev().find(|h| h.0 == pkey) else { break };
+                let Ty::Struct(esid) = pe else { break };
+                let Some((po, lo, ee)) = self.vec_fields(esid) else { break };
+                let (iv, it) = self.expr(&ix.index, Some(Ty::Usize))?;
+                let (Some(iv), Ty::Usize) = (iv, it) else { break };
+                // (範囲外なら読まない: 読む場所をダミーの領域にして、本体の中の検査で panic する)
+                let ok = self.b.ins().icmp(IntCC::UnsignedLessThan, iv, pl);
+                let at = self.elem_addr(pb, iv, pe);
+                let dummy = self.temp(pe);
+                let addr = self.b.ins().select(ok, at, dummy);
+                let rb = self.b.ins().load(PTR, mf(), addr, po as i32);
+                let rl = self.b.ins().load(types::I64, mf(), addr, lo as i32);
+                self.hoisted.push((key.clone(), rb, rl, ee, Some((ok, pl, iv))));
+                done.insert(key);
+            }
+        }
+        Ok(())
     }
 
     // --- panic / マクロ / `?` ---------------------------------------------
@@ -6750,6 +7015,43 @@ impl Cx<'_, '_> {
             }
             let (v, vt) = self.call_named("Vec::with_capacity", vec![xt], &[(nv, Ty::Usize)], span)?;
             let v = v.unwrap();
+            // 確保した領域に直接書いて、最後に長さを n にする (push の呼び出しと容量の検査をしない)
+            if let (Some(xv), Ty::Struct(vsid)) = (xv, vt) {
+                if let Some((po, lo, _)) = self.vec_fields(vsid) {
+                    let (es, _) = self.prog.size_align(xt);
+                    let p = self.b.ins().load(PTR, mf(), v, po as i32);
+                    // (1 byte の要素 (`vec![true; n]` / `vec![0u8; n]`) は memset)
+                    if es == 1 && clif_ty(xt) == Some(types::I8) && self.prog.index.contains_key("__exr_memset") {
+                        let c = self.b.ins().uextend(types::I32, xv);
+                        self.call_named("__exr_memset", vec![], &[(p, Ty::Ptr(true, intern(Ty::U8))), (c, Ty::I32), (nv, Ty::Usize)], span)?;
+                        self.b.ins().store(mf(), nv, v, lo as i32);
+                        return Ok((Some(v), vt));
+                    }
+                    let i = self.b.declare_var(types::I64);
+                    let z = self.b.ins().iconst(types::I64, 0);
+                    self.b.def_var(i, z);
+                    let head = self.b.create_block();
+                    let body = self.b.create_block();
+                    let done = self.b.create_block();
+                    self.b.ins().jump(head, &[]);
+                    self.b.switch_to_block(head);
+                    let iv = self.b.use_var(i);
+                    let more = self.b.ins().icmp(IntCC::UnsignedLessThan, iv, nv);
+                    self.b.ins().brif(more, body, &[], done, &[]);
+                    self.b.switch_to_block(body);
+                    let off = self.b.ins().imul_imm_s(iv, es.max(1) as i64);
+                    let a = self.b.ins().iadd(p, off);
+                    if es > 0 {
+                        self.write(Place::Mem(a, 0, xt), Some(xv));
+                    }
+                    let next = self.b.ins().iadd_imm_s(iv, 1);
+                    self.b.def_var(i, next);
+                    self.b.ins().jump(head, &[]);
+                    self.b.switch_to_block(done);
+                    self.b.ins().store(mf(), nv, v, lo as i32);
+                    return Ok((Some(v), vt));
+                }
+            }
             // for i in 0..n { v.push(x) }
             let i = self.b.declare_var(types::I64);
             let z = self.b.ins().iconst(types::I64, 0);

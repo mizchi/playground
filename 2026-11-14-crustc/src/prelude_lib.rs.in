@@ -420,6 +420,11 @@ unsafe extern "C" {
 }
 
 unsafe extern "C" {
+    #[link_name = "memset"]
+    fn __exr_memset(d: *mut u8, c: i32, n: usize) -> *mut u8;
+}
+
+unsafe extern "C" {
     #[link_name = "memcpy"]
     fn __exr_memcpy(d: *mut u8, s: *const u8, n: usize) -> *mut u8;
 }
