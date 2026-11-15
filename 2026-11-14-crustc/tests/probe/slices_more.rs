@@ -1,0 +1,31 @@
+fn main() {
+    let mut v = vec![5, 1, 4, 2, 3];
+    v.sort_unstable_by_key(|&x| std::cmp::Reverse(x));
+    println!("{:?}", v);
+    v.reverse(); v.swap(0, 4); v.rotate_left(2);
+    println!("{:?} {:?} {:?}", v, v.first(), v.last());
+    let (a, b) = v.split_at(2);
+    println!("{:?} {:?} {}", a, b, v.contains(&4));
+    let s = [1, 3, 5, 7, 9];
+    println!("{:?} {:?}", s.binary_search(&7), s.binary_search_by(|p| p.cmp(&4)));
+    println!("{:?}", s.iter().copied().max());
+    println!("{:?}", s.iter().skip_while(|&&x| x < 5).collect::<Vec<_>>());
+    let mut m = [[0; 3]; 2];
+    m[1][2] = 5;
+    let flat: Vec<i32> = m.iter().flat_map(|r| r.iter().copied()).collect();
+    println!("{:?}", flat);
+    let words = vec!["apple", "bob", "kayak"];
+    let pal: Vec<&&str> = words.iter().filter(|w| w.chars().eq(w.chars().rev())).collect();
+    println!("{:?}", pal);
+    let mut v2 = vec![1, 2, 3, 4, 5, 6];
+    v2.truncate(4); v2.insert(1, 9); let r = v2.remove(0);
+    println!("{:?} {} {:?}", v2, r, v2.iter().rev().enumerate().map(|(i, x)| i as i32 * x).collect::<Vec<_>>());
+    v2.extend_from_slice(&[7, 7]); v2.dedup();
+    println!("{:?} {:?}", v2, v2.iter().min_by_key(|&&x| (x - 5).abs()));
+    let fl = vec![2.5, -1.0, 3.75];
+    let mut sorted = fl.clone(); sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    println!("{:?} {}", sorted, fl.iter().cloned().fold(f64::MIN, f64::max));
+    println!("{:?}", fl.iter().map(|x| x * 2.0).sum::<f64>());
+    let joined: String = vec!['a', 'b'].iter().collect();
+    println!("{}", joined);
+}
