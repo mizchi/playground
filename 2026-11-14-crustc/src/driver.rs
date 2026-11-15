@@ -1073,6 +1073,10 @@ fn emit_object(
     isa: OwnedTargetIsa,
 ) -> Result<(Vec<u8>, FxSet<u32>), String> {
     let cc = isa.default_call_conv();
+    let sym_align = isa.symbol_alignment();
+    let mut fn_off: FxMap<u32, u64> = FxMap::default();
+    let mut text_end = 0u64;
+    let mut first_fn: Option<cranelift_module::FuncId> = None;
     let mut b = ObjectBuilder::new(isa, "exr", cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
     // 関数は 1 つの .text に並べる (関数ごとのセクションは 1 関数あたり section header 128 byte。
@@ -1302,72 +1306,99 @@ fn emit_object(
             .collect();
         m.define_function_bytes(fid, blob.align as u64, &blob.code, &relocs)
             .map_err(|e| e.to_string())?;
+        // (.text の中の位置: cranelift-object は定義した順に、関数のアラインメントに揃えて並べる)
+        let al = (blob.align as u64).max(sym_align).max(1);
+        text_end = text_end.div_ceil(al) * al;
+        fn_off.insert(uid, text_end);
+        text_end += blob.code.len() as u64;
+        first_fn.get_or_insert(fid);
     }
     // panic の trap の表 (main が登録したハンドラが、発生したアドレスで種類・場所・メッセージを引く):
     // [関数の数, (関数のアドレス, 個数, (オフセット << 44 | (メッセージ番号 + 1) << 31 | 種類・行・列) * 個数) *,
     //  メッセージの数, (アドレス, 長さ) *]  (1 か所 8 byte。オフセットが 1 MiB を超える場所は載せない)
     if let Some(tid) = trap_table {
-        let mut words: Vec<u64> = vec![0];
-        let mut fn_relocs: Vec<(u32, cranelift_module::FuncId)> = vec![];
+        let mut bytes: Vec<u8> = vec![0; 8];
+        let uv = |out: &mut Vec<u8>, mut v: u64| {
+            while v >= 0x80 {
+                out.push(v as u8 | 0x80);
+                v >>= 7;
+            }
+            out.push(v as u8);
+        };
         let mut msgs: Vec<Vec<u8>> = vec![];
+        let mut funcs: Vec<u8> = vec![];
         let mut nf = 0u64;
+        let (mut prev_fn, mut prev_line) = (0u64, 0i64);
         for &uid in user_live.iter().chain(&order) {
             let blob = &blobs[&uid];
             if blob.traps.is_empty() {
                 continue;
             }
-            let n = blob.traps.iter().filter(|t| t.0 < 1 << 20).count();
-            if n == 0 {
-                continue;
-            }
             nf += 1;
-            fn_relocs.push(((words.len() * 8) as u32, ids[&uid]));
-            words.push(0);
-            words.push(n as u64);
+            let fo = fn_off[&uid];
+            uv(&mut funcs, fo - prev_fn);
+            prev_fn = fo;
+            uv(&mut funcs, blob.traps.len() as u64);
+            let mut prev_site = 0u64;
             for &(off, info, mi) in &blob.traps {
-                if off >= 1 << 20 {
-                    continue;
-                }
-                let gm = if mi == u32::MAX || msgs.len() >= (1 << 13) - 1 {
-                    u32::MAX
+                let gm = if mi == u32::MAX {
+                    0
                 } else {
                     let bytes = &blob.datas[mi as usize];
                     match msgs.iter().position(|x| x == bytes) {
-                        Some(k) => k as u32,
+                        Some(k) => k as u64 + 1,
                         None => {
                             msgs.push(bytes.clone());
-                            msgs.len() as u32 - 1
+                            msgs.len() as u64
                         }
                     }
                 };
-                let m1 = if gm == u32::MAX { 0 } else { gm as u64 + 1 };
-                words.push(((off as u64) << 44) | (m1 << 31) | (info as u64 & 0x7FFF_FFFF));
+                let (kind, line, col) = ((info >> 27) as u64, ((info >> 11) & 0xFFFF) as i64, (info & 0x7FF) as u64);
+                uv(&mut funcs, off as u64 - prev_site);
+                prev_site = off as u64;
+                uv(&mut funcs, kind | (gm << 4));
+                let d = line - prev_line;
+                prev_line = line;
+                uv(&mut funcs, ((d << 1) ^ (d >> 63)) as u64);
+                uv(&mut funcs, col);
             }
         }
-        words[0] = nf;
-        words.push(msgs.len() as u64);
-        let mut msg_relocs = vec![];
+        uv(&mut bytes, msgs.len() as u64);
         for mb in &msgs {
-            let did = anon_data(&mut m, mb.clone(), 1, &mut anon)?;
-            msg_relocs.push(((words.len() * 8) as u32, did));
-            words.push(0);
-            words.push(mb.len() as u64);
+            uv(&mut bytes, mb.len() as u64);
+            bytes.extend_from_slice(mb);
         }
-        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        uv(&mut bytes, nf);
+        bytes.extend_from_slice(&funcs);
         let mut desc = cranelift_module::DataDescription::new();
         desc.define(bytes.into_boxed_slice());
         desc.set_align(8);
-        for (off, fid) in fn_relocs {
+        // (表が参照するのは .text の先頭 (最初に置いた関数) だけ。関数の位置は先頭からのオフセット)
+        if let Some(fid) = first_fn {
             let fr = desc.import_function(ModuleRelocTarget::from(fid));
-            desc.write_function_addr(off, fr);
-        }
-        for (off, did) in msg_relocs {
-            let gv = desc.import_global_value(ModuleRelocTarget::from(did));
-            desc.write_data_addr(off, gv, 0);
+            desc.write_function_addr(0, fr);
         }
         m.define_data(tid, &desc).map_err(|e| e.to_string())?;
     }
-    Ok((m.finish().emit().map_err(|e| e.to_string())?, reach))
+    let obj = m.finish().emit().map_err(|e| e.to_string())?;
+    // (panic の表は関数の位置を自分で数えている: 実際の .o の位置と合っているか確かめる)
+    if trap_table.is_some() {
+        let syms: FxMap<String, u64> = crate::elfz::func_symbols(&obj)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(n, _, v)| (n, v))
+            .collect();
+        for (&uid, &off) in &fn_off {
+            let sym = match insts.get(uid) {
+                Some(i) => &i.sig.symbol,
+                None => &prog.sigs[uid as usize].symbol,
+            };
+            if syms.get(sym).is_some_and(|&v| v != off) {
+                return Err(format!("internal: function `{sym}` is at {:#x} in .text, expected {off:#x}", syms[sym]));
+            }
+        }
+    }
+    Ok((obj, reach))
 }
 
 pub fn peak_rss_kib() -> u64 {

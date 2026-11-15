@@ -4715,34 +4715,66 @@ fn __exr_panic_tail<G>() {
 }
 
 // trap (ud2 の SIGILL) で止まったら、発生したアドレスで表を引いて panic のメッセージを出し、101 で終わる
+// 表の可変長整数 (7 bit ずつ) を 1 つ読む
+fn __exr_tab_uv(p: &mut *const u8) -> u64 {
+    let mut v = 0u64;
+    let mut sh = 0;
+    loop {
+        let b = unsafe { **p };
+        *p = unsafe { (*p).add(1) };
+        v |= ((b & 0x7F) as u64) << sh;
+        if b < 0x80 {
+            return v;
+        }
+        sh += 7;
+    }
+}
+
+// trap (ud2 の SIGILL) で止まったら、発生したアドレスで表を引いて panic のメッセージを出し、101 で終わる。
+// 表 (driver が作る): [.text の先頭のアドレス (8 byte)] の後ろに可変長整数の列
+//   メッセージの数, (長さ, 中身) *, 関数の数, (前の関数からのオフセットの差, 場所の数,
+//   (前の場所からのオフセットの差, 種類 | (メッセージ番号 + 1) << 4, 行の差 (zigzag), 列) *) *
 fn __exr_on_trap(sig: i32, info: *const u64, ctx: *const u8) {
     let _ = (sig, ctx);
     let pc = unsafe { *info.add(2) };
     let t = __EXR_TRAP_TABLE.as_ptr();
+    let base = unsafe { *t };
+    let mut p = unsafe { (t as *const u8).add(8) };
+    let msgs = p;
+    let nm = __exr_tab_uv(&mut p);
+    let mut k = 0;
+    while k < nm {
+        let n = __exr_tab_uv(&mut p);
+        p = unsafe { p.add(n as usize) };
+        k += 1;
+    }
     let mut found = false;
-    let mut inf: u64 = 0;
-    let mut mi: u64 = 0;
-    let mut p = unsafe { t.add(1) };
-    unsafe {
-        let nf = *t;
-        let mut i = 0;
-        while i < nf {
-            let fa = *p;
-            let n = *p.add(1);
-            p = p.add(2);
-            let mut j = 0;
-            while j < n {
-                let e = *p;
-                if fa + (e >> 44) == pc {
-                    found = true;
-                    inf = e & 0x7FFFFFFF;
-                    mi = (e >> 31) & 0x1FFF;
-                }
-                p = p.add(1);
-                j += 1;
+    let (mut kind, mut mi, mut line, mut col) = (0u64, 0u64, 0u64, 0u64);
+    let nf = __exr_tab_uv(&mut p);
+    let mut fa = base;
+    let mut cur_line: u64 = 0;
+    let mut i = 0;
+    while i < nf {
+        fa = fa.wrapping_add(__exr_tab_uv(&mut p));
+        let n = __exr_tab_uv(&mut p);
+        let mut at = fa;
+        let mut j = 0;
+        while j < n {
+            at = at.wrapping_add(__exr_tab_uv(&mut p));
+            let km = __exr_tab_uv(&mut p);
+            let z = __exr_tab_uv(&mut p);
+            cur_line = cur_line.wrapping_add(if z & 1 == 0 { z >> 1 } else { (!(z >> 1)).wrapping_add(0) });
+            let c = __exr_tab_uv(&mut p);
+            if at == pc && !found {
+                found = true;
+                kind = km & 0xF;
+                mi = km >> 4;
+                line = cur_line;
+                col = c;
             }
-            i += 1;
+            j += 1;
         }
+        i += 1;
     }
     if !found {
         unsafe {
@@ -4751,16 +4783,26 @@ fn __exr_on_trap(sig: i32, info: *const u64, ctx: *const u8) {
         __exr_err_str::<()>("\nthread 'main' panicked");
         __exr_panic_tail::<()>();
     }
-    __exr_panic_head::<()>((inf >> 11) & 0xFFFF, inf & 0x7FF);
+    __exr_panic_head::<()>(line, col);
     if mi != 0 {
-        // (メッセージの表は関数の表の後ろ: [数, (アドレス, 長さ) *])
-        unsafe {
-            let e = p.add(2 * mi as usize - 1);
-            __exr_write(2, *e as *const u8, *e.add(1) as usize);
+        // (mi 番目 (1 始まり) のメッセージ)
+        let mut q = msgs;
+        let _ = __exr_tab_uv(&mut q);
+        let mut k = 1;
+        loop {
+            let n = __exr_tab_uv(&mut q) as usize;
+            if k == mi {
+                unsafe {
+                    __exr_write(2, q, n);
+                }
+                break;
+            }
+            q = unsafe { q.add(n) };
+            k += 1;
         }
     } else {
         // (種類ごとのメッセージ: 繋げた文字列と、各メッセージの始まりの位置の表)
-        let kind = if inf >> 27 > 11 { 11 } else { (inf >> 27) as usize };
+        let kind = if kind > 11 { 11 } else { kind as usize };
         unsafe {
             let o = __EXR_KIND_OFF.as_ptr();
             let (a, b) = (*o.add(kind) as usize, *o.add(kind + 1) as usize);

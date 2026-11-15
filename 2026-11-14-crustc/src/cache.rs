@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use crate::codegen::{Blob, BlobReloc, Target};
 use crate::front::{Insts, Program};
 
-const MAGIC: &[u8; 8] = b"CRCC0002";
+const MAGIC: &[u8; 8] = b"CRCC0003";
 
 pub type Key = u128;
 
@@ -41,9 +41,13 @@ impl KeyHasher {
     }
 }
 
+/// キャッシュファイル: MAGIC の後ろは zstd で圧縮した本体。本体は
+/// [前回のオブジェクトのハッシュ (16 byte), エントリの数 (可変長), (キーの下位 64 bit, 長さ (可変長), 中身) *]。
+/// (キーは 128 bit のハッシュだが、ファイルには下位 64 bit だけを書く: 数千エントリでの衝突は 2^-40 未満)
 pub struct Cache {
+    /// 解凍した本体
     data: Vec<u8>,
-    index: HashMap<Key, (usize, usize)>,
+    index: HashMap<u64, (usize, usize)>,
     /// 前回の最終オブジェクトのハッシュ (リンク省略判定用)
     pub last_obj: Key,
 }
@@ -93,7 +97,14 @@ impl Rd<'_> {
 
 impl Cache {
     pub fn open(path: &Path) -> Cache {
-        let data = std::fs::read(path).unwrap_or_default();
+        let file = std::fs::read(path).unwrap_or_default();
+        let data = match file.get(..8) {
+            Some(m) if m == MAGIC => {
+                let n = zstd::bulk::Decompressor::upper_bound(&file[8..]).unwrap_or(64 << 20);
+                zstd::bulk::decompress(&file[8..], n).unwrap_or_default()
+            }
+            _ => vec![],
+        };
         let mut c = Cache {
             data: vec![],
             index: HashMap::new(),
@@ -115,17 +126,14 @@ impl Cache {
         }
     }
 
-    fn parse_index(d: &[u8]) -> Option<(HashMap<Key, (usize, usize)>, Key)> {
+    fn parse_index(d: &[u8]) -> Option<(HashMap<u64, (usize, usize)>, Key)> {
         let mut r = Rd(d, 0);
-        if r.take(8)? != MAGIC {
-            return None;
-        }
         let last = r.u128()?;
-        let n = r.u32()? as usize;
+        let n = r.uv()? as usize;
         let mut idx = HashMap::with_capacity(n);
         for _ in 0..n {
-            let k = r.u128()?;
-            let len = r.u32()? as usize;
+            let k = r.u64()?;
+            let len = r.uv()? as usize;
             let start = r.1;
             r.take(len)?;
             idx.insert(k, (start, start + len));
@@ -142,7 +150,7 @@ impl Cache {
     }
 
     pub fn get(&self, key: Key) -> Option<&[u8]> {
-        let &(s, e) = self.index.get(&key)?;
+        let &(s, e) = self.index.get(&(key as u64))?;
         Some(&self.data[s..e])
     }
 
@@ -154,21 +162,23 @@ impl Cache {
         last_obj: Key,
     ) -> std::io::Result<usize> {
         let mut out = Vec::with_capacity(self.data.len());
-        out.extend_from_slice(MAGIC);
         out.extend_from_slice(&last_obj.to_le_bytes());
-        out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        put_uv(&mut out, entries.len() as u64);
         for (k, b) in entries {
-            out.extend_from_slice(&k.to_le_bytes());
-            out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(*k as u64).to_le_bytes());
+            put_uv(&mut out, b.len() as u64);
             out.extend_from_slice(b);
         }
         if out == self.data {
-            return Ok(out.len()); // 変化なしなら書かない
+            // 変化なしなら書かない
+            return Ok(std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0));
         }
+        let mut file = MAGIC.to_vec();
+        file.extend_from_slice(&zstd::bulk::compress(&out, 1)?);
         let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &out)?;
+        std::fs::write(&tmp, &file)?;
         std::fs::rename(&tmp, path)?;
-        Ok(out.len())
+        Ok(file.len())
     }
 }
 

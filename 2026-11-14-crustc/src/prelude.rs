@@ -766,7 +766,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     // 算術の検査の panic (no_std で panic_handler を持つプログラムは使わない)
     if !user_src.contains("no_std") {
         need.extend(["__exr_err_str", "__exr_fflush", "__exr_write", "__exr_exit"]);
-        need.extend(["__exr_rt_init", "__exr_on_trap", "__exr_sigaction", "__EXR_TRAP_TABLE", "__EXR_KIND_MSG", "__EXR_KIND_OFF", "__EXR_SA", "__exr_err_num", "__exr_panic_index", "__EXR_CALLER"]);
+        need.extend(["__exr_rt_init", "__exr_on_trap", "__exr_sigaction", "__EXR_TRAP_TABLE", "__EXR_KIND_MSG", "__EXR_KIND_OFF", "__EXR_SA", "__exr_err_num", "__exr_panic_index", "__exr_tab_uv", "__EXR_CALLER"]);
 
     }
     if user_src.contains("process::exit") {

@@ -5,7 +5,7 @@
 //! そちらには `uncompress` で戻したものを一時ファイルで渡す)
 
 const SHF_COMPRESSED: u64 = 0x800;
-const SHF_EXECINSTR: u64 = 0x4;
+const SHF_ALLOC: u64 = 0x2;
 const SHT_PROGBITS: u32 = 1;
 const SHT_NOBITS: u32 = 8;
 const ELFCOMPRESS_ZSTD: u32 = 2;
@@ -115,10 +115,11 @@ fn rebuild(d: &[u8], f: impl Fn(usize, &Shdr) -> Option<(Vec<u8>, u64, u64)>) ->
     Some(out)
 }
 
-/// 実行可能な PROGBITS (`.text`) を zstd で圧縮する。圧縮で小さくならなければ元のまま
+/// メモリに載る PROGBITS (`.text` / `.rodata` / `.data.rel.ro` など) を zstd で圧縮する。圧縮で小さくならなければ元のまま
 pub fn compress_text(d: &[u8]) -> Vec<u8> {
     let r = rebuild(d, |_, s| {
-        if s.ty != SHT_PROGBITS || s.flags & SHF_EXECINSTR == 0 || s.flags & SHF_COMPRESSED != 0 || s.size < 256 {
+        // (機械語と、読み出し専用のデータ (panic の表・文字列)。どちらも wild はそのまま読む)
+        if s.ty != SHT_PROGBITS || s.flags & SHF_ALLOC == 0 || s.flags & SHF_COMPRESSED != 0 || s.size < 256 {
             return None;
         }
         let raw = d.get(s.off..s.off + s.size)?;
@@ -149,6 +150,31 @@ pub fn uncompress(d: &[u8]) -> Option<Vec<u8>> {
         let data = section_bytes(d, s)?.into_owned();
         Some((data, s.flags & !SHF_COMPRESSED, align))
     })
+}
+
+/// 定義された関数のシンボルの (名前, セクション番号, 位置)
+pub fn func_symbols(d: &[u8]) -> Option<Vec<(String, usize, u64)>> {
+    let (shoff, _, es) = sh_table(d)?;
+    let secs = sections(d)?;
+    let mut out = vec![];
+    for (i, s) in secs.iter().enumerate() {
+        if s.ty != 2 || s.entsize != 24 {
+            continue;
+        }
+        let link = rd(d, shoff + i * es + 0x28, 4)? as usize;
+        let st = secs.get(link)?;
+        for k in 0..s.size / 24 {
+            let e = s.off + k * 24;
+            let (name, info, shndx) = (rd(d, e, 4)? as usize, *d.get(e + 4)?, rd(d, e + 6, 2)? as usize);
+            if info & 0xF != 2 || shndx == 0 {
+                continue;
+            }
+            let ns = st.off + name;
+            let end = ns + d.get(ns..)?.iter().position(|&c| c == 0)?;
+            out.push((String::from_utf8_lossy(&d[ns..end]).into_owned(), shndx, rd(d, e + 8, 8)?));
+        }
+    }
+    Some(out)
 }
 
 /// .o に圧縮したセクションがあるか
