@@ -1840,6 +1840,11 @@ impl Inf<'_> {
                 .and_then(|id| self.lookup(&id.to_string()))
             {
                 Some(v) => v,
+                // const ジェネリクスの N は usize
+                None if p.path.get_ident().is_some_and(|id| {
+                    let n = id.to_string();
+                    crate::front::const_generic_value(self.env, &n).is_some()
+                }) => self.known(Ty::Usize),
                 // 値として使われた (ジェネリックでない) 関数は関数ポインタ
                 None => match self.prog.fn_by_path(&p.path, self.self_sid) {
                     Some(id)

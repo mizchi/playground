@@ -419,6 +419,8 @@ pub fn parse_tysyn(t: &syn::Type, self_ty: Option<&TySyn>) -> R<TySyn> {
                         match a {
                             syn::GenericArgument::Type(t) => v.push(parse_tysyn(t, self_ty)?),
                             syn::GenericArgument::Lifetime(_) => {}
+                            // `Buf<4>`: const ジェネリクスの引数 (長さを持つ配列型 `[(); 4]` として持つ)
+                            syn::GenericArgument::Const(e) => v.push(const_arg_syn(e)?),
                             _ => return err(a.span(), "unsupported generic argument"),
                         }
                     }
@@ -2220,6 +2222,8 @@ impl Program {
                     // (const ジェネリクスの N)
                     ArrLen::Const(c) => match names(c) {
                         Some(Ty::Param(i)) => (CONST_LEN_BASE + i as u32) as u64,
+                        // (インスタンスの中: N は長さを持つ配列型 / 長さが N の型引数 `[(); N]`)
+                        Some(Ty::Array(Ty::Unit, m)) => m as u64,
                         _ => self.const_usize(c)?,
                     },
                 };
@@ -2232,6 +2236,8 @@ impl Program {
                 match self.struct_index.get(n) {
                     Some(&id) if self.structs[id as usize].generics.is_empty() => Ty::Struct(id),
                     Some(_) => return Err(format!("missing generics for `{n}`")),
+                    // (`zeros::<K>()` / `Buf<K>`: const の名前は const ジェネリクスの引数)
+                    None if self.const_index.contains_key(n) => Ty::Array(intern(Ty::Unit), self.const_usize(n)? as u32),
                     None => return Err(format!("cannot find type `{n}`")),
                 }
             }
@@ -3097,6 +3103,12 @@ impl Program {
     fn fn_by_path_inner(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
         // 最後のセグメントの turbofish (`f::<T>`) は呼び出し側で読む
         let n = p.segments.len();
+        // (`Buf::<8>::new`: 型のセグメントの型引数も呼び出し側で読む)
+        if n == 2 && !p.segments[0].arguments.is_none() && p.leading_colon.is_none() {
+            let mut q = p.clone();
+            q.segments[0].arguments = syn::PathArguments::None;
+            return self.fn_by_path_inner(&q, self_sid);
+        }
         if p.leading_colon.is_some()
             || p.segments
                 .iter()
@@ -3761,6 +3773,32 @@ fn collect_generics(g: &syn::Generics, out: &mut Vec<(String, Vec<String>)>) -> 
         }
     }
     Ok(())
+}
+
+/// const ジェネリクスの引数 `4` / `{ 4 }` / `N`。値は長さを持つ配列型 `[(); n]` で表す
+pub fn const_arg_syn(e: &syn::Expr) -> R<TySyn> {
+    match e {
+        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. }) => {
+            let n = i.base10_parse::<u64>().or_else(|er| err(i.span(), er))?;
+            Ok(TySyn::Array(Box::new(TySyn::Prim(Ty::Unit)), ArrLen::Lit(n)))
+        }
+        syn::Expr::Block(b) if b.block.stmts.len() == 1 => match &b.block.stmts[0] {
+            syn::Stmt::Expr(e, None) => const_arg_syn(e),
+            _ => err(e.span(), "unsupported const argument"),
+        },
+        syn::Expr::Path(p) if p.path.get_ident().is_some() => {
+            Ok(TySyn::Array(Box::new(TySyn::Prim(Ty::Unit)), ArrLen::Const(p.path.get_ident().unwrap().to_string())))
+        }
+        _ => err(e.span(), "const arguments must be a literal or a name"),
+    }
+}
+
+/// 型の環境で name が const ジェネリクスの引数 (`[(); n]`) なら、その値
+pub fn const_generic_value(env: &TyEnv, name: &str) -> Option<u32> {
+    env.params.iter().find(|(n, _)| n == name).and_then(|(_, t)| match t {
+        Ty::Array(Ty::Unit, n) if *n < CONST_LEN_BASE => Some(*n),
+        _ => None,
+    })
 }
 
 /// const ジェネリクスの印 (境界の名前の位置に入れる)

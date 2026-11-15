@@ -332,6 +332,7 @@ impl Worker {
                 root,
                 closure_ix,
                 closure_hint: None,
+                seg_self: None,
                 in_fmt_args: 0,
                 owned: vec![],
                 temps: vec![],
@@ -581,6 +582,8 @@ struct Cx<'a, 'p> {
     closure_ix: HashMap<(usize, usize), u32>,
     /// 次に作るクロージャの引数・戻り値の型の手がかり (呼び先の `F: Fn(A) -> B` から)
     closure_hint: Option<(Vec<Ty>, Option<Ty>)>,
+    /// `Buf::<8>::new()` の型のセグメントの型 (呼ぶ関数の self 型から型引数を解く)
+    seg_self: Option<Ty>,
     /// 書式マクロの引数を評価している深さ (型推論の記録をソース上の位置で引く)
     in_fmt_args: u32,
     /// drop の責任を持つローカル変数 (スコープの深さ順) と、文の終わりで drop する一時値
@@ -1148,6 +1151,7 @@ impl Cx<'_, '_> {
             Expr::Path(p) if p.path.segments.len() == 2 && self.const_of(p).is_some() => {
                 Some(self.prog.consts[self.const_of(p)? as usize].ty)
             }
+            Expr::Path(p) if self.const_generic(p).is_some() => Some(Ty::Usize),
             Expr::Try(t) => {
                 let Ty::Struct(sid) = self.peek(&t.expr)? else {
                     return None;
@@ -1416,6 +1420,13 @@ impl Cx<'_, '_> {
         match e {
             Expr::Paren(p) => self.place(&p.expr),
             Expr::Group(g) => self.place(&g.expr),
+            Expr::Path(p) if self.const_generic(p).is_some() => {
+                let n = self.const_generic(p).unwrap();
+                let v = self.b.ins().iconst(types::I64, n as i64);
+                let var = self.b.declare_var(types::I64);
+                self.b.def_var(var, v);
+                Ok(Place::Var(var, Ty::Usize))
+            }
             // const (`LIMIT` / `S::N`) を場所として使う (`println!("{}", LIMIT)` / `&LIMIT`): 一時領域に置く
             Expr::Path(p) if self.const_of(p).is_some() && p.path.get_ident().is_none_or(|id| self.lookup(&id.to_string()).is_none()) => {
                 let ci = self.const_of(p).unwrap();
@@ -1694,6 +1705,11 @@ impl Cx<'_, '_> {
                 self.variant_value(sid, vi, &[], expected)
             }
             Expr::Match(m) => self.match_(m, expected),
+            // const ジェネリクスの N: インスタンスの型引数の長さ
+            Expr::Path(p) if self.const_generic(p).is_some() => {
+                let n = self.const_generic(p).unwrap();
+                Ok((Some(self.b.ins().iconst(types::I64, n as i64)), Ty::Usize))
+            }
             // const は式そのものを埋め込む
             Expr::Path(p) if self.const_of(p).is_some() => {
                 let ci = self.const_of(p).unwrap();
@@ -2841,7 +2857,18 @@ impl Cx<'_, '_> {
             },
             _ => None,
         };
-        self.call_fn(id, None, &args, tf, expected, c.span())
+        // `Buf::<8>::new()` / `Vec::<i32>::new()`: 型のセグメントの型引数
+        if let Expr::Path(p) = &*c.func {
+            let n = p.path.segments.len();
+            if n >= 2 && !p.path.segments[n - 2].arguments.is_none() {
+                let seg = p.path.segments[n - 2].clone();
+                let ty = syn::Type::Path(syn::TypePath { qself: None, path: syn::Path::from(seg) });
+                self.seg_self = Some(self.prog.parse_ty(&ty, &self.env)?);
+            }
+        }
+        let r = self.call_fn(id, None, &args, tf, expected, c.span());
+        self.seg_self = None;
+        r
     }
 
     /// `recv.m(args)`: レシーバを自動 deref して struct を見つけ、
@@ -3222,16 +3249,24 @@ impl Cx<'_, '_> {
         turbofish: Option<&syn::AngleBracketedGenericArguments>,
     ) -> R<Vec<Option<Ty>>> {
         let mut sol: Vec<Option<Ty>> = vec![None; sig.generics.len()];
+        if let (Some(t), Some(st)) = (self.seg_self, sig.self_ty) {
+            self.prog.match_ty(st, t, &mut sol);
+        }
         // trait メソッドは先頭が Self なので、turbofish はその後ろの型パラメータに当たる
         let first = sig.trait_of.is_some() as usize;
         if let Some(tf) = turbofish {
             for (i, a) in tf.args.iter().enumerate() {
-                let syn::GenericArgument::Type(t) = a else {
-                    return err(a.span(), "only type arguments are supported");
+                let ty = match a {
+                    syn::GenericArgument::Type(t) => self.prog.parse_ty(t, &self.env)?,
+                    // `f::<3>()`: const ジェネリクスの引数
+                    syn::GenericArgument::Const(e) => {
+                        let ts = crate::front::const_arg_syn(e).or_else(|er| err(a.span(), er))?;
+                        self.prog.resolve_env(&ts, &self.env).or_else(|er| err(a.span(), er))?
+                    }
+                    _ => return err(a.span(), "only type arguments are supported"),
                 };
                 if let Some(slot) = sol.get_mut(first + i) {
                     // `_` は推論に任せる。`Vec<_>` のように一部だけ `_` なら穴として持つ
-                    let ty = self.prog.parse_ty(t, &self.env)?;
                     *slot = (ty != Ty::Param(crate::front::HOLE)).then_some(ty);
                 }
             }
@@ -3409,6 +3444,16 @@ impl Cx<'_, '_> {
         let args: &[&Expr] = &conv_refs;
         for (a, &pt) in args.iter().zip(&sig0.params[skip..]) {
             let mut exp = Some(self.prog.partial_subst(pt, &sol)).filter(|&t| !self.prog.has_param(t));
+            // (`[i64; N]` の N がまだ分からなくても、配列のリテラルには要素の型を渡す。長さはリテラルから決まる)
+            if exp.is_none() {
+                if let Ty::Array(e, n) = self.prog.partial_subst(pt, &sol) {
+                    if n >= crate::front::CONST_LEN_BASE && !self.prog.has_param(*e) {
+                        if let Expr::Array(al) = strip_paren(a) {
+                            exp = Some(Ty::Array(e, al.elems.len() as u32));
+                        }
+                    }
+                }
+            }
             // `F: Fn(A) -> B` の引数にクロージャを渡すなら、A / B をクロージャの型の手がかりにする
             let fb = self.fn_bound_of(&sig0, pt);
             // 関数アイテム (`or_insert_with(Vec::new)`) なら、境界を関数ポインタの期待型にして型引数を決める
@@ -4852,6 +4897,7 @@ impl Cx<'_, '_> {
             Expr::Lit(syn::ExprLit {
                 lit: Lit::Int(i), ..
             }) => i.base10_parse::<u32>().or_else(|er| err(i.span(), er)),
+            Expr::Path(p) if self.const_generic(p).is_some() => Ok(self.const_generic(p).unwrap()),
             Expr::Path(p) if p.path.get_ident().is_some() || self.const_of(p).is_some() => {
                 // (関連定数 `S::N` は const の名前 `S::N` で引く)
                 let name = match self.const_of(p) {
@@ -7136,6 +7182,15 @@ impl Cx<'_, '_> {
     }
 
     /// 1 セグメントのパスが (ローカル変数でない) const なら、その index
+    /// `N` (const ジェネリクス) の値。ローカル変数が同じ名前なら変数
+    fn const_generic(&self, p: &syn::ExprPath) -> Option<u32> {
+        let id = p.path.get_ident()?.to_string();
+        if self.lookup(&id).is_some() {
+            return None;
+        }
+        crate::front::const_generic_value(&self.env, &id)
+    }
+
     fn const_of(&self, p: &syn::ExprPath) -> Option<u32> {
         // (速い判定: 複数セグメントのパスで、最後の名前の const がなければ const ではない)
         if p.path.segments.len() >= 2 {
