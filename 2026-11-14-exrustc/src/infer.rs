@@ -1438,6 +1438,26 @@ impl Inf<'_> {
                 let ss = self.prog.struct_index["String"];
                 self.known(Ty::Struct(ss))
             }
+            // `dbg!(e)`: e の型
+            Expr::Macro(m) if m.mac.path.is_ident("dbg") => {
+                use syn::parse::Parser;
+                let Ok(args) = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated.parse2(m.mac.tokens.clone()) else {
+                    return self.var();
+                };
+                let xs: Vec<Expr> = args.into_iter().collect();
+                if xs.is_empty() {
+                    return self.var();
+                }
+                self.no_record += 1;
+                self.pos_record += 1;
+                let ki = self.keep.len();
+                self.keep.push(xs);
+                let x: *const Expr = &self.keep[ki][0];
+                let v = self.expr(unsafe { &*x });
+                self.pos_record -= 1;
+                self.no_record -= 1;
+                v
+            }
             Expr::Macro(m) if is_fmt_macro(&m.mac) => {
                 self.fmt_width_vars(&m.mac);
                 self.var()

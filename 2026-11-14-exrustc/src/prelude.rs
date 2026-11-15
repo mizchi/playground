@@ -714,6 +714,10 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     if user_src.contains(".or_default()") {
         need.extend(["or_default", "__exr_default"]);
     }
+    if user_src.contains("dbg!") {
+        need.extend(FMT_NAMES.iter().copied());
+        need.extend(["eprintln", "Debug", "__exr_eprint"]);
+    }
     // 標準入出力
     if user_src.contains("stdin") {
         need.extend(["Stdin", "StdinLock", "StdinLines", "__core_stdin", "IoError", "Result", "Option", "next"]);

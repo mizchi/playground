@@ -4228,6 +4228,19 @@ impl<W> BufWriter<W> {
     }
 }
 
+unsafe extern "C" {
+    #[link_name = "exit"]
+    fn __exr_exit(code: i32);
+}
+
+// `std::process::exit(code)`: stdio を書き出してから終わる
+pub fn __core_exit(code: i32) -> ! {
+    unsafe {
+        __exr_exit(code);
+    }
+    loop {}
+}
+
 fn __exr_eprint<G>(s: &String) {
     unsafe {
         __exr_write(2, s.vec.ptr as *const u8, s.vec.len);
@@ -6636,6 +6649,32 @@ impl Iterator for CharIndices {
         let (c, n) = __exr_decode_at::<()>(self.ptr, self.i);
         self.i += n;
         Some((at, c))
+    }
+}
+
+impl CharIndices {
+    // 後ろから: 継続バイト (10xxxxxx) を戻って文字の先頭を探す (len が後ろの端)
+    pub fn next_back(&mut self) -> Option<(usize, char)> {
+        if self.len <= self.i {
+            return None;
+        }
+        let mut k = self.len - 1;
+        while k > self.i && (unsafe { *self.ptr.add(k) } & 0xC0) == 0x80 {
+            k -= 1;
+        }
+        let (c, _) = __exr_decode_at::<()>(self.ptr, k);
+        self.len = k;
+        Some((k, c))
+    }
+}
+
+impl Bytes {
+    pub fn next_back(&mut self) -> Option<u8> {
+        if self.len <= self.i {
+            return None;
+        }
+        self.len -= 1;
+        Some(unsafe { *self.ptr.add(self.len) })
     }
 }
 

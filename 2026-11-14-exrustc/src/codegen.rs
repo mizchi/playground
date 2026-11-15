@@ -5695,18 +5695,27 @@ impl Cx<'_, '_> {
         rev: bool,
         enumerate: bool,
     ) -> R<V> {
-        let (Some(lo_e), Some(hi_e)) = (&rg.start, &rg.end) else {
-            return err(rg.span(), "for loops need a bounded range");
+        let Some(lo_e) = &rg.start else {
+            return err(rg.span(), "for loops need a range with a start");
         };
-        let hint = self.peek(lo_e).or_else(|| self.peek(hi_e));
+        // `for i in 0..`: 型の最大値までの閉区間 (事実上終わらない)
+        if rg.end.is_none() && rev {
+            return err(rg.span(), "cannot reverse an unbounded range");
+        }
+        let hint = self.peek(lo_e).or_else(|| rg.end.as_ref().and_then(|h| self.peek(h)));
         let (lo, lt) = self.expr(lo_e, hint)?;
-        let (hi, ht) = self.expr(hi_e, Some(lt))?;
-        self.same(hi_e.span(), ht, lt)?;
         if !lt.is_int() {
             return err(rg.span(), "range bounds must be integers");
         }
-        let (lo, hi) = (lo.unwrap(), hi.unwrap());
-        let inclusive = matches!(rg.limits, syn::RangeLimits::Closed(_));
+        let lo = lo.unwrap();
+        let (hi, inclusive) = match &rg.end {
+            Some(hi_e) => {
+                let (hi, ht) = self.expr(hi_e, Some(lt))?;
+                self.same(hi_e.span(), ht, lt)?;
+                (hi.unwrap(), matches!(rg.limits, syn::RangeLimits::Closed(_)))
+            }
+            None => (self.int_const(lt, crate::front::prim_assoc_const(lt, "MAX").unwrap()), true),
+        };
         let s = lt.signed();
         let ct = clif_ty(lt).unwrap();
         let lt_cc = if s {
@@ -5903,6 +5912,25 @@ impl Cx<'_, '_> {
             "vec" => self.vec_macro(mac, expected),
             "format" | "print" | "println" | "eprint" | "eprintln" | "write" | "writeln" => {
                 self.fmt_macro(mac, &name)
+            }
+            // `dbg!(e)`: `[file:line:col] e = {:#?}` を stderr に出して e を返す
+            "dbg" => {
+                let args = self.macro_args(mac)?;
+                let Some(e) = args.first() else {
+                    return err(mac.span(), "`dbg!()` without arguments is not supported");
+                };
+                let st = e.span().start();
+                let text = {
+                    use quote::ToTokens;
+                    e.to_token_stream().to_string()
+                };
+                let head = format!("[main.rs:{}:{}] {} = ", st.line, st.column + 1, text);
+                let ex: Expr = syn::parse_quote!({
+                    let __exr_dbg = #e;
+                    eprintln!("{}{:#?}", #head, __exr_dbg);
+                    __exr_dbg
+                });
+                self.expr(&ex, expected)
             }
             "panic" | "unreachable" | "todo" | "unimplemented" => Ok(self.panic_call()),
             "assert" | "debug_assert" => {
