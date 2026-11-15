@@ -393,6 +393,7 @@ bench/regress.sh
   - `std::process::exit`、`dbg!`、`for i in 0..`（終わりのない範囲）、`char_indices()` / `bytes()` の `rev()`
   - クロージャを含む型を返すクロージャ（`flat_map(|i| (0..i).map(move |j| (i, j)))`、`|a| move |b| a + b`）: 型推論がクロージャの struct 型（親の型引数・キャプチャ・引数・戻り値）まで解く
   - `Iterator::cycle`
+  - `-> impl Iterator<Item = T>` などクロージャ以外の `impl Trait` の戻り値（プログラムを組み立てた直後に本体を型推論して具体型を入れる。呼び出し側のキャッシュのキーには解いた型が入る）
   - `const fn` を const の初期化式から呼ぶこと、範囲パターンの端に const（`i32::MIN..=-1`）、`?Sized` 境界
 - panic：
   - `#[panic_handler]` があればそれを呼ぶ（範囲外アクセス・`unwrap`・`assert!`・`panic!` など）
@@ -451,7 +452,7 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
 - `macro_rules!` の制限：衛生 (hygiene) はない（展開はテキストの置き換え）。`$x:expr` などは次の区切りまでのトークン列として取る近似
 - イテレータのアダプタ（`for` の中で直接使う形以外）
 - ブランケット impl（`impl<T: Display> Tr for T`）
-- `-> impl Iterator<Item = T>` のような、クロージャ以外の `impl Trait` の戻り値（要約の段階で具体型が決まらないため）
+- ジェネリックな関数の `-> impl Trait` の戻り値
 - 参照の Vec を `iter().flatten()` すること（`into_iter().flatten()` は可）、型パラメータのある trait（`From<T>` は名前だけ持ち、同じ型への `From` の impl は 1 つまで）
 - `impl Trait for [T; N]` のような、プリミティブ以外の組み込み型への impl
 

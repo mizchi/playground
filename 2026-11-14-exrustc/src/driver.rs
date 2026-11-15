@@ -348,7 +348,8 @@ impl Session {
                 }
             }
         }
-        let prog = Program::build(&items, &sums)?;
+        let mut prog = Program::build(&items, &sums)?;
+        prog.resolve_opaque(src, &items)?;
         let mut refs = Vec::with_capacity(prog.item_of.len());
         let mut srefs = Vec::with_capacity(prog.item_of.len());
         let mut crefs = Vec::with_capacity(prog.item_of.len());

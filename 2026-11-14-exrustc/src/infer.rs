@@ -144,6 +144,8 @@ struct Inf<'p> {
     clo_root: Option<(u32, u32, *const syn::Block)>,
     /// Shape::Clo の st → (クロージャの関数 id, キャプチャの型変数, 注釈のない引数の位置)
     clo_info: crate::fxhash::FxMap<u32, (u32, Vec<u32>, Vec<usize>)>,
+    /// 後でもう一度見る関連型の境界 (呼び先, 型パラメータの型変数)
+    late: Vec<(u32, Vec<Option<u32>>)>,
 }
 
 /// sig はこの関数 (インスタンスなら型引数を入れた後) のシグネチャ、env は `Self` と型パラメータ
@@ -202,6 +204,7 @@ pub fn infer_ctx(
         clo_ctx: None,
         clo_root,
         clo_info: Default::default(),
+        late: vec![],
     };
     s.ret = match ret {
         // 一部だけ分かっている型 (`Result<?, u8>`): 型パラメータの所を型変数にする
@@ -232,6 +235,7 @@ pub fn infer_ctx(
     let tail = s.block(&f.block);
     let ret = s.ret;
     s.unify(tail, ret);
+    s.finish_late_bounds();
     s.finish_collects();
     s.finish_assocs();
     let lets = std::mem::take(&mut s.lets);
@@ -893,7 +897,17 @@ impl Inf<'_> {
         let prog = self.prog;
         self.unify_fn_bounds(&prog.sigs[id as usize].generics, &mut pv);
         self.unify_assoc_bounds(&prog.sigs[id as usize].generics, &mut pv);
-        self.known_g(ret, &mut pv)
+        let r = self.known_g(ret, &mut pv);
+        self.late_bounds(id, pv);
+        r
+    }
+
+    /// 関連型の境界 (`U: __Flat<Item = B>`) は、クロージャの本体を推論した後でもう一度見る
+    fn late_bounds(&mut self, id: u32, pv: Vec<Option<u32>>) {
+        let gs = &self.prog.sigs[id as usize].generics;
+        if gs.iter().any(|g| g.1.iter().any(|b| b.contains("Item") && b.contains('='))) {
+            self.late.push((id, pv));
+        }
     }
 
     /// 書式マクロの引数 (`println!("{}", (1..4).map(..))`) も推論する。parse し直したノードは捨てるので、
@@ -1015,7 +1029,9 @@ impl Inf<'_> {
                 let prog = self.prog;
                 self.unify_fn_bounds(&prog.sigs[id as usize].generics, &mut pv);
                 self.unify_assoc_bounds(&prog.sigs[id as usize].generics, &mut pv);
-                self.known_g(ret, &mut pv)
+                let r = self.known_g(ret, &mut pv);
+                self.late_bounds(id, pv);
+                r
             }
             None => self.var(),
         }
@@ -1077,6 +1093,14 @@ impl Inf<'_> {
             Ty::Ref(_, i) => elem_of(*i).map(|e| Ty::Ref(false, intern(e))),
             Ty::Array(e, _) => Some(Ty::Ref(false, e)),
             t => elem_of(t).or_else(|| self.prog.assoc_of(t, "Item")),
+        }
+    }
+
+    fn finish_late_bounds(&mut self) {
+        let ls = std::mem::take(&mut self.late);
+        for (id, mut pv) in ls {
+            let prog = self.prog;
+            self.unify_assoc_bounds(&prog.sigs[id as usize].generics, &mut pv);
         }
     }
 

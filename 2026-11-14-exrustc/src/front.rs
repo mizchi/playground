@@ -796,6 +796,8 @@ pub struct Program {
     pub struct_index: FxMap<String, u32>,
     /// バリアント名 → (enum, 番号)。`use E::*;` で取り込んだバリアントを短い名前で引く (同名が複数なら引かない)
     pub variant_names: FxMap<String, Option<(u32, usize)>>,
+    /// 戻り値が本体から決まる `impl Trait` の関数
+    pub opaque: Vec<u32>,
     /// 名前の最後のセグメント → 関数 ID 群 (`len` → `A::len`, `B::len`)。参照の過大近似用
     pub by_last: FxMap<String, Vec<u32>>,
     /// trait 名 → その trait で宣言された関数
@@ -1342,7 +1344,7 @@ fn lift_closures(
     let cs = closure::closures_of(&f.block);
     if cs.is_empty() {
         if sig.ret == TySyn::Named(IMPL_RET.into()) {
-            return err(f.sig.output.span(), "`impl Trait` return types must be a closure");
+            sig.ret = TySyn::Named(OPAQUE_RET.into());
         }
         return Ok(());
     }
@@ -1405,17 +1407,19 @@ fn lift_closures(
     // `-> impl Fn(A) -> B { move |x| .. }`: 型は末尾のクロージャの struct。
     // キャプチャは引数だけ (型が注釈から分かる) に限る
     if sig.ret == TySyn::Named(IMPL_RET.into()) {
-        let bad = || err(f.sig.output.span(), "`impl Trait` return types must be a closure");
+        // (末尾がクロージャでなければ、本体の型推論で決める: `-> impl Iterator<Item = u32>`)
         let tail = match f.block.stmts.last() {
-            Some(syn::Stmt::Expr(e, None)) => e,
-            _ => return bad(),
+            Some(syn::Stmt::Expr(e, None)) => Some(e),
+            _ => None,
         };
         let mut tail = tail;
-        while let syn::Expr::Paren(p) = tail {
-            tail = &p.expr;
+        while let Some(syn::Expr::Paren(p)) = tail {
+            tail = Some(&p.expr);
         }
-        let syn::Expr::Closure(tc) = tail else {
-            return bad();
+        let Some(syn::Expr::Closure(tc)) = tail else {
+            sig.ret = TySyn::Named(OPAQUE_RET.into());
+            sm.closures = out;
+            return Ok(());
         };
         let key = closure::closure_key(tc);
         let k = cs.iter().position(|c| closure::closure_key(c) == key).unwrap();
@@ -1496,6 +1500,7 @@ impl Program {
             structs: AdtTable::new(),
             struct_index: FxMap::default(),
             variant_names: FxMap::default(),
+            opaque: vec![],
             by_last: FxMap::default(),
             traits: FxMap::default(),
             impls: HashSet::new(),
@@ -1702,9 +1707,14 @@ impl Program {
                             .map_err(|e| format!("{}:1: {e}", it.line))?,
                     );
                 }
-                let ret = p
-                    .resolve_g(&ss.ret, &gnames)
-                    .map_err(|e| format!("{}:1: {e}", it.line))?;
+                // (本体から決める `impl Trait` はいったん () にして、後で resolve_opaque が入れる)
+                let ret = if ss.ret == TySyn::Named(OPAQUE_RET.into()) {
+                    p.opaque.push(p.names.len() as u32);
+                    Ty::Unit
+                } else {
+                    p.resolve_g(&ss.ret, &gnames)
+                        .map_err(|e| format!("{}:1: {e}", it.line))?
+                };
                 let self_ty = match &ss.self_ty {
                     Some(t) => Some(
                         p.resolve_g(t, &gnames)
@@ -2226,6 +2236,44 @@ impl Program {
 
     /// ジェネリックな struct / enum に型引数を入れる。型引数がすべて具体型ならレイアウトも決める。
     /// 同じ (定義, 型引数) には同じ id を返す
+    /// `-> impl Iterator<..>` の戻り値を本体の型推論で決める (呼び出し先も同じ形なら数回まわす)
+    pub fn resolve_opaque(&mut self, src: &str, items: &[SrcItem]) -> R<()> {
+        if self.opaque.is_empty() {
+            return Ok(());
+        }
+        let ids = self.opaque.clone();
+        let mut done = vec![false; ids.len()];
+        for _ in 0..4 {
+            let mut progress = false;
+            for (k, &id) in ids.iter().enumerate() {
+                if done[k] {
+                    continue;
+                }
+                let sig = self.sigs[id as usize].clone();
+                if sig.is_generic() {
+                    return Err(format!("`{}`: generic functions returning `impl Trait` are not supported", self.names[id as usize]));
+                }
+                let Some(ii) = self.item_of[id as usize] else { continue };
+                let it = &items[ii as usize];
+                let syn::Item::Fn(f) = parse_item(src, it)? else { continue };
+                let env = TyEnv { self_sid: sig.impl_of, params: vec![], self_ty: sig.self_ty };
+                let (_, r, _) = crate::infer::infer_ctx(self, &f, &sig, &env, &[], None, Some((id, 0)));
+                if let Some(t) = r.filter(|&t| t != Ty::Unit && !self.has_param(t)) {
+                    self.sigs[id as usize].ret = t;
+                    done[k] = true;
+                    progress = true;
+                }
+            }
+            if !progress {
+                break;
+            }
+        }
+        if let Some(k) = done.iter().position(|d| !d) {
+            return Err(format!("cannot infer the `impl Trait` return type of `{}`", self.names[ids[k] as usize]));
+        }
+        Ok(())
+    }
+
     fn relayout_instances(&mut self) {
         for _ in 0..8 {
             let mut ids: Vec<(u32, u32, Vec<Ty>)> =
@@ -3521,6 +3569,8 @@ fn collect_generics(g: &syn::Generics, out: &mut Vec<(String, Vec<String>)>) -> 
 /// owner: impl / trait のメンバならその所有者
 /// 戻り値位置の `impl Trait` の仮の型名
 pub const IMPL_RET: &str = "impl Trait";
+/// クロージャでない `impl Trait` の戻り値 (`-> impl Iterator<Item = u32>`): 本体の型推論で決める
+pub const OPAQUE_RET: &str = "impl Trait (opaque)";
 
 fn parse_sig(
     sig: &syn::Signature,
