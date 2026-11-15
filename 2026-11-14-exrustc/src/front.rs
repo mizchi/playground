@@ -2857,6 +2857,13 @@ impl Program {
         {
             return None;
         }
+        // `std::collections::HashMap::new` などは `HashMap::new`
+        if n >= 3 && matches!(p.segments[0].ident.to_string().as_str(), "core" | "std" | "alloc") {
+            let ty = p.segments[n - 2].ident.to_string();
+            if self.struct_index.contains_key(&ty) {
+                return self.index.get(&format!("{ty}::{}", p.segments[n - 1].ident)).copied();
+            }
+        }
         // `core::cmp::max` / `core::mem::swap` などは prelude の `__core_*` へ
         if n >= 2 && matches!(p.segments[0].ident.to_string().as_str(), "core" | "std") {
             return self

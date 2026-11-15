@@ -506,11 +506,8 @@ mod tests {
 /// 対応する `}` を空白で塗りつぶし、中のアイテムをトップレベルのアイテムにする (バイト位置と行は変えない)。
 /// `#[cfg(test)] mod tests { .. }` はまるごと消す。モジュールのパス (`geo::f`) は名前解決が先頭を読み飛ばす。
 /// モジュールがなければ None
-pub fn flatten_modules(src: &str) -> Option<String> {
-    if !src.contains("mod") {
-        return None;
-    }
-    let s = src.as_bytes();
+/// 簡単な字句解析: (種類, 開始, 終了)。0 = 識別子, 1 = 記号 1 文字, 2 = リテラル (コメントは飛ばす)
+fn tokenize(s: &[u8]) -> Vec<(u8, usize, usize)> {
     let n = s.len();
     // (種類, 開始, 終了): 0 = 識別子, 1 = 記号 1 文字, 2 = リテラル
     let mut toks: Vec<(u8, usize, usize)> = vec![];
@@ -582,6 +579,157 @@ pub fn flatten_modules(src: &str) -> Option<String> {
         toks.push((1, i, i + 1));
         i += 1;
     }
+    toks
+}
+
+/// 関数の本体の中に書いたアイテム (`fn helper() {..}` / `struct` / `enum` / `const` / `use`) をファイルの末尾へ移す。
+/// 元の場所は空白にして (改行は残す)、後ろの行番号を変えない
+pub fn hoist_nested_items(src: &str) -> Option<String> {
+    // (速く飛ばす: 字下げした行頭の `fn ` などがなければ入れ子のアイテムはない)
+    let indented = src.split('\n').any(|l| {
+        let t = l.trim_start();
+        t.len() < l.len() && ["fn ", "struct ", "enum ", "use ", "const ", "static "].iter().any(|k| t.starts_with(k))
+    });
+    if !indented {
+        return None;
+    }
+    let s = src.as_bytes();
+    let toks = tokenize(s);
+    let tok = |k: usize| -> &[u8] { &s[toks[k].1..toks[k].2] };
+    let is_sym = |k: usize, c: &[u8]| toks[k].0 == 1 && tok(k) == c;
+    // 各位置の波括弧の深さと、関数の本体の深さのスタック
+    let mut depth = 0i32;
+    let mut fn_bodies: Vec<i32> = vec![];
+    let mut pending_fn = false;
+    let mut moves: Vec<(usize, usize)> = vec![];
+    let mut k = 0;
+    while k < toks.len() {
+        let t = tok(k);
+        if toks[k].0 == 0 {
+            let in_body = fn_bodies.last().is_some_and(|&d| depth > d);
+            let stmt_start = k == 0 || is_sym(k - 1, b"{") || is_sym(k - 1, b"}") || is_sym(k - 1, b";") || is_sym(k - 1, b"]");
+            let item_kw = matches!(t, b"fn" | b"struct" | b"enum" | b"const" | b"use" | b"static");
+            // (`const` の後ろに `fn` や `|` (const クロージャ) が来るものは別扱い: `const fn` は fn で見る)
+            if in_body && stmt_start && item_kw && k + 1 < toks.len() && toks[k + 1].0 == 0 {
+                // アイテムの終わり: `{ .. }` (fn / struct / enum) か `;`
+                let mut j = k + 1;
+                let mut d = 0i32;
+                let mut end = None;
+                while j < toks.len() {
+                    if toks[j].0 == 1 {
+                        match tok(j) {
+                            b"(" | b"[" => d += 1,
+                            b")" | b"]" => d -= 1,
+                            b";" if d == 0 => {
+                                end = Some(j);
+                                break;
+                            }
+                            b"{" if d == 0 => {
+                                // 対応する }
+                                let mut e = 0i32;
+                                let mut m = j;
+                                while m < toks.len() {
+                                    if is_sym(m, b"{") {
+                                        e += 1;
+                                    } else if is_sym(m, b"}") {
+                                        e -= 1;
+                                        if e == 0 {
+                                            break;
+                                        }
+                                    }
+                                    m += 1;
+                                }
+                                end = Some(m);
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    j += 1;
+                }
+                let Some(e) = end else { return None };
+                if e >= toks.len() {
+                    return None;
+                }
+                // 前の `#[..]` も一緒に
+                let mut st = k;
+                while st >= 1 && is_sym(st - 1, b"]") {
+                    let mut m = st - 1;
+                    let mut d = 0;
+                    loop {
+                        if is_sym(m, b"]") {
+                            d += 1;
+                        } else if is_sym(m, b"[") {
+                            d -= 1;
+                            if d == 0 {
+                                break;
+                            }
+                        }
+                        if m == 0 {
+                            break;
+                        }
+                        m -= 1;
+                    }
+                    if m >= 1 && is_sym(m - 1, b"#") {
+                        st = m - 1;
+                    } else {
+                        break;
+                    }
+                }
+                moves.push((toks[st].1, toks[e].2));
+                k = e + 1;
+                continue;
+            }
+            if t == b"fn" {
+                pending_fn = true;
+            }
+        } else if toks[k].0 == 1 {
+            match t {
+                b"{" => {
+                    if pending_fn {
+                        fn_bodies.push(depth);
+                        pending_fn = false;
+                    }
+                    depth += 1;
+                }
+                b"}" => {
+                    depth -= 1;
+                    if fn_bodies.last() == Some(&depth) {
+                        fn_bodies.pop();
+                    }
+                }
+                // `fn f();` (宣言だけ) は本体なし
+                b";" => pending_fn = false,
+                _ => {}
+            }
+        }
+        k += 1;
+    }
+    if moves.is_empty() {
+        return None;
+    }
+    let mut out = s.to_vec();
+    let mut tail = Vec::new();
+    for &(a, b) in &moves {
+        tail.push(b'\n');
+        tail.extend_from_slice(&s[a..b]);
+        for x in &mut out[a..b] {
+            if *x != b'\n' {
+                *x = b' ';
+            }
+        }
+    }
+    out.extend_from_slice(&tail);
+    out.push(b'\n');
+    String::from_utf8(out).ok()
+}
+
+pub fn flatten_modules(src: &str) -> Option<String> {
+    if !src.contains("mod") {
+        return None;
+    }
+    let s = src.as_bytes();
+    let toks = tokenize(s);
     let tok = |k: usize| -> &[u8] { &s[toks[k].1..toks[k].2] };
     // 対応する閉じ括弧のトークン位置
     let matching = |k: usize| -> Option<usize> {

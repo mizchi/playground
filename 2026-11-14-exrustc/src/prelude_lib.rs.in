@@ -934,6 +934,27 @@ impl<T> Iterator for Chunks<T> {
     }
 }
 
+fn __exr_slice_split_at<T>(s: &[T], mid: usize) -> (&[T], &[T]) {
+    if mid > s.len() {
+        panic!("mid > len");
+    }
+    unsafe {
+        (
+            core::slice::from_raw_parts(s.as_ptr(), mid),
+            core::slice::from_raw_parts(s.as_ptr().add(mid), s.len() - mid),
+        )
+    }
+}
+
+fn __exr_slice_split_at_mut<T>(s: &mut [T], mid: usize) -> (&mut [T], &mut [T]) {
+    if mid > s.len() {
+        panic!("mid > len");
+    }
+    let n = s.len();
+    let p = s.as_mut_ptr();
+    unsafe { (core::slice::from_raw_parts_mut(p, mid), core::slice::from_raw_parts_mut(p.add(mid), n - mid)) }
+}
+
 fn __exr_slice_windows<T>(s: &[T], n: usize) -> Windows<T> {
     if n == 0 {
         panic!("window size must be non-zero");
@@ -2575,6 +2596,10 @@ impl Iterator for Chars {
 }
 
 impl Chars {
+    // まだ読んでいない残り
+    pub fn as_str(&self) -> &str {
+        __exr_sub::<()>(unsafe { self.ptr.add(self.i) }, self.len - self.i)
+    }
     pub fn next_back(&mut self) -> Option<char> {
         if self.i >= self.len {
             return None;
@@ -5461,6 +5486,15 @@ pub struct VecDeque<T> {
 impl<T> VecDeque<T> {
     pub fn new() -> VecDeque<T> {
         VecDeque { ptr: core::ptr::null_mut(), cap: 0, head: 0, len: 0 }
+    }
+    pub fn from(v: Vec<T>) -> VecDeque<T> {
+        let mut d = VecDeque::with_capacity(v.len());
+        let mut v = v;
+        v.reverse();
+        while let Some(x) = v.pop() {
+            d.push_back(x);
+        }
+        d
     }
     pub fn with_capacity(n: usize) -> VecDeque<T> {
         let mut d = VecDeque::new();

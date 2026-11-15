@@ -1972,7 +1972,21 @@ impl Inf<'_> {
                         let rr = self.with(Shape::Ref(m, el));
                         self.option_of(rr)
                     }
-                    "swap" => self.known(Ty::Unit),
+                    // (添字の引数は usize)
+                    "swap" | "truncate" | "rotate_left" | "rotate_right" => {
+                        for a in args {
+                            let k = self.known(Ty::Usize);
+                            self.unify(a, k);
+                        }
+                        self.known(Ty::Unit)
+                    }
+                    "split_at" | "split_at_mut" => {
+                        for a in args {
+                            let k = self.known(Ty::Usize);
+                            self.unify(a, k);
+                        }
+                        self.var()
+                    }
                     // 値としての `xs.iter()` / `iter_mut()`: prelude の Iter<T> / IterMut<T>
                     "iter" | "iter_mut" => {
                         let name = if mc.method == "iter" { "Iter" } else { "IterMut" };
@@ -2113,6 +2127,34 @@ impl Inf<'_> {
                     if let Some(&os) = self.prog.struct_index.get("Ordering") {
                         let o = self.known(Ty::Struct(os));
                         return if n == "cmp" { o } else { self.option_of(o) };
+                    }
+                }
+                // スライス・配列の受け手 (`v.swap(i, j)` の v: &mut [T]): Vec の同名メソッドのシグネチャで推論する
+                if callee.is_none() && sid.is_none() {
+                    let mut t = self.resolve(rv);
+                    while let Some(Ty::Ref(_, i)) = t {
+                        t = Some(*i);
+                    }
+                    let root = self.find(rv);
+                    let elem = match (t, self.shape[root as usize]) {
+                        (Some(Ty::Slice(e)) | Some(Ty::Array(e, _)), _) => Some(self.known(*e)),
+                        (_, Some(Shape::Slc(e)) | Some(Shape::Arr(e, _))) => Some(e),
+                        _ => None,
+                    };
+                    if let (Some(e), Some(&vb)) = (elem, self.prog.struct_index.get("Vec")) {
+                        if let Some(id) = self.prog.method(vb, &n) {
+                            if !matches!(n.as_str(), "len" | "is_empty" | "iter" | "iter_mut" | "into_iter") {
+                                let vv = self.adt(vb, vec![e]);
+                                return self.apply_recv(Some(id), args.clone(), vv);
+                            }
+                        }
+                    }
+                    // 受け手の型が分からない (ジェネリックな `&mut [T]` など) ときも、添字の引数 (`swap(i, j)`) は usize
+                    if t.is_none() && matches!(n.as_str(), "swap" | "split_at" | "split_at_mut" | "truncate" | "rotate_left" | "rotate_right" | "split_off") {
+                        for &a in &args {
+                            let u = self.known(Ty::Usize);
+                            self.unify(a, u);
+                        }
                     }
                 }
                 if callee.is_none() && sid.is_none() {

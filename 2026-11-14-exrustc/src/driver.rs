@@ -723,6 +723,9 @@ fn with_prelude<'a>(
     let src: &str = expanded.as_deref().unwrap_or(src);
     let flat = lexer::flatten_modules(src).or(expanded.clone());
     let src: &str = flat.as_deref().unwrap_or(src);
+    // 関数の中のアイテムはファイルの末尾へ
+    let hoisted = lexer::hoist_nested_items(src).or(flat.clone());
+    let src: &str = hoisted.as_deref().unwrap_or(src);
     let mut items = lexer::split(src)?;
     let extra = crate::prelude::select_with(src, &items, cache);
     // (デバッグ用: 付けた prelude をソースの後ろに続く行番号つきで stderr に出す)
@@ -735,7 +738,7 @@ fn with_prelude<'a>(
     if extra.is_empty() {
         // prelude を使わなければソースはそのまま (コピーしない)
         return Ok((
-            match &flat {
+            match &hoisted {
                 Some(f) => std::borrow::Cow::Owned(f.clone()),
                 None => std::borrow::Cow::Borrowed(orig),
             },

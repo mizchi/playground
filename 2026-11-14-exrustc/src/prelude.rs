@@ -474,7 +474,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             "find", "position", "nth", "zip", "chain", "take", "skip", "take_while", "copied",
             "cloned", "format", "print", "println", "eprint", "eprintln", "write", "writeln",
             "split", "split_whitespace", "lines", "trim", "starts_with", "ends_with", "contains",
-            "clamp", "from_u32", "char", "join", "concat", "drain", "default", "f64", "f32", "i128", "u128", "Iterator", "into",
+            "clamp", "from_u32", "char", "join", "concat", "drain", "default", "f64", "f32", "i128", "u128", "Iterator", "into", "split_at_mut",
         ]);
         // (先頭の 1 byte, 長さ) ごとの候補。prelude の名前が増えても 1 識別子あたりの比較は 0〜1 回
         let mut t: Vec<Vec<&'static str>> = vec![vec![]; 256 * 32];
@@ -664,7 +664,13 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     if need.contains("drain") {
         need.insert("__drain");
     }
-    for (m, f) in [("windows", "__exr_slice_windows"), ("chunks", "__exr_slice_chunks"), ("to_vec", "__exr_slice_to_vec")] {
+    for (m, f) in [
+        ("windows", "__exr_slice_windows"),
+        ("chunks", "__exr_slice_chunks"),
+        ("to_vec", "__exr_slice_to_vec"),
+        ("split_at", "__exr_slice_split_at"),
+        ("split_at_mut", "__exr_slice_split_at_mut"),
+    ] {
         if need.contains(m) {
             need.extend([f, "Iterator", "next"]);
         }

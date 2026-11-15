@@ -4472,6 +4472,8 @@ impl Cx<'_, '_> {
             "windows" => Some(("__exr_slice_windows", false)),
             "chunks" => Some(("__exr_slice_chunks", false)),
             "to_vec" => Some(("__exr_slice_to_vec", false)),
+            "split_at" => Some(("__exr_slice_split_at", false)),
+            "split_at_mut" => Some(("__exr_slice_split_at_mut", true)),
             _ => None,
         }
         .filter(|(f, _)| self.prog.index.contains_key(*f));
@@ -6074,8 +6076,26 @@ impl Cx<'_, '_> {
         if family == "Result" {
             let (_, ety, eoff) = self.prog.structs[inst as usize].variants[err_vi].fields[0];
             let (_, rety, reoff) = self.prog.structs[rinst as usize].variants[r_err].fields[0];
-            self.same(t.span(), ety, rety)?;
             let (ev, _) = self.read(Self::field_place(place, ety, eoff));
+            // エラーの型が違えば `From::from` で変換する (`impl From<ParseIntError> for AppError`)
+            let ev = if ety != rety {
+                let conv = match rety {
+                    Ty::Struct(rs) => self.prog.method(rs, "from").filter(|&id| {
+                        let sg = &self.prog.sigs[id as usize];
+                        !sg.has_self && sg.params.len() == 1 && (sg.params[0] == ety || self.prog.has_param(sg.params[0]))
+                    }),
+                    _ => None,
+                };
+                match (conv, ev) {
+                    (Some(id), Some(v)) => self.call_fn_vals(id, &[(v, ety)], t.span())?.0,
+                    _ => {
+                        self.same(t.span(), ety, rety)?;
+                        ev
+                    }
+                }
+            } else {
+                ev
+            };
             self.write(Place::Mem(a, reoff as i32, rety), ev);
         }
         self.drop_for_exit(0, 0);
