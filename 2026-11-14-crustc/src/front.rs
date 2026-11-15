@@ -197,7 +197,7 @@ impl Ty {
         })
     }
 
-    fn prim(s: &str) -> Option<Ty> {
+    pub fn prim(s: &str) -> Option<Ty> {
         Ty::from_suffix(s).or(match s {
             "bool" => Some(Ty::Bool),
             "char" => Some(Ty::Char),
@@ -392,6 +392,27 @@ pub fn parse_tysyn(t: &syn::Type, self_ty: Option<&TySyn>) -> R<TySyn> {
                 Box::new(parse_tysyn(&q.ty, self_ty)?),
                 p.path.segments.last().unwrap().ident.to_string(),
             )
+        }
+        // `io::Error` / `io::Result<T>` (prelude の IoError)
+        syn::Type::Path(p)
+            if p.qself.is_none()
+                && p.path.segments.len() >= 2
+                && p.path.segments[p.path.segments.len() - 2].ident == "io"
+                && matches!(p.path.segments.last().unwrap().ident.to_string().as_str(), "Result" | "Error") =>
+        {
+            let last = p.path.segments.last().unwrap();
+            let io_err = TySyn::Named("IoError".into());
+            if last.ident == "Error" {
+                io_err
+            } else {
+                let syn::PathArguments::AngleBracketed(ab) = &last.arguments else {
+                    return err(t.span(), "`io::Result` needs a type argument");
+                };
+                let Some(syn::GenericArgument::Type(a)) = ab.args.first() else {
+                    return err(t.span(), "`io::Result` needs a type argument");
+                };
+                TySyn::App("Result".into(), vec![parse_tysyn(a, self_ty)?, io_err])
+            }
         }
         // `fmt::Result` / `fmt::Error` (`std::fmt::Result` も)
         syn::Type::Path(p)
@@ -686,6 +707,8 @@ pub struct Summary {
     pub closures: Vec<ClosureSyn>,
     /// impl の関連型 (`type Item = u32;`)
     pub assocs: Vec<AssocSyn>,
+    /// `type Key = u128;` / `type R<T> = Result<T, E>;` の (名前, 型パラメータ, 中身)
+    pub aliases: Vec<(String, Vec<String>, TySyn)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -851,6 +874,8 @@ pub struct Program {
     pub assocs: Vec<AssocDef>,
     /// 右辺の型を持つ比較の impl の eq (`Vec::<PartialEq<[T;N]>>::eq` など)。`a == b` の型が違うとき探す
     pub peq: Vec<u32>,
+    /// 型の別名: 名前 → (型パラメータ, 中身)
+    pub aliases: FxMap<String, (Vec<String>, TySyn)>,
     /// 同じく `S::<PartialOrd<R>>::partial_cmp`。`a < b` の型が違うとき探す
     pub pord: Vec<u32>,
 }
@@ -1226,6 +1251,12 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
             lift_closures(f, &name, &mut sig, Some(&ow.self_ty), &mut sm)?;
             sm.fns.push((name, sig));
         }
+        // 型の別名 (`type Key = u128;`)
+        syn::Item::Type(t) => {
+            let mut g = vec![];
+            collect_generics(&t.generics, &mut g)?;
+            sm.aliases.push((t.ident.to_string(), g.into_iter().map(|x| x.0).collect(), parse_tysyn(&t.ty, None)?));
+        }
         syn::Item::Trait(t) => {
             only_lifetimes(&t.generics)?;
             sm.trait_decl = Some(t.ident.to_string());
@@ -1485,7 +1516,8 @@ fn lift_closures(
             generics,
             fields,
             sig: csig,
-            by_move: c.capture.is_some(),
+            // (`move` がなくても、本体がキャプチャを値として渡す・返すなら値で持つ: rustc と同じく FnOnce)
+            by_move: c.capture.is_some() || closure::moves_capture(c, &caps),
             ret_ann,
             n_parent,
         });
@@ -1607,8 +1639,15 @@ impl Program {
             has_drop: false,
             assocs: vec![],
             peq: vec![],
+            aliases: FxMap::default(),
             pord: vec![],
         };
+        // 0. 型の別名 (struct のフィールドの型より先に)
+        for sm in sums {
+            for (n, g, t) in &sm.aliases {
+                p.aliases.insert(n.clone(), (g.clone(), t.clone()));
+            }
+        }
         // 0. const / static の名前 (配列の長さで使うので型より先に)
         for (ii, sm) in sums.iter().enumerate() {
             let cs = sm
@@ -1817,7 +1856,7 @@ impl Program {
                 };
                 let mut blanket = false;
                 let impl_of = match &ss.impl_of {
-                    Some(n) if Ty::prim(n).is_some() || n == "__array" || n == "__slice" => None,
+                    Some(n) if Ty::prim(n).is_some() || n == "__array" || n == "__slice" || n == "str" => None,
                     Some(n) => match p.struct_index.get(n) {
                         Some(&sid) => Some(sid),
                         // ブランケット impl (`impl<T: Display> Describe for T`): どの型のメソッドとしても探す
@@ -1935,7 +1974,8 @@ impl Program {
                 return Err(format!("{}:1: cannot find trait `{tr}`", it.line));
             }
             // プリミティブ型への trait 実装 (`impl Tr for u32`)
-            if let Some(pt) = Ty::prim(sn) {
+            // (`impl Hash for str`: str も組み込みの型として持つ)
+            if let Some(pt) = Ty::prim(sn).or((sn == "str").then_some(Ty::Str)) {
                 if !p.prim_impls.insert((pt, tr.clone())) {
                     return Err(format!(
                         "{}:1: conflicting implementations of trait `{tr}` for `{sn}`",
@@ -2093,11 +2133,15 @@ impl Program {
                 self.structs[sid as usize].args.iter().all(|&a| self.implements(a, tr))
             }
             Ty::Struct(sid) => self.impls.contains(&(self.base_of(sid), tr.to_string())),
+            // (配列・スライス: 比較・Debug・Hash は要素が実装していれば)
             Ty::Array(e, _) => {
-                tr == "Sized" || (matches!(tr, "Copy" | "Clone") && self.implements(*e, tr))
+                tr == "Sized"
+                    || (matches!(tr, "Copy" | "Clone" | "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Debug" | "Hash" | "Default")
+                        && self.implements(*e, tr))
             }
             Ty::Str => matches!(tr, "Display" | "Debug" | "PartialEq" | "Eq" | "Hash" | "PartialOrd" | "Ord"),
-            Ty::Slice(_) | Ty::Dyn(_) => false,
+            Ty::Slice(e) => matches!(tr, "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Debug" | "Hash") && self.implements(*e, tr),
+            Ty::Dyn(_) => false,
             // 関数ポインタ: Fn 系 (引数の数が合うもの) と Copy
             Ty::Fn(f) => match parse_fn_bound(tr) {
                 Some((_, ps, _)) => ps.len() == f.params.len(),
@@ -2140,6 +2184,15 @@ impl Program {
     /// プリミティブ型 t のメソッド (trait 実装のもの → なければ trait のデフォルトメソッド)
     pub fn prim_method(&self, t: Ty, name: &str) -> Option<u32> {
         if let Some(&id) = self.index.get(&format!("{}::{name}", self.tn(t))) {
+            return Some(id);
+        }
+        // (`impl<T: Hash> Hash for [T]` / `for [T; N]` のメソッドは `__slice::m` / `__array::m`)
+        let base = match t {
+            Ty::Slice(_) => Some("__slice"),
+            Ty::Array(..) => Some("__array"),
+            _ => None,
+        };
+        if let Some(&id) = base.and_then(|g| self.index.get(&format!("{g}::{name}"))) {
             return Some(id);
         }
         let mut found = None;
@@ -2248,6 +2301,11 @@ impl Program {
                 if let Some(t) = names(n) {
                     return Ok(t);
                 }
+                if let Some((g, t)) = self.aliases.get(n) {
+                    if g.is_empty() {
+                        return self.resolve_with(t, names);
+                    }
+                }
                 match self.struct_index.get(n) {
                     Some(&id) if self.structs[id as usize].generics.is_empty() => Ty::Struct(id),
                     Some(_) => return Err(format!("missing generics for `{n}`")),
@@ -2266,6 +2324,15 @@ impl Program {
             }
             TySyn::App(n, args) if n == "Box" && args.len() == 1 && !self.struct_index.contains_key(n) => {
                 Ty::Box(intern(r(&args[0])?))
+            }
+            // 型パラメータを持つ別名 (`type R<T> = Result<T, String>;`)
+            TySyn::App(n, args) if self.aliases.get(n).is_some_and(|a| a.0.len() == args.len()) => {
+                let (g, t) = self.aliases[n].clone();
+                let vals = args.iter().map(r).collect::<R<Vec<Ty>>>()?;
+                return self.resolve_with(&t, &|x| match g.iter().position(|y| y == x) {
+                    Some(i) => Some(vals[i]),
+                    None => names(x),
+                });
             }
             TySyn::App(n, args) => {
                 let Some(&id) = self.struct_index.get(n) else {
@@ -3140,6 +3207,21 @@ impl Program {
             }
         }
         // `std::process::exit` / `process::exit` (ユーザの `exit` と名前がぶつからないように別の名前)
+        // `fs::read_to_string` / `fs::write` / `env::args` などは prelude の `__core_*`
+        if n >= 2 {
+            let (m, f) = (p.segments[n - 2].ident.to_string(), p.segments[n - 1].ident.to_string());
+            let core = match (m.as_str(), f.as_str()) {
+                ("fs", "read_to_string") => Some("__exr_fs_read_to_string"),
+                ("fs", "read") => Some("__exr_fs_read"),
+                ("fs", "write") => Some("__exr_fs_write"),
+                ("env", "args") => Some("__exr_env_args"),
+                ("env", "var") => Some("__exr_env_var"),
+                _ => None,
+            };
+            if let Some(c) = core {
+                return self.index.get(c).copied();
+            }
+        }
         if n >= 2 && p.segments[n - 2].ident == "process" && p.segments[n - 1].ident == "exit" {
             return self.index.get("__core_process_exit").copied();
         }
@@ -3416,6 +3498,10 @@ impl Program {
         stack.extend(self.index.get("String::from").copied());
         // (`process::exit` は名前を書かずに呼ばれる: あれば根にする。使われなければ要約で選ばれない)
         stack.extend(self.index.get("__core_process_exit").copied());
+        // (`fs::read_to_string` / `env::args` などはパスで引くので、名前からは届かない)
+        for n in ["__exr_fs_read", "__exr_fs_read_to_string", "__exr_fs_write", "__exr_env_args", "__exr_env_var"] {
+            stack.extend(self.index.get(n).copied());
+        }
         // const の式から呼ぶ関数 (`const N: u32 = sq(4);`。const は使う場所で式として展開される)
         for c in &self.consts {
             if c.expr.contains('(') {
@@ -3633,6 +3719,7 @@ crate::enc_struct!(Summary {
     statics,
     closures,
     assocs,
+    aliases,
 });
 crate::enc_struct!(AssocSyn {
     name,

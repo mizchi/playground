@@ -401,57 +401,64 @@ pub fn expand(src: &str) -> Result<Option<String>, String> {
     }
     let mut text = src.to_string();
     let mut macros: HashMap<String, Vec<Rule>> = HashMap::new();
-    // 1. 定義を集めて消す
+    // 1. 定義を集めて消す (関数の本体や `mod m { .. }` の中の定義も)
     {
         let ts = TokenStream::from_str(&text).map_err(|e| format!("1:1: {e}"))?;
-        let toks: Vec<TokenTree> = ts.into_iter().collect();
         let mut cut: Vec<(usize, usize)> = vec![];
-        let mut i = 0;
-        while i + 3 < toks.len() {
-            let is_def = matches!(&toks[i], TokenTree::Ident(x) if x == "macro_rules")
-                && matches!(&toks[i + 1], TokenTree::Punct(p) if p.as_char() == '!');
-            if !is_def {
-                i += 1;
-                continue;
-            }
-            let (TokenTree::Ident(name), TokenTree::Group(g)) = (&toks[i + 2], &toks[i + 3]) else {
-                i += 1;
-                continue;
-            };
-            let mut rules = vec![];
-            let body: Vec<TokenTree> = g.stream().into_iter().collect();
-            let mut j = 0;
-            while j < body.len() {
-                // (matcher) => {transcriber} ;
-                let TokenTree::Group(m) = &body[j] else { j += 1; continue };
-                let Some(TokenTree::Group(t)) = body.get(j + 3) else { break };
-                rules.push(Rule { pat: parse_pt(m.stream(), true), body: parse_pt(t.stream(), false) });
-                j += 4;
-                if let Some(TokenTree::Punct(p)) = body.get(j) {
+        fn collect(ts: TokenStream, macros: &mut HashMap<String, Vec<Rule>>, cut: &mut Vec<(usize, usize)>) {
+            let toks: Vec<TokenTree> = ts.into_iter().collect();
+            let mut i = 0;
+            while i < toks.len() {
+                let is_def = i + 3 < toks.len()
+                    && matches!(&toks[i], TokenTree::Ident(x) if x == "macro_rules")
+                    && matches!(&toks[i + 1], TokenTree::Punct(p) if p.as_char() == '!');
+                if !is_def {
+                    if let TokenTree::Group(g) = &toks[i] {
+                        collect(g.stream(), macros, cut);
+                    }
+                    i += 1;
+                    continue;
+                }
+                let (TokenTree::Ident(name), TokenTree::Group(g)) = (&toks[i + 2], &toks[i + 3]) else {
+                    i += 1;
+                    continue;
+                };
+                let mut rules = vec![];
+                let body: Vec<TokenTree> = g.stream().into_iter().collect();
+                let mut j = 0;
+                while j < body.len() {
+                    // (matcher) => {transcriber} ;
+                    let TokenTree::Group(m) = &body[j] else { j += 1; continue };
+                    let Some(TokenTree::Group(t)) = body.get(j + 3) else { break };
+                    rules.push(Rule { pat: parse_pt(m.stream(), true), body: parse_pt(t.stream(), false) });
+                    j += 4;
+                    if let Some(TokenTree::Punct(p)) = body.get(j) {
+                        if p.as_char() == ';' {
+                            j += 1;
+                        }
+                    }
+                }
+                macros.insert(name.to_string(), rules);
+                // `#[macro_export]` などの属性も消す
+                let mut st = toks[i].span().byte_range().start;
+                if i >= 2 {
+                    if let (TokenTree::Punct(h), TokenTree::Group(a)) = (&toks[i - 2], &toks[i - 1]) {
+                        if h.as_char() == '#' && a.delimiter() == Delimiter::Bracket {
+                            st = h.span().byte_range().start;
+                        }
+                    }
+                }
+                let mut en = g.span().byte_range().end;
+                if let Some(TokenTree::Punct(p)) = toks.get(i + 4) {
                     if p.as_char() == ';' {
-                        j += 1;
+                        en = p.span().byte_range().end;
                     }
                 }
+                cut.push((st, en));
+                i += 4;
             }
-            macros.insert(name.to_string(), rules);
-            // `#[macro_export]` などの属性も消す
-            let mut st = toks[i].span().byte_range().start;
-            if i >= 2 {
-                if let (TokenTree::Punct(h), TokenTree::Group(a)) = (&toks[i - 2], &toks[i - 1]) {
-                    if h.as_char() == '#' && a.delimiter() == Delimiter::Bracket {
-                        st = h.span().byte_range().start;
-                    }
-                }
-            }
-            let mut en = g.span().byte_range().end;
-            if let Some(TokenTree::Punct(p)) = toks.get(i + 4) {
-                if p.as_char() == ';' {
-                    en = p.span().byte_range().end;
-                }
-            }
-            cut.push((st, en));
-            i += 4;
         }
+        collect(ts, &mut macros, &mut cut);
         let mut b = text.into_bytes();
         for (a, e) in cut {
             for x in &mut b[a..e] {

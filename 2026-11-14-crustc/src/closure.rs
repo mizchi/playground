@@ -269,3 +269,54 @@ pub fn synth(c: &ExprClosure) -> syn::ItemFn {
     f.block.stmts = stmts;
     f
 }
+
+/// クロージャの本体がキャプチャした変数を値として使うか (`|| String::from_utf8(out)` / `|| out`):
+/// 関数の引数・本体の値・`let y = x;` の右辺・`return x`。rustc はこのときキャプチャを値で持つ
+pub fn moves_capture(c: &ExprClosure, caps: &[String]) -> bool {
+    use syn::visit::Visit;
+    struct V<'a> {
+        caps: &'a [String],
+        found: bool,
+    }
+    impl V<'_> {
+        fn is_cap(&self, e: &Expr) -> bool {
+            matches!(e, Expr::Path(p) if p.path.get_ident().is_some_and(|i| self.caps.iter().any(|c| i == c)))
+        }
+    }
+    impl<'ast> Visit<'ast> for V<'_> {
+        fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
+            if e.args.iter().any(|a| self.is_cap(a)) {
+                self.found = true;
+            }
+            syn::visit::visit_expr_call(self, e);
+        }
+        fn visit_local(&mut self, l: &'ast syn::Local) {
+            if let Some(init) = &l.init {
+                if self.is_cap(&init.expr) {
+                    self.found = true;
+                }
+            }
+            syn::visit::visit_local(self, l);
+        }
+        fn visit_expr_return(&mut self, r: &'ast syn::ExprReturn) {
+            if r.expr.as_deref().is_some_and(|e| self.is_cap(e)) {
+                self.found = true;
+            }
+            syn::visit::visit_expr_return(self, r);
+        }
+        fn visit_expr_closure(&mut self, _: &'ast ExprClosure) {}
+    }
+    let mut v = V { caps, found: false };
+    let body = match &*c.body {
+        Expr::Block(b) => b.block.stmts.last().and_then(|s| match s {
+            syn::Stmt::Expr(e, None) => Some(e),
+            _ => None,
+        }),
+        e => Some(e),
+    };
+    if body.is_some_and(|e| v.is_cap(e)) {
+        return true;
+    }
+    v.visit_expr(&c.body);
+    v.found
+}

@@ -176,6 +176,18 @@ fn is_op_trait(h: usize) -> bool {
         && it.idents.iter().any(|&(a, b)| OP_TRAITS.contains(&&PRELUDE[a as usize..b as usize]))
 }
 
+/// 名前が要るときだけ付ける trait の宣言 (メンバの名前が `write` / `hash` などよくある名前のもの)
+fn gated_trait(h: usize) -> Option<&'static str> {
+    let it = &items()[h].0;
+    if !matches!(it.kind, ItemKind::TraitHeader) {
+        return None;
+    }
+    it.idents
+        .iter()
+        .map(|&(a, b)| &PRELUDE[a as usize..b as usize])
+        .find(|w| matches!(*w, "Hasher" | "Hash" | "__BoolThen" | "__AsBytes"))
+}
+
 /// ユーザが手で impl している (`impl Ord for S` / `impl<T> Add for W<T>`) trait の名前 (最後のセグメント)
 fn user_impl_traits(src: &str) -> Vec<&str> {
     let mut out = vec![];
@@ -443,7 +455,7 @@ fn owner(h: usize) -> Option<&'static str> {
                         | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks"
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
                         | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "RangeFrom" | "TryFromIntError" | "Stdin" | "StdinLock" | "StdinLines" | "Stdout" | "StdoutLock"
-                        | "BufWriter" | "IoError" | "__DynError" => Some(w),
+                        | "BufWriter" | "IoError" | "__DynError" | "Args" | "DefaultHasher" | "VarError" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,
@@ -769,6 +781,18 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         need.extend(["__exr_rt_init", "__exr_on_trap", "__exr_sigaction", "__EXR_TRAP_TABLE", "__EXR_KIND_MSG", "__EXR_KIND_OFF", "__EXR_SA", "__exr_err_num", "__exr_panic_index", "__exr_tab_uv", "__EXR_CALLER"]);
 
     }
+    // (`42u128` の接尾辞は識別子として現れない)
+    for t in ["u128", "i128"] {
+        if user_src.contains(t) {
+            need.insert(t);
+        }
+    }
+    if user_src.contains("fs::") {
+        need.extend(["__exr_fs_read", "__exr_fs_read_to_string", "__exr_fs_write", "IoError", "Result", "String", "__AsBytes", "Debug", "Display"]);
+    }
+    if user_src.contains("env::") {
+        need.extend(["__exr_env_args", "Args", "__exr_env_var", "VarError", "Iterator", "next", "String", "__AsBytes", "Result", "Option"]);
+    }
     if user_src.contains("process::exit") {
         need.insert("process_exit");
     }
@@ -1008,6 +1032,12 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
                     && !all[h as usize].0.idents.iter().any(|&(a, b)| op_impls.contains(&&PRELUDE[a as usize..b as usize]))
                 {
                     continue;
+                }
+                // (Hash / Hasher などの宣言は、その trait の名前が要るときだけ: `fn write` などの名前では引かない)
+                if let Some(tn) = gated_trait(h as usize) {
+                    if !need.contains(tn) {
+                        continue;
+                    }
                 }
             }
             // `impl Iterator for X` のメソッドと、イテレータを作るメソッドも同じ

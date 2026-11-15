@@ -64,6 +64,15 @@ fn is_builtin_scalar_method(n: &str) -> bool {
             | "to_ascii_uppercase"
             | "to_ascii_lowercase"
             | "is_ascii_whitespace"
+            | "is_ascii_alphanumeric"
+            | "is_ascii_hexdigit"
+            | "is_ascii_punctuation"
+            | "is_ascii_graphic"
+            | "is_ascii_control"
+            | "is_ascii"
+            | "to_le_bytes"
+            | "to_be_bytes"
+            | "to_ne_bytes"
             | "as_bytes"
             | "as_ptr"
             | "is_null"
@@ -1931,6 +1940,16 @@ impl Inf<'_> {
                         match (self.shape[fl as usize], self.shape[fr as usize]) {
                             (Some(Shape::Ref(_, x)), Some(s)) if !matches!(s, Shape::Ref(..)) => self.seq_unify(x, r),
                             (Some(s), Some(Shape::Ref(_, y))) if !matches!(s, Shape::Ref(..)) => self.seq_unify(l, y),
+                            // (`w == b"pub"` で w: &[u8]: 参照の中身どうし (スライスと配列は単一化しない))
+                            (Some(Shape::Ref(_, x)), Some(Shape::Ref(_, y))) => {
+                                let (fx, fy) = (self.find(x), self.find(y));
+                                let seqish = |s: &Option<Shape>| matches!(s, Some(Shape::Slc(_) | Shape::Arr(..) | Shape::Known(Ty::Slice(_) | Ty::Array(..))));
+                                if seqish(&self.shape[fx as usize]) && seqish(&self.shape[fy as usize]) {
+                                    self.seq_unify(x, y)
+                                } else {
+                                    self.unify(l, r)
+                                }
+                            }
                             _ => self.seq_unify(l, r),
                         }
                         self.known(Ty::Bool)
@@ -2521,6 +2540,12 @@ impl Inf<'_> {
                 if !builtin {
                     return self.apply_helper(id, mc, args);
                 }
+            }
+        }
+        // 整数の `to_le_bytes` など: [u8; N]
+        if let Some(t) = recv_ty.filter(|t| t.is_int()) {
+            if matches!(name.as_str(), "to_le_bytes" | "to_be_bytes" | "to_ne_bytes") {
+                return self.known(Ty::Array(intern(Ty::U8), t.bits() / 8));
             }
         }
         // 浮動小数点のメソッド (bool を返すもの / ビット列 / Ordering 以外は同じ型)

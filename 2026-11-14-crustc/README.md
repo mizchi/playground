@@ -120,6 +120,13 @@ tests/probe.sh
 
 よく使う機能の小さいプログラム（`tests/probe/*.rs`、81 本）を rustc と比べ、通った数を出す。
 
+```bash
+tests/selfhost.sh
+```
+
+セルフホストの確認。crustc 自身のソースのうち外部クレートに依存しない部分を crustc でコンパイルし、rustc でコンパイルしたものと出力を比べる。
+いまは `src/lexer.rs`（と `src/cache.rs` の KeyHasher = std の DefaultHasher 2 つ）：crustc 自身のソース・examples・probe の 143 ファイルを字句解析し、アイテムの区切りと 128 bit のハッシュが rustc 版と完全に一致する。
+
 環境変数：`CRUSTC_DUMP_PRELUDE=1` は付けた prelude を stderr に出す。`CRUSTC_NO_STRIP=1` は出力のシンボルを残す（callgrind などで関数名を見るため）。
 `CRUSTC_BENCH_LINKER` は criterion のベンチのリンカを固定する。
 
@@ -897,6 +904,20 @@ crustc のバイナリはシンボルを持たない（strip しても同じ大�
 - 同じ機械語になるインスタンスは 1 つだけ置く（ICF：`Vec<u32>::push` と `Vec<i32>::push` など）。機械語・リロケーション（呼び先は代表に直す）・データ・vtable・panic の場所・呼び出し規約が同じものを、変わらなくなるまで繰り返して畳む。
   キャッシュは機械語を（長さ, ハッシュ）で `.o` から引くので、畳んだインスタンスも代表の機械語でヒットする。examples 全体でバイナリ −3%（binary_heap −13%）、`.o` −3%。
 - drop の要らない型の `__exr_drop_in_place::<T>` / `drop(x)` は呼ばない（インスタンスも作らない。collections でインスタンス 353 → 341）。
+
+#### std の範囲へ（セルフホストの第 1 段階: crustc 自身の lexer）
+
+crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfhost/build_lexer.py`）crustc でコンパイルし、足りないものを順に足した。
+- `std::hash`：`Hash` / `Hasher`（`write_u8` 〜 `write_usize`・`write_str`・`write_length_prefix` の既定のメソッドも）と、整数・bool・char・str・String・スライス・Vec の `impl Hash`、
+  `DefaultHasher`（std と同じ SipHash-1-3・鍵 0 で、値も std と一致する）
+- str とスライスへの trait 実装（`impl Hash for str` / `impl<T: Hash> Hash for [T]`）のメソッド呼び出し（組み込みのメソッドより先に探す）
+- 型の別名 `type Key = u128;` / `type Res<T> = Result<T, String>;`
+- `std::fs::read_to_string` / `read` / `write`、`std::env::args` / `var`、`std::io::Error`（Display / Debug は std と同じ形: `Os { code: 2, kind: NotFound, message: ".." }`）、`std::io::Result<T>`
+- `String::from_utf8_lossy`（std と同じく壊れた列ごとに U+FFFD）、`bool::then` / `then_some`、整数の `to_le_bytes` / `to_be_bytes` / `to_ne_bytes` / `from_le_bytes` など、u8 の `is_ascii_alphanumeric` など
+- バイト列のパターン（`match w { b"pub" | b"fn" => .. }`、w: &[u8]）、`&[u8] == b"pub"`、`&&str` を `&str` の引数に（deref の強制変換）
+- 関数の中で定義した `macro_rules!`
+- 本体がキャプチャを値として使うクロージャ（`changed.then(|| String::from_utf8(out))`）は、rustc と同じく値でキャプチャする（FnOnce）。値で持ったキャプチャからのムーブは、環境の側を 0 にする
+- prelude の新しい項目（Hash / Hasher / Args など）は、その名前が要るときだけ付ける（`fn write` / `len` などのよくある名前では引かない）
 
 ### 途中で分かったこと
 

@@ -774,6 +774,12 @@ impl<T> Vec<T> {
     pub fn chunks(&self, n: usize) -> Chunks<T> {
         __exr_slice_chunks(self.as_slice(), n)
     }
+    pub fn as_ptr(&self) -> *const T {
+        self.ptr as *const T
+    }
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        self.ptr
+    }
     pub fn as_slice(&self) -> &[T] {
         unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
     }
@@ -1820,6 +1826,28 @@ impl String {
         r
     }
     // UTF-8 として正しければ、そのバイト列を持つ String
+    // (std は Cow<str> を返す。ここでは String: 読むだけなら同じように使える)
+    // 不正な部分は std と同じく、壊れた列ごとに U+FFFD 1 つにする (末尾の途中で切れた列も 1 つ)
+    pub fn from_utf8_lossy(v: &[u8]) -> String {
+        let mut out = String::new();
+        let mut rest = v;
+        loop {
+            match __exr_utf8_check::<()>(rest) {
+                Ok(()) => {
+                    out.vec.extend_from_slice(rest);
+                    return out;
+                }
+                Err(e) => {
+                    out.vec.extend_from_slice(&rest[..e.valid_up_to]);
+                    out.push_str("\u{FFFD}");
+                    match e.error_len {
+                        Some(n) => rest = &rest[e.valid_up_to + n as usize..],
+                        None => return out,
+                    }
+                }
+            }
+        }
+    }
     pub fn from_utf8(v: Vec<u8>) -> Result<String, FromUtf8Error> {
         match __exr_utf8_check::<()>(v.as_slice()) {
             Ok(()) => Ok(String { vec: v }),
@@ -4727,16 +4755,288 @@ unsafe extern "C" {
     fn __exr_fflush(f: *mut u8) -> i32;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// std::io::Error: OS のエラー (errno) か、種類とメッセージ (code < 0: InvalidData など)
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct IoError {
     code: i32,
 }
 
+unsafe extern "C" {
+    #[link_name = "strerror"]
+    fn __exr_strerror(e: i32) -> *const u8;
+}
+
+unsafe extern "C" {
+    #[link_name = "strlen"]
+    fn __exr_strlen(p: *const u8) -> usize;
+}
+
+unsafe extern "C" {
+    #[link_name = "__errno_location"]
+    fn __exr_errno_location() -> *mut i32;
+}
+
+fn __exr_cstr<G>(p: *const u8) -> &str {
+    unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(p, __exr_strlen(p))) }
+}
+
+// (std の ErrorKind の名前: errno から)
+fn __exr_io_kind<G>(code: i32) -> &str {
+    if code == -1 {
+        "InvalidData"
+    } else if code == 2 {
+        "NotFound"
+    } else if code == 13 || code == 1 {
+        "PermissionDenied"
+    } else if code == 17 {
+        "AlreadyExists"
+    } else if code == 21 {
+        "IsADirectory"
+    } else if code == 20 {
+        "NotADirectory"
+    } else if code == 22 {
+        "InvalidInput"
+    } else if code == 32 {
+        "BrokenPipe"
+    } else if code == 4 {
+        "Interrupted"
+    } else {
+        "Uncategorized"
+    }
+}
+
+impl IoError {
+    pub fn last_os_error() -> IoError {
+        IoError { code: unsafe { *__exr_errno_location() } }
+    }
+    pub fn raw_os_error(&self) -> Option<i32> {
+        if self.code > 0 { Some(self.code) } else { None }
+    }
+    fn __message(&self) -> &str {
+        if self.code == -1 {
+            "stream did not contain valid UTF-8"
+        } else {
+            __exr_cstr::<()>(unsafe { __exr_strerror(self.code) })
+        }
+    }
+}
+
 impl Display for IoError {
     fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
-        __exr_fmt_str::<()>(f, "I/O error");
+        __exr_fmt_str::<()>(f, self.__message());
+        if self.code > 0 {
+            __exr_fmt_str::<()>(f, " (os error ");
+            __exr_fmt_int::<()>(f, self.code as u64, false);
+            __exr_fmt_str::<()>(f, ")");
+        }
         Ok(())
     }
+}
+
+impl Debug for IoError {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        if self.code > 0 {
+            __exr_fmt_str::<()>(f, "Os { code: ");
+            __exr_fmt_int::<()>(f, self.code as u64, false);
+            __exr_fmt_str::<()>(f, ", kind: ");
+            __exr_fmt_str::<()>(f, __exr_io_kind::<()>(self.code));
+            __exr_fmt_str::<()>(f, ", message: ");
+            __exr_fmt_str_debug::<()>(f, self.__message());
+            __exr_fmt_str::<()>(f, " }");
+        } else {
+            __exr_fmt_str::<()>(f, "Error { kind: ");
+            __exr_fmt_str::<()>(f, __exr_io_kind::<()>(self.code));
+            __exr_fmt_str::<()>(f, ", message: ");
+            __exr_fmt_str_debug::<()>(f, self.__message());
+            __exr_fmt_str::<()>(f, " }");
+        }
+        Ok(())
+    }
+}
+
+// --- std::fs / std::env (libc の open / read / write / getenv) ---
+
+unsafe extern "C" {
+    #[link_name = "open"]
+    fn __exr_open(path: *const u8, flags: i32, mode: i32) -> i32;
+}
+
+unsafe extern "C" {
+    #[link_name = "read"]
+    fn __exr_read(fd: i32, buf: *mut u8, n: usize) -> isize;
+}
+
+unsafe extern "C" {
+    #[link_name = "close"]
+    fn __exr_close(fd: i32) -> i32;
+}
+
+unsafe extern "C" {
+    #[link_name = "getenv"]
+    fn __exr_getenv(name: *const u8) -> *const u8;
+}
+
+// パスや中身として渡せる型 (&str / String / &[u8] / Vec<u8>)
+pub trait __AsBytes {
+    fn __as_bytes(&self) -> &[u8];
+}
+impl __AsBytes for str {
+    fn __as_bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+impl __AsBytes for String {
+    fn __as_bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+impl __AsBytes for [u8] {
+    fn __as_bytes(&self) -> &[u8] {
+        self
+    }
+}
+impl __AsBytes for Vec<u8> {
+    fn __as_bytes(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+// NUL で終わるコピー
+fn __exr_c_path<G>(p: &[u8]) -> Vec<u8> {
+    let mut v: Vec<u8> = Vec::with_capacity(p.len() + 1);
+    v.extend_from_slice(p);
+    v.push(0);
+    v
+}
+
+fn __exr_read_fd_all<G>(fd: i32) -> Result<Vec<u8>, IoError> {
+    let mut v: Vec<u8> = Vec::with_capacity(4096);
+    loop {
+        if v.cap - v.len < 4096 {
+            v.reserve(4096);
+        }
+        let n = unsafe { __exr_read(fd, v.ptr.add(v.len), v.cap - v.len) };
+        if n < 0 {
+            let e = IoError::last_os_error();
+            if e.code == 4 {
+                continue;
+            }
+            return Err(e);
+        }
+        if n == 0 {
+            return Ok(v);
+        }
+        v.len += n as usize;
+    }
+}
+
+pub fn __exr_fs_read<P>(path: P) -> Result<Vec<u8>, IoError> {
+    let c = __exr_c_path::<()>(path.__as_bytes());
+    let fd = unsafe { __exr_open(c.as_ptr(), 0, 0) };
+    if fd < 0 {
+        return Err(IoError::last_os_error());
+    }
+    let r = __exr_read_fd_all::<()>(fd);
+    unsafe {
+        __exr_close(fd);
+    }
+    r
+}
+
+pub fn __exr_fs_read_to_string<P>(path: P) -> Result<String, IoError> {
+    let v = __exr_fs_read(path)?;
+    match String::from_utf8(v) {
+        Ok(s) => Ok(s),
+        Err(_) => Err(IoError { code: -1 }),
+    }
+}
+
+pub fn __exr_fs_write<P, C>(path: P, contents: C) -> Result<(), IoError> {
+    let c = __exr_c_path::<()>(path.__as_bytes());
+    // O_WRONLY | O_CREAT | O_TRUNC, 0o666
+    let fd = unsafe { __exr_open(c.as_ptr(), 0x241, 0o666) };
+    if fd < 0 {
+        return Err(IoError::last_os_error());
+    }
+    let b = contents.__as_bytes();
+    let mut off = 0;
+    while off < b.len() {
+        let n = unsafe { __exr_write(fd, b.as_ptr().add(off), b.len() - off) };
+        if n < 0 {
+            let e = IoError::last_os_error();
+            unsafe {
+                __exr_close(fd);
+            }
+            return Err(e);
+        }
+        off += n as usize;
+    }
+    unsafe {
+        __exr_close(fd);
+    }
+    Ok(())
+}
+
+// std::env::args: /proc/self/cmdline (NUL 区切り) から
+pub struct Args {
+    v: Vec<String>,
+    i: usize,
+}
+
+impl Iterator for Args {
+    type Item = String;
+    fn next(&mut self) -> Option<String> {
+        if self.i < self.v.len() {
+            self.i += 1;
+            Some(self.v[self.i - 1].clone())
+        } else {
+            None
+        }
+    }
+}
+
+impl Args {
+    pub fn len(&self) -> usize {
+        self.v.len() - self.i
+    }
+}
+
+pub fn __exr_env_args() -> Args {
+    let mut v: Vec<String> = Vec::new();
+    if let Ok(b) = __exr_fs_read("/proc/self/cmdline") {
+        let mut st = 0;
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == 0 {
+                v.push(String::from_utf8_lossy(&b[st..i]));
+                st = i + 1;
+            }
+            i += 1;
+        }
+    }
+    Args { v: v, i: 0 }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarError {
+    NotPresent,
+    NotUnicode,
+}
+
+impl Display for VarError {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_fmt_str::<()>(f, if *self == VarError::NotPresent { "environment variable not found" } else { "environment variable was not valid unicode" });
+        Ok(())
+    }
+}
+
+pub fn __exr_env_var<K>(key: K) -> Result<String, VarError> {
+    let c = __exr_c_path::<()>(key.__as_bytes());
+    let p = unsafe { __exr_getenv(c.as_ptr()) };
+    if p.is_null() {
+        return Err(VarError::NotPresent);
+    }
+    Ok(String::from(__exr_cstr::<()>(p)))
 }
 
 // 1 行 (改行まで。改行も入れる) を buf の後ろに足す。読んだバイト数 (0 なら終わり)
@@ -8450,4 +8750,272 @@ fn __exr_str_ends_with<G>(s: &str, t: &str) -> bool {
         j += 1;
     }
     true
+}
+
+// --- std::hash (Hash / Hasher / DefaultHasher)。DefaultHasher は std と同じ SipHash-1-3 (鍵 0) で、値も std と一致する ---
+
+pub trait Hasher {
+    fn finish(&self) -> u64;
+    fn write(&mut self, bytes: &[u8]);
+    fn write_u8(&mut self, i: u8) {
+        self.write(unsafe { core::slice::from_raw_parts(&i as *const u8, 1) });
+    }
+    fn write_u16(&mut self, i: u16) {
+        self.write(unsafe { core::slice::from_raw_parts(&i as *const u16 as *const u8, 2) });
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.write(unsafe { core::slice::from_raw_parts(&i as *const u32 as *const u8, 4) });
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.write(unsafe { core::slice::from_raw_parts(&i as *const u64 as *const u8, 8) });
+    }
+    fn write_u128(&mut self, i: u128) {
+        self.write(unsafe { core::slice::from_raw_parts(&i as *const u128 as *const u8, 16) });
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.write(unsafe { core::slice::from_raw_parts(&i as *const usize as *const u8, 8) });
+    }
+    fn write_i8(&mut self, i: i8) {
+        self.write_u8(i as u8);
+    }
+    fn write_i16(&mut self, i: i16) {
+        self.write_u16(i as u16);
+    }
+    fn write_i32(&mut self, i: i32) {
+        self.write_u32(i as u32);
+    }
+    fn write_i64(&mut self, i: i64) {
+        self.write_u64(i as u64);
+    }
+    fn write_i128(&mut self, i: i128) {
+        self.write_u128(i as u128);
+    }
+    fn write_isize(&mut self, i: isize) {
+        self.write_usize(i as usize);
+    }
+    fn write_str(&mut self, s: &str) {
+        self.write(s.as_bytes());
+        self.write_u8(0xff);
+    }
+    fn write_length_prefix(&mut self, len: usize) {
+        self.write_usize(len);
+    }
+}
+
+pub trait Hash {
+    fn hash<H: Hasher>(&self, state: &mut H);
+}
+
+impl Hash for u8 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u8(*self);
+    }
+}
+impl Hash for u16 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u16(*self);
+    }
+}
+impl Hash for u32 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u32(*self);
+    }
+}
+impl Hash for u64 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(*self);
+    }
+}
+impl Hash for u128 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u128(*self);
+    }
+}
+impl Hash for usize {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_usize(*self);
+    }
+}
+impl Hash for i8 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_i8(*self);
+    }
+}
+impl Hash for i16 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_i16(*self);
+    }
+}
+impl Hash for i32 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_i32(*self);
+    }
+}
+impl Hash for i64 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_i64(*self);
+    }
+}
+impl Hash for i128 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_i128(*self);
+    }
+}
+impl Hash for isize {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_isize(*self);
+    }
+}
+impl Hash for bool {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u8(*self as u8);
+    }
+}
+impl Hash for char {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u32(*self as u32);
+    }
+}
+impl Hash for str {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_str(self);
+    }
+}
+impl Hash for String {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_str(self.as_str());
+    }
+}
+impl<T: Hash> Hash for [T] {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_length_prefix(self.len());
+        let mut i = 0;
+        while i < self.len() {
+            self[i].hash(state);
+            i += 1;
+        }
+    }
+}
+impl<T: Hash> Hash for Vec<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
+    }
+}
+
+pub struct DefaultHasher {
+    v0: u64,
+    v1: u64,
+    v2: u64,
+    v3: u64,
+    tail: u64,
+    ntail: usize,
+    length: usize,
+}
+
+fn __exr_sip_round<G>(v: &mut [u64; 4]) {
+    v[0] = v[0].wrapping_add(v[1]);
+    v[1] = v[1].rotate_left(13);
+    v[1] ^= v[0];
+    v[0] = v[0].rotate_left(32);
+    v[2] = v[2].wrapping_add(v[3]);
+    v[3] = v[3].rotate_left(16);
+    v[3] ^= v[2];
+    v[0] = v[0].wrapping_add(v[3]);
+    v[3] = v[3].rotate_left(21);
+    v[3] ^= v[0];
+    v[2] = v[2].wrapping_add(v[1]);
+    v[1] = v[1].rotate_left(17);
+    v[1] ^= v[2];
+    v[2] = v[2].rotate_left(32);
+}
+
+impl DefaultHasher {
+    pub fn new() -> DefaultHasher {
+        DefaultHasher {
+            v0: 0x736f6d6570736575,
+            v1: 0x646f72616e646f6d,
+            v2: 0x6c7967656e657261,
+            v3: 0x7465646279746573,
+            tail: 0,
+            ntail: 0,
+            length: 0,
+        }
+    }
+    pub fn default() -> DefaultHasher {
+        DefaultHasher::new()
+    }
+    fn __block(&mut self, m: u64) {
+        let mut v = [self.v0, self.v1, self.v2, self.v3];
+        v[3] ^= m;
+        __exr_sip_round::<()>(&mut v);
+        v[0] ^= m;
+        self.v0 = v[0];
+        self.v1 = v[1];
+        self.v2 = v[2];
+        self.v3 = v[3];
+    }
+}
+
+impl Hasher for DefaultHasher {
+    fn write(&mut self, msg: &[u8]) {
+        let len = msg.len();
+        self.length += len;
+        let mut i = 0;
+        // (前回の端数を 8 byte まで埋める)
+        if self.ntail != 0 {
+            while i < len && self.ntail < 8 {
+                self.tail |= (msg[i] as u64) << (8 * self.ntail);
+                self.ntail += 1;
+                i += 1;
+            }
+            if self.ntail < 8 {
+                return;
+            }
+            let t = self.tail;
+            self.__block(t);
+            self.tail = 0;
+            self.ntail = 0;
+        }
+        while i + 8 <= len {
+            let mut m: u64 = 0;
+            let mut k = 0;
+            while k < 8 {
+                m |= (msg[i + k] as u64) << (8 * k);
+                k += 1;
+            }
+            self.__block(m);
+            i += 8;
+        }
+        while i < len {
+            self.tail |= (msg[i] as u64) << (8 * self.ntail);
+            self.ntail += 1;
+            i += 1;
+        }
+    }
+    fn finish(&self) -> u64 {
+        let b: u64 = ((self.length as u64 & 0xff) << 56) | self.tail;
+        let mut v = [self.v0, self.v1, self.v2, self.v3];
+        v[3] ^= b;
+        __exr_sip_round::<()>(&mut v);
+        v[0] ^= b;
+        v[2] ^= 0xff;
+        __exr_sip_round::<()>(&mut v);
+        __exr_sip_round::<()>(&mut v);
+        __exr_sip_round::<()>(&mut v);
+        v[0] ^ v[1] ^ v[2] ^ v[3]
+    }
+}
+
+// bool::then / then_some
+pub trait __BoolThen {
+    fn then_some<T>(self, t: T) -> Option<T>;
+    fn then<T, F: FnOnce() -> T>(self, f: F) -> Option<T>;
+}
+impl __BoolThen for bool {
+    fn then_some<T>(self, t: T) -> Option<T> {
+        if self { Some(t) } else { None }
+    }
+    fn then<T, F: FnOnce() -> T>(self, f: F) -> Option<T> {
+        if self { Some(f()) } else { None }
+    }
 }

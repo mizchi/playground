@@ -1795,7 +1795,23 @@ impl Cx<'_, '_> {
                     }
                     if let Expr::Path(rp) = strip_paren(root) {
                         if let Some(id) = rp.path.get_ident() {
-                            if self.caps.iter().any(|c| c.0 == id.to_string()) {
+                            if let Some(c) = self.caps.iter().find(|c| c.0 == id.to_string()) {
+                                // 値で持ったキャプチャ (FnOnce) から出す: 退避して環境の側を「空」(0) にする
+                                // (環境はそのまま drop されるが、0 の Vec / String / Box は何も解放しない)
+                                if let (false, Expr::Path(_), Place::Mem(a, o, t), Some(v)) = (c.2, strip_paren(e), p, r.0) {
+                                    if self.zeroable(t) {
+                                        let v = if t.is_agg() {
+                                            let tmp = self.temp(t);
+                                            self.copy(tmp, v, t);
+                                            tmp
+                                        } else {
+                                            v
+                                        };
+                                        let dst = self.addr_plus(a, o);
+                                        self.zero(dst, t);
+                                        return Ok((Some(v), t));
+                                    }
+                                }
                                 return err(
                                     e.span(),
                                     "moving a captured value out of a closure is not supported",
@@ -3147,6 +3163,12 @@ impl Cx<'_, '_> {
                 }
             }
         }
+        // (str / スライスへの trait 実装は、組み込みのメソッドより先に: `"x".hash(&mut h)`)
+        if self.peek(&mc.receiver).is_some_and(|t| matches!(self.strip_refs(t), Ty::Str | Ty::Slice(_) | Ty::Array(..))) {
+            if let Some(r) = self.prim_trait_method(mc)? {
+                return Ok(r);
+            }
+        }
         if let Some(r) = self.builtin_method(mc)? {
             return Ok(r);
         }
@@ -3277,10 +3299,37 @@ impl Cx<'_, '_> {
         while let Ty::Ref(_, i) = t {
             t = *i;
         }
+        let name = mc.method.to_string();
+        // str / スライス / 配列への trait 実装 (`impl Hash for str` / `for [T]`): 受け手は &str / &[T] (fat) か &[T; N]
+        if matches!(t, Ty::Str | Ty::Slice(_) | Ty::Array(..)) {
+            let Some(id) = self.prog.prim_method(t, &name) else {
+                return Ok(None);
+            };
+            if !matches!(self.prog.sigs[id as usize].params.first(), Some(Ty::Ref(..))) {
+                return Ok(None);
+            }
+            let (v, vt) = self.expr(&mc.receiver, None)?;
+            let Some(mut v) = v else { return Ok(Some((None, Ty::Never))) };
+            let mut vt = vt;
+            // (参照の参照は 1 段ずつ外し、&str / &[T] / &[T; N] で止める)
+            while let Ty::Ref(_, i) = vt {
+                if matches!(i, Ty::Str | Ty::Slice(_) | Ty::Array(..)) {
+                    break;
+                }
+                v = self.b.ins().load(PTR, mf(), v, 0);
+                vt = *i;
+            }
+            if matches!(vt, Ty::Array(..)) {
+                let a = v;
+                v = a;
+                vt = Ty::Ref(false, intern(vt));
+            }
+            let args: Vec<&Expr> = mc.args.iter().collect();
+            return self.call_fn(id, Some((v, vt)), &args, mc.turbofish.as_ref(), None, mc.span()).map(Some);
+        }
         if !(t.is_int() || matches!(t, Ty::Bool | Ty::Char)) {
             return Ok(None);
         }
-        let name = mc.method.to_string();
         let Some(id) = self.prog.prim_method(t, &name) else {
             return Ok(None);
         };
@@ -3664,6 +3713,18 @@ impl Cx<'_, '_> {
             None
         };
         for ((v, t, sp), &pt) in vals.into_iter().zip(&sig.params) {
+            // 参照の参照を参照に (deref の強制変換: `t.starts_with(k)` で k: &&str)
+            let (v, t) = match (t, pt) {
+                (Ty::Ref(_, a), Ty::Ref(_, pi)) if matches!(*a, Ty::Ref(_, i) if *i == *pi) => {
+                    if pt.is_fat() {
+                        // (&&str は fat pointer の組を指すアドレス: それがそのまま &str の値)
+                        (v, pt)
+                    } else {
+                        (self.b.ins().load(PTR, mf(), v, 0), pt)
+                    }
+                }
+                _ => (v, t),
+            };
             self.same(sp, t, pt)?;
             self.push_arg(&mut cv, v, pt);
         }
@@ -5620,6 +5681,15 @@ impl Cx<'_, '_> {
                     if name == "split" && t != Ty::Char {
                         return err(a.span(), "only `char` separators are supported in `split`");
                     }
+                    // (`&&str` / `&String` のパターンは &str に)
+                    let (v, t) = match t {
+                        Ty::Ref(_, Ty::Ref(_, Ty::Str)) => (v, sref),
+                        Ty::Ref(_, Ty::Struct(sid)) if exp == sref => match v.and_then(|x| self.deref_to_slice(x, *sid, false)) {
+                            Some((fat, ft)) => (Some(fat), ft),
+                            None => (v, t),
+                        },
+                        _ => (v, t),
+                    };
                     self.same(a.span(), t, exp)?;
                     if char_pat {
                         let ss = self.b.create_sized_stack_slot(StackSlotData::new(
@@ -5799,6 +5869,15 @@ impl Cx<'_, '_> {
             "to_ascii_uppercase",
             "to_ascii_lowercase",
             "is_ascii_whitespace",
+            "is_ascii_alphanumeric",
+            "is_ascii_hexdigit",
+            "is_ascii_punctuation",
+            "is_ascii_graphic",
+            "is_ascii_control",
+            "is_ascii",
+            "to_le_bytes",
+            "to_be_bytes",
+            "to_ne_bytes",
         ];
         if !known.contains(&name.as_str()) {
             return Ok(None);
@@ -6243,6 +6322,56 @@ impl Cx<'_, '_> {
                 let l = ascii(self, b'a', b'z');
                 let c = self.b.ins().bor(u, l);
                 ins_bool(self, c)
+            }
+            "is_ascii_alphanumeric" => {
+                let u = ascii(self, b'A', b'Z');
+                let l = ascii(self, b'a', b'z');
+                let d = ascii(self, b'0', b'9');
+                let c = self.b.ins().bor(u, l);
+                let c = self.b.ins().bor(c, d);
+                ins_bool(self, c)
+            }
+            "is_ascii_hexdigit" => {
+                let d = ascii(self, b'0', b'9');
+                let u = ascii(self, b'A', b'F');
+                let l = ascii(self, b'a', b'f');
+                let c = self.b.ins().bor(u, l);
+                let c = self.b.ins().bor(c, d);
+                ins_bool(self, c)
+            }
+            // (! から / 、: から @、[ から `、{ から ~)
+            "is_ascii_punctuation" => {
+                let mut acc = self.b.ins().iconst(types::I8, 0);
+                for (lo, hi) in [(b'!', b'/'), (b':', b'@'), (b'[', b'`'), (b'{', b'~')] {
+                    let c = ascii(self, lo, hi);
+                    acc = self.b.ins().bor(acc, c);
+                }
+                ins_bool(self, acc)
+            }
+            "is_ascii_graphic" => {
+                let c = ascii(self, b'!', b'~');
+                ins_bool(self, c)
+            }
+            "is_ascii_control" => {
+                let lo = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThan, a, 0x20);
+                let del = self.b.ins().icmp_imm_u(IntCC::Equal, a, 0x7f);
+                let c = self.b.ins().bor(lo, del);
+                ins_bool(self, c)
+            }
+            "is_ascii" => {
+                let c = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThan, a, 0x80);
+                ins_bool(self, c)
+            }
+            // (x86-64 はリトルエンディアン: そのまま書くと le / ne。be はバイトを逆にしてから)
+            "to_le_bytes" | "to_be_bytes" | "to_ne_bytes" => {
+                let n = t.bits() / 8;
+                let at = Ty::Array(intern(Ty::U8), n);
+                let out = self.temp(at);
+                let v = if name == "to_be_bytes" && n > 1 { self.b.ins().bswap(a) } else { a };
+                let mut fl = MemFlagsData::new();
+                fl.set_notrap();
+                self.b.ins().store(fl, v, out, 0);
+                (Some(out), at)
             }
             "is_ascii_whitespace" => {
                 let mut acc = self.b.ins().iconst(types::I8, 0);
@@ -7542,6 +7671,19 @@ impl Cx<'_, '_> {
         };
         let last = p.path.segments.last().unwrap();
         let name = last.ident.to_string();
+        // `u32::from_le_bytes([..])` / `from_be_bytes` / `from_ne_bytes`
+        if matches!(name.as_str(), "from_le_bytes" | "from_be_bytes" | "from_ne_bytes") && p.path.segments.len() == 2 && c.args.len() == 1 {
+            if let Some(t) = Ty::prim(&p.path.segments[0].ident.to_string()).filter(|t| t.is_int()) {
+                let n = t.bits() / 8;
+                let (v, _) = self.expr(&c.args[0], Some(Ty::Array(intern(Ty::U8), n)))?;
+                let Some(a) = v else { return Ok(Some((None, Ty::Never))) };
+                let mut fl = MemFlagsData::new();
+                fl.set_notrap();
+                let x = self.b.ins().load(clif_ty(t).unwrap(), fl, a, 0);
+                let x = if name == "from_be_bytes" && n > 1 { self.b.ins().bswap(x) } else { x };
+                return Ok(Some((Some(x), t)));
+            }
+        }
         // `Box::new(x)`: ヒープに置いて、所有する `&mut T` として返す (解放はしない)
         let n = p.path.segments.len();
         if name == "new"
@@ -8268,6 +8410,35 @@ impl Cx<'_, '_> {
                 self.b.switch_to_block(ok);
                 Ok(())
             }
+            // バイト列のパターン (`match w { b"pub" => .. }`、w: &[u8] / &[u8; N]): 長さと中身で比べる
+            Pat::Lit(l) if matches!(l.lit, Lit::ByteStr(_)) => {
+                let Lit::ByteStr(bs) = &l.lit else { unreachable!() };
+                let mut p = p;
+                // (&&[u8] などは 1 段ずつ外し、&[u8] / &[u8; N] で止める)
+                while let Ty::Ref(_, i) = p.ty() {
+                    if matches!(i, Ty::Slice(_) | Ty::Array(..)) {
+                        break;
+                    }
+                    let (v, _) = self.read(p);
+                    p = Place::Mem(v.unwrap(), 0, *i);
+                }
+                let u8s = Ty::Ref(false, intern(Ty::Slice(intern(Ty::U8))));
+                let fat = match p.ty() {
+                    Ty::Ref(_, Ty::Slice(Ty::U8)) => self.read(p).0.unwrap(),
+                    Ty::Ref(_, Ty::Array(Ty::U8, n)) => {
+                        let (v, _) = self.read(p);
+                        let n = self.b.ins().iconst(types::I64, *n as i64);
+                        self.make_fat_v(v.unwrap(), n)
+                    }
+                    t => return err(l.span(), format!("mismatched types: expected `{}`, found `&[u8]`", self.prog.tn(t))),
+                };
+                let (c, _) = self.lit(&l.lit, None)?;
+                let n = self.b.ins().iconst(types::I64, bs.value().len() as i64);
+                let cf = self.make_fat_v(c.unwrap(), n);
+                let cond = self.eq_at(fat, cf, u8s, l.span())?;
+                self.require(cond, fail);
+                Ok(())
+            }
             // 文字列のパターン (`match s { "add" => .. }`): &str (と &&str) の中身で比べる
             Pat::Lit(l) if matches!(l.lit, Lit::Str(_)) => {
                 let sref = Ty::Ref(false, intern(Ty::Str));
@@ -8751,6 +8922,11 @@ impl Cx<'_, '_> {
             Ty::Box(_) => true,
             Ty::Array(e, _) => !self.needs_drop(*e) || self.zeroable(*e),
             Ty::Struct(sid) => {
+                // (prelude の Vec / String は 0 (null の ptr、長さ 0) でも drop が何もしない)
+                let bname = &self.prog.structs[self.prog.base_of(sid) as usize].name;
+                if bname == "Vec" || bname == "String" {
+                    return true;
+                }
                 if self.prog.drop_impls.contains(&self.prog.base_of(sid)) {
                     return false;
                 }
@@ -10841,6 +11017,10 @@ impl Cx<'_, '_> {
                     v = Some(fat);
                     t = ft;
                 }
+            }
+            // `&&str` → `&str` (fat pointer の組を指すアドレスがそのまま &str の値)
+            if let (Ty::Ref(_, Ty::Ref(_, Ty::Str)), true) = (t, pt == sref) {
+                t = sref;
             }
             self.same(a.span(), t, pt)?;
             if let Some(v) = v {
