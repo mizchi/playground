@@ -832,6 +832,24 @@ impl Cx<'_, '_> {
 
     fn emit_return(&mut self, v: Option<Value>) {
         if self.is_main {
+            // `fn main() -> Result<(), E>`: Err なら `Error: {:?}` を出して 1 で終わる
+            if let (Ty::Struct(rs), Some(v)) = (self.ret, v) {
+                let rd = &self.prog.structs[rs as usize];
+                if rd.is_enum && rd.base.is_some_and(|b| self.prog.structs[b as usize].name == "Result") {
+                    if let Some(ev) = rd.variants.iter().position(|x| x.name == "Err") {
+                        let (_, et, off) = rd.variants[ev].fields[0];
+                        let ok = self.b.create_block();
+                        let span = proc_macro2::Span::call_site();
+                        if self.test_variant(Place::Mem(v, 0, self.ret), rs, ev, span, ok).is_ok() {
+                            let pa = self.addr_plus(v, off as i32);
+                            let _ = self.call_named("__exr_main_err", vec![et], &[(pa, Ty::Ref(false, intern(et)))], span);
+                            let one = self.b.ins().iconst(types::I32, 1);
+                            self.b.ins().return_(&[one]);
+                        }
+                        self.b.switch_to_block(ok);
+                    }
+                }
+            }
             let z = self.b.ins().iconst(types::I32, 0);
             self.b.ins().return_(&[z]);
         } else if let Some(dst) = self.sret {
@@ -1178,6 +1196,8 @@ impl Cx<'_, '_> {
             }
             Expr::Paren(p) => self.peek(&p.expr),
             Expr::Group(g) => self.peek(&g.expr),
+            // `format!(..)` は String
+            Expr::Macro(m) if m.mac.path.is_ident("format") => self.prog.struct_index.get("String").map(|&s| Ty::Struct(s)),
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => match self.peek(&u.expr)? {
                 Ty::Ref(_, i) => Some(*i),
                 _ => None,
@@ -2827,6 +2847,12 @@ impl Cx<'_, '_> {
             let target = expected.or_else(|| self.lets.get(&(mc as *const _ as usize)).copied());
             if !recv_own {
                 match target {
+                    // `"msg".into()` / `e.into()` → Box<dyn Error>
+                    Some(Ty::Struct(sid)) if self.prog.structs[sid as usize].name == "__DynError" => {
+                        let (v, t) = self.expr(&mc.receiver, None)?;
+                        let Some(v) = v else { return Ok((None, Ty::Never)) };
+                        return self.call_named("__exr_dyn_error", vec![t], &[(v, t)], mc.span());
+                    }
                     Some(Ty::Struct(sid)) => {
                         if let Some(id) = self.prog.method(sid, "from") {
                             let args = [&*mc.receiver];
@@ -6313,8 +6339,11 @@ impl Cx<'_, '_> {
                     }),
                     _ => None,
                 };
+                let dyn_err = matches!(rety, Ty::Struct(rs) if self.prog.structs[rs as usize].name == "__DynError");
                 match (conv, ev) {
                     (Some(id), Some(v)) => self.call_fn_vals(id, &[(v, ety)], t.span())?.0,
+                    // `Box<dyn Error>` へは表示の文字列にして入れる
+                    (None, Some(v)) if dyn_err => self.call_named("__exr_dyn_error", vec![ety], &[(v, ety)], t.span())?.0,
                     _ => {
                         self.same(t.span(), ety, rety)?;
                         ev
@@ -6347,6 +6376,14 @@ impl Cx<'_, '_> {
         {
             if c.args.len() != 1 {
                 return err(c.span(), "`Box::new` takes 1 argument");
+            }
+            // `Box::new(MyErr(..))` を `Box<dyn Error>` として: 表示の文字列にする
+            if let Some(Ty::Struct(sid)) = expected {
+                if self.prog.structs[sid as usize].name == "__DynError" {
+                    let (v, t) = self.expr(&c.args[0], None)?;
+                    let Some(v) = v else { return Ok(Some((None, Ty::Never))) };
+                    return self.call_named("__exr_dyn_error", vec![t], &[(v, t)], c.span()).map(Some);
+                }
             }
             let inner = match expected {
                 Some(Ty::Box(t)) if !matches!(t, Ty::Dyn(_) | Ty::Slice(_) | Ty::Str) => Some(*t),

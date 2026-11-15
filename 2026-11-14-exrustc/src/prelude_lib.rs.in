@@ -4638,6 +4638,41 @@ pub trait Rem {
     type Output;
     fn rem(self, rhs: Self) -> Self::Output;
 }
+// std::error::Error (メソッドは使わない: `Box<dyn Error>` は __DynError で表す)
+pub trait Error {
+    fn __err_mark(&self) {}
+}
+
+// `Box<dyn Error>`: 変換した時点で表示 ({}) と Debug ({:?}) の文字列にしておく
+pub struct __DynError {
+    msg: String,
+    dbg: String,
+}
+
+impl Display for __DynError {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_fmt_str::<()>(f, self.msg.as_str());
+        Ok(())
+    }
+}
+
+impl Debug for __DynError {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        f.buf.push_str(self.dbg.as_str());
+        Ok(())
+    }
+}
+
+fn __exr_dyn_error<E>(e: E) -> __DynError {
+    __DynError { msg: format!("{}", e), dbg: format!("{:?}", e) }
+}
+
+// `fn main() -> Result<(), E>` が Err で終わったとき
+fn __exr_main_err<E>(e: &E) {
+    eprintln!("Error: {:?}", e);
+    __core_process_exit(1);
+}
+
 // `impl IntoIterator for &Coll`: 名前だけ (for がユーザの into_iter を呼ぶ)
 pub trait IntoIterator {
     fn __into_iter_mark(&self) {}

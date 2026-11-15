@@ -319,6 +319,9 @@ pub fn parse_tysyn(t: &syn::Type, self_ty: Option<&TySyn>) -> R<TySyn> {
             let mut tr = None;
             for b in &to.bounds {
                 match b {
+                    // (`dyn Error + Send + Sync`: 自動 trait は読み飛ばす)
+                    syn::TypeParamBound::Trait(t)
+                        if t.path.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(), "Send" | "Sync")) => {}
                     syn::TypeParamBound::Trait(t) if tr.is_none() => tr = Some(bound_string(t)),
                     syn::TypeParamBound::Lifetime(_) => {}
                     _ => return err(b.span(), "only one trait is supported in `dyn`"),
@@ -1244,7 +1247,9 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
             // `#[no_mangle] extern "C" fn main() -> i32` (no_main) は C の main そのもの
             let is_main = name == "main" && !export;
             let mut sig = parse_sig(&f.sig, false, is_main, None)?;
-            if is_main && (!sig.params.is_empty() || sig.ret != TySyn::Prim(Ty::Unit)) {
+            // (`fn main() -> Result<(), E>` も: Err なら `Error: {:?}` を出して 1 で終わる)
+            let result_ret = matches!(&sig.ret, TySyn::App(n, _) if n == "Result");
+            if is_main && (!sig.params.is_empty() || (sig.ret != TySyn::Prim(Ty::Unit) && !result_ret)) {
                 return err(f.sig.span(), "`main` must be `fn main()`");
             }
             if export {
@@ -2182,6 +2187,14 @@ impl Program {
                     Some(_) => return Err(format!("missing generics for `{n}`")),
                     None => return Err(format!("cannot find type `{n}`")),
                 }
+            }
+            // `Box<dyn Error>`: prelude の __DynError (表示と Debug の文字列を持つ)
+            TySyn::App(n, args)
+                if n == "Box"
+                    && matches!(args.as_slice(), [TySyn::Dyn(d)] if d == "Error")
+                    && self.struct_index.contains_key("__DynError") =>
+            {
+                Ty::Struct(self.struct_index["__DynError"])
             }
             TySyn::App(n, args) if n == "Box" && args.len() == 1 && !self.struct_index.contains_key(n) => {
                 Ty::Box(intern(r(&args[0])?))

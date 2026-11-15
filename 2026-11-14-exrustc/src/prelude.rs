@@ -166,7 +166,7 @@ fn is_cmp_trait(h: usize) -> bool {
 /// 演算子の trait (宣言はユーザが手で impl するときだけ付ける)
 const OP_TRAITS: &[&str] = &[
     "Add", "Sub", "Mul", "Div", "Rem", "Neg", "Not", "BitAnd", "BitOr", "BitXor", "AddAssign", "SubAssign",
-    "MulAssign", "DivAssign", "RemAssign", "Index", "IndexMut", "From", "Deref", "IntoIterator",
+    "MulAssign", "DivAssign", "RemAssign", "Index", "IndexMut", "From", "Deref", "IntoIterator", "Error",
 ];
 
 /// 演算子の trait の宣言か
@@ -424,7 +424,7 @@ fn owner(h: usize) -> Option<&'static str> {
                         | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks"
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
                         | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "RangeFrom" | "TryFromIntError" | "Stdin" | "StdinLock" | "StdinLines" | "Stdout" | "StdoutLock"
-                        | "BufWriter" | "IoError" => Some(w),
+                        | "BufWriter" | "IoError" | "__DynError" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,
@@ -843,6 +843,15 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     // (アダプタの列があれば、その元 (Range など) の next も要る)
     if chain {
         need.insert("next");
+    }
+    // `Box<dyn Error>` と `impl Error for E {}`、`fn main() -> Result<..>`
+    if user_src.contains("dyn Error") || user_src.contains("error::Error") || user_src.contains("Error for") {
+        need.extend(["__DynError", "__exr_dyn_error", "__err_mark", "String", "format", "Display", "Debug"]);
+        need.extend(FMT_NAMES.iter().copied());
+    }
+    if user_src.contains("fn main() -> Result") {
+        need.extend(["__exr_main_err", "process_exit", "eprintln", "__exr_eprint", "Debug"]);
+        need.extend(FMT_NAMES.iter().copied());
     }
     // (`impl IntoIterator for &Coll` の into_iter はイテレータを返す)
     if user_src.contains("IntoIterator for") {
