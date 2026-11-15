@@ -158,7 +158,7 @@ fn is_cmp_trait(h: usize) -> bool {
         && it
             .idents
             .iter()
-            .any(|&(a, b)| matches!(&PRELUDE[a as usize..b as usize], "PartialEq" | "Eq" | "PartialOrd" | "Ord"))
+            .any(|&(a, b)| matches!(&PRELUDE[a as usize..b as usize], "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Clone" | "Copy"))
 }
 
 /// 演算子の trait (宣言はユーザが手で impl するときだけ付ける)
@@ -311,7 +311,8 @@ fn nonliteral_to_string(src: &str) -> bool {
 const ITER_NAMES: &[&str] = &[
     "Iterator", "next", "map", "filter", "filter_map", "collect", "sum", "product", "count",
     "fold", "for_each", "any", "all", "find", "position", "nth", "zip", "chain", "take", "skip",
-    "take_while", "copied", "cloned", "into_iter",
+    "take_while", "copied", "cloned", "into_iter", "flat_map", "flatten", "step_by", "peekable", "skip_while", "scan",
+    "inspect",
 ];
 
 /// prelude のアイテムの識別子を need に足す (Iterator のメソッド名はメソッド呼び出しの位置だけ)
@@ -345,7 +346,8 @@ fn owner(h: usize) -> Option<&'static str> {
                     .map(|&(a, b)| &PRELUDE[a as usize..b as usize])
                     .find_map(|w| match w {
                         "Vec" | "String" | "HashMap" | "Reverse" | "BinaryHeap" | "SplitStr" | "CharIndices"
-                        | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" => Some(w),
+                        | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" | "Rev" | "StepBy" | "Peekable"
+                        | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,
@@ -399,7 +401,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             "find", "position", "nth", "zip", "chain", "take", "skip", "take_while", "copied",
             "cloned", "format", "print", "println", "eprint", "eprintln", "write", "writeln",
             "split", "split_whitespace", "lines", "trim", "starts_with", "ends_with", "contains",
-            "clamp", "from_u32", "char",
+            "clamp", "from_u32", "char", "join", "concat", "drain",
         ]);
         // (先頭の 1 byte, 長さ) ごとの候補。prelude の名前が増えても 1 識別子あたりの比較は 0〜1 回
         let mut t: Vec<Vec<&'static str>> = vec![vec![]; 256 * 32];
@@ -554,6 +556,25 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     if need.contains("parse") {
         need.extend(["__from_str", "__FromStr"]);
     }
+    if need.contains("flat_map") || need.contains("flatten") {
+        need.extend(["__flat_prep", "__flat_next", "__Flat", "__flat_mark", "reverse", "pop", "take"]);
+    }
+    // `x.clone()` を codegen が __exr_clone::<T> にする (prelude の Vec::clone / cloned / to_vec の中も)
+    // (drop の要らない型と、自分の clone を持つ型 (String / Vec) には要らない)
+    if ["clone", "cloned", "to_vec", "resize"].iter().any(|n| need.contains(n)) {
+        need.insert("__exr_clone");
+    }
+    if need.contains("join") || need.contains("concat") {
+        need.extend(["__exr_join_str", "__exr_join_string"]);
+    }
+    if need.contains("drain") {
+        need.insert("__drain");
+    }
+    for (m, f) in [("windows", "__exr_slice_windows"), ("chunks", "__exr_slice_chunks"), ("to_vec", "__exr_slice_to_vec")] {
+        if need.contains(m) {
+            need.extend([f, "Iterator", "next"]);
+        }
+    }
     // `x.extend(arg)`: codegen が arg を into_iter / iter にし、要素が参照なら __extend_ref を呼ぶ
     if need.contains("extend") {
         need.extend(["__extend_ref", "into_iter", "iter", "Iterator"]);
@@ -574,7 +595,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     ];
     // (prelude の Reverse も PartialOrd / Ord を impl する)
     let user_impls = user_impl_traits(user_src);
-    let cmp_impl = user_impls.iter().any(|t| matches!(*t, "PartialEq" | "Eq" | "PartialOrd" | "Ord"))
+    let cmp_impl = user_impls.iter().any(|t| matches!(*t, "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Clone" | "Copy"))
         || need.contains("Reverse");
     let op_impls: Vec<&str> = user_impls.iter().copied().filter(|t| OP_TRAITS.contains(t)).collect();
     // (再帰する型は Box / Vec を通るので、そのときは glue を付ける。それ以外の型の比較は codegen が直接展開する)
@@ -582,7 +603,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         need.insert("__exr_cmp");
     }
     if cmp_impl {
-        need.extend(["eq", "cmp", "partial_cmp", "__exr_eq_marker", "Ordering"]);
+        need.extend(["eq", "cmp", "partial_cmp", "__exr_eq_marker", "Ordering", "__exr_copy_marker"]);
     }
     if ORD_NAMES.iter().any(|n| need.contains(n))
         || (iter_lib && (need.contains("max") || need.contains("min")))
@@ -613,6 +634,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             ("sort_by_key", "__exr_slice_sort_by_key"),
             ("sort_unstable_by_key", "__exr_slice_sort_by_key"),
             ("sort_by_cached_key", "__exr_slice_sort_by_cached_key"),
+
             ("binary_search", "__exr_slice_bsearch"),
             ("binary_search_by", "__exr_slice_bsearch_by"),
             ("binary_search_by_key", "__exr_slice_bsearch_by_key"),

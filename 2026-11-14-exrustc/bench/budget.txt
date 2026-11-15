@@ -8,6 +8,9 @@ binary_heap.object_bytes 165614
 binary_heap_extend.binary_bytes 65864
 binary_heap_extend.cache_bytes 119032
 binary_heap_extend.object_bytes 122984
+clone_derive.binary_bytes 45427
+clone_derive.cache_bytes 86098
+clone_derive.object_bytes 85428
 closures.binary_bytes 13902
 closures.cache_bytes 22947
 closures.object_bytes 22612
@@ -41,6 +44,9 @@ hashmap.object_bytes 93450
 hello.binary_bytes 6451
 hello.cache_bytes 3202
 hello.object_bytes 4132
+iter_vec_more.binary_bytes 96910
+iter_vec_more.cache_bytes 178390
+iter_vec_more.object_bytes 181120
 iterators.binary_bytes 45981
 iterators.cache_bytes 81747
 iterators.object_bytes 86091

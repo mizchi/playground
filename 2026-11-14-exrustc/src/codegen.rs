@@ -315,6 +315,8 @@ impl Worker {
                 cx.hash_glue_body(sig)
             } else if prog.index.get("__exr_cmp") == Some(&body_id) {
                 cx.cmp_glue_body(sig)
+            } else if prog.index.get("__exr_clone") == Some(&body_id) {
+                cx.clone_glue_body(sig)
             } else if prog.index.get("__exr_display") == Some(&body_id) {
                 cx.fmt_glue_body(sig, false)
             } else if prog.index.get("__exr_debug") == Some(&body_id) {
@@ -335,7 +337,10 @@ impl Worker {
     fn emit(&mut self, prog: &Program, id: u32, isa: &dyn TargetIsa) -> R<Blob> {
         self.ctx
             .compile(isa, &mut ControlPlane::default())
-            .map_err(|e| format!("{}: codegen error: {:?}", prog.names[id as usize], e.inner))?;
+            .map_err(|e| {
+                let n = prog.names.get(id as usize).cloned().unwrap_or_else(|| format!("instance #{id}"));
+                format!("{n}: codegen error: {:?}", e.inner)
+            })?;
         let code = self.ctx.compiled_code().unwrap();
         let mut relocs = vec![];
         for r in code.buffer.relocs() {
@@ -2464,6 +2469,9 @@ impl Cx<'_, '_> {
         if let Some(r) = self.extend_call(mc, expected)? {
             return Ok(r);
         }
+        if let Some(r) = self.clone_call(mc)? {
+            return Ok(r);
+        }
         // `x.clamp(lo, hi)` (整数も Ord な型も): prelude の __exr_clamp
         if mc.method == "clamp" && mc.args.len() == 2 && self.prog.index.contains_key("__exr_clamp") {
             let own = match self.peek(&mc.receiver).map(|t| self.strip_refs(t)) {
@@ -3073,9 +3081,18 @@ impl Cx<'_, '_> {
                 Some(t)
             };
             let (r, rt) = self.expr(&b.right, rhint.or(Some(t)))?;
-            let Some(r) = r else {
+            let Some(mut r) = r else {
                 return Ok((None, Ty::Never));
             };
+            // `acc += x` (x: &i32): 整数への参照は値にする (core の `AddAssign<&i32>` 相当)
+            let mut rt = rt;
+            while let Ty::Ref(_, i) = rt {
+                if !(i.is_int() || matches!(i, Ty::Ref(..))) || rt.is_fat() {
+                    break;
+                }
+                r = self.b.ins().load(clif_ty(*i).unwrap_or(PTR), mf(), r, 0);
+                rt = *i;
+            }
             let Some(l) = l else {
                 return err(b.span(), "unsupported operand");
             };
@@ -3883,9 +3900,71 @@ impl Cx<'_, '_> {
             "binary_search" => Some(("__exr_slice_bsearch", false)),
             "binary_search_by" => Some(("__exr_slice_bsearch_by", false)),
             "binary_search_by_key" => Some(("__exr_slice_bsearch_by_key", false)),
+            "windows" => Some(("__exr_slice_windows", false)),
+            "chunks" => Some(("__exr_slice_chunks", false)),
+            "to_vec" => Some(("__exr_slice_to_vec", false)),
             _ => None,
         }
         .filter(|(f, _)| self.prog.index.contains_key(*f));
+        // `names.join(", ")` / `parts.concat()` (要素が &str / String の Vec・配列・スライス)
+        if matches!(name.as_str(), "join" | "concat")
+            && mc.args.len() <= 1
+            && self.prog.index.contains_key("__exr_join_str")
+        {
+            let own = match self.peek(&mc.receiver).map(|t| self.strip_refs(t)) {
+                Some(Ty::Struct(sid)) => self.vec_fields(sid).is_none() && self.prog.method(sid, &name).is_some(),
+                _ => false,
+            };
+            if !own {
+                // (一時値の受け手 `vec![..].join(..)` は `&` を付けて評価し、文の終わりに drop させる)
+                let r = &mc.receiver;
+                let re: Expr = if is_place_expr(r) { (**r).clone() } else { syn::parse_quote!(&(#r)) };
+                let (base, len, elem) = self.indexable(&re)?;
+                let f = match elem {
+                    Ty::Ref(_, Ty::Str) => "__exr_join_str",
+                    Ty::Struct(es) if self.prog.structs[es as usize].name == "String" => "__exr_join_string",
+                    t => return err(mc.span(), format!("`{name}` on elements of type `{}` is not supported", self.prog.tn(t))),
+                };
+                let fat = self.make_fat_v(base, len);
+                let st = Ty::Ref(false, intern(Ty::Slice(intern(elem))));
+                let sref = Ty::Ref(false, intern(Ty::Str));
+                let sep = match mc.args.first() {
+                    Some(a) if self.peek(a) == Some(Ty::Char) => {
+                        let (v, _) = self.expr(a, Some(Ty::Char))?;
+                        self.char_to_str(v.unwrap(), a.span())?
+                    }
+                    Some(a) => {
+                        let (v, t) = self.expr(a, Some(sref))?;
+                        self.same(a.span(), t, sref)?;
+                        v.unwrap()
+                    }
+                    None => {
+                        let e: Expr = syn::parse_quote!("");
+                        self.expr(&e, Some(sref))?.0.unwrap()
+                    }
+                };
+                return self.call_named(f, vec![Ty::Unit], &[(fat, st), (sep, sref)], mc.span()).map(Some);
+            }
+        }
+        // `v.drain(a..b)` / `v.drain(..)`: Vec::__drain(lo, hi)
+        if name == "drain" && mc.args.len() == 1 {
+            if let (Expr::Range(rg), Some(Ty::Struct(sid))) = (strip_paren(&mc.args[0]), self.peek(&mc.receiver).map(|t| self.strip_refs(t))) {
+                if self.vec_fields(sid).is_some() && self.prog.method(sid, "__drain").is_some() {
+                    let r = &mc.receiver;
+                    let lo: Expr = match &rg.start {
+                        Some(e) => (**e).clone(),
+                        None => syn::parse_quote!(0usize),
+                    };
+                    let hi: Expr = match (&rg.end, &rg.limits) {
+                        (Some(e), syn::RangeLimits::Closed(_)) => syn::parse_quote!((#e) + 1),
+                        (Some(e), _) => (**e).clone(),
+                        (None, _) => syn::parse_quote!((#r).len()),
+                    };
+                    let e: Expr = syn::parse_quote!((#r).__drain(#lo, #hi));
+                    return self.expr(&e, None).map(Some);
+                }
+            }
+        }
         // `v[..n].sort()`: 範囲の添字は自動で借用する
         if let (Some((f, m)), Expr::Index(ix)) = (slice_fn, strip_paren(&mc.receiver)) {
             if matches!(&*ix.index, Expr::Range(_)) {
@@ -8216,5 +8295,200 @@ impl Cx<'_, '_> {
         self.b.ins().jump(done, &[ok.into()]);
         self.b.switch_to_block(done);
         res
+    }
+}
+
+// --- clone (derive(Clone) など) ---------------------------------------------------
+
+impl Cx<'_, '_> {
+    /// `x.clone()` (自分の clone メソッドがない型): 整数などはそのまま読み、ほかは __exr_clone::<T>
+    fn clone_call(&mut self, mc: &syn::ExprMethodCall) -> R<Option<V>> {
+        if mc.method != "clone" || !mc.args.is_empty() {
+            return Ok(None);
+        }
+        if let Some(pt) = self.peek(&mc.receiver) {
+            let mut t = pt;
+            while let Ty::Ref(_, i) = t {
+                if t.is_fat() {
+                    break;
+                }
+                t = *i;
+            }
+            if let Ty::Struct(sid) = t {
+                if self.prog.method(sid, "clone").is_some() {
+                    return Ok(None);
+                }
+            }
+        }
+        // (`&str` / `&[T]` の clone は参照のコピー)
+        let (v, vt) = self.operand(&mc.receiver, None, true)?;
+        let Some(v) = v else { return Ok(Some((None, Ty::Never))) };
+        let (a, t) = self.ord_addr(v, vt);
+        // (型が分からずに評価してから、自分の clone を持つ型だったとき)
+        if let Ty::Struct(sid) = t {
+            if let Some(id) = self.prog.method(sid, "clone") {
+                return self.call_fn(id, Some((a, Ty::Ref(false, intern(t)))), &[], None, None, mc.span()).map(Some);
+            }
+        }
+        if !self.needs_drop(t) {
+            let p = Place::Mem(a, 0, t);
+            return Ok(Some(self.read(p)));
+        }
+        if !self.prog.index.contains_key("__exr_clone") {
+            return err(mc.span(), "internal: `__exr_clone` is missing from the prelude");
+        }
+        let r = Ty::Ref(false, intern(t));
+        self.call_named("__exr_clone", vec![t], &[(a, r)], mc.span()).map(Some)
+    }
+
+    /// `__exr_clone::<T>(x: &T) -> T` の本体
+    fn clone_glue_body(&mut self, sig: &FnSig) -> R<()> {
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        self.b.switch_to_block(entry);
+        self.b.seal_block(entry);
+        let mut ps = self.b.block_params(entry).to_vec();
+        let Some(Ty::Ref(_, t)) = sig.params.first() else {
+            return Err("internal: bad clone glue signature".into());
+        };
+        let t = **t;
+        if is_sret(sig) {
+            let dst = ps.remove(0);
+            let src = ps[0];
+            self.clone_into(src, dst, t)?;
+            self.b.ins().return_(&[]);
+        } else {
+            let src = ps[0];
+            match clif_ty(t) {
+                Some(ct) => {
+                    // (Box などスカラーでも drop の要る型は clone してから返す)
+                    let tmp = self.temp(t);
+                    self.clone_into(src, tmp, t)?;
+                    let v = self.b.ins().load(ct, mf(), tmp, 0);
+                    self.b.ins().return_(&[v]);
+                }
+                None => {
+                    self.b.ins().return_(&[]);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// src にある t の値の clone を dst に書く
+    fn clone_into(&mut self, src: Value, dst: Value, t: Ty) -> R<()> {
+        if !self.needs_drop(t) {
+            self.copy(dst, src, t);
+            return Ok(());
+        }
+        match t {
+            Ty::Struct(sid) => {
+                // 自分の clone (String / Vec / 手書きの impl Clone): それを呼ぶ
+                if let Some(id) = self.prog.method(sid, "clone") {
+                    let sig0 = self.prog.sigs[id as usize].clone();
+                    let (fid, sig) = if sig0.is_generic() {
+                        let mut sol = vec![None; sig0.generics.len()];
+                        if let Some(st) = sig0.self_ty {
+                            self.prog.match_ty(st, t, &mut sol);
+                        }
+                        let r = Ty::Ref(false, intern(t));
+                        self.resolve_call(id, &[r], sol, None, proc_macro2::Span::call_site())?
+                    } else {
+                        (id, sig0)
+                    };
+                    let f = self.fref(fid, &sig);
+                    if is_sret(&sig) {
+                        self.b.ins().call(f, &[dst, src]);
+                    } else {
+                        let call = self.b.ins().call(f, &[src]);
+                        if let Some(&v) = self.b.inst_results(call).first() {
+                            self.b.ins().store(mf(), v, dst, 0);
+                        }
+                    }
+                    return Ok(());
+                }
+                let sd = &self.prog.structs[sid as usize];
+                if !sd.is_enum {
+                    let fields = sd.fields.clone();
+                    for (_, ft, off) in fields {
+                        let (s2, d2) = (self.addr_plus(src, off as i32), self.addr_plus(dst, off as i32));
+                        self.clone_elem(s2, d2, ft)?;
+                    }
+                    return Ok(());
+                }
+                // enum: 判別値をコピーし、そのバリアントのフィールドを clone
+                let tag_ty = sd.tag;
+                let variants: Vec<(i64, Vec<(String, Ty, u32)>)> =
+                    sd.variants.iter().map(|v| (v.discr, v.fields.clone())).collect();
+                let (size, _) = self.prog.size_align(t);
+                let _ = size;
+                let ct = clif_ty(tag_ty).unwrap();
+                let tag = self.b.ins().load(ct, mf(), src, 0);
+                // (まずビットごとにコピーしてから、要るフィールドを clone で上書きする)
+                self.copy(dst, src, t);
+                let done = self.b.create_block();
+                for (d, fs) in variants {
+                    if !fs.iter().any(|f| self.needs_drop(f.1)) {
+                        continue;
+                    }
+                    let yes = self.b.create_block();
+                    let next = self.b.create_block();
+                    let c = self.b.ins().icmp_imm_s(IntCC::Equal, tag, d);
+                    self.b.ins().brif(c, yes, &[], next, &[]);
+                    self.b.switch_to_block(yes);
+                    for (_, ft, off) in fs {
+                        let (s2, d2) = (self.addr_plus(src, off as i32), self.addr_plus(dst, off as i32));
+                        self.clone_elem(s2, d2, ft)?;
+                    }
+                    self.b.ins().jump(done, &[]);
+                    self.b.switch_to_block(next);
+                }
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(done);
+                Ok(())
+            }
+            Ty::Array(e, n) => {
+                let (es, _) = self.prog.size_align(*e);
+                for i in 0..n {
+                    let (s2, d2) = (self.addr_plus(src, (i * es) as i32), self.addr_plus(dst, (i * es) as i32));
+                    self.clone_elem(s2, d2, *e)?;
+                }
+                Ok(())
+            }
+            Ty::Box(inner) if !matches!(inner, Ty::Dyn(_)) => {
+                let Some(&alloc) = self.prog.index.get(crate::prelude::BOX_ALLOC) else {
+                    return Err("internal: the allocator is missing from the prelude".into());
+                };
+                let (size, _) = self.prog.size_align(*inner);
+                let asig = self.prog.sigs[alloc as usize].clone();
+                let fr = self.fref(alloc, &asig);
+                let sz = self.b.ins().iconst(types::I64, size.max(1) as i64);
+                let call = self.b.ins().call(fr, &[sz]);
+                let np = self.b.inst_results(call)[0];
+                let op = self.b.ins().load(PTR, mf(), src, 0);
+                self.clone_elem(op, np, *inner)?;
+                self.b.ins().store(mf(), np, dst, 0);
+                Ok(())
+            }
+            t => Err(format!("`{}` cannot be cloned", self.prog.tn(t))),
+        }
+    }
+
+    /// 要素 1 つの clone: drop の要らない型はコピー、ほかは __exr_clone::<t> を呼ぶ
+    fn clone_elem(&mut self, src: Value, dst: Value, t: Ty) -> R<()> {
+        if !self.needs_drop(t) {
+            self.copy(dst, src, t);
+            return Ok(());
+        }
+        let r = Ty::Ref(false, intern(t));
+        let (v, _) = self.call_named("__exr_clone", vec![t], &[(src, r)], proc_macro2::Span::call_site())?;
+        match v {
+            Some(v) if t.is_agg() => self.copy(dst, v, t),
+            Some(v) => {
+                self.b.ins().store(mf(), v, dst, 0);
+            }
+            None => {}
+        }
+        Ok(())
     }
 }

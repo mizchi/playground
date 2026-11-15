@@ -65,6 +65,62 @@ pub enum Option<T> {
 }
 
 impl<T> Option<T> {
+    pub fn expect(self, msg: &str) -> T {
+        match self {
+            Some(x) => x,
+            None => panic!("{}", msg),
+        }
+    }
+    pub fn __flat_prep(&mut self) {}
+    pub fn __flat_next(&mut self) -> Option<T> {
+        self.take()
+    }
+    pub fn zip<U>(self, o: Option<U>) -> Option<(T, U)> {
+        match (self, o) {
+            (Some(a), Some(b)) => Some((a, b)),
+            _ => None,
+        }
+    }
+    pub fn map_or_else<U, D: FnOnce() -> U, F: FnOnce(T) -> U>(self, d: D, f: F) -> U {
+        match self {
+            Some(x) => f(x),
+            None => d(),
+        }
+    }
+    pub fn or_else<F: FnOnce() -> Option<T>>(self, f: F) -> Option<T> {
+        match self {
+            Some(x) => Some(x),
+            None => f(),
+        }
+    }
+    pub fn and<U>(self, o: Option<U>) -> Option<U> {
+        match self {
+            Some(_) => o,
+            None => None,
+        }
+    }
+    pub fn get_or_insert_with<F: FnOnce() -> T>(&mut self, f: F) -> &mut T {
+        if self.is_none() {
+            *self = Some(f());
+        }
+        match self {
+            Some(x) => x,
+            None => panic!("unreachable"),
+        }
+    }
+    pub fn insert(&mut self, v: T) -> &mut T {
+        *self = Some(v);
+        match self {
+            Some(x) => x,
+            None => panic!("unreachable"),
+        }
+    }
+    pub fn is_none_or<F: FnOnce(T) -> bool>(self, f: F) -> bool {
+        match self {
+            Some(x) => f(x),
+            None => true,
+        }
+    }
     pub fn is_some(&self) -> bool {
         match self {
             Some(_) => true,
@@ -196,12 +252,20 @@ impl<T> Option<&T> {
             None => None,
         }
     }
+}
+
+impl<T: Clone> Option<&T> {
     pub fn cloned(self) -> Option<T> {
         match self {
-            Some(v) => Some(*v),
+            Some(v) => Some(v.clone()),
             None => None,
         }
     }
+}
+
+// `x.clone()` (derive(Clone) / タプル / 配列 / 整数など): 本体は型ごとに codegen が作る (フィールドごとに clone)
+fn __exr_clone<T>(x: &T) -> T {
+    unsafe { (x as *const T).read() }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -211,6 +275,36 @@ pub enum Result<T, E> {
 }
 
 impl<T, E> Result<T, E> {
+    pub fn expect(self, msg: &str) -> T {
+        match self {
+            Ok(x) => x,
+            Err(_) => panic!("{}", msg),
+        }
+    }
+    pub fn is_ok_and<F: FnOnce(T) -> bool>(self, f: F) -> bool {
+        match self {
+            Ok(x) => f(x),
+            Err(_) => false,
+        }
+    }
+    pub fn is_err_and<F: FnOnce(E) -> bool>(self, f: F) -> bool {
+        match self {
+            Ok(_) => false,
+            Err(e) => f(e),
+        }
+    }
+    pub fn map_or<U, F: FnOnce(T) -> U>(self, d: U, f: F) -> U {
+        match self {
+            Ok(x) => f(x),
+            Err(_) => d,
+        }
+    }
+    pub fn or_else<F2, O: FnOnce(E) -> Result<T, F2>>(self, o: O) -> Result<T, F2> {
+        match self {
+            Ok(x) => Ok(x),
+            Err(e) => o(e),
+        }
+    }
     pub fn is_ok(&self) -> bool {
         match self {
             Ok(_) => true,
@@ -467,6 +561,124 @@ impl<T> Vec<T> {
             self.push(*x);
         }
     }
+    pub fn retain<F: FnMut(&T) -> bool>(&mut self, f: F) {
+        let mut f = f;
+        let mut w = 0;
+        let mut i = 0;
+        while i < self.len {
+            unsafe {
+                if f(&*self.ptr.add(i)) {
+                    if w != i {
+                        self.ptr.add(w).write(self.ptr.add(i).read());
+                    }
+                    w += 1;
+                } else {
+                    __exr_drop_in_place(self.ptr.add(i));
+                }
+            }
+            i += 1;
+        }
+        self.len = w;
+    }
+    pub fn retain_mut<F: FnMut(&mut T) -> bool>(&mut self, f: F) {
+        let mut f = f;
+        let mut w = 0;
+        let mut i = 0;
+        while i < self.len {
+            unsafe {
+                if f(&mut *self.ptr.add(i)) {
+                    if w != i {
+                        self.ptr.add(w).write(self.ptr.add(i).read());
+                    }
+                    w += 1;
+                } else {
+                    __exr_drop_in_place(self.ptr.add(i));
+                }
+            }
+            i += 1;
+        }
+        self.len = w;
+    }
+    pub fn dedup_by_key<K: PartialEq, F: FnMut(&mut T) -> K>(&mut self, f: F) {
+        let mut f = f;
+        if self.len < 2 {
+            return;
+        }
+        let mut w = 1;
+        let mut i = 1;
+        while i < self.len {
+            unsafe {
+                let a = f(&mut *self.ptr.add(i));
+                let b = f(&mut *self.ptr.add(w - 1));
+                if a == b {
+                    __exr_drop_in_place(self.ptr.add(i));
+                } else {
+                    if w != i {
+                        self.ptr.add(w).write(self.ptr.add(i).read());
+                    }
+                    w += 1;
+                }
+            }
+            i += 1;
+        }
+        self.len = w;
+    }
+    pub fn split_off(&mut self, at: usize) -> Vec<T> {
+        if at > self.len {
+            panic!("`at` split index out of bounds");
+        }
+        let mut r = Vec::with_capacity(self.len - at);
+        let mut i = at;
+        while i < self.len {
+            unsafe {
+                r.push(self.ptr.add(i).read());
+            }
+            i += 1;
+        }
+        self.len = at;
+        r
+    }
+    // `v.drain(a..b)` (codegen が範囲を (lo, hi) にして呼ぶ)。取り出した要素を持つ IntoIter を返す
+    pub fn __drain(&mut self, lo: usize, hi: usize) -> IntoIter<T> {
+        if lo > hi || hi > self.len {
+            panic!("range end index out of range");
+        }
+        let mut r = Vec::with_capacity(hi - lo);
+        let mut i = lo;
+        while i < hi {
+            unsafe {
+                r.push(self.ptr.add(i).read());
+            }
+            i += 1;
+        }
+        let mut j = hi;
+        while j < self.len {
+            unsafe {
+                self.ptr.add(lo + j - hi).write(self.ptr.add(j).read());
+            }
+            j += 1;
+        }
+        self.len -= hi - lo;
+        r.into_iter()
+    }
+    pub fn __flat_prep(&mut self) {
+        self.reverse();
+    }
+    pub fn __flat_next(&mut self) -> Option<T> {
+        self.pop()
+    }
+    pub fn first_mut(&mut self) -> Option<&mut T> {
+        if self.len == 0 { None } else { Some(unsafe { &mut *self.ptr }) }
+    }
+    pub fn last_mut(&mut self) -> Option<&mut T> {
+        if self.len == 0 { None } else { Some(unsafe { &mut *self.ptr.add(self.len - 1) }) }
+    }
+    pub fn windows(&self, n: usize) -> Windows<T> {
+        __exr_slice_windows(self.as_slice(), n)
+    }
+    pub fn chunks(&self, n: usize) -> Chunks<T> {
+        __exr_slice_chunks(self.as_slice(), n)
+    }
     pub fn as_slice(&self) -> &[T] {
         unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
     }
@@ -482,14 +694,30 @@ impl<T: Copy> Vec<T> {
             self.push(x);
         }
     }
-    pub fn clone(&self) -> Vec<T> {
-        let mut v = Vec::with_capacity(self.len);
-        v.extend_from_slice(self.as_slice());
-        v
-    }
 }
 
 impl<T: PartialEq> Vec<T> {
+    pub fn dedup(&mut self) {
+        if self.len < 2 {
+            return;
+        }
+        let mut w = 1;
+        let mut i = 1;
+        while i < self.len {
+            unsafe {
+                if *self.ptr.add(i) == *self.ptr.add(w - 1) {
+                    __exr_drop_in_place(self.ptr.add(i));
+                } else {
+                    if w != i {
+                        self.ptr.add(w).write(self.ptr.add(i).read());
+                    }
+                    w += 1;
+                }
+            }
+            i += 1;
+        }
+        self.len = w;
+    }
     pub fn contains(&self, x: &T) -> bool {
         let mut i = 0;
         while i < self.len {
@@ -552,6 +780,135 @@ impl<T> Vec<T> {
         let mut f = f;
         __exr_bsearch_by(self.ptr, self.len, |e: &T| __exr_cmp_m::<B>(&f(e), b))
     }
+}
+
+impl<T: Clone> Vec<T> {
+    pub fn clone(&self) -> Vec<T> {
+        let mut v = Vec::with_capacity(self.len);
+        let mut i = 0;
+        while i < self.len {
+            v.push(unsafe { (*self.ptr.add(i)).clone() });
+            i += 1;
+        }
+        v
+    }
+    pub fn resize(&mut self, n: usize, value: T) {
+        while self.len > n {
+            self.len -= 1;
+            unsafe {
+                __exr_drop_in_place(self.ptr.add(self.len));
+            }
+        }
+        while self.len < n {
+            self.push(value.clone());
+        }
+    }
+    pub fn fill(&mut self, value: T) {
+        let mut i = 0;
+        while i < self.len {
+            unsafe {
+                __exr_drop_in_place(self.ptr.add(i));
+                self.ptr.add(i).write(value.clone());
+            }
+            i += 1;
+        }
+    }
+    pub fn to_vec(&self) -> Vec<T> {
+        __exr_slice_to_vec(self.as_slice())
+    }
+}
+
+// windows / chunks (Vec とスライス)
+pub struct Windows<T> {
+    ptr: *const T,
+    len: usize,
+    n: usize,
+    i: usize,
+}
+
+impl<T> Iterator for Windows<T> {
+    type Item = &[T];
+    fn next(&mut self) -> Option<&[T]> {
+        if self.i + self.n <= self.len {
+            let s = unsafe { core::slice::from_raw_parts(self.ptr.add(self.i), self.n) };
+            self.i += 1;
+            Some(s)
+        } else {
+            None
+        }
+    }
+}
+
+pub struct Chunks<T> {
+    ptr: *const T,
+    len: usize,
+    n: usize,
+    i: usize,
+}
+
+impl<T> Iterator for Chunks<T> {
+    type Item = &[T];
+    fn next(&mut self) -> Option<&[T]> {
+        if self.i < self.len {
+            let k = if self.len - self.i < self.n { self.len - self.i } else { self.n };
+            let s = unsafe { core::slice::from_raw_parts(self.ptr.add(self.i), k) };
+            self.i += k;
+            Some(s)
+        } else {
+            None
+        }
+    }
+}
+
+fn __exr_slice_windows<T>(s: &[T], n: usize) -> Windows<T> {
+    if n == 0 {
+        panic!("window size must be non-zero");
+    }
+    Windows { ptr: s.as_ptr(), len: s.len(), n: n, i: 0 }
+}
+
+fn __exr_slice_chunks<T>(s: &[T], n: usize) -> Chunks<T> {
+    if n == 0 {
+        panic!("chunk size must be non-zero");
+    }
+    Chunks { ptr: s.as_ptr(), len: s.len(), n: n, i: 0 }
+}
+
+fn __exr_slice_to_vec<T: Clone>(s: &[T]) -> Vec<T> {
+    let mut r = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        r.push(s[i].clone());
+        i += 1;
+    }
+    r
+}
+
+// `["a", "b"].join(", ")` / `.concat()` (要素が &str か String。codegen が要素の型で選ぶ)
+fn __exr_join_str<G>(s: &[&str], sep: &str) -> String {
+    let mut r = String::new();
+    let mut i = 0;
+    while i < s.len() {
+        if i > 0 {
+            r.push_str(sep);
+        }
+        r.push_str(s[i]);
+        i += 1;
+    }
+    r
+}
+
+fn __exr_join_string<G>(s: &[String], sep: &str) -> String {
+    let mut r = String::new();
+    let mut i = 0;
+    while i < s.len() {
+        if i > 0 {
+            r.push_str(sep);
+        }
+        r.push_str(s[i].as_str());
+        i += 1;
+    }
+    r
 }
 
 // 安定なマージソート (下から上へ)。16 個ずつ挿入ソートしてから、作業領域と交互にマージする。
@@ -954,11 +1311,53 @@ pub trait Iterator {
     {
         Copied { iter: self }
     }
-    fn cloned<T>(self) -> Copied<Self, T>
+    fn cloned<T>(self) -> Cloned<Self, T>
     where
         Self: Iterator<Item = &T>,
     {
-        Copied { iter: self }
+        Cloned { iter: self }
+    }
+    fn flat_map<U, B, F: FnMut(Self::Item) -> U>(self, f: F) -> FlatMap<Self, F, U, B>
+    where
+        U: __Flat<Item = B>,
+    {
+        FlatMap { iter: self, f: f, cur: None }
+    }
+    fn flatten<U, B>(self) -> Flatten<Self, U, B>
+    where
+        Self: Iterator<Item = U>,
+        U: __Flat<Item = B>,
+    {
+        Flatten { iter: self, cur: None }
+    }
+    // (flat_map / flatten の中身として回すとき: イテレータはそのまま)
+    fn __flat_prep(&mut self) {}
+    fn __flat_next(&mut self) -> Option<Self::Item> {
+        self.next()
+    }
+    fn rev(self) -> Rev<Self> {
+        Rev { iter: self }
+    }
+    fn step_by(self, step: usize) -> StepBy<Self> {
+        if step == 0 {
+            panic!("assertion failed: step != 0");
+        }
+        StepBy { iter: self, step: step, first: true }
+    }
+    fn peekable<T>(self) -> Peekable<Self, T>
+    where
+        Self: Iterator<Item = T>,
+    {
+        Peekable { iter: self, peeked: None, has: false }
+    }
+    fn skip_while<P: FnMut(&Self::Item) -> bool>(self, p: P) -> SkipWhile<Self, P> {
+        SkipWhile { iter: self, p: p, done: false }
+    }
+    fn scan<St, B, F: FnMut(&mut St, Self::Item) -> Option<B>>(self, init: St, f: F) -> Scan<Self, St, F, B> {
+        Scan { iter: self, st: init, f: f }
+    }
+    fn inspect<F: FnMut(&Self::Item)>(self, f: F) -> Inspect<Self, F> {
+        Inspect { iter: self, f: f }
     }
     fn count(self) -> usize {
         let mut it = self;
@@ -1349,8 +1748,260 @@ impl<A: Iterator, B: Iterator> Iterator for Chain<A, B> {
     }
 }
 
+// flat_map / flatten: 中身 (Vec / Option / イテレータ) を順に回す。IntoIterator の代わりに __Flat
+pub trait __Flat {
+    type Item;
+    fn __flat_mark(&self) {}
+}
+
+// (impl はメソッドから選ばれるので印のメソッドを持たせる)
+impl<T> __Flat for Vec<T> {
+    type Item = T;
+    fn __flat_mark(&self) {}
+}
+
+impl<T> __Flat for Option<T> {
+    type Item = T;
+    fn __flat_mark(&self) {}
+}
+
+pub struct FlatMap<I, F, U, B> {
+    iter: I,
+    f: F,
+    cur: Option<U>,
+}
+
+impl<I: Iterator, F: FnMut(I::Item) -> U, U, B> Iterator for FlatMap<I, F, U, B> {
+    type Item = B;
+    fn next(&mut self) -> Option<B> {
+        loop {
+            if let Some(u) = &mut self.cur {
+                if let Some(x) = u.__flat_next() {
+                    return Some(x);
+                }
+            }
+            match self.iter.next() {
+                Some(a) => {
+                    let mut u = (self.f)(a);
+                    u.__flat_prep();
+                    self.cur = Some(u);
+                }
+                None => return None,
+            }
+        }
+    }
+}
+
+pub struct Flatten<I, U, B> {
+    iter: I,
+    cur: Option<U>,
+}
+
+impl<I: Iterator, U, B> Iterator for Flatten<I, U, B> {
+    type Item = B;
+    fn next(&mut self) -> Option<B> {
+        loop {
+            if let Some(u) = &mut self.cur {
+                if let Some(x) = u.__flat_next() {
+                    return Some(x);
+                }
+            }
+            match self.iter.next() {
+                Some(a) => {
+                    let mut u = a;
+                    u.__flat_prep();
+                    self.cur = Some(u);
+                }
+                None => return None,
+            }
+        }
+    }
+}
+
+// rev(): 後ろから (next_back を持つイテレータだけ)
+pub struct Rev<I> {
+    iter: I,
+}
+
+impl<I: Iterator> Iterator for Rev<I> {
+    type Item = I::Item;
+    fn next(&mut self) -> Option<I::Item> {
+        self.iter.next_back()
+    }
+}
+
+impl<I: Iterator> Rev<I> {
+    pub fn next_back(&mut self) -> Option<I::Item> {
+        self.iter.next()
+    }
+}
+
+pub struct StepBy<I> {
+    iter: I,
+    step: usize,
+    first: bool,
+}
+
+impl<I: Iterator> Iterator for StepBy<I> {
+    type Item = I::Item;
+    fn next(&mut self) -> Option<I::Item> {
+        if self.first {
+            self.first = false;
+            self.iter.next()
+        } else {
+            self.iter.nth(self.step - 1)
+        }
+    }
+}
+
+pub struct Peekable<I, T> {
+    iter: I,
+    peeked: Option<T>,
+    has: bool,
+}
+
+impl<I: Iterator, T> Iterator for Peekable<I, T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        if self.has {
+            self.has = false;
+            self.peeked.take()
+        } else {
+            self.iter.next()
+        }
+    }
+}
+
+impl<I: Iterator, T> Peekable<I, T> {
+    pub fn peek(&mut self) -> Option<&T> {
+        if !self.has {
+            self.peeked = self.iter.next();
+            self.has = true;
+        }
+        self.peeked.as_ref()
+    }
+    pub fn next_if<F: FnOnce(&T) -> bool>(&mut self, f: F) -> Option<T> {
+        let ok = match self.peek() {
+            Some(x) => f(x),
+            None => false,
+        };
+        if ok { self.next() } else { None }
+    }
+}
+
+pub struct SkipWhile<I, P> {
+    iter: I,
+    p: P,
+    done: bool,
+}
+
+impl<I: Iterator, P: FnMut(&I::Item) -> bool> Iterator for SkipWhile<I, P> {
+    type Item = I::Item;
+    fn next(&mut self) -> Option<I::Item> {
+        loop {
+            let x = self.iter.next()?;
+            if self.done || !(self.p)(&x) {
+                self.done = true;
+                return Some(x);
+            }
+        }
+    }
+}
+
+pub struct Scan<I, St, F, B> {
+    iter: I,
+    st: St,
+    f: F,
+}
+
+impl<I: Iterator, St, F: FnMut(&mut St, I::Item) -> Option<B>, B> Iterator for Scan<I, St, F, B> {
+    type Item = B;
+    fn next(&mut self) -> Option<B> {
+        match self.iter.next() {
+            Some(x) => (self.f)(&mut self.st, x),
+            None => None,
+        }
+    }
+}
+
+pub struct Inspect<I, F> {
+    iter: I,
+    f: F,
+}
+
+impl<I: Iterator, F: FnMut(&I::Item)> Iterator for Inspect<I, F> {
+    type Item = I::Item;
+    fn next(&mut self) -> Option<I::Item> {
+        let x = self.iter.next()?;
+        (self.f)(&x);
+        Some(x)
+    }
+}
+
+// 後ろからの next (rev() 用。DoubleEndedIterator の代わりに各型のメソッドとして持つ)
+impl<I: Iterator, F: FnMut(I::Item) -> B, B> Map<I, F, B> {
+    pub fn next_back(&mut self) -> Option<B> {
+        match self.iter.next_back() {
+            Some(x) => Some((self.f)(x)),
+            None => None,
+        }
+    }
+}
+
+impl<I: Iterator, P: FnMut(&I::Item) -> bool> Filter<I, P> {
+    pub fn next_back(&mut self) -> Option<I::Item> {
+        while let Some(x) = self.iter.next_back() {
+            if (self.p)(&x) {
+                return Some(x);
+            }
+        }
+        None
+    }
+}
+
+impl<A: Iterator, B: Iterator> Chain<A, B> {
+    pub fn next_back(&mut self) -> Option<A::Item> {
+        match self.b.next_back() {
+            Some(x) => Some(x),
+            None => self.a.next_back(),
+        }
+    }
+}
+
+impl<I: Iterator, T: Copy> Copied<I, T> {
+    pub fn next_back(&mut self) -> Option<T> {
+        match self.iter.next_back() {
+            Some(x) => Some(*x),
+            None => None,
+        }
+    }
+}
+
 pub struct Copied<I, T> {
     iter: I,
+}
+
+pub struct Cloned<I, T> {
+    iter: I,
+}
+
+impl<I: Iterator, T> Iterator for Cloned<I, T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        match self.iter.next() {
+            Some(x) => Some(x.clone()),
+            None => None,
+        }
+    }
+}
+
+impl<I: Iterator, T> Cloned<I, T> {
+    pub fn next_back(&mut self) -> Option<T> {
+        match self.iter.next_back() {
+            Some(x) => Some(x.clone()),
+            None => None,
+        }
+    }
 }
 
 impl<I: Iterator, T: Copy> Iterator for Copied<I, T> {
@@ -1382,10 +2033,36 @@ impl<T: Copy + Ord> Iterator for Range<T> {
     }
 }
 
+impl<T: Copy + Ord> Range<T> {
+    pub fn next_back(&mut self) -> Option<T> {
+        if self.start < self.end {
+            self.end = self.end - 1;
+            Some(self.end)
+        } else {
+            None
+        }
+    }
+}
+
 pub struct RangeInclusive<T> {
     pub start: T,
     pub end: T,
     pub done: bool,
+}
+
+impl<T: Copy + Ord> RangeInclusive<T> {
+    pub fn next_back(&mut self) -> Option<T> {
+        if self.done || self.start > self.end {
+            return None;
+        }
+        let v = self.end;
+        if v == self.start {
+            self.done = true;
+        } else {
+            self.end = v - 1;
+        }
+        Some(v)
+    }
 }
 
 impl<T: Copy + Ord> Iterator for RangeInclusive<T> {
@@ -1424,10 +2101,32 @@ impl<T> Iterator for Iter<T> {
     }
 }
 
+impl<T> Iter<T> {
+    pub fn next_back(&mut self) -> Option<&T> {
+        if self.i < self.len {
+            self.len -= 1;
+            Some(unsafe { &*self.ptr.add(self.len) })
+        } else {
+            None
+        }
+    }
+}
+
 pub struct IterMut<T> {
     ptr: *mut T,
     len: usize,
     i: usize,
+}
+
+impl<T> IterMut<T> {
+    pub fn next_back(&mut self) -> Option<&mut T> {
+        if self.i < self.len {
+            self.len -= 1;
+            Some(unsafe { &mut *self.ptr.add(self.len) })
+        } else {
+            None
+        }
+    }
 }
 
 impl<T> Iterator for IterMut<T> {
@@ -1471,6 +2170,17 @@ impl<T> Iterator for IntoIter<T> {
             let x = unsafe { self.v.ptr.add(self.i).read() };
             self.i += 1;
             Some(x)
+        } else {
+            None
+        }
+    }
+}
+
+impl<T> IntoIter<T> {
+    pub fn next_back(&mut self) -> Option<T> {
+        if self.i < self.v.len {
+            self.v.len -= 1;
+            Some(unsafe { self.v.ptr.add(self.v.len).read() })
         } else {
             None
         }
@@ -1564,6 +2274,21 @@ impl Iterator for Chars {
     }
 }
 
+impl Chars {
+    pub fn next_back(&mut self) -> Option<char> {
+        if self.i >= self.len {
+            return None;
+        }
+        let mut j = self.len - 1;
+        while j > self.i && unsafe { *self.ptr.add(j) } >= 0x80 && unsafe { *self.ptr.add(j) } < 0xC0 {
+            j -= 1;
+        }
+        let (c, _) = __exr_decode_at::<()>(self.ptr, j);
+        self.len = j;
+        Some(c)
+    }
+}
+
 fn __exr_str_chars<G>(s: &str) -> Chars {
     Chars {
         ptr: s.as_ptr(),
@@ -1583,7 +2308,7 @@ pub struct Formatter {
     buf: &mut String,
     // 書式指定 ({:>8} / {:08.3x} など)
     width: usize,
-    fill: char,
+    fill_c: char,
     // 0 = 指定なし, 1 = <, 2 = >, 3 = ^
     align: u8,
     zero: bool,
@@ -1627,7 +2352,7 @@ fn __exr_formatter<G>(buf: &mut String) -> Formatter {
     Formatter {
         buf: buf,
         width: 0,
-        fill: ' ',
+        fill_c: ' ',
         align: 0,
         zero: false,
         plus: false,
@@ -1642,7 +2367,7 @@ fn __exr_formatter<G>(buf: &mut String) -> Formatter {
 fn __exr_fmt_spec<G>(
     f: &mut Formatter,
     width: usize,
-    fill: char,
+    fill_c: char,
     align: u8,
     flags: u8,
     prec: usize,
@@ -1650,7 +2375,7 @@ fn __exr_fmt_spec<G>(
     radix: u8,
 ) {
     f.width = width;
-    f.fill = fill;
+    f.fill_c = fill_c;
     f.align = align;
     f.zero = flags & 1 != 0;
     f.plus = flags & 2 != 0;
@@ -1688,13 +2413,13 @@ fn __exr_pad<G>(f: &mut Formatter, s: &str, def_align: u8) {
     };
     let mut i = 0;
     while i < l {
-        f.buf.push(f.fill);
+        f.buf.push(f.fill_c);
         i += 1;
     }
     f.buf.push_str(s);
     let mut i = 0;
     while i < r {
-        f.buf.push(f.fill);
+        f.buf.push(f.fill_c);
         i += 1;
     }
 }
@@ -2039,6 +2764,12 @@ pub trait PartialEq {
 }
 pub trait Eq {
     fn __exr_eq_marker(&self) {}
+}
+pub trait Clone {
+    fn clone(&self) -> Self;
+}
+pub trait Copy {
+    fn __exr_copy_marker(&self) {}
 }
 pub trait PartialOrd {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering>;

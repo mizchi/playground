@@ -1833,6 +1833,8 @@ impl Program {
                             .iter()
                             .all(|f| self.implements(f.1, tr)))
             }
+            // flat_map / flatten の中身: イテレータもよい
+            Ty::Struct(_) if tr == "__Flat" && self.implements(t, "Iterator") => true,
             // タプル: 要素がすべて実装していれば (core の impl と同じ)
             Ty::Struct(sid) if self.is_tuple(sid) => {
                 matches!(
@@ -1840,9 +1842,16 @@ impl Program {
                     "Copy" | "Clone" | "Sized" | "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Hash" | "Debug" | "Default"
                 ) && self.structs[sid as usize].fields.iter().all(|f| self.implements(f.1, tr))
             }
+            // eq / clone メソッドを持つ型 (prelude の String / Vec など)
+            Ty::Struct(sid)
+                if (tr == "PartialEq" && self.method(sid, "eq").is_some())
+                    || (tr == "Clone" && self.method(sid, "clone").is_some()) =>
+            {
+                true
+            }
             // Vec / String は要素しだいで比較できる
             Ty::Struct(sid)
-                if matches!(tr, "PartialOrd" | "Ord" | "Eq" | "Hash")
+                if matches!(tr, "PartialOrd" | "Ord" | "Eq" | "Hash" | "PartialEq" | "Clone")
                     && matches!(self.structs[self.base_of(sid) as usize].name.as_str(), "Vec" | "String") =>
             {
                 self.structs[sid as usize].args.iter().all(|&a| self.implements(a, tr))

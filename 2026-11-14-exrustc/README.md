@@ -181,6 +181,12 @@ bench/regress.sh
       - chars で回していた helper は UTF-8 を直接読み、イテレータの部品を付けない
       既存の予算は 1 byte も緩めていない。
     - `|a| a + 1` の戻り値を呼び先の境界 (`B`) で決めようとして、まだ決まっていない `B` を親の型推論より優先していた（`map(|w| w.parse().unwrap())`）。
+  - イテレータ・Vec・clone の追加時
+    - **これまで `#[derive(Clone)]` の型の `.clone()` は使えず、`Vec<String>` の clone と `cloned()` はビットごとのコピー（二重解放）だった**。clone の glue を足して直した。
+    - 新しいアダプタ（Rev / Peekable / FlatMap など）の `impl Iterator` が、イテレータを使うプログラムに全部付いていた。その struct が要るときだけにした。
+      書式化の Formatter の `fill` フィールドが `Vec::fill` を引いて clone 一式まで付いていたので、フィールド名を変えた。既存の予算は緩めていない。
+    - `vec![..].join(..)` の一時値の Vec を drop していなかった（valgrind で見つけた）。
+    - callgrind: gen1000 ±0%、hello +2.5%、vec_string / iterators / hashmap は +0.5〜1%。
   - マクロの引数の中のクロージャの追加時
     - 要約と codegen が `|` を含むマクロの引数だけを parse してクロージャを数える。callgrind は gen1000 +0.2%、iterators +0.7%、formatting ±0%。
     - 型推論は `vec![..]` の引数を parse し直したノードを推論の終わりまで持ち、クロージャの本体を呼び先の境界が分かるまで後回しにできるようにした（`vec![v.iter().map(|x| x * x).sum::<i32>(); 2]`）。
@@ -272,6 +278,13 @@ bench/regress.sh
   - char の `is_alphabetic` / `is_numeric` / `is_alphanumeric` / `is_whitespace` / `is_uppercase` / `is_lowercase` / `to_digit` / `is_digit` /
     `to_uppercase` / `to_lowercase` / `len_utf8`、`char::from_digit` / `char::from_u32` / `char::from(u8)`。
     Unicode の表は持たないので、ASCII・Latin-1・ギリシャ文字・キリル文字・仮名・漢字・ハングルの範囲で近似する
+- イテレータの追加分（`examples/iter_vec_more.rs`）：`rev`（Vec・配列・範囲・chars・map / filter / copied / chain の後。DoubleEndedIterator の代わりに各型が `next_back` を持つ）/
+  `step_by` / `peekable`（`peek` / `next_if`）/ `skip_while` / `scan` / `inspect` / `flat_map` / `flatten`（中身は Vec・Option・イテレータ）
+- Vec / スライスの追加分：`retain` / `retain_mut` / `dedup` / `dedup_by_key` / `drain(範囲)` / `split_off` / `resize` / `fill` / `first_mut` / `last_mut` /
+  `windows` / `chunks` / `to_vec` / `join` / `concat`（要素が `&str` か String）
+- Option / Result の追加分：`expect` / `zip` / `map_or_else` / `or_else` / `and` / `get_or_insert_with` / `insert` / `is_none_or` / `is_ok_and` / `is_err_and` / `map_or`
+- clone（`examples/clone_derive.rs`）：`#[derive(Clone)]` の struct / enum / ジェネリック、Box・タプル・配列・Option・Result、手書きの `impl Clone`。
+  本体は型ごとに codegen が作る（`__exr_clone::<T>`。drop の要らないフィールドはコピー、ほかはフィールドごとに clone）
 - 演算子のオーバーロード：`impl Add / Sub / Mul / Div / Rem / Neg / Not / BitAnd / BitOr / BitXor / AddAssign ..`。
   `a + b` は左辺が struct で `add` メソッドがあれば `a.add(b)` にする（`impl Mul<i32> for V` のような右辺の型も）
 - `&str` のメソッド：`split(char)` / `split_whitespace` / `lines` / `trim*` / `starts_with` / `ends_with` / `contains` / `find`（引数は `&str` か `char`）、`<` などの比較と `sort`

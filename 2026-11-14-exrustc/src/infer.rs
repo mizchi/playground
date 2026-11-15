@@ -1820,6 +1820,12 @@ impl Inf<'_> {
                     }
                     return self.var();
                 }
+                // `x.to_string()` (Display): String
+                if callee.is_none() && n == "to_string" && args.is_empty() {
+                    if let Some(&ss) = self.prog.struct_index.get("String") {
+                        return self.known(Ty::Struct(ss));
+                    }
+                }
                 // 組み込みの比較 (`3.cmp(&5)` / derive した型の cmp): Ordering / Option<Ordering>
                 if callee.is_none() && matches!(n.as_str(), "cmp" | "partial_cmp") && args.len() == 1 {
                     if let Some(&os) = self.prog.struct_index.get("Ordering") {
