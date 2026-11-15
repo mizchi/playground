@@ -2714,6 +2714,39 @@ impl Program {
         self.struct_index.get(&id).copied()
     }
 
+    /// `i32::pow(2, 10)` / `u64::count_ones(x)` / `f64::abs(x)`: プリミティブのメソッドを関数の形で呼んだもの。
+    /// 関数として見つからなければ、メソッド呼び出し `(2i32).pow(10)` に書き換える
+    pub fn prim_method_call(&self, c: &syn::ExprCall, self_sid: Option<u32>) -> Option<syn::Expr> {
+        let syn::Expr::Path(p) = &*c.func else { return None };
+        if p.path.segments.len() != 2 || c.args.is_empty() || p.qself.is_some() {
+            return None;
+        }
+        let ty = p.path.segments[0].ident.to_string();
+        let t = Ty::prim(&ty)?;
+        if t == Ty::Char || t == Ty::Bool {
+            return None;
+        }
+        let m = &p.path.segments[1].ident;
+        let ms = m.to_string();
+        if ms.starts_with("from") || ms.starts_with("try_from") || ms == "default" || ms == "new" {
+            return None;
+        }
+        if self.fn_by_path(&p.path, self_sid).is_some() {
+            return None;
+        }
+        let mut args = c.args.iter();
+        let a0 = args.next()?;
+        let rest: Vec<&syn::Expr> = args.collect();
+        let tyi = &p.path.segments[0].ident;
+        // (リテラルは型を付ける: `i32::pow(2, 10)` の 2 は i32)
+        let recv: syn::Expr = if matches!(a0, syn::Expr::Lit(_)) {
+            syn::parse_quote!((#a0 as #tyi))
+        } else {
+            syn::parse_quote!((#a0))
+        };
+        Some(syn::parse_quote!(#recv.#m(#(#rest),*)))
+    }
+
     /// 関数として書かれたパス (`f` / `S::f` / `Self::f`) → 関数 ID
     pub fn fn_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
         if let Some(r) = self.fn_by_path_inner(p, self_sid) {
@@ -3001,6 +3034,14 @@ impl Program {
         // `vec![..]` / `"..".to_string()` は名前を書かずに Vec の realloc / String::from を使う
         stack.extend(self.index.get("__exr_realloc").copied());
         stack.extend(self.index.get("String::from").copied());
+        // const の式から呼ぶ関数 (`const N: u32 = sq(4);`。const は使う場所で式として展開される)
+        for c in &self.consts {
+            if c.expr.contains('(') {
+                for w in c.expr.split(|ch: char| !(ch.is_alphanumeric() || ch == '_')) {
+                    stack.extend(self.index.get(w).copied());
+                }
+            }
+        }
 
         // `impl Drop` の drop は drop glue から、メソッド `eq` は `==` から (名前を書かずに) 呼ばれる
         stack.extend((0..self.names.len() as u32).filter(|&i| {
@@ -3302,6 +3343,8 @@ fn bound_names(bs: &Bounds) -> R<Vec<String>> {
             let mut v = vec![];
             for b in bs {
                 match b {
+                    // `?Sized` は制約を緩めるだけなので数えない
+                    syn::TypeParamBound::Trait(t) if matches!(t.modifier, syn::TraitBoundModifier::Maybe(_)) => {}
                     syn::TypeParamBound::Trait(t)
                         if matches!(
                             t.path.segments.last().map(|s| &s.arguments),

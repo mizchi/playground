@@ -164,7 +164,7 @@ fn is_cmp_trait(h: usize) -> bool {
 /// 演算子の trait (宣言はユーザが手で impl するときだけ付ける)
 const OP_TRAITS: &[&str] = &[
     "Add", "Sub", "Mul", "Div", "Rem", "Neg", "Not", "BitAnd", "BitOr", "BitXor", "AddAssign", "SubAssign",
-    "MulAssign", "DivAssign", "RemAssign", "Index", "IndexMut",
+    "MulAssign", "DivAssign", "RemAssign", "Index", "IndexMut", "From",
 ];
 
 /// 演算子の trait の宣言か
@@ -280,6 +280,39 @@ fn impls_cmp_trait(src: &str) -> bool {
                 return true;
             }
         }
+    }
+    false
+}
+
+/// `vec![x; n]` の x がリテラルでないものがあるか
+fn vec_repeat_nonliteral(src: &str) -> bool {
+    let b = src.as_bytes();
+    let mut i = 0;
+    while let Some(k) = src[i..].find("vec![") {
+        let start = i + k + 5;
+        let mut depth = 0i32;
+        let mut j = start;
+        while j < b.len() {
+            match b[j] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' if depth == 0 => break,
+                b')' | b']' | b'}' => depth -= 1,
+                b';' if depth == 0 => {
+                    let x = src[start..j].trim_start();
+                    let lit = x.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '\'')
+                        || x.starts_with("true")
+                        || x.starts_with("false")
+                        || x.starts_with("b'");
+                    if !lit {
+                        return true;
+                    }
+                    break;
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        i = start;
     }
     false
 }
@@ -403,7 +436,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             "find", "position", "nth", "zip", "chain", "take", "skip", "take_while", "copied",
             "cloned", "format", "print", "println", "eprint", "eprintln", "write", "writeln",
             "split", "split_whitespace", "lines", "trim", "starts_with", "ends_with", "contains",
-            "clamp", "from_u32", "char", "join", "concat", "drain", "default", "f64", "f32", "i128", "u128",
+            "clamp", "from_u32", "char", "join", "concat", "drain", "default", "f64", "f32", "i128", "u128", "Iterator", "into",
         ]);
         // (先頭の 1 byte, 長さ) ごとの候補。prelude の名前が増えても 1 識別子あたりの比較は 0〜1 回
         let mut t: Vec<Vec<&'static str>> = vec![vec![]; 256 * 32];
@@ -586,6 +619,9 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     }
     if need.contains("join") || need.contains("concat") {
         need.extend(["__exr_join_str", "__exr_join_string"]);
+        if need.contains("concat") {
+            need.insert("__exr_concat_vec");
+        }
     }
     if need.contains("drain") {
         need.insert("__drain");
@@ -596,8 +632,23 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         }
     }
     // checked_* は Option を返す
-    if user_src.contains("checked_") {
+    if user_src.contains("checked_") || user_src.contains("overflowing_") {
         need.insert("Option");
+    }
+    // `vec![x; n]` で x が Copy でなさそうなら (リテラルでない) resize で並べる
+    if need.contains("vec") && vec_repeat_nonliteral(user_src) {
+        need.extend(["resize", "new", "__exr_clone"]);
+    }
+    // String への collect は要素が &str / String なら push_str を使う
+    if need.contains("collect") && need.contains("String") {
+        need.extend(["push_str", "as_str"]);
+    }
+    // `x.into()` は期待型の from を呼ぶ
+    if user_src.contains(".into()") {
+        need.insert("from");
+    }
+    if user_src.contains("isqrt") {
+        need.insert("__exr_isqrt");
     }
     // 128 bit 整数: 除算と書式化
     if need.contains("i128") || need.contains("u128") {

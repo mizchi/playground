@@ -934,6 +934,20 @@ fn __exr_join_str<G>(s: &[&str], sep: &str) -> String {
     r
 }
 
+fn __exr_concat_vec<T: Clone>(s: &[Vec<T>]) -> Vec<T> {
+    let mut r = Vec::new();
+    let mut i = 0;
+    while i < s.len() {
+        let mut j = 0;
+        while j < s[i].len() {
+            r.push(s[i][j].clone());
+            j += 1;
+        }
+        i += 1;
+    }
+    r
+}
+
 fn __exr_join_string<G>(s: &[String], sep: &str) -> String {
     let mut r = String::new();
     let mut i = 0;
@@ -1613,7 +1627,8 @@ impl __FromIter for String {
         let mut it = it;
         let mut s = String::new();
         while let Some(c) = it.next() {
-            s.push(c);
+            // (要素が char なら push、&str / String なら push_str。codegen が要素の型で選ぶ)
+            s.__push_piece(c);
         }
         s
     }
@@ -2598,6 +2613,26 @@ fn __exr_fmt_int128<G>(f: &mut Formatter, mag: u128, neg: bool) {
         w /= base;
     }
     __exr_fmt_digits::<()>(f, &digits, n, neg, base);
+}
+
+// 整数の平方根 (2 bit ずつ決める)
+fn __exr_isqrt<G>(n: u64) -> u64 {
+    let mut x = n;
+    let mut r: u64 = 0;
+    let mut b: u64 = 1 << 62;
+    while b > x {
+        b >>= 2;
+    }
+    while b != 0 {
+        if x >= r + b {
+            x -= r + b;
+            r = (r >> 1) + b;
+        } else {
+            r >>= 1;
+        }
+        b >>= 2;
+    }
+    r
 }
 
 // 128 bit の除算 (rem なら剰余)。上位がなければ 64 bit で割る
@@ -3731,6 +3766,12 @@ pub trait Rem {
     type Output;
     fn rem(self, rhs: Self) -> Self::Output;
 }
+// `impl From<X> for S`: trait は名前だけ (型パラメータのある trait はまだないので、impl のシグネチャを使う)
+// (宣言の引数の型は使わない。メソッドがないと trait ごと選ばれないので 1 つ置く)
+pub trait From {
+    fn from(t: Self) -> Self;
+}
+
 pub trait Neg {
     type Output;
     fn neg(self) -> Self::Output;
@@ -5962,6 +6003,139 @@ impl __FromStr for u128 {
     fn __from_str(s: &str) -> Result<u128, ParseIntError> {
         match __exr_parse_int128::<()>(s, false) {
             Ok((_, v)) => Ok(v),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+// `u32::from_str_radix(s, 16)` (2〜36 進。数字は 0-9 / a-z / A-Z)
+trait __Radix {
+    fn from_str_radix(s: &str, radix: u32) -> Result<Self, ParseIntError>;
+}
+fn __exr_parse_radix<G>(s: &str, radix: u32, signed: bool, max: u64, neg_max: u64) -> Result<(bool, u64), ParseIntError> {
+    let b = s.as_bytes();
+    if b.len() == 0 {
+        return Err(ParseIntError { kind: IntErrorKind::Empty });
+    }
+    let mut i = 0;
+    let mut neg = false;
+    if b[0] == b'+' || (b[0] == b'-' && signed) {
+        neg = b[0] == b'-';
+        i = 1;
+        if b.len() == 1 {
+            return Err(ParseIntError { kind: IntErrorKind::InvalidDigit });
+        }
+    }
+    let lim = if neg { neg_max } else { max };
+    let r = radix as u64;
+    let mut v: u64 = 0;
+    let mut over = false;
+    while i < b.len() {
+        let c = b[i];
+        let d = if c >= b'0' && c <= b'9' {
+            (c - b'0') as u64
+        } else if c >= b'a' && c <= b'z' {
+            (c - b'a') as u64 + 10
+        } else if c >= b'A' && c <= b'Z' {
+            (c - b'A') as u64 + 10
+        } else {
+            99
+        };
+        if d >= r {
+            return Err(ParseIntError { kind: IntErrorKind::InvalidDigit });
+        }
+        if !over {
+            if d > lim || v > (lim - d) / r {
+                over = true;
+            } else {
+                v = v * r + d;
+            }
+        }
+        i += 1;
+    }
+    if over {
+        return Err(ParseIntError {
+            kind: if neg { IntErrorKind::NegOverflow } else { IntErrorKind::PosOverflow },
+        });
+    }
+    Ok((neg, v))
+}
+impl __Radix for i8 {
+    fn from_str_radix(s: &str, radix: u32) -> Result<i8, ParseIntError> {
+        match __exr_parse_radix::<()>(s, radix, true, 127, 128) {
+            Ok((n, v)) => Ok(if n { (v as i8).wrapping_neg() } else { v as i8 }),
+            Err(e) => Err(e),
+        }
+    }
+}
+impl __Radix for i16 {
+    fn from_str_radix(s: &str, radix: u32) -> Result<i16, ParseIntError> {
+        match __exr_parse_radix::<()>(s, radix, true, 32767, 32768) {
+            Ok((n, v)) => Ok(if n { (v as i16).wrapping_neg() } else { v as i16 }),
+            Err(e) => Err(e),
+        }
+    }
+}
+impl __Radix for i32 {
+    fn from_str_radix(s: &str, radix: u32) -> Result<i32, ParseIntError> {
+        match __exr_parse_radix::<()>(s, radix, true, 2147483647, 2147483648) {
+            Ok((n, v)) => Ok(if n { (v as i32).wrapping_neg() } else { v as i32 }),
+            Err(e) => Err(e),
+        }
+    }
+}
+impl __Radix for i64 {
+    fn from_str_radix(s: &str, radix: u32) -> Result<i64, ParseIntError> {
+        match __exr_parse_radix::<()>(s, radix, true, 9223372036854775807, 9223372036854775808) {
+            Ok((n, v)) => Ok(if n { (v as i64).wrapping_neg() } else { v as i64 }),
+            Err(e) => Err(e),
+        }
+    }
+}
+impl __Radix for isize {
+    fn from_str_radix(s: &str, radix: u32) -> Result<isize, ParseIntError> {
+        match __exr_parse_radix::<()>(s, radix, true, 9223372036854775807, 9223372036854775808) {
+            Ok((n, v)) => Ok(if n { (v as isize).wrapping_neg() } else { v as isize }),
+            Err(e) => Err(e),
+        }
+    }
+}
+impl __Radix for u8 {
+    fn from_str_radix(s: &str, radix: u32) -> Result<u8, ParseIntError> {
+        match __exr_parse_radix::<()>(s, radix, false, 255, 0) {
+            Ok((_, v)) => Ok(v as u8),
+            Err(e) => Err(e),
+        }
+    }
+}
+impl __Radix for u16 {
+    fn from_str_radix(s: &str, radix: u32) -> Result<u16, ParseIntError> {
+        match __exr_parse_radix::<()>(s, radix, false, 65535, 0) {
+            Ok((_, v)) => Ok(v as u16),
+            Err(e) => Err(e),
+        }
+    }
+}
+impl __Radix for u32 {
+    fn from_str_radix(s: &str, radix: u32) -> Result<u32, ParseIntError> {
+        match __exr_parse_radix::<()>(s, radix, false, 4294967295, 0) {
+            Ok((_, v)) => Ok(v as u32),
+            Err(e) => Err(e),
+        }
+    }
+}
+impl __Radix for u64 {
+    fn from_str_radix(s: &str, radix: u32) -> Result<u64, ParseIntError> {
+        match __exr_parse_radix::<()>(s, radix, false, 18446744073709551615, 0) {
+            Ok((_, v)) => Ok(v as u64),
+            Err(e) => Err(e),
+        }
+    }
+}
+impl __Radix for usize {
+    fn from_str_radix(s: &str, radix: u32) -> Result<usize, ParseIntError> {
+        match __exr_parse_radix::<()>(s, radix, false, 18446744073709551615, 0) {
+            Ok((_, v)) => Ok(v as usize),
             Err(e) => Err(e),
         }
     }

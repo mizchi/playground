@@ -25,6 +25,19 @@ fn is_builtin_scalar_method(n: &str) -> bool {
             | "checked_mul"
             | "checked_div"
             | "checked_rem"
+            | "checked_pow"
+            | "wrapping_pow"
+            | "saturating_pow"
+            | "overflowing_pow"
+            | "overflowing_add"
+            | "overflowing_sub"
+            | "overflowing_mul"
+            | "rem_euclid"
+            | "div_euclid"
+            | "next_power_of_two"
+            | "isqrt"
+            | "leading_ones"
+            | "trailing_ones"
             | "saturating_add"
             | "saturating_sub"
             | "abs"
@@ -1669,6 +1682,10 @@ impl Inf<'_> {
                 self.known(Ty::Never)
             }
             Expr::Continue(_) => self.known(Ty::Never),
+            Expr::Call(c) if self.prog.prim_method_call(c, self.self_sid).is_some() => {
+                let e = self.prog.prim_method_call(c, self.self_sid).unwrap();
+                self.expr(&e)
+            }
             Expr::Call(c) => {
                 if let Expr::Path(p) = &*c.func {
                     if let Some((sid, vi)) = self.prog.variant_by_path(&p.path, self.self_sid) {
@@ -1883,6 +1900,28 @@ impl Inf<'_> {
                         return self.known(Ty::Struct(ss));
                     }
                 }
+                // `parts.join(", ")` / `.concat()`: String (要素が Vec なら、その Vec)
+                if callee.is_none() && matches!(n.as_str(), "join" | "concat") && args.len() <= 1 {
+                    let mut t = self.resolve(rv);
+                    while let Some(Ty::Ref(_, i)) = t {
+                        t = Some(*i);
+                    }
+                    let elem = match t {
+                        Some(Ty::Array(e, _)) | Some(Ty::Slice(e)) => Some(*e),
+                        Some(Ty::Struct(s)) if self.prog.structs[s as usize].name.starts_with("Vec") => {
+                            self.prog.structs[s as usize].args.first().copied()
+                        }
+                        _ => None,
+                    };
+                    if let Some(e @ Ty::Struct(es)) = elem {
+                        if n == "concat" && self.prog.base_of(es) == self.prog.struct_index.get("Vec").copied().unwrap_or(u32::MAX) {
+                            return self.known(e);
+                        }
+                    }
+                    if let Some(&ss) = self.prog.struct_index.get("String") {
+                        return self.known(Ty::Struct(ss));
+                    }
+                }
                 // 組み込みの比較 (`3.cmp(&5)` / derive した型の cmp): Ordering / Option<Ordering>
                 if callee.is_none() && matches!(n.as_str(), "cmp" | "partial_cmp") && args.len() == 1 {
                     if let Some(&os) = self.prog.struct_index.get("Ordering") {
@@ -2048,9 +2087,32 @@ impl Inf<'_> {
                 }
                 rv
             }
+            "rem_euclid" | "div_euclid" => {
+                for a in args {
+                    self.unify(a, rv);
+                }
+                rv
+            }
+            "overflowing_add" | "overflowing_sub" | "overflowing_mul" | "overflowing_pow" => {
+                for a in args {
+                    let k = if name == "overflowing_pow" { self.known(Ty::U32) } else { rv };
+                    self.unify(a, k);
+                }
+                let b = self.known(Ty::Bool);
+                let tb = self.prog.tuple_base(2);
+                self.adt(tb, vec![rv, b])
+            }
+            "checked_pow" => {
+                for a in args {
+                    let k = self.known(Ty::U32);
+                    self.unify(a, k);
+                }
+                self.option_of(rv)
+            }
+            "leading_ones" | "trailing_ones" => self.known(Ty::U32),
             "wrapping_neg" | "abs" | "signum" | "swap_bytes" | "to_ascii_uppercase"
-            | "to_ascii_lowercase" => rv,
-            "pow" | "rotate_left" | "rotate_right" => {
+            | "to_ascii_lowercase" | "next_power_of_two" | "isqrt" => rv,
+            "pow" | "rotate_left" | "rotate_right" | "wrapping_pow" | "saturating_pow" => {
                 for a in args {
                     let k = self.known(Ty::U32);
                     self.unify(a, k);
