@@ -142,6 +142,8 @@ fn helper_suffixes() -> &'static HashMap<&'static str, Vec<&'static str>> {
             for pre in ["__exr_str_", "__exr_char_"] {
                 if let Some(suf) = n.strip_prefix(pre) {
                     if !suf.is_empty() {
+                        // (`trim_matches_fn` はクロージャのパターン版: メソッド名 `trim_matches` で引く)
+                        let suf = suf.strip_suffix("_fn").unwrap_or(suf);
                         m.entry(suf).or_default().push(n);
                     }
                 }
@@ -343,7 +345,7 @@ fn nonliteral_to_string(src: &str) -> bool {
 /// これらの名前が現れたら Iterator を使っているとみなす
 const ITER_NAMES: &[&str] = &[
     "Iterator", "next", "map", "filter", "filter_map", "collect", "sum", "product", "count",
-    "fold", "for_each", "any", "all", "find", "position", "nth", "zip", "chain", "take", "skip",
+    "fold", "for_each", "any", "all", "find", "position", "rposition", "partition", "nth", "zip", "chain", "take", "skip",
     "take_while", "copied", "cloned", "into_iter", "flat_map", "flatten", "step_by", "peekable", "skip_while", "scan",
     "inspect",
 ];
@@ -382,7 +384,7 @@ fn owner(h: usize) -> Option<&'static str> {
                         | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" | "Rev" | "StepBy" | "Peekable"
                         | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks"
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
-                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" => Some(w),
+                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,

@@ -861,7 +861,11 @@ impl Cx<'_, '_> {
                     let Some(init) = &l.init else {
                         return err(l.span(), "`let` without initializer is not supported");
                     };
-                    let Some(place) = self.scrutinee(&init.expr)? else {
+                    let ann = match &l.pat {
+                        Pat::Type(pt) => self.prog.parse_ty(&pt.ty, &self.env).ok(),
+                        _ => None,
+                    };
+                    let Some(place) = self.scrutinee_as(&init.expr, ann)? else {
                         diverged = true;
                         continue;
                     };
@@ -2654,6 +2658,19 @@ impl Cx<'_, '_> {
     /// `recv.m(args)`: レシーバを自動 deref して struct を見つけ、
     /// メソッドの self 型に合わせて自動参照 (`&self` / `&mut self`) かコピー (`self`) で渡す
     fn method_call(&mut self, mc: &syn::ExprMethodCall, expected: Option<Ty>) -> R<V> {
+        // prelude の `v.__push_auto(x)` (partition など): x が `&T` で v が `Vec<T>` なら `*x` を push
+        if mc.method == "__push_auto" && mc.args.len() == 1 {
+            let (r, a) = (&mc.receiver, &mc.args[0]);
+            let elem = match self.peek(r).map(|t| self.strip_refs(t)) {
+                Some(Ty::Struct(sid)) => self.vec_fields(sid).map(|f| f.2),
+                _ => None,
+            };
+            let e: Expr = match (self.peek(a), elem) {
+                (Some(Ty::Ref(_, i)), Some(el)) if *i == el => syn::parse_quote!((#r).push(*(#a))),
+                _ => syn::parse_quote!((#r).push(#a)),
+            };
+            return self.expr(&e, expected);
+        }
         // prelude の `s.__push_piece(c)` (String への collect): 要素の型で push / push_str
         if mc.method == "__push_piece" && mc.args.len() == 1 {
             let (r, a) = (&mc.receiver, &mc.args[0]);
@@ -4733,7 +4750,17 @@ impl Cx<'_, '_> {
             }
             m => {
                 // prelude の `__exr_str_<m>` (`s.split("ab")` は __exr_str_split_str)
-                let h = if m == "split" { "split_str" } else { m };
+                // (パターンがクロージャなら `__exr_str_<m>_fn`)
+                let fname = format!("{m}_fn");
+                let h = if m == "split" {
+                    "split_str"
+                } else if matches!(mc.args.first(), Some(Expr::Closure(_)))
+                    && self.prog.index.contains_key(&format!("__exr_str_{fname}"))
+                {
+                    fname.as_str()
+                } else {
+                    m
+                };
                 if let Some(r) = self.helper_method("__exr_str_", h, mc, (fat, Ty::Ref(false, intern(Ty::Str))))? {
                     return Ok(Some(r));
                 }
@@ -5785,6 +5812,9 @@ impl Cx<'_, '_> {
         let Some(place) = self.scrutinee(&t.expr)? else {
             return Ok((None, Ty::Never));
         };
+        // `?` は中身 (Ok / Some の値か、Err の値) をムーブするので、一時値 (や変数) はもう drop しない
+        let sflag = self.last_scrut;
+        self.release(&t.expr, sflag);
         let (place, _) = self.pat_deref(place, BindMode::Move);
         let Ty::Struct(inst) = place.ty() else {
             return err(
@@ -6211,6 +6241,11 @@ impl Cx<'_, '_> {
 
     /// match 対象を place にする。値なら一時変数に置く。None は発散
     fn scrutinee(&mut self, e: &Expr) -> R<Option<Place>> {
+        self.scrutinee_as(e, None)
+    }
+
+    /// `let (a, b): (Vec<i32>, Vec<i32>) = ..`: 型注釈を期待型として渡す
+    fn scrutinee_as(&mut self, e: &Expr, expected: Option<Ty>) -> R<Option<Place>> {
         self.last_scrut = None;
         // `v[..]` / `a[1..]` (サイズ不定の [T] の場所): fat pointer の置き場所を `[T]` 型の place として渡す
         // (スライスパターンだけが受け付け、要素は値で束縛する)
@@ -6227,7 +6262,7 @@ impl Cx<'_, '_> {
         if is_place_expr(e) {
             return Ok(Some(self.place(e)?));
         }
-        let (v, t) = self.expr(e, None)?;
+        let (v, t) = self.expr(e, expected)?;
         // 一時値の match 対象は文の終わりまで所有する (パターンがムーブしたらフラグを下ろす)
         if let Some(v) = v {
             if t != Ty::Never {
@@ -6684,6 +6719,8 @@ impl Cx<'_, '_> {
             Ty::Struct(x) if self.prog.is_tuple(x) => {
                 Ok(self.prog.structs[x as usize].fields.clone())
             }
+            // `()` のパターン (`Ok(())`)
+            Ty::Unit if n_pat == 0 => Ok(vec![]),
             t => err(
                 span,
                 format!(

@@ -133,6 +133,8 @@ struct Inf<'p> {
     no_record: u32,
     /// `it.collect()` の (受け手, 結果): 最後に結果が Vec<T> / HashMap<K, V> なら Item と単一化する
     collects: Vec<(u32, u32)>,
+    /// 次の apply_recv に渡すメソッド呼び出しの turbofish
+    turbofish: Option<*const syn::AngleBracketedGenericArguments>,
 }
 
 /// sig はこの関数 (インスタンスなら型引数を入れた後) のシグネチャ、env は `Self` と型パラメータ
@@ -172,6 +174,7 @@ pub fn infer_full(
         assoc_later: vec![],
         no_record: 0,
         collects: vec![],
+        turbofish: None,
     };
     s.ret = match ret {
         // 一部だけ分かっている型 (`Result<?, u8>`): 型パラメータの所を型変数にする
@@ -819,10 +822,67 @@ impl Inf<'_> {
             let k = self.known_g(p, &mut pv);
             self.unify(a, k);
         }
+        // turbofish (`collect::<Vec<_>>()`): 後ろの型パラメータ (メソッド自身のもの) から
+        if let Some(tf) = self.turbofish.take() {
+            // SAFETY: tf は infer() の間生きている関数の AST の中を指す
+            let tf = unsafe { &*tf };
+            let tys: Vec<&syn::Type> = tf
+                .args
+                .iter()
+                .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
+                .collect();
+            let ng = pv.len();
+            if tys.len() <= ng {
+                for (k, t) in tys.into_iter().enumerate() {
+                    let v = self.syn_ty_var(t);
+                    let i = ng - tf.args.len() + k;
+                    match pv[i] {
+                        Some(old) => self.unify(old, v),
+                        None => pv[i] = Some(v),
+                    }
+                }
+            }
+        }
         let prog = self.prog;
         self.unify_fn_bounds(&prog.sigs[id as usize].generics, &mut pv);
         self.unify_assoc_bounds(&prog.sigs[id as usize].generics, &mut pv);
         self.known_g(ret, &mut pv)
+    }
+
+    /// 書かれた型の型変数 (`Vec<_>` の `_` は新しい型変数)
+    fn syn_ty_var(&mut self, t: &syn::Type) -> u32 {
+        if let Ok(k) = self.prog.parse_ty(t, self.env) {
+            return self.known(k);
+        }
+        match t {
+            syn::Type::Infer(_) => self.var(),
+            syn::Type::Reference(r) => {
+                let i = self.syn_ty_var(&r.elem);
+                self.with(Shape::Ref(r.mutability.is_some(), i))
+            }
+            syn::Type::Path(p) if p.qself.is_none() => {
+                let last = p.path.segments.last().unwrap();
+                let base = self.prog.struct_index.get(&last.ident.to_string()).copied();
+                match (base, &last.arguments) {
+                    (Some(b), syn::PathArguments::AngleBracketed(ab)) => {
+                        let args: Vec<u32> = ab
+                            .args
+                            .iter()
+                            .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
+                            .map(|t| self.syn_ty_var(t))
+                            .collect();
+                        self.adt(b, args)
+                    }
+                    _ => self.var(),
+                }
+            }
+            syn::Type::Tuple(tt) => {
+                let args: Vec<u32> = tt.elems.iter().map(|t| self.syn_ty_var(t)).collect();
+                let tb = self.prog.tuple_base(args.len());
+                self.adt(tb, args)
+            }
+            _ => self.var(),
+        }
     }
 
     fn apply_self(
@@ -940,6 +1000,24 @@ impl Inf<'_> {
             let name = self.prog.structs[b as usize].name.clone();
             if matches!(name.as_str(), "Vec" | "BinaryHeap") && vars.len() == 1 {
                 self.unify(item, vars[0]);
+            } else if matches!(name.as_str(), "Option" | "Result") && !vars.is_empty() {
+                // `Option<Vec<T>>` / `Result<Vec<T>, E>`: 要素は Option<T> / Result<T, E>
+                let r0 = self.find(vars[0]);
+                let inner = match self.shape[r0 as usize] {
+                    Some(Shape::Adt(ib, st, l)) if self.prog.structs[ib as usize].name == "Vec" => {
+                        self.adt_vars_of(st, l).first().copied()
+                    }
+                    Some(Shape::Known(Ty::Struct(s))) if self.prog.structs[self.prog.base_of(s) as usize].name == "Vec" => {
+                        self.prog.structs[s as usize].args.first().copied().map(|a| self.known(a))
+                    }
+                    _ => None,
+                };
+                if let Some(t) = inner {
+                    let mut a = vec![t];
+                    a.extend(vars[1..].iter().copied());
+                    let it = self.adt(b, a);
+                    self.unify(item, it);
+                }
             } else if name == "HashMap" && vars.len() == 2 {
                 let tb = self.prog.tuple_base(2);
                 let t = self.adt(tb, vec![vars[0], vars[1]]);
@@ -1184,7 +1262,12 @@ impl Inf<'_> {
                     if i + 1 == n && semi.is_none() {
                         res = Some(v);
                     }
+                    // `{ return None; }` は発散する (型は周りから決まる)
+                    if i + 1 == n && semi.is_some() && diverges(e) {
+                        res = Some(self.var());
+                    }
                 }
+                Stmt::Macro(m) if i + 1 == n && diverging_macro(&m.mac) => res = Some(self.var()),
                 _ => {}
             }
         }
@@ -1990,7 +2073,9 @@ impl Inf<'_> {
                         }
                     }
                 }
+                self.turbofish = mc.turbofish.as_ref().map(|t| t as *const _);
                 let r = self.apply_recv(callee, args, rv);
+                self.turbofish = None;
                 if n == "collect" {
                     self.collects.push((rv, r));
                 }
@@ -2019,6 +2104,10 @@ impl Inf<'_> {
                 "split_str".to_string()
             } else if name == "split_whitespace" {
                 "split_ws".to_string()
+            } else if matches!(mc.args.first(), Some(Expr::Closure(_)))
+                && self.prog.index.contains_key(&format!("{pre}{name}_fn"))
+            {
+                format!("{name}_fn")
             } else {
                 name.clone()
             };
@@ -2145,4 +2234,17 @@ impl Inf<'_> {
             _ => self.var(),
         }
     }
+}
+
+/// 必ず発散する式 (`return` / `break` / `continue` / `panic!(..)`)
+fn diverges(e: &Expr) -> bool {
+    match e {
+        Expr::Return(_) | Expr::Break(_) | Expr::Continue(_) => true,
+        Expr::Macro(m) => diverging_macro(&m.mac),
+        _ => false,
+    }
+}
+
+fn diverging_macro(m: &syn::Macro) -> bool {
+    m.path.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(), "panic" | "unreachable" | "todo" | "unimplemented"))
 }
