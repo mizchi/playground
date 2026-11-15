@@ -53,6 +53,8 @@ pub struct Blob {
     pub relocs: Vec<BlobReloc>,
     /// この関数が参照する無名データ (文字列リテラルなど)。.o では内容で重複を除く
     pub datas: Vec<Vec<u8>>,
+    /// この関数が参照する vtable (関数 ID の列)。.o では内容で重複を除く
+    pub vtables: Vec<Vec<u32>>,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +75,8 @@ pub enum Target {
     Data(u32),
     /// static (Program::consts の index)
     Static(u32),
+    /// Blob::vtables の index
+    Vtable(u32),
 }
 
 /// キャッシュに書くため Reloc を 1 byte にする表。
@@ -160,11 +164,13 @@ pub struct Worker {
     requested: Vec<u32>,
     /// 直前に lowering した関数の無名データ
     datas: Vec<Vec<u8>>,
+    vtables: Vec<Vec<u32>>,
 }
 
-/// UserExternalName の名前空間: 0 = 関数, 1 = 無名データ, 2 = static
+/// UserExternalName の名前空間: 0 = 関数, 1 = 無名データ, 2 = static, 3 = vtable
 pub const NS_DATA: u32 = 1;
 pub const NS_STATIC: u32 = 2;
+pub const NS_VTABLE: u32 = 3;
 
 impl Worker {
     pub fn new() -> Self {
@@ -173,6 +179,7 @@ impl Worker {
             fbc: FunctionBuilderContext::new(),
             requested: vec![],
             datas: vec![],
+            vtables: vec![],
         }
     }
 
@@ -229,10 +236,41 @@ impl Worker {
         f: &syn::ItemFn,
         isa: &dyn TargetIsa,
     ) -> R<()> {
-        let (sig, env) = {
+        let (sig, env, body_id) = {
             let g = insts.lock().unwrap();
-            (g.sig(prog, id).clone(), g.env(prog, id))
+            (g.sig(prog, id).clone(), g.env(prog, id), g.body_of(id))
         };
+        // クロージャの本体: キャプチャ (名前, 変数の型, by-ref か, オフセット)
+        let mut caps: Vec<(String, Ty, bool, u32)> = vec![];
+        if let Some(cd) = prog.closures.get(&body_id) {
+            if let Some(Ty::Ptr(_, Ty::Struct(sid))) = sig.params.first() {
+                let sd = &prog.structs[*sid as usize];
+                for (n, (_, ft, off)) in cd.captures.iter().zip(&sd.fields) {
+                    match (cd.by_move, ft) {
+                        (false, Ty::Ptr(_, t)) => caps.push((n.clone(), **t, true, *off)),
+                        _ => caps.push((n.clone(), *ft, false, *off)),
+                    }
+                }
+            }
+        }
+        // この本体に書かれたクロージャ (前順) の番号: 親なら 0 から、クロージャ k なら k+1 から
+        let (root, base_k) = match prog.closures.get(&body_id) {
+            Some(cd) => (cd.parent, cd.k + 1),
+            None => (body_id, 0),
+        };
+        let mut closure_ix = HashMap::new();
+        let (mut taken, closures) = addr_taken(f);
+        for (i, c) in closures.into_iter().enumerate() {
+            let k = base_k + i as u32;
+            closure_ix.insert(c as *const syn::ExprClosure as usize, k);
+            // 参照でキャプチャされる変数はスタックに置く
+            if let Some(cd) = prog.closure_by.get(&(root, k)).and_then(|i| prog.closures.get(i)) {
+                if !cd.by_move {
+                    taken.extend(cd.captures.iter().cloned());
+                }
+            }
+        }
+        let extra: Vec<(String, Ty)> = caps.iter().map(|c| (c.0.clone(), c.1)).collect();
         let sig = &sig;
         let cc = isa.default_call_conv();
         self.ctx.clear();
@@ -252,17 +290,23 @@ impl Worker {
                 self_sid: env.self_sid,
                 sret: None,
                 frefs: HashMap::new(),
-                lets: crate::infer::infer(prog, f, sig, &env),
-                addr_taken: addr_taken(f),
+                lets: crate::infer::infer_full(prog, f, sig, &env, &extra, Some(sig.ret)).0,
+                addr_taken: taken,
+                caps,
+                root,
+                closure_ix,
+                closure_hint: None,
                 env,
                 insts,
                 requested: vec![],
                 datas: vec![],
+                vtables: vec![],
                 gvs: HashMap::new(),
             };
             let r = cx.body(f, sig);
             self.requested = std::mem::take(&mut cx.requested);
             self.datas = std::mem::take(&mut cx.datas);
+            self.vtables = std::mem::take(&mut cx.vtables);
             r?;
             cx.b.seal_all_blocks();
             cx.b.finalize(isa.frontend_config());
@@ -283,6 +327,7 @@ impl Worker {
                     match n.namespace {
                         NS_DATA => Target::Data(n.index),
                         NS_STATIC => Target::Static(n.index),
+                        NS_VTABLE => Target::Vtable(n.index),
                         _ => Target::Func(n.index),
                     }
                 }
@@ -301,13 +346,15 @@ impl Worker {
             code: code.buffer.data().to_vec(),
             relocs,
             datas: std::mem::take(&mut self.datas),
+            vtables: std::mem::take(&mut self.vtables),
         })
     }
 }
 
-/// `&x` / `&mut x.f` などでアドレスを取られるローカル変数名 (shadowing は無視した過大近似)。
-fn addr_taken(f: &syn::ItemFn) -> HashSet<String> {
-    struct V(HashSet<String>);
+/// `&x` / `&mut x.f` などでアドレスを取られるローカル変数名 (shadowing は無視した過大近似)と、
+/// 本体のクロージャ式 (前順。[`crate::closure::closures_of`] と同じ順)。1 回の走査で集める
+fn addr_taken(f: &syn::ItemFn) -> (HashSet<String>, Vec<&syn::ExprClosure>) {
+    struct V<'a>(HashSet<String>, Vec<&'a syn::ExprClosure>);
     fn root(e: &Expr) -> Option<String> {
         match e {
             Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
@@ -317,17 +364,22 @@ fn addr_taken(f: &syn::ItemFn) -> HashSet<String> {
             _ => None,
         }
     }
-    impl<'ast> Visit<'ast> for V {
+    impl<'ast> Visit<'ast> for V<'ast> {
         fn visit_expr_reference(&mut self, r: &'ast syn::ExprReference) {
             if let Some(n) = root(&r.expr) {
                 self.0.insert(n);
             }
             syn::visit::visit_expr_reference(self, r);
         }
+        fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
+            self.1.push(c);
+            syn::visit::visit_expr_closure(self, c);
+        }
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
     }
-    let mut v = V(HashSet::new());
+    let mut v = V(HashSet::new(), vec![]);
     v.visit_block(&f.block);
-    v.0
+    (v.0, v.1)
 }
 
 /// 式の評価結果。Unit / Never のとき値は None。struct のときはアドレス。
@@ -388,7 +440,23 @@ struct Cx<'a, 'p> {
     requested: Vec<u32>,
     /// 無名データ (内容) と、そのシンボルの GlobalValue
     datas: Vec<Vec<u8>>,
+    vtables: Vec<Vec<u32>>,
     gvs: HashMap<(u32, u32), ir::GlobalValue>,
+    /// クロージャの本体なら、キャプチャ (名前, 型, by-ref か, `__env` 内のオフセット)
+    caps: Vec<(String, Ty, bool, u32)>,
+    /// クロージャを書いた大元の関数と、この本体のクロージャ式 (アドレス) → 番号
+    root: u32,
+    closure_ix: HashMap<usize, u32>,
+    /// 次に作るクロージャの引数・戻り値の型の手がかり (呼び先の `F: Fn(A) -> B` から)
+    closure_hint: Option<(Vec<Ty>, Option<Ty>)>,
+}
+
+fn strip_paren(e: &Expr) -> &Expr {
+    match e {
+        Expr::Paren(p) => strip_paren(&p.expr),
+        Expr::Group(g) => strip_paren(&g.expr),
+        e => e,
+    }
 }
 
 fn is_place_expr(e: &Expr) -> bool {
@@ -458,6 +526,16 @@ impl Cx<'_, '_> {
             let v = self.b.ins().load(ty, mf(), src, off as i32);
             self.b.ins().store(mf(), v, dst, off as i32);
             off += chunk;
+        }
+    }
+
+    /// ローカル変数 (スカラー) の値
+    fn loc_value(&mut self, l: Loc) -> Option<Value> {
+        match l {
+            Loc::Var(v) => Some(self.b.use_var(v)),
+            Loc::Slot(ss) => Some(self.b.ins().stack_load(PTR, PTR, ss, 0)),
+            Loc::Ptr(a) => Some(self.b.ins().load(PTR, mf(), a, 0)),
+            Loc::Zst => None,
         }
     }
 
@@ -561,6 +639,27 @@ impl Cx<'_, '_> {
                     .push((name, Loc::Ptr(v), ty));
             } else {
                 self.bind(name, ty, Some(v));
+            }
+        }
+        // クロージャ: キャプチャを `__env` のフィールド (by-ref なら指す先) として見せる
+        if !self.caps.is_empty() {
+            let env = match self.lookup("__env") {
+                Some((l, _)) => self.loc_value(l),
+                None => None,
+            };
+            let env = env.ok_or("closure without environment")?;
+            for (n, t, by_ref, off) in self.caps.clone() {
+                let a = if by_ref {
+                    self.b.ins().load(PTR, mf(), env, off as i32)
+                } else {
+                    self.addr_plus(env, off as i32)
+                };
+                let loc = if clif_ty(t).is_none() && !t.is_agg() {
+                    Loc::Zst
+                } else {
+                    Loc::Ptr(a)
+                };
+                self.scopes.last_mut().unwrap().push((n, loc, t));
             }
         }
         let (v, t) = self.block(&f.block, Some(self.ret))?;
@@ -988,6 +1087,14 @@ impl Cx<'_, '_> {
                 return Ok((Some(fat), want));
             }
         }
+        // `&T` → `&dyn Trait` (データのポインタ + vtable)
+        if let (Some(want @ Ty::Ref(m2, Ty::Dyn(tr))), Some(v), Ty::Ref(m1, inner)) = (expected, v, t)
+        {
+            if !matches!(inner, Ty::Dyn(_)) && (m1 || !m2) {
+                let fat = self.to_dyn(v, *inner, tr, e.span())?;
+                return Ok((Some(fat), want));
+            }
+        }
         Ok((v, t))
     }
 
@@ -1177,6 +1284,7 @@ impl Cx<'_, '_> {
                 Ok(self.dead())
             }
             Expr::Call(c) => self.call(c, expected),
+            Expr::Closure(c) => self.closure_value(c, expected),
             Expr::Tuple(t) if t.elems.is_empty() => Ok((None, Ty::Unit)),
             Expr::Tuple(t) => self.tuple_lit(t, expected),
             Expr::Array(a) => self.array_lit(a, expected),
@@ -1192,6 +1300,12 @@ impl Cx<'_, '_> {
             Expr::MethodCall(mc) => self.method_call(mc),
             Expr::Cast(c) => {
                 let to = self.prog.parse_ty(&c.ty, &self.env)?;
+                // `&x as &dyn Trait` は期待型つきの評価 (強制変換) と同じ
+                if let Ty::Ref(_, Ty::Dyn(_)) = to {
+                    let (v, t) = self.expr(&c.expr, Some(to))?;
+                    self.same(c.span(), t, to)?;
+                    return Ok((v, t));
+                }
                 let hint = self.peek(&c.expr).or(Some(Ty::I32));
                 let (v, from) = self.expr(&c.expr, hint)?;
                 if from == Ty::Never {
@@ -1362,6 +1476,404 @@ impl Cx<'_, '_> {
         self.adt_value(sid, None, &args, expected, s.span())
     }
 
+    /// `|..| ..`: キャプチャを struct に詰めた値。型引数 (キャプチャ・引数・戻り値の型) をここで決める
+    fn closure_value(&mut self, c: &syn::ExprClosure, expected: Option<Ty>) -> R<V> {
+        let prog = self.prog;
+        let hint = self.closure_hint.take();
+        let Some(&k) = self.closure_ix.get(&(c as *const syn::ExprClosure as usize)) else {
+            return err(c.span(), "closures inside macro arguments are not supported");
+        };
+        let Some(&cid) = prog.closure_by.get(&(self.root, k)) else {
+            return err(c.span(), "internal: unregistered closure");
+        };
+        let cd = &prog.closures[&cid];
+        let sig0 = &prog.sigs[cid as usize];
+        let ng = sig0.generics.len();
+        let mut sol: Vec<Option<Ty>> = vec![None; ng];
+        for (i, s) in sol.iter_mut().enumerate().take(cd.n_parent) {
+            *s = self.env.params.get(i).map(|p| p.1);
+        }
+        // 期待型がこのクロージャの型そのもの (戻り値位置の `impl Fn`) なら型引数ごと使う
+        let exp_args = match expected {
+            Some(Ty::Struct(sid)) if prog.base_of(sid) == cd.sid => {
+                Some(prog.structs[sid as usize].args.clone())
+            }
+            _ => None,
+        };
+        // 期待型が `dyn Fn(A) -> B` なら引数と戻り値の手がかりにする
+        let hint = hint.or_else(|| {
+            let s = match expected {
+                Some(Ty::Dyn(s)) => s,
+                Some(Ty::Ref(_, Ty::Dyn(s))) => *s,
+                _ => return None,
+            };
+            self.dyn_fn_sig(s).ok().map(|(ps, r)| (ps, Some(r)))
+        });
+        let mut caps = vec![];
+        for (i, n) in cd.captures.iter().enumerate() {
+            let Some((loc, t)) = self.lookup(n) else {
+                return err(c.span(), format!("cannot capture `{n}` here"));
+            };
+            let ct = if cd.by_move {
+                t
+            } else {
+                Ty::Ptr(true, intern(t))
+            };
+            sol[cd.n_parent + i] = Some(ct);
+            caps.push((loc, t));
+        }
+        let mut g = cd.n_parent + cd.captures.len();
+        let mut pslots = vec![];
+        for (i, p) in c.inputs.iter().enumerate() {
+            if crate::closure::param(p).1.is_some() {
+                continue;
+            }
+            pslots.push((i, g));
+            // 呼び先の境界 → 親の型推論 (`let f = |x| x; f(1u8)` の使われ方) の順
+            sol[g] = hint
+                .as_ref()
+                .and_then(|h| h.0.get(i).copied())
+                .filter(|&t| !prog.has_param(t))
+                .or_else(|| self.lets.get(&(p as *const Pat as usize)).copied());
+            g += 1;
+        }
+        // 戻り値: 注釈 → 手がかり → 本体の型推論
+        let ri = ng - 1;
+        sol[ri] = cd
+            .ret_ann
+            .map(|t| prog.partial_subst(t, &sol))
+            .or(hint.as_ref().and_then(|h| h.1))
+            .or_else(|| self.lets.get(&(c as *const syn::ExprClosure as usize)).copied());
+        if let Some(a) = exp_args {
+            for (s, a) in sol.iter_mut().zip(a) {
+                *s = Some(a);
+            }
+        }
+        // 一部だけ分かっている戻り値型 (`Result<?, u8>`) は型推論の手がかりにする
+        let partial_ret = sol[ri].filter(|&t| prog.has_param(t));
+        if partial_ret.is_some() {
+            sol[ri] = None;
+        }
+        // 決まらない引数・戻り値は本体の型推論で (`let f = |x| x + k;`)
+        if sol.iter().any(|s| s.is_none()) {
+            let f = crate::closure::synth(c);
+            let sig = FnSig {
+                params: sig0.params.iter().map(|&t| prog.partial_subst(t, &sol)).collect(),
+                ret: Ty::Unit,
+                ..sig0.clone()
+            };
+            let env = TyEnv {
+                self_sid: self.env.self_sid,
+                params: sig0
+                    .generics
+                    .iter()
+                    .zip(&sol)
+                    .filter_map(|(g, s)| Some((g.0.clone(), (*s)?)))
+                    .collect(),
+                self_ty: self.env.self_ty,
+            };
+            let extra: Vec<(String, Ty)> = cd
+                .captures
+                .iter()
+                .zip(&caps)
+                .map(|(n, c)| (n.clone(), c.1))
+                .collect();
+            let (_, r, ps) =
+                crate::infer::infer_full(prog, &f, &sig, &env, &extra, sol[ri].or(partial_ret));
+            if sol[ri].is_none() {
+                sol[ri] = r;
+            }
+            for &(i, g) in &pslots {
+                if sol[g].is_none() {
+                    sol[g] = ps.get(i + 1).copied().flatten();
+                }
+            }
+            if let Some(&(i, _)) = pslots.iter().find(|(_, g)| sol[*g].is_none()) {
+                return err(
+                    c.inputs[i].span(),
+                    "cannot infer the type of this closure parameter; add a type annotation",
+                );
+            }
+        }
+        let Some(args) = sol.into_iter().collect::<Option<Vec<Ty>>>() else {
+            return err(c.span(), "cannot infer the return type of this closure; annotate it (`|..| -> T { .. }`)");
+        };
+        let sid = prog.instantiate(cd.sid, args.clone()).or_else(|e| err(c.span(), e))?;
+        // 呼ばれなくても本体を検査・コンパイルする (未使用なら --gc-sections で消える)
+        {
+            let mut g = self.insts.lock().unwrap();
+            let iid = g.request(prog, cid, args).or_else(|e| err(c.span(), e))?;
+            drop(g);
+            self.requested.push(iid);
+        }
+        let st = Ty::Struct(sid);
+        let a = self.temp(st);
+        let fields = prog.structs[sid as usize].fields.clone();
+        for ((loc, t), (_, ft, off)) in caps.into_iter().zip(fields) {
+            if cd.by_move {
+                let p = match loc {
+                    Loc::Var(v) => Place::Var(v, t),
+                    Loc::Zst => Place::Zst(t),
+                    l => Place::Mem(self.loc_addr(l).unwrap(), 0, t),
+                };
+                let (v, _) = self.read(p);
+                self.write(Place::Mem(a, off as i32, ft), v);
+            } else {
+                let addr = match loc {
+                    Loc::Zst => self.b.ins().iconst(PTR, 0),
+                    Loc::Var(_) => {
+                        return err(c.span(), "internal: captured variable is not in memory");
+                    }
+                    l => self.loc_addr(l).unwrap(),
+                };
+                self.b.ins().store(mf(), addr, a, off as i32);
+            }
+        }
+        Ok((Some(a), st))
+    }
+
+    /// `&T` (アドレス v) を `&dyn tr` の fat pointer にする
+    fn to_dyn(&mut self, v: Value, t: Ty, tr: &str, span: proc_macro2::Span) -> R<Value> {
+        let mut fns = vec![];
+        if crate::front::parse_fn_bound(tr).is_some() {
+            let cid = match t {
+                Ty::Struct(sid) => self.prog.closure_of_struct.get(&self.prog.base_of(sid)).copied(),
+                _ => None,
+            };
+            let Some(cid) = cid else {
+                return err(span, format!("`{}` is not a closure", self.prog.tn(t)));
+            };
+            let Ty::Struct(sid) = t else { unreachable!() };
+            let args = self.prog.structs[sid as usize].args.clone();
+            let mut g = self.insts.lock().unwrap();
+            let iid = g.request(self.prog, cid, args).or_else(|e| err(span, e))?;
+            drop(g);
+            self.requested.push(iid);
+            fns.push(iid);
+        } else {
+            let Some(decls) = self.prog.traits.get(tr) else {
+                return err(span, format!("cannot find trait `{tr}`"));
+            };
+            if !self.prog.implements(t, tr) {
+                return err(
+                    span,
+                    format!("the trait `{tr}` is not implemented for `{}`", self.prog.tn(t)),
+                );
+            }
+            for &d in decls {
+                let ds = &self.prog.sigs[d as usize];
+                let Some(Ty::Ref(m, _)) = ds.params.first() else {
+                    return err(
+                        span,
+                        format!(
+                            "`{}` cannot be called through `dyn` (it needs `&self`)",
+                            self.prog.names[d as usize]
+                        ),
+                    );
+                };
+                let recv = [Ty::Ref(*m, intern(t))];
+                let sol = vec![None; ds.generics.len()];
+                let (mut fid, _) = self.resolve_call(d, &recv, sol, None, span)?;
+                // ジェネリックな impl (`impl<T> Tr for W<T>`) のメソッドはさらにインスタンス化する
+                if (fid as usize) < self.prog.sigs.len() && self.prog.sigs[fid as usize].is_generic() {
+                    let g = self.prog.sigs[fid as usize].generics.len();
+                    let mut sol = vec![None; g];
+                    if let Some(st) = self.prog.sigs[fid as usize].self_ty {
+                        self.prog.match_ty(st, t, &mut sol);
+                    }
+                    fid = self.resolve_call(fid, &recv, sol, None, span)?.0;
+                }
+                fns.push(fid);
+            }
+        }
+        let k = match self.vtables.iter().position(|x| *x == fns) {
+            Some(k) => k,
+            None => {
+                self.vtables.push(fns);
+                self.vtables.len() - 1
+            }
+        };
+        let vt = self.symbol_addr(NS_VTABLE, k as u32);
+        let fat = self.temp(Ty::Ref(false, intern(Ty::Dyn(crate::front::intern_str(tr)))));
+        self.b.ins().store(mf(), v, fat, 0);
+        self.b.ins().store(mf(), vt, fat, 8);
+        Ok(fat)
+    }
+
+    /// vtable の idx 番目を呼ぶ。fat は `&dyn` の (データ, vtable) のアドレス
+    fn dyn_call(
+        &mut self,
+        fat: Value,
+        idx: usize,
+        params: &[Ty],
+        ret: Ty,
+        args: &[&Expr],
+        span: proc_macro2::Span,
+    ) -> R<V> {
+        if params.len() != args.len() {
+            return err(
+                span,
+                format!("expected {} arguments, found {}", params.len(), args.len()),
+            );
+        }
+        let mut sig = self.prog.sigs[0].clone();
+        sig.params = std::iter::once(Ty::Ptr(false, intern(Ty::U8)))
+            .chain(params.iter().copied())
+            .collect();
+        sig.ret = ret;
+        sig.is_main = false;
+        sig.is_extern = false;
+        let data = self.b.ins().load(PTR, mf(), fat, 0);
+        let mut vals = vec![];
+        for (a, &pt) in args.iter().zip(params) {
+            let (v, t) = self.expr(a, Some(pt))?;
+            if t == Ty::Never {
+                return Ok((None, Ty::Never));
+            }
+            self.same(a.span(), t, pt)?;
+            vals.push(v);
+        }
+        let vt = self.b.ins().load(PTR, mf(), fat, 8);
+        let fp = self.b.ins().load(PTR, mf(), vt, 8 * idx as i32);
+        let mut cv = vec![];
+        let sret = if is_sret(&sig) {
+            let a = self.temp(ret);
+            cv.push(a);
+            Some(a)
+        } else {
+            None
+        };
+        cv.push(data);
+        for (v, &pt) in vals.into_iter().zip(params) {
+            if let Some(v) = v {
+                self.push_arg(&mut cv, v, pt);
+            }
+        }
+        let sr = self.b.import_signature(clif_sig(&sig, self.cc));
+        let call = self.b.ins().call_indirect(sr, fp, &cv);
+        if ret == Ty::Never {
+            self.b.ins().trap(TrapCode::unwrap_user(1));
+            return Ok(self.dead());
+        }
+        if let Some(a) = sret {
+            return Ok((Some(a), ret));
+        }
+        let r = self.b.inst_results(call).first().copied();
+        Ok((r, ret))
+    }
+
+    /// `&dyn Fn(A) -> B` の呼び出し (vtable の 0 番目がクロージャの本体)
+    fn dyn_fn_call(&mut self, fat: Value, s: &str, args: &[&Expr], span: proc_macro2::Span) -> R<V> {
+        let (ps, r) = self.dyn_fn_sig(s).or_else(|e| err(span, e))?;
+        self.dyn_call(fat, 0, &ps, r, args, span)
+    }
+
+    /// `x.m(..)` (x: `&dyn Trait`)
+    fn dyn_method_call(&mut self, fat: Value, tr: &str, mc: &syn::ExprMethodCall) -> R<V> {
+        let name = mc.method.to_string();
+        let decls = self.prog.traits.get(tr).cloned().unwrap_or_default();
+        let Some(idx) = decls
+            .iter()
+            .position(|&d| self.prog.names[d as usize].rsplit("::").next() == Some(&name))
+        else {
+            return err(
+                mc.method.span(),
+                format!("no method named `{name}` found for `dyn {tr}`"),
+            );
+        };
+        let ds = &self.prog.sigs[decls[idx] as usize];
+        // Self は引数・戻り値に出てこない (object safe) 前提。出てきたらエラー
+        let ps: Vec<Ty> = ds.params[1..].to_vec();
+        if ps.iter().chain([&ds.ret]).any(|&t| self.prog.has_param(t)) {
+            return err(
+                mc.method.span(),
+                format!("`{name}` cannot be called through `dyn {tr}` (it uses `Self` or generics)"),
+            );
+        }
+        let ret = ds.ret;
+        let args: Vec<&Expr> = mc.args.iter().collect();
+        self.dyn_call(fat, idx, &ps, ret, &args, mc.span())
+    }
+
+    /// 呼び先の引数の型 pt が `F` / `&F` / `&mut F` で、F に `Fn(A) -> B` の境界があれば (A, B)
+    /// (呼び先のシグネチャの型パラメータを Param で含む)
+    fn fn_bound_of(&self, sig: &FnSig, pt: Ty) -> Option<(Vec<Ty>, Ty)> {
+        let pt = match pt {
+            Ty::Ref(_, i) => *i,
+            t => t,
+        };
+        let Ty::Param(g) = pt else { return None };
+        let (_, bounds) = sig.generics.get(g as usize)?;
+        let (_, ps, r) = bounds.iter().find_map(|b| crate::front::parse_fn_bound(b))?;
+        let names: Vec<&str> = sig.generics.iter().map(|g| g.0.as_str()).collect();
+        let ps = ps
+            .iter()
+            .map(|t| self.prog.resolve_g(t, &names).ok())
+            .collect::<Option<Vec<Ty>>>()?;
+        Some((ps, self.prog.resolve_g(&r, &names).ok()?))
+    }
+
+    /// クロージャの型 (struct のインスタンス) なら、その引数と戻り値の型
+    fn closure_sig(&self, t: Ty) -> Option<(Vec<Ty>, Ty)> {
+        let Ty::Struct(sid) = t else { return None };
+        let cid = *self.prog.closure_of_struct.get(&self.prog.base_of(sid))?;
+        let args = &self.prog.structs[sid as usize].args;
+        let s0 = &self.prog.sigs[cid as usize];
+        Some((
+            s0.params[1..].iter().map(|&p| self.prog.subst(p, args)).collect(),
+            self.prog.subst(s0.ret, args),
+        ))
+    }
+
+    /// `Fn(A, B) -> R` (dyn の中身) の引数と戻り値の型
+    fn dyn_fn_sig(&self, s: &str) -> R<(Vec<Ty>, Ty)> {
+        let Some((_, ps, r)) = crate::front::parse_fn_bound(s) else {
+            return Err(format!("`dyn {s}` is not a function type"));
+        };
+        let ps = ps
+            .iter()
+            .map(|t| self.prog.resolve_env(t, &self.env))
+            .collect::<R<Vec<Ty>>>()?;
+        Ok((ps, self.prog.resolve_env(&r, &self.env)?))
+    }
+
+    /// 関数でない値の呼び出し `f(x)`: クロージャ (の参照) か `&dyn Fn`
+    fn call_value(&mut self, c: &syn::ExprCall, expected: Option<Ty>) -> R<V> {
+        let (v, mut t) = self.expr(&c.func, None)?;
+        let Some(mut v) = v else {
+            return err(c.func.span(), "expected a function");
+        };
+        loop {
+            match t {
+                Ty::Ref(_, Ty::Dyn(_)) => break,
+                Ty::Ref(_, i) if i.is_agg() => t = *i,
+                Ty::Ref(_, i) => {
+                    v = self.b.ins().load(PTR, mf(), v, 0);
+                    t = *i;
+                }
+                _ => break,
+            }
+        }
+        let args: Vec<&Expr> = c.args.iter().collect();
+        match t {
+            Ty::Struct(sid) => {
+                let Some(&cid) = self.prog.closure_of_struct.get(&self.prog.base_of(sid)) else {
+                    return err(
+                        c.func.span(),
+                        format!("expected a function, found `{}`", self.prog.tn(t)),
+                    );
+                };
+                let recv = (v, Ty::Ptr(true, intern(t)));
+                self.call_fn(cid, Some(recv), &args, None, expected, c.span())
+            }
+            Ty::Ref(_, Ty::Dyn(s)) => self.dyn_fn_call(v, s, &args, c.span()),
+            t => err(
+                c.func.span(),
+                format!("expected a function, found `{}`", self.prog.tn(t)),
+            ),
+        }
+    }
+
     fn call(&mut self, c: &syn::ExprCall, expected: Option<Ty>) -> R<V> {
         if let Expr::Path(p) = &*c.func {
             if let Some((sid, vi)) = self.prog.variant_by_path(&p.path, self.self_sid) {
@@ -1393,10 +1905,8 @@ impl Cx<'_, '_> {
             return Ok(r);
         }
         let Some((id, _)) = self.callee(&c.func) else {
-            return err(
-                c.func.span(),
-                "only direct calls to named functions are supported",
-            );
+            // 値の呼び出し: クロージャ / `&dyn Fn`
+            return self.call_value(c, expected);
         };
         let args: Vec<&Expr> = c.args.iter().collect();
         let tf = match &*c.func {
@@ -1436,6 +1946,10 @@ impl Cx<'_, '_> {
         let (a, o, sid) = loop {
             p = match p {
                 Place::Mem(a, o, Ty::Struct(sid)) => break (a, o, sid),
+                Place::Mem(a, o, Ty::Ref(_, Ty::Dyn(tr))) => {
+                    let fat = self.addr_plus(a, o);
+                    return self.dyn_method_call(fat, tr, mc);
+                }
                 Place::Mem(a, o, Ty::Ref(_, i)) => {
                     let ptr = self.b.ins().load(PTR, mf(), a, o);
                     Place::Mem(ptr, 0, *i)
@@ -1661,7 +2175,28 @@ impl Cx<'_, '_> {
         }
         for (a, &pt) in args.iter().zip(&sig0.params[skip..]) {
             let exp = Some(self.prog.partial_subst(pt, &sol)).filter(|&t| !self.prog.has_param(t));
+            // `F: Fn(A) -> B` の引数にクロージャを渡すなら、A / B をクロージャの型の手がかりにする
+            let fb = self.fn_bound_of(&sig0, pt);
+            if let (Some((bps, bret)), Expr::Closure(_)) = (&fb, strip_paren(a)) {
+                let ps = bps.iter().map(|&t| self.prog.partial_subst(t, &sol)).collect();
+                let r = Some(self.prog.partial_subst(*bret, &sol));
+                self.closure_hint = Some((ps, r));
+            }
             let (v, mut t) = self.expr(a, exp)?;
+            self.closure_hint = None;
+            // クロージャの実際の引数・戻り値の型から境界の型パラメータを解く (`map<U, F: FnOnce(T) -> U>`)
+            if let Some((bps, bret)) = &fb {
+                let mut ct = t;
+                while let Ty::Ref(_, i) = ct {
+                    ct = *i;
+                }
+                if let Some((cps, cret)) = self.closure_sig(ct) {
+                    for (&b, &c) in bps.iter().zip(&cps) {
+                        self.prog.match_ty(b, c, &mut sol);
+                    }
+                    self.prog.match_ty(*bret, cret, &mut sol);
+                }
+            }
             if t == Ty::Never {
                 return Ok((None, Ty::Never));
             }
@@ -1692,7 +2227,13 @@ impl Cx<'_, '_> {
             vals.push((v.unwrap(), t, a.span()));
         }
         let arg_tys: Vec<Ty> = vals.iter().map(|v| v.1).collect();
-        let sol0 = self.turbofish_sol(&sig0, turbofish)?;
+        // 引数の型から改めて解く。引数に現れない型パラメータ (クロージャの戻り値など) は sol から
+        let mut sol0 = self.turbofish_sol(&sig0, turbofish)?;
+        for (a, b) in sol0.iter_mut().zip(&sol) {
+            if a.is_none() {
+                *a = *b;
+            }
+        }
         let (target, sig) = self.resolve_call(id, &arg_tys, sol0, expected, span)?;
         let mut cv = vec![];
         let sret = if is_sret(&sig) {
@@ -2376,6 +2917,18 @@ impl Cx<'_, '_> {
             Some(Ty::Array(t, _)) | Some(Ty::Slice(t)) => Some(*t),
             _ => None,
         };
+        // `[&a as &dyn Tr, &b]`: 要素のどれかが `&dyn` なら全体をそれに揃える
+        if !matches!(elem, Some(Ty::Ref(_, Ty::Dyn(_)))) {
+            if let Some(d) = a.elems.iter().find_map(|e| match e {
+                Expr::Cast(c) => match self.prog.parse_ty(&c.ty, &self.env) {
+                    Ok(t @ Ty::Ref(_, Ty::Dyn(_))) => Some(t),
+                    _ => None,
+                },
+                _ => None,
+            }) {
+                elem = Some(d);
+            }
+        }
         let mut vals = vec![];
         for e in &a.elems {
             let (v, t) = self.expr(e, elem)?;

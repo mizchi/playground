@@ -8,8 +8,14 @@ mkdir -p "$out"
 fail=0
 for src in examples/*.rs; do
   name=$(basename "$src" .rs)
-  if ! ./target/release/exrustc "$src" -o "$out/$name" >"$out/$name.log" 2>&1; then
+  # キャッシュなし (cold) とキャッシュからの再ビルド (warm) の両方を確かめる
+  rm -f "$out/$name.exrc" "$out/$name.cold.exrc"
+  if ! ./target/release/exrustc "$src" -o "$out/$name.cold" >"$out/$name.log" 2>&1; then
     echo "FAIL $name (exrustc)"; cat "$out/$name.log"; fail=1; continue
+  fi
+  cp "$out/$name.cold.exrc" "$out/$name.exrc" 2>/dev/null
+  if ! ./target/release/exrustc "$src" -o "$out/$name" >"$out/$name.log" 2>&1; then
+    echo "FAIL $name (exrustc, warm)"; cat "$out/$name.log"; fail=1; continue
   fi
   # no_std (#![no_std] + #![no_main]) は libcore だけで、panic=abort・libc をリンクしてビルドする
   # (rust_eh_personality は panic=abort では呼ばれないので 0 に定義しておく)
@@ -20,7 +26,12 @@ for src in examples/*.rs; do
   fi
   rustc -Awarnings "${rflags[@]}" "$src" -o "$out/$name.rustc" || { echo "FAIL $name (rustc)"; fail=1; continue; }
   # 終了コードも比べる (no_std の main は戻り値が終了コード)
+  "$out/$name.cold" >"$out/$name.out0"; c0=$?
   "$out/$name" >"$out/$name.out1"; c1=$?
+  echo "exit=$c0" >>"$out/$name.out0"
+  if ! diff -q "$out/$name.out0" <("$out/$name"; echo "exit=$?") >/dev/null; then
+    echo "FAIL $name (cold and warm builds differ)"; fail=1; continue
+  fi
   "$out/$name.rustc" >"$out/$name.out2"; c2=$?
   echo "exit=$c1" >>"$out/$name.out1"; echo "exit=$c2" >>"$out/$name.out2"
   if diff "$out/$name.out1" "$out/$name.out2" >"$out/$name.diff"; then

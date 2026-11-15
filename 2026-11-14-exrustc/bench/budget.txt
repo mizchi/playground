@@ -2,6 +2,12 @@
 arrays.binary_bytes 13826
 arrays.cache_bytes 11974
 arrays.object_bytes 12373
+closures.binary_bytes 13902
+closures.cache_bytes 22947
+closures.object_bytes 22612
+dyn_trait.binary_bytes 8601
+dyn_trait.cache_bytes 9273
+dyn_trait.object_bytes 9903
 enums.binary_bytes 10264
 enums.cache_bytes 8491
 enums.object_bytes 8937
@@ -15,6 +21,9 @@ lsp1000.mem_bytes 20843
 methods.binary_bytes 7232
 methods.cache_bytes 6072
 methods.object_bytes 7005
+nostd_calc.binary_bytes 13952
+nostd_calc.cache_bytes 13394
+nostd_calc.object_bytes 13650
 nostd_core.binary_bytes 10256
 nostd_core.cache_bytes 8668
 nostd_core.object_bytes 9525

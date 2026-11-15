@@ -107,6 +107,54 @@ impl<T> Option<T> {
             None => None,
         }
     }
+    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Option<U> {
+        match self {
+            Some(v) => Some(f(v)),
+            None => None,
+        }
+    }
+    pub fn and_then<U, F: FnOnce(T) -> Option<U>>(self, f: F) -> Option<U> {
+        match self {
+            Some(v) => f(v),
+            None => None,
+        }
+    }
+    pub fn unwrap_or_else<F: FnOnce() -> T>(self, f: F) -> T {
+        match self {
+            Some(v) => v,
+            None => f(),
+        }
+    }
+    pub fn map_or<U, F: FnOnce(T) -> U>(self, default: U, f: F) -> U {
+        match self {
+            Some(v) => f(v),
+            None => default,
+        }
+    }
+    pub fn is_some_and<F: FnOnce(T) -> bool>(self, f: F) -> bool {
+        match self {
+            Some(v) => f(v),
+            None => false,
+        }
+    }
+    pub fn filter<P: FnOnce(&T) -> bool>(self, p: P) -> Option<T> {
+        match self {
+            Some(v) => {
+                if p(&v) {
+                    Some(v)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        }
+    }
+    pub fn ok_or_else<E, F: FnOnce() -> E>(self, f: F) -> Result<T, E> {
+        match self {
+            Some(v) => Ok(v),
+            None => Err(f()),
+        }
+    }
 }
 
 impl<T> Option<&T> {
@@ -171,6 +219,30 @@ impl<T, E> Result<T, E> {
         match self {
             Ok(_) => None,
             Err(e) => Some(e),
+        }
+    }
+    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Result<U, E> {
+        match self {
+            Ok(v) => Ok(f(v)),
+            Err(e) => Err(e),
+        }
+    }
+    pub fn map_err<G, F: FnOnce(E) -> G>(self, f: F) -> Result<T, G> {
+        match self {
+            Ok(v) => Ok(v),
+            Err(e) => Err(f(e)),
+        }
+    }
+    pub fn and_then<U, F: FnOnce(T) -> Result<U, E>>(self, f: F) -> Result<U, E> {
+        match self {
+            Ok(v) => f(v),
+            Err(e) => Err(e),
+        }
+    }
+    pub fn unwrap_or_else<F: FnOnce(E) -> T>(self, f: F) -> T {
+        match self {
+            Ok(v) => v,
+            Err(e) => f(e),
         }
     }
 }

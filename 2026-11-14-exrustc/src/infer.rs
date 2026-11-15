@@ -85,6 +85,8 @@ enum Shape {
     Slc(u32),
     /// `*const T` (false) / `*mut T` (true)
     Ptr(bool, u32),
+    /// クロージャ: adt_args[start..start+n] が引数、その次が戻り値の型変数
+    Clo(u32, u32),
 }
 
 struct Inf<'p> {
@@ -105,7 +107,22 @@ struct Inf<'p> {
 
 /// sig はこの関数 (インスタンスなら型引数を入れた後) のシグネチャ、env は `Self` と型パラメータ
 pub fn infer(prog: &Program, f: &syn::ItemFn, sig: &FnSig, env: &TyEnv) -> LetTypes {
-    let ret = sig.ret;
+    infer_full(prog, f, sig, env, &[], Some(sig.ret)).0
+}
+
+/// 推論結果: (let と式の型, 戻り値型, 引数の型)
+pub type Full = (LetTypes, Option<Ty>, Vec<Option<Ty>>);
+
+/// extra は最初からスコープにある変数 (クロージャのキャプチャ)。ret が None なら戻り値型も推論して返す。
+/// 型パラメータを含む引数の型は未知として扱い、推論した型を返す (注釈のないクロージャ引数)
+pub fn infer_full(
+    prog: &Program,
+    f: &syn::ItemFn,
+    sig: &FnSig,
+    env: &TyEnv,
+    extra: &[(String, Ty)],
+    ret: Option<Ty>,
+) -> Full {
     let mut s = Inf {
         prog,
         self_sid: env.self_sid,
@@ -118,25 +135,45 @@ pub fn infer(prog: &Program, f: &syn::ItemFn, sig: &FnSig, env: &TyEnv) -> LetTy
         ret: 0,
         adt_args: vec![],
     };
-    s.ret = s.known(ret);
+    s.ret = match ret {
+        // 一部だけ分かっている型 (`Result<?, u8>`): 型パラメータの所を型変数にする
+        Some(t) if prog.has_param(t) => s.known_g(t, &mut vec![]),
+        Some(t) => s.known(t),
+        None => s.var(),
+    };
+    for (n, t) in extra {
+        let v = s.known(*t);
+        s.scopes[0].push((n.clone(), v));
+    }
+    let mut pvars = vec![];
     for (a, &t) in f.sig.inputs.iter().zip(&sig.params) {
         let name = match a {
             syn::FnArg::Receiver(_) => "self".to_string(),
             syn::FnArg::Typed(pt) => match &*pt.pat {
                 Pat::Ident(pi) => pi.ident.to_string(),
-                _ => continue,
+                _ => {
+                    pvars.push(s.var());
+                    continue;
+                }
             },
         };
-        let v = s.known(t);
+        let v = if prog.has_param(t) { s.var() } else { s.known(t) };
+        pvars.push(v);
         s.scopes[0].push((name, v));
     }
     let tail = s.block(&f.block);
     let ret = s.ret;
     s.unify(tail, ret);
     let lets = std::mem::take(&mut s.lets);
-    lets.into_iter()
-        .filter_map(|(k, v)| Some((k, s.resolve(v)?)))
-        .collect()
+    let r = s.resolve(ret);
+    let ps = pvars.into_iter().map(|v| s.resolve(v)).collect();
+    (
+        lets.into_iter()
+            .filter_map(|(k, v)| Some((k, s.resolve(v)?)))
+            .collect(),
+        r,
+        ps,
+    )
 }
 
 impl Inf<'_> {
@@ -236,8 +273,34 @@ impl Inf<'_> {
             (None, _) => self.link(a, b),
             (_, None) => self.link(b, a),
             (Some(Shape::Ref(_, x)), Some(Shape::Ref(_, y))) => {
-                self.link(a, b);
-                self.unify(x, y);
+                // `&T` と `&dyn Trait`: 強制変換なので中身は単一化せず、dyn の方を代表にする
+                let is_dyn = |s: &mut Self, v: u32| {
+                    let r = s.find(v);
+                    matches!(s.shape[r as usize], Some(Shape::Known(Ty::Dyn(_))))
+                };
+                let is_clo = |s: &mut Self, v: u32| {
+                    let r = s.find(v);
+                    matches!(s.shape[r as usize], Some(Shape::Clo(..)))
+                };
+                match (is_dyn(self, x), is_dyn(self, y)) {
+                    (true, false) => {
+                        self.link(b, a);
+                        // `&|x| ..` を `&dyn Fn(A) -> B` に: クロージャの引数・戻り値は決まる
+                        if is_clo(self, y) {
+                            self.unify(x, y);
+                        }
+                    }
+                    (false, true) => {
+                        self.link(a, b);
+                        if is_clo(self, x) {
+                            self.unify(x, y);
+                        }
+                    }
+                    _ => {
+                        self.link(a, b);
+                        self.unify(x, y);
+                    }
+                }
             }
             (Some(Shape::Known(x)), Some(Shape::Known(y))) if x == y => self.link(a, b),
             (Some(Shape::Arr(x, n)), Some(Shape::Arr(y, m))) if n == m => {
@@ -277,7 +340,110 @@ impl Inf<'_> {
                     self.unify(p, k);
                 }
             }
+            // `&[T; N]` を `&[T]` に渡す (強制変換): 要素の型だけ単一化する
+            (Some(Shape::Slc(x)), Some(Shape::Arr(y, _)))
+            | (Some(Shape::Arr(y, _)), Some(Shape::Slc(x))) => self.unify(x, y),
+            (Some(Shape::Clo(s1, n1)), Some(Shape::Clo(s2, n2))) if n1 == n2 => {
+                self.link(a, b);
+                for i in 0..=n1 {
+                    let (p, q) = (self.adt_args[(s1 + i) as usize], self.adt_args[(s2 + i) as usize]);
+                    self.unify(p, q);
+                }
+            }
+            (Some(Shape::Clo(st, n)), Some(Shape::Known(t)))
+            | (Some(Shape::Known(t)), Some(Shape::Clo(st, n))) => {
+                let (ca, ka) = if matches!(self.shape[a as usize], Some(Shape::Clo(..))) {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
+                if let Some((ps, r)) = self.closure_sig(t) {
+                    if ps.len() == n as usize {
+                        // `dyn Fn` とは同じ型ではない (強制変換されるだけ) ので要素だけ単一化する
+                        if !matches!(t, Ty::Dyn(_)) {
+                            self.link(ca, ka);
+                        }
+                        for (i, t) in ps.into_iter().chain([r]).enumerate() {
+                            let k = self.known(t);
+                            let p = self.adt_args[st as usize + i];
+                            self.unify(p, k);
+                        }
+                    }
+                }
+            }
             _ => {} // 矛盾は codegen で報告
+        }
+    }
+    /// 具体型のクロージャ (struct のインスタンス / `&dyn Fn`) の引数と戻り値の型
+    fn closure_sig(&self, t: Ty) -> Option<(Vec<Ty>, Ty)> {
+        match t {
+            Ty::Struct(sid) => {
+                let cid = *self.prog.closure_of_struct.get(&self.prog.base_of(sid))?;
+                let args = &self.prog.structs[sid as usize].args;
+                let s0 = &self.prog.sigs[cid as usize];
+                Some((
+                    s0.params[1..].iter().map(|&p| self.prog.subst(p, args)).collect(),
+                    self.prog.subst(s0.ret, args),
+                ))
+            }
+            Ty::Dyn(s) => {
+                let (_, ps, r) = crate::front::parse_fn_bound(s)?;
+                let ps = ps
+                    .iter()
+                    .map(|t| self.prog.resolve_env(t, self.env).ok())
+                    .collect::<Option<Vec<Ty>>>()?;
+                Some((ps, self.prog.resolve_env(&r, self.env).ok()?))
+            }
+            _ => None,
+        }
+    }
+    /// 呼び出せる値の (引数, 戻り値) の型変数。参照は剥がす
+    fn callable(&mut self, f: u32, n: usize) -> Option<(Vec<u32>, u32)> {
+        let mut f = f;
+        loop {
+            let r = self.find(f);
+            match self.shape[r as usize] {
+                Some(Shape::Ref(_, i)) => f = i,
+                Some(Shape::Clo(st, k)) if k as usize == n => {
+                    let vs = self.adt_args[st as usize..=(st + k) as usize].to_vec();
+                    return Some((vs[..n].to_vec(), vs[n]));
+                }
+                Some(Shape::Known(Ty::Ref(_, t))) => {
+                    let (ps, r) = self.closure_sig(*t)?;
+                    let ps = ps.into_iter().map(|t| self.known(t)).collect();
+                    return Some((ps, self.known(r)));
+                }
+                Some(Shape::Known(t)) => {
+                    let (ps, r) = self.closure_sig(t)?;
+                    let ps = ps.into_iter().map(|t| self.known(t)).collect();
+                    return Some((ps, self.known(r)));
+                }
+                _ => return None,
+            }
+        }
+    }
+    /// 型パラメータに `Fn(A) -> B` の境界があり、渡したのがクロージャなら A / B と単一化する
+    fn unify_fn_bounds(&mut self, generics: &[(String, Vec<String>)], pv: &mut Vec<Option<u32>>) {
+        for (g, (_, bounds)) in generics.iter().enumerate() {
+            if !bounds.iter().any(|b| b.starts_with("Fn")) {
+                continue;
+            }
+            let Some(v) = pv.get(g).copied().flatten() else { continue };
+            let Some((_, ps, r)) = bounds.iter().find_map(|b| crate::front::parse_fn_bound(b)) else {
+                continue;
+            };
+            let names: Vec<&str> = generics.iter().map(|g| g.0.as_str()).collect();
+            let Some((cps, cr)) = self.callable(v, ps.len()) else { continue };
+            for (t, c) in ps.iter().zip(cps) {
+                if let Ok(t) = self.prog.resolve_g(t, &names) {
+                    let k = self.known_g(t, pv);
+                    self.unify(c, k);
+                }
+            }
+            if let Ok(t) = self.prog.resolve_g(&r, &names) {
+                let k = self.known_g(t, pv);
+                self.unify(cr, k);
+            }
         }
     }
     fn resolve(&mut self, v: u32) -> Option<Ty> {
@@ -295,6 +461,7 @@ impl Inf<'_> {
                 }
                 self.prog.instantiate(b, args).ok().map(Ty::Struct)
             }
+            Some(Shape::Clo(..)) => None,
             None if self.int_lit[r as usize] => Some(Ty::I32),
             None => None,
         }
@@ -463,6 +630,8 @@ impl Inf<'_> {
             let k = self.known_g(p, &mut pv);
             self.unify(a, k);
         }
+        let prog = self.prog;
+        self.unify_fn_bounds(&prog.sigs[id as usize].generics, &mut pv);
         self.known_g(ret, &mut pv)
     }
 
@@ -485,6 +654,8 @@ impl Inf<'_> {
                     let k = self.known_g(p, &mut pv);
                     self.unify(a, k);
                 }
+                let prog = self.prog;
+                self.unify_fn_bounds(&prog.sigs[id as usize].generics, &mut pv);
                 self.known_g(ret, &mut pv)
             }
             None => self.var(),
@@ -1077,7 +1248,60 @@ impl Inf<'_> {
                     _ => None,
                 };
                 let args: Vec<u32> = c.args.iter().map(|a| self.expr(a)).collect();
+                if callee.is_none() {
+                    // クロージャ (の参照) / `&dyn Fn` の呼び出し
+                    let f = self.expr(&c.func);
+                    return match self.callable(f, args.len()) {
+                        Some((ps, r)) => {
+                            for (a, p) in args.into_iter().zip(ps) {
+                                self.unify(a, p);
+                            }
+                            r
+                        }
+                        None => self.var(),
+                    };
+                }
                 self.apply(callee, args, 0)
+            }
+            Expr::Closure(c) => {
+                // 引数・戻り値を型変数にして本体を推論する (キャプチャは外のスコープを見る)
+                let st = self.adt_args.len() as u32;
+                let n = c.inputs.len() as u32;
+                let mut vs = vec![];
+                for p in &c.inputs {
+                    let v = match crate::closure::param(p).1 {
+                        Some(t) => match self.prog.parse_ty(t, self.env) {
+                            Ok(t) => self.known(t),
+                            Err(_) => self.var(),
+                        },
+                        None => self.var(),
+                    };
+                    vs.push(v);
+                }
+                let rv = match &c.output {
+                    syn::ReturnType::Type(_, t) => match self.prog.parse_ty(t, self.env) {
+                        Ok(t) => self.known(t),
+                        Err(_) => self.var(),
+                    },
+                    syn::ReturnType::Default => self.var(),
+                };
+                self.adt_args.extend(vs.iter().copied().chain([rv]));
+                // codegen がクロージャの型引数を決めるのに使う: 引数 (パターンのアドレス) と戻り値 (式のアドレス)
+                for (p, &v) in c.inputs.iter().zip(&vs) {
+                    self.lets.push((p as *const Pat as usize, v));
+                }
+                self.lets.push((c as *const syn::ExprClosure as usize, rv));
+                self.scopes.push(vec![]);
+                for (p, &v) in c.inputs.iter().zip(&vs) {
+                    self.pat(p, v, None);
+                }
+                let saved = self.ret;
+                self.ret = rv;
+                let b = self.expr(&c.body);
+                self.unify(b, rv);
+                self.ret = saved;
+                self.scopes.pop();
+                self.with(Shape::Clo(st, n))
             }
             Expr::MethodCall(mc)
                 if {
@@ -1140,6 +1364,32 @@ impl Inf<'_> {
                         .or_else(|| self.prog.default_method(sid, &n))
                 });
                 let args: Vec<u32> = mc.args.iter().map(|a| self.expr(a)).collect();
+                // `&dyn Trait` のメソッド: trait の宣言のシグネチャ
+                let mut dt = self.resolve(rv);
+                while let Some(Ty::Ref(_, i)) = dt {
+                    dt = Some(*i);
+                }
+                if let Some(Ty::Dyn(tr)) = dt {
+                    let decl = self.prog.traits.get(tr).and_then(|ds| {
+                        ds.iter()
+                            .copied()
+                            .find(|&d| self.prog.names[d as usize].rsplit("::").next() == Some(&n))
+                    });
+                    if let Some(d) = decl {
+                        let sig = &self.prog.sigs[d as usize];
+                        let (ps, ret) = (sig.params[1..].to_vec(), sig.ret);
+                        for (a, p) in args.into_iter().zip(ps) {
+                            if !self.prog.has_param(p) {
+                                let k = self.known(p);
+                                self.unify(a, k);
+                            }
+                        }
+                        if !self.prog.has_param(ret) {
+                            return self.known(ret);
+                        }
+                    }
+                    return self.var();
+                }
                 if callee.is_none() && sid.is_none() {
                     // プリミティブ型への trait 実装のメソッド
                     if let Some(t) = self.resolve(rv) {

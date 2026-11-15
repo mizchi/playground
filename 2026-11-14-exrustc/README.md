@@ -80,13 +80,15 @@ bench/regress.sh
 
 | ベンチ（`benches/compile.rs`、N=1000） | 何を見るか | 現在値 |
 |---|---|---:|
-| `lsp/did_change_1fn` | LSP 応答性：1 関数編集の didChange から publishDiagnostics まで | 4.6 ms |
-| `lsp/did_change_noop` | 内容が同じ didChange（保存など） | 0.25 ms |
-| `cold/lsp_did_open` | 初めて開いたとき（全関数を検査） | 58 ms |
-| `build/noop` | 無変更ビルド（リンク省略） | 9.2 ms |
-| `build/edit_1fn` | 1 関数編集ビルド（リンク込み） | 18 ms |
-| `cold/build` | キャッシュなしのビルド | 95 ms |
-| `front/lex` | 字句解析だけ（no-op の下限） | 2.3 ms |
+| `lsp/did_change_1fn` | LSP 応答性：1 関数編集の didChange から publishDiagnostics まで | 3.9 ms |
+| `lsp/did_change_noop` | 内容が同じ didChange（保存など） | 0.19 ms |
+| `cold/lsp_did_open` | 初めて開いたとき（全関数を検査） | 41 ms |
+| `build/noop` | 無変更ビルド（リンク省略） | 7.1 ms |
+| `build/edit_1fn` | 1 関数編集ビルド（リンク込み） | 28 ms |
+| `cold/build` | キャッシュなしのビルド | 84 ms |
+| `front/lex` | 字句解析だけ（no-op の下限） | 1.7 ms |
+
+（値はマシンの状態で変わる。比べるときは同じ時間帯に、ベースラインのコミットと並べて測る。`build/edit_1fn` はリンク（この環境では ld.lld）が大半を占める）
 
 - 判定の閾値：5% 未満の変化は無視し（`noise_threshold`）、有意水準は 1% にしている。
   cold 系は実行ごとに ±10% ぶれるので、閾値を 15% にしている。
@@ -104,6 +106,12 @@ bench/regress.sh
     - 直したもの：毎回の全識別子のハッシュ（prelude の選択）、LSP が本文全体をハッシュしていたこと、名前表の SipHash。
     - 名前表は自前の FxHasher に替えた。キャッシュのキーには使わない。
     - 結果、LSP の 1 関数編集は −7%、no-op ビルドは −4% と、ベースラインより速くなった。
+  - 正しさ（クロージャ・dyn の追加時。`tests/compare.sh` に「キャッシュなし」と「キャッシュからの再ビルド」の両方を比べる段を足して見つけた）
+    - 同じ関数の中のクロージャは、struct の deep hash（＝親アイテムのハッシュ）とシグネチャがどれも同じになる。そのため `consume::<closure#8>` と `consume::<closure#9>` のキャッシュキーが衝突し、2 回目のビルドで別のクロージャの機械語が使われていた。キーにクロージャの名前を入れて直した。
+    - vtable を zero-init で定義したため `.bss` に置かれ、リロケーションが適用されず null を呼んでいた。
+  - 速度（クロージャ・dyn の追加時）
+    - HEAD との A/B で、LSP の 1 関数編集に +4% が出た。型推論の呼び出しごとの `Vec` の clone と、struct のハッシュに名前を入れていたことが原因で、どちらも外した。
+    - callgrind の命令数で見ると、1 関数編集（`Session::check`）は HEAD より少なくなった。didOpen（cold）は約 +2% で、criterion でも有意差はない。
 
 ## 対応している言語サブセット（no_std の範囲）
 
@@ -116,7 +124,7 @@ bench/regress.sh
 検証は、そうしたプログラムを rustc でもビルドし、実行結果（標準出力と終了コード）が一致することで行う。
 
 - rustc 側は libcore だけでビルドする（`-C panic=abort`）。
-- 比較は `tests/compare.sh` が行う。対象は `examples/*.rs` の 13 本で、そのうち no_std は 6 本（`nostd_calc` は字句解析と後置記法の電卓で、ジェネリック struct・`?`・const 配列・`&&str` の自動 deref を使う）。
+- 比較は `tests/compare.sh` が行う。対象は `examples/*.rs` の 15 本で、そのうち no_std は 6 本（`nostd_calc` は字句解析と後置記法の電卓で、ジェネリック struct・`?`・const 配列・`&&str` の自動 deref を使う）。
 
 ### 言語
 
@@ -138,6 +146,17 @@ bench/regress.sh
   - struct / enum（`Pair<T>`、`Option<T>`）
   - `impl<T> X<T>`、`impl<T> Option<&T>` のような self 型パターン
   - すべて呼び出し元で型引数を推論し、単相化する。ライフタイムは消去する
+  - 引数位置の `impl Trait`（名前のない型パラメータとして扱う）
+- クロージャ（`examples/closures.rs`）：
+  - キャプチャ：参照（既定）と `move`（値）。入れ子のクロージャ、`self` やメソッド呼び出しを含む本体
+  - `F: Fn(A) -> B` / `FnMut` / `FnOnce` 境界、`impl Fn(A) -> B` 引数、`&F` / `&mut F` 渡し
+  - 戻り値位置の `impl Fn(A) -> B`（末尾が `move` クロージャで、キャプチャが引数だけのもの）
+  - struct のフィールドに入れる（`struct Button<F: Fn(i64) -> i64> { on_click: F }`、`(self.on_click)(x)`）
+  - 引数・戻り値の型は、注釈 → 呼び先の境界 → 使われ方（親の型推論）→ 本体の型推論の順に決める
+- `dyn Trait`（`examples/dyn_trait.rs`）：
+  - `&dyn Trait` / `&mut dyn Trait`。`&T` からの暗黙の変換（引数・let・フィールド・配列・戻り値）と `as &dyn Trait`
+  - デフォルトメソッド、ジェネリックな impl（`impl<T> Tr for W<T>`）、プリミティブ型への impl を vtable 経由で呼ぶ
+  - `&dyn Fn(A) -> B`（クロージャを vtable 経由で呼ぶ）
 - 型：
   - 整数（`i8`〜`i64`、`u8`〜`u64`、`isize`、`usize`）、`bool`、`char`、`()`、`!`
   - `&T`、`&mut T`、`*const T`、`*mut T`
@@ -176,7 +195,9 @@ bench/regress.sh
 ### core の代わり（組み込みの prelude、`src/prelude.rs`）
 
 - `Option<T>`：`is_some` / `is_none` / `unwrap` / `unwrap_or` / `ok_or` / `or` / `xor` / `take` / `replace` / `as_ref` / `as_mut` / `copied` / `cloned`
+  - クロージャを取るもの：`map` / `and_then` / `unwrap_or_else` / `map_or` / `is_some_and` / `filter` / `ok_or_else`
 - `Result<T, E>`：`is_ok` / `is_err` / `unwrap` / `unwrap_err` / `unwrap_or` / `ok` / `err`
+  - クロージャを取るもの：`map` / `map_err` / `and_then` / `unwrap_or_else`
 - `core::panic::PanicInfo`
 - `core::cmp::{min, max}`、`core::mem::{swap, replace, size_of, align_of}`、`core::ptr::{null, null_mut, read_volatile, write_volatile}`
 - 組み込みメソッド：
@@ -205,8 +226,13 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
 
 - alloc（`Vec` / `Box` / `String`）
 - 書式化（`write!` / `core::fmt`）
-- クロージャ
-- `dyn Trait`、関連型、関連定数（`u32::MAX` などの組み込みは可）
+- `Box<dyn Trait>`（alloc が要る）、関数ポインタ・関数アイテムを値として渡すこと（`apply(double, 3)`）
+- クロージャの制限
+  - マクロの引数の中のクロージャ（`assert!(f(|x| x))` の `|x| x`）
+  - Fn / FnMut / FnOnce を区別しない（`FnMut` のクロージャを `&dyn Fn` にしてもエラーにならない）
+  - ローカル変数をキャプチャするクロージャを `impl Fn` で返すこと（引数のキャプチャだけ対応）
+- `dyn` の制限：`Self` やジェネリクスを使うメソッド（object safe でないもの）は dyn 経由で呼べない。`dyn A + B` は不可
+- 関連型、関連定数（`u32::MAX` などの組み込みは可）
 - 浮動小数点
 - 128 bit 整数
 - モジュール（`mod`）、マクロ定義（`macro_rules!`）
@@ -228,6 +254,18 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
   - 戻り値：呼び出し側が確保した領域のアドレスを、隠れ第 1 引数（sret）で渡す。
   - extern "C" 関数との間で struct を値で受け渡すことはできない（エラーになる）。
 - **レイアウト**：宣言順に自然なアラインメントで並べる（repr(C) 相当）。
+- **クロージャ**（`src/closure.rs`）
+  - 要約の段階で、本体の k 番目（前順）のクロージャを次の 2 つに持ち上げる（lambda lifting）。
+    - struct `親::{closure#k}<親の型引数, __C.., __P.., __R>`。フィールドはキャプチャで、参照キャプチャなら `*mut T`、`move` なら `T`。
+    - fn `親::{closure#k}::call(__env: *mut その struct, 引数..) -> __R`。
+  - キャプチャ・引数・戻り値の型がすべて struct の型引数に入る。そのためクロージャの型だけで本体のインスタンスが決まり、既存の単相化とインスタンス単位のキャッシュにそのまま乗る。
+  - 本体は親のアイテムを parse し直し、k 番目を取り出して普通の fn にしてコンパイルする。キャプチャは `__env` のフィールドとしてスコープに入る。
+  - 呼ばれないクロージャも、作った時点でインスタンスを要求する（本体のエラーを報告するため。未使用なら `--gc-sections` で消える）。
+- **`&dyn Trait`**：(データのポインタ, vtable のアドレス) の 16 byte。
+  - vtable は trait のメソッドの宣言順に並べた関数アドレスの列で、Blob に「関数 ID の列」として持つ。
+  - キャッシュには関数名（インスタンスなら元の関数名と型引数）で保存する。
+  - `.o` では内容で重複を除いた読み取り専用データにする。
+  - `&dyn Fn(A) -> B` の vtable は、クロージャ本体のインスタンス 1 個だけ。
 
 ## アーキテクチャ
 
@@ -259,7 +297,8 @@ src.rs ──lexer(自前)──▶ アイテム列 + 正規化ハッシュ
 |---|---|
 | `src/lexer.rs` | トップレベルのアイテム分割と、正規化トークン列のハッシュ。syn より 1 桁以上速い。`impl` はヘッダとメンバに分ける |
 | `src/front.rs` | 型（intern）、struct レイアウト、シグネチャ、アイテム要約とそのシリアライズ、参照グラフ、到達可能性 |
-| `src/infer.rs` | 関数単位の型推論（union-find。参照の形も単一化する） |
+| `src/infer.rs` | 関数単位の型推論（union-find。参照・クロージャの形も単一化する） |
+| `src/closure.rs` | クロージャの持ち上げ：キャプチャの抽出（スコープを辿る自由変数解析）と、本体を fn にする合成 |
 | `src/codegen.rs` | syn AST から Cranelift IR への 1 パス lowering と型検査（place / スタックスロット / sret）。出力は `Blob` |
 | `src/cache.rs` | 1 ファイルキャッシュ（index + payload、tmp + rename で書き込む） |
 | `src/link.rs` | `cc -###` からリンク行を抽出して保存し、リンカを直接起動する |
@@ -364,7 +403,7 @@ rustc 側はほとんどが std 由来。
 ## 次にやること
 
 - **言語**
-  - クロージャ、`dyn Trait`、モジュール、`core::fmt` 相当の書式化
+  - モジュール、`core::fmt` 相当の書式化、関数ポインタ
   - 浮動小数点、オーバーフロー検査（debug ビルドの rustc と同じ panic）
   - 単相化をレイアウトでキーにして共有する（`Vec<A>` と `Vec<B>` を 1 つにする。blaze の polymorph）
   - 最小の自前 std（relax 方式）

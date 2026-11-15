@@ -160,30 +160,16 @@ pub fn encode_blob(b: &Blob, prog: &Program, insts: &Insts, out: &mut Vec<u8>) {
     out.extend_from_slice(&(b.code.len() as u32).to_le_bytes());
     out.extend_from_slice(&b.code);
     out.extend_from_slice(&(b.relocs.len() as u32).to_le_bytes());
-    let put_name = |out: &mut Vec<u8>, id: u32| {
-        let n = prog.names[id as usize].as_bytes();
-        out.extend_from_slice(&(n.len() as u16).to_le_bytes());
-        out.extend_from_slice(n);
-    };
     for r in &b.relocs {
         out.extend_from_slice(&r.offset.to_le_bytes());
         out.push(r.kind);
         out.extend_from_slice(&r.addend.to_le_bytes());
         match r.target {
-            Target::Func(id) => match insts.get(id) {
-                None => {
-                    out.push(0);
-                    put_name(out, id);
-                }
-                Some(inst) => {
-                    out.push(2);
-                    put_name(out, inst.base);
-                    out.push(inst.args.len() as u8);
-                    for &t in &inst.args {
-                        crate::front::put_ty(out, &prog.ty_syn(t));
-                    }
-                }
-            },
+            Target::Func(id) => put_func(out, id, prog, insts),
+            Target::Vtable(k) => {
+                out.push(5);
+                out.extend_from_slice(&k.to_le_bytes());
+            }
             Target::SelfOffset(o) => {
                 out.push(1);
                 out.extend_from_slice(&o.to_le_bytes());
@@ -206,6 +192,56 @@ pub fn encode_blob(b: &Blob, prog: &Program, insts: &Insts, out: &mut Vec<u8>) {
         out.extend_from_slice(&(d.len() as u32).to_le_bytes());
         out.extend_from_slice(d);
     }
+    // vtable は (ほとんどの関数にはないので) あるときだけ書く
+    if !b.vtables.is_empty() {
+        out.extend_from_slice(&(b.vtables.len() as u32).to_le_bytes());
+        for vt in &b.vtables {
+            out.extend_from_slice(&(vt.len() as u32).to_le_bytes());
+            for &f in vt {
+                put_func(out, f, prog, insts);
+            }
+        }
+    }
+}
+
+/// 関数への参照: 普通の関数は名前 (タグ 0)、インスタンスは (元の関数名, 型引数) (タグ 2)
+fn put_func(out: &mut Vec<u8>, id: u32, prog: &Program, insts: &Insts) {
+    let put_name = |out: &mut Vec<u8>, id: u32| {
+        let n = prog.names[id as usize].as_bytes();
+        out.extend_from_slice(&(n.len() as u16).to_le_bytes());
+        out.extend_from_slice(n);
+    };
+    match insts.get(id) {
+        None => {
+            out.push(0);
+            put_name(out, id);
+        }
+        Some(inst) => {
+            out.push(2);
+            put_name(out, inst.base);
+            out.push(inst.args.len() as u8);
+            for &t in &inst.args {
+                crate::front::put_ty(out, &prog.ty_syn(t));
+            }
+        }
+    }
+}
+
+/// put_func の逆 (タグを読んだ後)。インスタンスは insts に要求し直す
+fn get_func(r: &mut Rd, tag: u8, prog: &Program, insts: &Mutex<Insts>) -> Option<u32> {
+    let len = r.u16()? as usize;
+    let name = std::str::from_utf8(r.take(len)?).ok()?;
+    let id = *prog.index.get(name)?;
+    if tag == 0 {
+        return Some(id);
+    }
+    let na = r.u8()? as usize;
+    let mut args = Vec::with_capacity(na);
+    for _ in 0..na {
+        let ts = crate::front::read_ty(r.0, &mut r.1)?;
+        args.push(prog.resolve(&ts).ok()?);
+    }
+    insts.lock().unwrap().request(prog, id, args).ok()
 }
 
 /// インスタンスの列を (元の関数名, 型引数) で書く (check の「検査済み」の印に付ける)
@@ -267,22 +303,8 @@ pub fn decode_blob(d: &[u8], prog: &Program, insts: &Mutex<Insts>) -> Option<Blo
         let addend = r.u64()? as i64;
         let tag = r.u8()?;
         let target = match tag {
-            0 | 2 => {
-                let len = r.u16()? as usize;
-                let name = std::str::from_utf8(r.take(len)?).ok()?;
-                let id = *prog.index.get(name)?;
-                if tag == 0 {
-                    Target::Func(id)
-                } else {
-                    let na = r.u8()? as usize;
-                    let mut args = Vec::with_capacity(na);
-                    for _ in 0..na {
-                        let ts = crate::front::read_ty(r.0, &mut r.1)?;
-                        args.push(prog.resolve(&ts).ok()?);
-                    }
-                    Target::Func(insts.lock().unwrap().request(prog, id, args).ok()?)
-                }
-            }
+            0 | 2 => Target::Func(get_func(&mut r, tag, prog, insts)?),
+            5 => Target::Vtable(r.u32()?),
             1 => Target::SelfOffset(r.u32()?),
             3 => Target::Data(r.u32()?),
             4 => {
@@ -305,10 +327,24 @@ pub fn decode_blob(d: &[u8], prog: &Program, insts: &Mutex<Insts>) -> Option<Blo
         let n = r.u32()? as usize;
         datas.push(r.take(n)?.to_vec());
     }
+    let mut vtables = vec![];
+    if r.1 < r.0.len() {
+        let nv = r.u32()? as usize;
+        for _ in 0..nv {
+            let n = r.u32()? as usize;
+            let mut vt = Vec::with_capacity(n);
+            for _ in 0..n {
+                let tag = r.u8()?;
+                vt.push(get_func(&mut r, tag, prog, insts)?);
+            }
+            vtables.push(vt);
+        }
+    }
     Some(Blob {
         align,
         code,
         relocs,
         datas,
+        vtables,
     })
 }

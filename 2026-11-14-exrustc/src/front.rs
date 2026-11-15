@@ -56,6 +56,9 @@ pub enum Ty {
     Str,
     /// `*const T` (false) / `*mut T` (true)
     Ptr(bool, &'static Ty),
+    /// `dyn Trait` (サイズ不定。`&dyn Trait` = (データ, vtable) の中身としてだけ現れる)。
+    /// 中身は trait 境界の文字列 (`Shape` / `Fn(i32) -> i32`)
+    Dyn(&'static str),
 }
 
 impl Ty {
@@ -65,8 +68,51 @@ impl Ty {
     }
     /// (ポインタ, 長さ) の 2 語で表す参照
     pub fn is_fat(self) -> bool {
-        matches!(self, Ty::Ref(_, Ty::Slice(_) | Ty::Str))
+        matches!(self, Ty::Ref(_, Ty::Slice(_) | Ty::Str | Ty::Dyn(_)))
     }
+}
+
+/// 文字列の intern 表 (`dyn` の trait 境界)
+pub fn intern_str(s: &str) -> &'static str {
+    static TABLE: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let mut tab = TABLE.get_or_init(Default::default).lock().unwrap();
+    if let Some(&r) = tab.get(s) {
+        return r;
+    }
+    let r: &'static str = Box::leak(s.to_string().into_boxed_str());
+    tab.insert(r);
+    r
+}
+
+/// trait 境界を文字列にする (パスの最後のセグメントだけ。`core::ops::Fn(u8) -> u8` → `Fn (u8) -> u8`)
+pub fn bound_string(t: &syn::TraitBound) -> String {
+    use quote::ToTokens;
+    t.path
+        .segments
+        .last()
+        .map(|s| s.to_token_stream().to_string())
+        .unwrap_or_default()
+}
+
+/// `Fn(A, B) -> R` 形式の境界なら (種類, 引数, 戻り値)
+pub fn parse_fn_bound(s: &str) -> Option<(&'static str, Vec<TySyn>, TySyn)> {
+    let kind = ["FnOnce", "FnMut", "Fn"]
+        .into_iter()
+        .find(|k| s.starts_with(k) && s[k.len()..].trim_start().starts_with('('))?;
+    let tb: syn::TraitBound = syn::parse_str(s).ok()?;
+    let syn::PathArguments::Parenthesized(pa) = &tb.path.segments.last()?.arguments else {
+        return None;
+    };
+    let args = pa
+        .inputs
+        .iter()
+        .map(|t| parse_tysyn(t, None).ok())
+        .collect::<Option<Vec<_>>>()?;
+    let ret = match &pa.output {
+        syn::ReturnType::Default => TySyn::Prim(Ty::Unit),
+        syn::ReturnType::Type(_, t) => parse_tysyn(t, None).ok()?,
+    };
+    Some((kind, args, ret))
 }
 
 /// 型の intern 表。種類数はプログラム中の型の数で抑えられるので解放しない。
@@ -141,7 +187,8 @@ impl Ty {
             | Ty::Param(_)
             | Ty::Array(..)
             | Ty::Slice(_)
-            | Ty::Str => 0,
+            | Ty::Str
+            | Ty::Dyn(_) => 0,
         }
     }
 }
@@ -162,6 +209,8 @@ pub enum TySyn {
     Slice(Box<TySyn>),
     Str,
     Ptr(bool, Box<TySyn>),
+    /// `dyn Trait` (境界の文字列)
+    Dyn(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -183,6 +232,20 @@ pub fn parse_tysyn(t: &syn::Type, self_ty: Option<&TySyn>) -> R<TySyn> {
                 .collect::<R<_>>()?,
         ),
         syn::Type::Paren(p) => parse_tysyn(&p.elem, self_ty)?,
+        syn::Type::TraitObject(to) => {
+            let mut tr = None;
+            for b in &to.bounds {
+                match b {
+                    syn::TypeParamBound::Trait(t) if tr.is_none() => tr = Some(bound_string(t)),
+                    syn::TypeParamBound::Lifetime(_) => {}
+                    _ => return err(b.span(), "only one trait is supported in `dyn`"),
+                }
+            }
+            match tr {
+                Some(s) => TySyn::Dyn(s),
+                None => return err(to.span(), "`dyn` needs a trait"),
+            }
+        }
         syn::Type::Group(g) => parse_tysyn(&g.elem, self_ty)?,
         // ライフタイムはコード生成に影響しないので消去する
         syn::Type::Reference(r) => TySyn::Ref(
@@ -470,6 +533,25 @@ pub struct Summary {
     pub consts: Vec<(String, TySyn, String)>,
     /// `static [mut] N: T = e;` の (名前, 型, 初期値のソース, mut)
     pub statics: Vec<(String, TySyn, String, bool)>,
+    /// fn 本体の中のクロージャ (前順)。[`crate::closure`] を参照
+    pub closures: Vec<ClosureSyn>,
+}
+
+/// 持ち上げたクロージャ 1 個分 (struct と fn)
+#[derive(Clone, Debug, Default)]
+pub struct ClosureSyn {
+    /// struct の名前 (`親::{closure#k}`)。fn は `<name>::call`
+    pub name: String,
+    /// struct と fn の型パラメータ: 親の型パラメータ, __C.., __P.., __R
+    pub generics: Vec<String>,
+    /// キャプチャ (名前, `__Ci`)
+    pub fields: Vec<(String, TySyn)>,
+    pub sig: SigSyn,
+    pub by_move: bool,
+    /// 戻り値型の注釈 (`|x| -> u8 { .. }`)
+    pub ret_ann: Option<TySyn>,
+    /// 親の型パラメータの数
+    pub n_parent: u64,
 }
 
 /// const / static の定義
@@ -580,6 +662,28 @@ pub struct Program {
     pub const_index: FxMap<String, u32>,
     /// プリミティブ型への trait 実装 (型, trait)
     pub prim_impls: HashSet<(Ty, String)>,
+    /// クロージャの fn id → 定義
+    pub closures: FxMap<u32, ClosureDef>,
+    /// (親の関数 id, 前順の番号) → クロージャの fn id
+    pub closure_by: FxMap<(u32, u32), u32>,
+    /// クロージャの (ジェネリックな) struct id → fn id
+    pub closure_of_struct: FxMap<u32, u32>,
+}
+
+/// 持ち上げたクロージャ ([`crate::closure`])
+pub struct ClosureDef {
+    /// 親 (クロージャを書いた関数) の id と、その本体での前順の番号
+    pub parent: u32,
+    pub k: u32,
+    /// ジェネリックな struct
+    pub sid: u32,
+    /// キャプチャの名前 (struct のフィールド順)
+    pub captures: Vec<String>,
+    pub by_move: bool,
+    /// 親の型パラメータの数 (型引数の先頭)
+    pub n_parent: usize,
+    /// 戻り値の注釈 (親の型パラメータを Param で含みうる)
+    pub ret_ann: Option<Ty>,
 }
 
 /// 単相化したインスタンス (ジェネリック関数 base に型引数 args を入れたもの)
@@ -721,6 +825,14 @@ impl Insts {
     }
 }
 
+/// 関数 body の AST。クロージャなら親の本体から k 番目を取り出して fn にする
+pub fn fn_ast(prog: &Program, f: syn::ItemFn, body: u32) -> syn::ItemFn {
+    match prog.closures.get(&body) {
+        Some(cd) => crate::closure::synth(crate::closure::closures_of(&f.block)[cd.k as usize]),
+        None => f,
+    }
+}
+
 /// syn で 1 アイテムを parse する。エラー位置はファイル全体での行に補正する。
 /// impl のヘッダは空の impl として、メンバは `Item::Fn` に直して返す。
 pub fn parse_item(src: &str, it: &SrcItem) -> R<syn::Item> {
@@ -831,8 +943,10 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
     match item {
         syn::Item::Fn(f) if owner.is_some() => {
             let ow = owner.unwrap();
-            let sig = parse_sig(&f.sig, false, false, Some(ow))?;
-            sm.fns.push((format!("{}::{}", ow.base, f.sig.ident), sig));
+            let mut sig = parse_sig(&f.sig, false, false, Some(ow))?;
+            let name = format!("{}::{}", ow.base, f.sig.ident);
+            lift_closures(f, &name, &mut sig, Some(&ow.self_ty), &mut sm)?;
+            sm.fns.push((name, sig));
         }
         syn::Item::Trait(t) => {
             only_lifetimes(&t.generics)?;
@@ -877,6 +991,7 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
                     return err(f.sig.span(), "`#[panic_handler]` function must return `!`");
                 }
             }
+            lift_closures(f, &name, &mut sig, None, &mut sm)?;
             sm.fns.push((name, sig));
         }
         // `use` は名前の最後のセグメントで解決するので読み飛ばす。クレート属性も同じ
@@ -984,6 +1099,144 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
     Ok(sm)
 }
 
+/// fn 本体のクロージャを持ち上げる ([`crate::closure`])。戻り値位置の `impl Fn` も
+/// ここで末尾のクロージャの型に置き換える
+fn lift_closures(
+    f: &syn::ItemFn,
+    fname: &str,
+    sig: &mut SigSyn,
+    self_ty: Option<&TySyn>,
+    sm: &mut Summary,
+) -> R<()> {
+    use crate::closure;
+    let cs = closure::closures_of(&f.block);
+    if cs.is_empty() {
+        if sig.ret == TySyn::Named(IMPL_RET.into()) {
+            return err(f.sig.output.span(), "`impl Trait` return types must be a closure");
+        }
+        return Ok(());
+    }
+    let bound = closure::bound_in_fn(f);
+    let mut out = vec![];
+    for (k, c) in cs.iter().enumerate() {
+        let name = format!("{fname}::{{closure#{k}}}");
+        let mut generics: Vec<String> = sig.generics.iter().map(|g| g.0.clone()).collect();
+        let n_parent = generics.len() as u64;
+        let caps = closure::captures(c, &bound);
+        let mut fields = vec![];
+        for (i, n) in caps.iter().enumerate() {
+            let g = format!("__C{i}");
+            fields.push((n.clone(), TySyn::Named(g.clone())));
+            generics.push(g);
+        }
+        let mut params = vec![];
+        for (i, p) in c.inputs.iter().enumerate() {
+            match closure::param(p).1 {
+                Some(t) => params.push(parse_tysyn(t, self_ty)?),
+                None => {
+                    let g = format!("__P{i}");
+                    params.push(TySyn::Named(g.clone()));
+                    generics.push(g);
+                }
+            }
+        }
+        generics.push("__R".into());
+        let ret_ann = match &c.output {
+            syn::ReturnType::Default => None,
+            syn::ReturnType::Type(_, t) => Some(parse_tysyn(t, self_ty)?),
+        };
+        let env = TySyn::App(
+            name.clone(),
+            generics.iter().map(|g| TySyn::Named(g.clone())).collect(),
+        );
+        params.insert(0, TySyn::Ptr(true, Box::new(env)));
+        let mut gs: Vec<(String, Vec<String>)> = sig.generics.clone();
+        gs.extend(generics[n_parent as usize..].iter().map(|g| (g.clone(), vec![])));
+        let csig = SigSyn {
+            params,
+            ret: TySyn::Named("__R".into()),
+            symbol: format!("{}.c{k}", sig.symbol),
+            impl_of: sig.impl_of.clone(),
+            generics: gs,
+            has_body: true,
+            self_ty: sig.self_ty.clone(),
+            ..Default::default()
+        };
+        out.push(ClosureSyn {
+            name,
+            generics,
+            fields,
+            sig: csig,
+            by_move: c.capture.is_some(),
+            ret_ann,
+            n_parent,
+        });
+    }
+    // `-> impl Fn(A) -> B { move |x| .. }`: 型は末尾のクロージャの struct。
+    // キャプチャは引数だけ (型が注釈から分かる) に限る
+    if sig.ret == TySyn::Named(IMPL_RET.into()) {
+        let bad = || err(f.sig.output.span(), "`impl Trait` return types must be a closure");
+        let tail = match f.block.stmts.last() {
+            Some(syn::Stmt::Expr(e, None)) => e,
+            _ => return bad(),
+        };
+        let mut tail = tail;
+        while let syn::Expr::Paren(p) = tail {
+            tail = &p.expr;
+        }
+        let syn::Expr::Closure(tc) = tail else {
+            return bad();
+        };
+        let k = cs.iter().position(|c| std::ptr::eq(*c, tc)).unwrap();
+        let syn::ReturnType::Type(_, rt) = &f.sig.output else {
+            unreachable!()
+        };
+        let syn::Type::ImplTrait(it) = &**rt else {
+            unreachable!()
+        };
+        let bs = bound_names(&it.bounds)?;
+        let Some((_, bargs, bret)) = bs.iter().find_map(|b| parse_fn_bound(b)) else {
+            return err(rt.span(), "`impl Trait` return types must be `impl Fn(..) -> ..`");
+        };
+        let cl = &out[k];
+        let mut args: Vec<TySyn> = sig.generics.iter().map(|g| TySyn::Named(g.0.clone())).collect();
+        for (n, _) in &cl.fields {
+            if cl.by_move {
+                let ty = f.sig.inputs.iter().zip(&sig.params).find_map(|(a, t)| match a {
+                    syn::FnArg::Typed(pt) => match &*pt.pat {
+                        syn::Pat::Ident(pi) if pi.ident == n => Some(t.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                });
+                match ty {
+                    Some(t) => args.push(t),
+                    None => {
+                        return err(
+                            tc.span(),
+                            format!("a returned closure can only capture parameters (`{n}`)"),
+                        );
+                    }
+                }
+            } else {
+                return err(tc.span(), "a returned closure that captures must be `move`");
+            }
+        }
+        for (i, p) in tc.inputs.iter().enumerate() {
+            if closure::param(p).1.is_none() {
+                match bargs.get(i) {
+                    Some(t) => args.push(t.clone()),
+                    None => return err(p.span(), "closure has more parameters than the bound"),
+                }
+            }
+        }
+        args.push(cl.ret_ann.clone().unwrap_or(bret));
+        sig.ret = TySyn::App(cl.name.clone(), args);
+    }
+    sm.closures = out;
+    Ok(())
+}
+
 /// struct / enum 定義の中での `Self`
 fn self_of(name: &str, generics: &[String]) -> TySyn {
     if generics.is_empty() {
@@ -1012,6 +1265,9 @@ impl Program {
             consts: vec![],
             const_index: FxMap::default(),
             prim_impls: HashSet::new(),
+            closures: FxMap::default(),
+            closure_by: FxMap::default(),
+            closure_of_struct: FxMap::default(),
         };
         // 0. const / static の名前 (配列の長さで使うので型より先に)
         for (ii, sm) in sums.iter().enumerate() {
@@ -1051,6 +1307,15 @@ impl Program {
                 }
                 p.struct_index.insert(name.clone(), sdefs.len() as u32);
                 sdefs.push((ii, name.clone(), shape, sm.adt_generics.clone()));
+            }
+            for c in &sm.closures {
+                p.struct_index.insert(c.name.clone(), sdefs.len() as u32);
+                sdefs.push((
+                    ii,
+                    c.name.clone(),
+                    AdtShape::Struct(c.fields.clone()),
+                    c.generics.clone(),
+                ));
             }
         }
         // 2. フィールド型を解決し、依存順にレイアウトを決める
@@ -1124,7 +1389,14 @@ impl Program {
         }
         // 3. 関数
         for (ii, (it, sm)) in items.iter().zip(sums).enumerate() {
-            for (name, ss) in &sm.fns {
+            let first = p.names.len() as u32;
+            let cnames: Vec<String> = sm.closures.iter().map(|c| format!("{}::call", c.name)).collect();
+            let fns = sm
+                .fns
+                .iter()
+                .map(|(n, s)| (n, s))
+                .chain(cnames.iter().zip(sm.closures.iter().map(|c| &c.sig)));
+            for (name, ss) in fns {
                 if p.index.contains_key(name) {
                     return Err(format!("{}:1: duplicate definition of `{name}`", it.line));
                 }
@@ -1196,6 +1468,32 @@ impl Program {
                         .push(p.names.len() as u32 - 1);
                 }
             }
+            for (k, c) in sm.closures.iter().enumerate() {
+                let fid = first + sm.fns.len() as u32 + k as u32;
+                let sid = p.struct_index[&c.name];
+                let gnames: Vec<&str> = c.generics.iter().map(|g| g.as_str()).collect();
+                let ret_ann = match &c.ret_ann {
+                    Some(t) => Some(
+                        p.resolve_g(t, &gnames)
+                            .map_err(|e| format!("{}:1: {e}", it.line))?,
+                    ),
+                    None => None,
+                };
+                p.closures.insert(
+                    fid,
+                    ClosureDef {
+                        parent: first,
+                        k: k as u32,
+                        sid,
+                        captures: c.fields.iter().map(|f| f.0.clone()).collect(),
+                        by_move: c.by_move,
+                        n_parent: c.n_parent as usize,
+                        ret_ann,
+                    },
+                );
+                p.closure_by.insert((first, k as u32), fid);
+                p.closure_of_struct.insert(sid, fid);
+            }
             if let Some(tr) = &sm.trait_decl {
                 p.traits.entry(tr.clone()).or_default();
             }
@@ -1262,11 +1560,21 @@ impl Program {
     /// 型 t が trait tr を実装しているか
     pub fn implements(&self, t: Ty, tr: &str) -> bool {
         match t {
+            Ty::Struct(sid) if self.closure_of_struct.contains_key(&self.base_of(sid)) => {
+                // クロージャ: Fn 系と、キャプチャがすべて Copy なら Copy / Clone
+                parse_fn_bound(tr).is_some()
+                    || matches!(tr, "Fn" | "FnMut" | "FnOnce" | "Sized")
+                    || (matches!(tr, "Copy" | "Clone")
+                        && self.structs[sid as usize]
+                            .fields
+                            .iter()
+                            .all(|f| self.implements(f.1, tr)))
+            }
             Ty::Struct(sid) => self.impls.contains(&(self.base_of(sid), tr.to_string())),
             Ty::Array(e, _) => {
                 tr == "Sized" || (matches!(tr, "Copy" | "Clone") && self.implements(*e, tr))
             }
-            Ty::Slice(_) | Ty::Str => false,
+            Ty::Slice(_) | Ty::Str | Ty::Dyn(_) => false,
             // 組み込み型: マーカー trait と比較・既定値など (core が実装しているもの)
             Ty::Ref(true, _) => tr == "Sized",
             Ty::Ptr(..) | Ty::Ref(..) => {
@@ -1353,6 +1661,9 @@ impl Program {
             TySyn::Ptr(m, inner) => Ty::Ptr(*m, intern(r(inner)?)),
             TySyn::Slice(inner) => Ty::Slice(intern(r(inner)?)),
             TySyn::Str => Ty::Str,
+            TySyn::Dyn(s) => {
+                Ty::Dyn(intern_str(s))
+            }
             TySyn::Array(inner, len) => {
                 let n = match len {
                     ArrLen::Lit(n) => *n,
@@ -1684,6 +1995,7 @@ impl Program {
             Ty::Slice(i) => TySyn::Slice(Box::new(self.ty_syn(*i))),
             Ty::Array(i, n) => TySyn::Array(Box::new(self.ty_syn(*i)), ArrLen::Lit(n as u64)),
             Ty::Str => TySyn::Str,
+            Ty::Dyn(s) => TySyn::Dyn(s.to_string()),
             Ty::Struct(id) => {
                 let sd = &self.structs[id as usize];
                 match sd.base {
@@ -1977,7 +2289,7 @@ impl Program {
                 (s * n, a)
             }
             t if t.is_fat() => (16, 8),
-            Ty::Unit | Ty::Never | Ty::Slice(_) | Ty::Str | Ty::Param(_) => (0, 1),
+            Ty::Unit | Ty::Never | Ty::Slice(_) | Ty::Str | Ty::Dyn(_) | Ty::Param(_) => (0, 1),
             t => (t.bits() / 8, t.bits() / 8),
         }
     }
@@ -2004,6 +2316,7 @@ impl Program {
             Ty::Array(i, n) => format!("[{}; {n}]", self.tn(*i)),
             Ty::Slice(i) => format!("[{}]", self.tn(*i)),
             Ty::Str => "str".into(),
+            Ty::Dyn(s) => format!("dyn {}", s.replace(" (", "(").replace("( ", "(").replace(" )", ")")),
             t => format!("{t:?}").to_lowercase(),
         }
     }
@@ -2019,8 +2332,12 @@ impl Program {
                 let sd = &self.structs[id as usize];
                 match sd.base {
                     // インスタンス: 元の定義の deep hash + 型引数
+                    // (クロージャの struct は同じアイテムに複数あるので名前も入れる)
                     Some(b) => {
                         h.add(&(103u8, self.structs[b as usize].deep, sd.args.len()));
+                        if self.closure_of_struct.contains_key(&b) {
+                            h.add(&self.structs[b as usize].name);
+                        }
                         for &a in &sd.args {
                             self.hash_ty(a, h);
                         }
@@ -2042,6 +2359,13 @@ impl Program {
                 self.hash_ty(*i, h);
             }
             Ty::Str => h.add(&107u8),
+            // vtable の並び (trait のメソッドの順) もコードに埋まる
+            Ty::Dyn(s) => {
+                h.add(&(108u8, s));
+                for &f in self.traits.get(s).map(|v| &v[..]).unwrap_or(&[]) {
+                    h.add(&self.names[f as usize]);
+                }
+            }
             t => h.add(&ty_code(t)),
         }
     }
@@ -2198,6 +2522,10 @@ impl Enc for TySyn {
                 out.push(29 + *m as u8);
                 i.enc(out);
             }
+            TySyn::Dyn(n) => {
+                out.push(31);
+                n.enc(out);
+            }
         }
     }
     fn dec(r: &mut Rd) -> Option<Self> {
@@ -2212,6 +2540,7 @@ impl Enc for TySyn {
             27 => TySyn::Slice(Box::new(TySyn::dec(r)?)),
             28 => TySyn::Str,
             c @ (29 | 30) => TySyn::Ptr(c == 30, Box::new(TySyn::dec(r)?)),
+            31 => TySyn::Dyn(String::dec(r)?),
             _ => return None,
         })
     }
@@ -2275,6 +2604,16 @@ crate::enc_struct!(Summary {
     impl_self_ty,
     consts,
     statics,
+    closures,
+});
+crate::enc_struct!(ClosureSyn {
+    name,
+    generics,
+    fields,
+    sig,
+    by_move,
+    ret_ann,
+    n_parent,
 });
 
 impl Enc for (String, TySyn, String, bool) {
@@ -2348,12 +2687,20 @@ fn only_lifetimes(g: &syn::Generics) -> R<()> {
 }
 
 /// trait 境界 (`T: A + B` と where 節) を集める
-fn collect_generics(g: &syn::Generics, out: &mut Vec<(String, Vec<String>)>) -> R<()> {
-    let bound_names =
-        |bs: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>| -> R<Vec<String>> {
+type Bounds = syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>;
+
+fn bound_names(bs: &Bounds) -> R<Vec<String>> {
             let mut v = vec![];
             for b in bs {
                 match b {
+                    syn::TypeParamBound::Trait(t)
+                        if matches!(
+                            t.path.segments.last().map(|s| &s.arguments),
+                            Some(syn::PathArguments::Parenthesized(_))
+                        ) =>
+                    {
+                        v.push(bound_string(t))
+                    }
                     syn::TypeParamBound::Trait(t) => match t.path.get_ident() {
                         Some(id) => v.push(id.to_string()),
                         None => return err(t.span(), "unsupported trait bound"),
@@ -2363,7 +2710,9 @@ fn collect_generics(g: &syn::Generics, out: &mut Vec<(String, Vec<String>)>) -> 
                 }
             }
             Ok(v)
-        };
+        }
+
+fn collect_generics(g: &syn::Generics, out: &mut Vec<(String, Vec<String>)>) -> R<()> {
     for p in &g.params {
         match p {
             syn::GenericParam::Lifetime(_) => {}
@@ -2397,6 +2746,9 @@ fn collect_generics(g: &syn::Generics, out: &mut Vec<(String, Vec<String>)>) -> 
 }
 
 /// owner: impl / trait のメンバならその所有者
+/// 戻り値位置の `impl Trait` の仮の型名
+pub const IMPL_RET: &str = "impl Trait";
+
 fn parse_sig(
     sig: &syn::Signature,
     is_extern: bool,
@@ -2419,7 +2771,24 @@ fn parse_sig(
     let mut has_self = false;
     for a in &sig.inputs {
         match a {
-            syn::FnArg::Typed(pt) => params.push(parse_tysyn(&pt.ty, self_ty)?),
+            syn::FnArg::Typed(pt) => {
+                // 引数位置の `impl Trait` は名前のない型パラメータ
+                let (inner, rf) = match &*pt.ty {
+                    syn::Type::Reference(r) => (&*r.elem, Some(r.mutability.is_some())),
+                    t => (t, None),
+                };
+                if let syn::Type::ImplTrait(it) = inner {
+                    let g = format!("__impl{}", generics.len());
+                    generics.push((g.clone(), bound_names(&it.bounds)?));
+                    let t = TySyn::Named(g);
+                    params.push(match rf {
+                        Some(m) => TySyn::Ref(m, Box::new(t)),
+                        None => t,
+                    });
+                } else {
+                    params.push(parse_tysyn(&pt.ty, self_ty)?)
+                }
+            }
             // syn 2 では `self` / `&self` / `&mut self` / `self: &Self` すべて ty に完全な型が入る
             syn::FnArg::Receiver(r) => {
                 if owner.is_none() {
@@ -2432,6 +2801,10 @@ fn parse_sig(
     }
     let ret = match &sig.output {
         syn::ReturnType::Default => TySyn::Prim(Ty::Unit),
+        // 戻り値位置の `impl Trait` は本体を見て summarize が具体型に置き換える
+        syn::ReturnType::Type(_, t) if matches!(&**t, syn::Type::ImplTrait(_)) => {
+            TySyn::Named(IMPL_RET.into())
+        }
         syn::ReturnType::Type(_, t) => parse_tysyn(t, self_ty)?,
     };
     let name = sig.ident.to_string();

@@ -374,6 +374,10 @@ impl Session {
         let ii = a.prog.item_of[id].unwrap() as usize;
         let mut h = KeyHasher::new();
         h.add(&(base, a.items[ii].hash));
+        // 同じアイテムから複数の関数ができる (クロージャ) ので名前も入れる
+        if a.prog.closures.contains_key(&(id as u32)) {
+            h.add(&a.prog.names[id]);
+        }
         // 自分のシグネチャ (struct 引数のレイアウトを含む) と、
         // 参照先はシグネチャだけ (本体の変更は呼び出し元に波及しない)
         a.prog.hash_sig(id as u32, &mut h);
@@ -771,6 +775,7 @@ fn compile_one(
     let syn::Item::Fn(f) = item else {
         unreachable!()
     };
+    let f = front::fn_ast(prog, f, body);
     w.compile(prog, insts, id, &f, isa)
         .map_err(|e| front::relocate_err(e, it))
     // f (AST) はここで捨てる: 同時に生きている AST は常に 1 関数分だけ
@@ -861,6 +866,7 @@ fn check_all(
         let syn::Item::Fn(f) = item else {
             return Ok(vec![]);
         };
+        let f = front::fn_ast(prog, f, body(id));
         w.check(prog, insts, id, &f, &**isa)
             .map_err(|e| front::relocate_err(e, it))
     };
@@ -1039,12 +1045,37 @@ fn emit_object(
     for (id, dv) in defs {
         define_val(&mut m, id, dv, &mut anon, &statics)?;
     }
+    // vtable: 関数アドレスの列。内容で重複を除く。到達しない関数 (どこからも名前で
+    // 呼ばれないメソッド) は 0 にしておく (dyn 経由の呼び出しもメソッド名で参照に入るので呼ばれない)
+    let mut vts: HashMap<Vec<u32>, cranelift_module::DataId> = HashMap::new();
     for &uid in user_live.iter().chain(&order) {
         let blob = &blobs[&uid];
         let fid = ids[&uid];
         let mut data_ids = vec![];
         for d in &blob.datas {
             data_ids.push(anon_data(&mut m, d.clone(), 1, &mut anon)?);
+        }
+        let mut vt_ids = vec![];
+        for vt in &blob.vtables {
+            if let Some(&id) = vts.get(vt) {
+                vt_ids.push(id);
+                continue;
+            }
+            let id = m
+                .declare_anonymous_data(false, false)
+                .map_err(|e| e.to_string())?;
+            let mut desc = cranelift_module::DataDescription::new();
+            desc.define(vec![0u8; 8 * vt.len().max(1)].into_boxed_slice());
+            desc.set_align(8);
+            for (i, f) in vt.iter().enumerate() {
+                if let Some(&fid) = ids.get(f) {
+                    let fr = desc.import_function(ModuleRelocTarget::from(fid));
+                    desc.write_function_addr(8 * i as u32, fr);
+                }
+            }
+            m.define_data(id, &desc).map_err(|e| e.to_string())?;
+            vts.insert(vt.clone(), id);
+            vt_ids.push(id);
         }
         let relocs: Vec<ModuleReloc> = blob
             .relocs
@@ -1058,6 +1089,7 @@ fn emit_object(
                     Target::SelfOffset(off) => ModuleRelocTarget::FunctionOffset(fid, off),
                     Target::Data(k) => ModuleRelocTarget::from(data_ids[k as usize]),
                     Target::Static(c) => ModuleRelocTarget::from(statics[&c]),
+                    Target::Vtable(k) => ModuleRelocTarget::from(vt_ids[k as usize]),
                 },
             })
             .collect();

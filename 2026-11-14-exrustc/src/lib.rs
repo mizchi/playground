@@ -2,6 +2,7 @@
 //! CLI (`src/main.rs`)・LSP (`lsp`)・ベンチ (`benches/`) はすべて [`Session`] を通る。
 
 pub mod cache;
+pub mod closure;
 pub mod codegen;
 pub mod consteval;
 pub mod driver;

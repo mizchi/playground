@@ -34,3 +34,29 @@ fn generic_body_errors_with_cached_callers() {
     assert!(d[0].msg.contains("expected `i64`, found `bool`"), "{d:?}");
     assert!(s.check(&src).is_empty());
 }
+
+/// クロージャの本体のエラーは (呼ばれていなくても) 正しい行で報告され、直せば消える。
+/// 検査済みの印が付いた後も、編集したクロージャの本体だけが検査し直される
+#[test]
+fn closure_and_dyn_errors() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/closures.rs"))
+        .unwrap();
+    let mut s = Session::new(Options::default());
+    assert!(s.check(&src).is_empty());
+    let bad = src.replace("let add_k = |x| x + k;", "let add_k = |x| x + k + nope;");
+    assert_ne!(bad, src);
+    let d = s.check(&bad);
+    assert_eq!(d.len(), 1, "{d:?}");
+    let line = src.lines().position(|l| l.contains("let add_k")).unwrap() + 1;
+    assert_eq!(d[0].line, line, "{d:?}");
+    assert!(s.check(&src).is_empty());
+
+    let dy = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/dyn_trait.rs"))
+        .unwrap();
+    assert!(s.check(&dy).is_empty());
+    let bad = dy.replace("let d: &dyn Shape = &q;", "let d: &dyn Shape = &5u32;");
+    assert_ne!(bad, dy);
+    let d = s.check(&bad);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].msg.contains("not implemented for `u32`"), "{d:?}");
+}
