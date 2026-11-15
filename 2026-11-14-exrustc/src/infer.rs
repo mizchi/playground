@@ -1945,11 +1945,35 @@ impl Inf<'_> {
                     _ => None,
                 };
                 let n = mc.method.to_string();
-                let callee = sid.and_then(|sid| {
+                let mut callee = sid.and_then(|sid| {
                     self.prog
                         .method(sid, &n)
                         .or_else(|| self.prog.default_method(sid, &n))
                 });
+                // メソッドがなく `deref` があれば、deref した先 (`rc.borrow()` の RefCell) で探す
+                let mut rv = rv;
+                let mut sid = sid;
+                let mut hops = 0;
+                while callee.is_none() && hops < 4 {
+                    let Some(s0) = sid else { break };
+                    let Some(did) = self.prog.method(s0, "deref") else { break };
+                    if !matches!(n.as_str(), "clone" | "to_string" | "cmp" | "partial_cmp" | "eq") {
+                        let r = self.apply_recv(Some(did), vec![], rv);
+                        rv = self.deref_expr(r);
+                        let root = self.find(rv);
+                        sid = match self.shape[root as usize] {
+                            Some(Shape::Known(Ty::Struct(sid))) => Some(sid),
+                            Some(Shape::Adt(b, _, _)) => Some(b),
+                            _ => None,
+                        };
+                        callee = sid.and_then(|sid| {
+                            self.prog.method(sid, &n).or_else(|| self.prog.default_method(sid, &n))
+                        });
+                    } else {
+                        break;
+                    }
+                    hops += 1;
+                }
                 let args: Vec<u32> = mc.args.iter().map(|a| self.expr(a)).collect();
                 // `&dyn Trait` のメソッド: trait の宣言のシグネチャ
                 let mut dt = self.resolve(rv);

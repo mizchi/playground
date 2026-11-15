@@ -375,6 +375,8 @@ bench/regress.sh
   - `vec![v; n]` の要素が Copy でないもの（clone して並べる）、`Vec<Vec<T>>` の `concat`、`collect::<String>()` の要素が `&str` / `String`
   - `partition` / `rposition`、`collect::<Option<Vec<T>>>()` / `collect::<Result<Vec<T>, E>>()`、メソッドの turbofish の型推論
   - `String::from_utf8` / `std::str::from_utf8`（検査と `Utf8Error` の表示は std と同じ）、`trim_matches` 系（パターンは &str / char / クロージャ）、`split` / `lines` / `split_whitespace` の `rev()`
+  - `Rc`（`clone` / `strong_count` / `ptr_eq`。弱参照はない）、`RefCell`（`borrow` / `borrow_mut` は参照を返すだけで、借用の検査はしない）、`Cell`
+  - メソッドが見つからないときの `deref` 先での検索（`rc.borrow_mut()`）。`struct Node { children: Vec<Node> }` や `Vec<Rc<RefCell<Node>>>` のような再帰型
   - `const fn` を const の初期化式から呼ぶこと、範囲パターンの端に const（`i32::MIN..=-1`）、`?Sized` 境界
 - panic：
   - `#[panic_handler]` があればそれを呼ぶ（範囲外アクセス・`unwrap`・`assert!`・`panic!` など）

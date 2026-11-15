@@ -1570,6 +1570,9 @@ impl Program {
         for id in 0..sdefs.len() {
             p.layout(id, &sdefs, items, &mut state)?;
         }
+        // レイアウトの途中で作ったインスタンス (`Node` の中の `RefCell<Node>`) は、まだ大きさの決まっていない
+        // 型で計算されているので、全部決まってから取り直す
+        p.relayout_instances();
         // deep hash = 値・参照を問わずフィールドから推移的に届く全 struct の定義ハッシュ。
         // 参照経由 (`&'a Other`) でもフィールドオフセットはコードに埋まるので含める。
         let n_defs = sdefs.len();
@@ -2198,6 +2201,51 @@ impl Program {
 
     /// ジェネリックな struct / enum に型引数を入れる。型引数がすべて具体型ならレイアウトも決める。
     /// 同じ (定義, 型引数) には同じ id を返す
+    fn relayout_instances(&mut self) {
+        for _ in 0..8 {
+            let mut ids: Vec<(u32, u32, Vec<Ty>)> =
+                self.structs.inst.lock().unwrap().iter().map(|((b, a), &id)| (id, *b, a.clone())).collect();
+            ids.sort_by_key(|x| x.0);
+            let mut changed = false;
+            for (id, base, args) in ids {
+                if args.iter().any(|&t| self.has_param(t)) {
+                    continue;
+                }
+                let b = &self.structs[base as usize];
+                if b.is_enum {
+                    let mut vs = vec![];
+                    for v in &b.variants {
+                        let fs = v.fields.iter().map(|(n, t, _)| (n.clone(), self.subst(*t, &args))).collect();
+                        vs.push((v.name.clone(), v.kind, fs, v.discr));
+                    }
+                    let tag = b.tag;
+                    let (vs, size, align) = self.enum_layout(vs, tag);
+                    let d = self.structs.get_mut(id as usize);
+                    if d.size != size || d.align != align {
+                        changed = true;
+                    }
+                    d.variants = vs;
+                    d.size = size;
+                    d.align = align;
+                } else {
+                    let fs: Vec<(String, Ty)> =
+                        b.fields.iter().map(|(n, t, _)| (n.clone(), self.subst(*t, &args))).collect();
+                    let (fs, size, align) = self.struct_layout(fs);
+                    let d = self.structs.get_mut(id as usize);
+                    if d.size != size || d.align != align || d.fields.len() != fs.len() {
+                        changed = true;
+                    }
+                    d.fields = fs;
+                    d.size = size;
+                    d.align = align;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
     pub fn instantiate(&self, base: u32, args: Vec<Ty>) -> R<u32> {
         if let Some(&id) = self.structs.inst.lock().unwrap().get(&(base, args.clone())) {
             return Ok(id);
@@ -2510,17 +2558,21 @@ impl Program {
                 // `Box<T>` はポインタなので T のレイアウトは要らない
                 TySyn::App(n, _) if n == "Box" && !self.struct_index.contains_key(&n) => {}
                 TySyn::App(n, args) => {
+                    // 型引数のうち、その型が値として持つもの (`Vec<T>` の T はポインタの先なので要らない)
+                    let mut by_value = vec![true; args.len()];
                     if let Some(&sid) = self.struct_index.get(&n) {
+                        let bg = sdefs[sid as usize].3.clone();
+                        let fs = fields_of(&sdefs[sid as usize].2);
+                        if bg.len() == args.len() {
+                            for (k, g) in bg.iter().enumerate() {
+                                by_value[k] = fs.iter().any(|f| syn_holds_by_value(f, g));
+                            }
+                        }
                         if visited_bases.insert(sid) {
-                            let bg = sdefs[sid as usize].3.clone();
-                            todo.extend(
-                                fields_of(&sdefs[sid as usize].2)
-                                    .into_iter()
-                                    .map(|t| (t, bg.clone())),
-                            );
+                            todo.extend(fs.into_iter().map(|t| (t, bg.clone())));
                         }
                     }
-                    todo.extend(args.into_iter().map(|a| (a, gs.clone())));
+                    todo.extend(args.into_iter().zip(by_value).filter(|(_, v)| *v).map(|(a, _)| (a, gs.clone())));
                 }
                 TySyn::Tuple(es) => todo.extend(es.into_iter().map(|a| (a, gs.clone()))),
                 TySyn::Array(e, _) => todo.push((*e, gs)),
@@ -3494,4 +3546,16 @@ fn parse_sig(
         export: false,
         panic_handler: false,
     })
+}
+
+/// 型 t が型パラメータ g を値として含むか (参照・ポインタ・Box の先は含まない。ほかの型の引数は含むとみなす)
+fn syn_holds_by_value(t: &TySyn, g: &str) -> bool {
+    match t {
+        TySyn::Named(n) => n == g,
+        TySyn::App(n, _) if n == "Box" => false,
+        TySyn::App(_, args) => args.iter().any(|a| syn_holds_by_value(a, g)),
+        TySyn::Tuple(es) => es.iter().any(|a| syn_holds_by_value(a, g)),
+        TySyn::Array(e, _) => syn_holds_by_value(e, g),
+        _ => false,
+    }
 }

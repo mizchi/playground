@@ -166,7 +166,7 @@ fn is_cmp_trait(h: usize) -> bool {
 /// 演算子の trait (宣言はユーザが手で impl するときだけ付ける)
 const OP_TRAITS: &[&str] = &[
     "Add", "Sub", "Mul", "Div", "Rem", "Neg", "Not", "BitAnd", "BitOr", "BitXor", "AddAssign", "SubAssign",
-    "MulAssign", "DivAssign", "RemAssign", "Index", "IndexMut", "From",
+    "MulAssign", "DivAssign", "RemAssign", "Index", "IndexMut", "From", "Deref",
 ];
 
 /// 演算子の trait の宣言か
@@ -384,7 +384,7 @@ fn owner(h: usize) -> Option<&'static str> {
                         | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" | "Rev" | "StepBy" | "Peekable"
                         | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks"
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
-                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" => Some(w),
+                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,
@@ -644,6 +644,10 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     // String への collect は要素が &str / String なら push_str を使う
     if need.contains("collect") && need.contains("String") {
         need.extend(["push_str", "as_str"]);
+    }
+    // Rc は deref の先のメソッドを呼ぶ
+    if need.contains("Rc") {
+        need.insert("deref");
     }
     // `x.into()` は期待型の from を呼ぶ
     if user_src.contains(".into()") {

@@ -2793,43 +2793,66 @@ impl Cx<'_, '_> {
                 }
             }
         };
-        let (a, o, sid) = loop {
-            p = match p {
-                Place::Mem(a, o, Ty::Struct(sid)) => break (a, o, sid),
-                Place::Mem(a, o, Ty::Ref(_, Ty::Dyn(tr)) | Ty::Box(Ty::Dyn(tr))) => {
-                    let fat = self.addr_plus(a, o);
-                    return self.dyn_method_call(fat, tr, mc);
-                }
-                Place::Mem(a, o, Ty::Ref(_, i) | Ty::Box(i)) => {
-                    let ptr = self.b.ins().load(PTR, mf(), a, o);
-                    Place::Mem(ptr, 0, *i)
-                }
-                Place::Var(v, Ty::Ref(_, i) | Ty::Box(i)) => {
-                    let ptr = self.b.use_var(v);
-                    Place::Mem(ptr, 0, *i)
-                }
-                p => {
-                    let t = self.prog.tn(p.ty());
-                    return err(
-                        mc.method.span(),
-                        format!("no method `{}` on type `{t}`", mc.method),
-                    );
-                }
-            }
-        };
         let name = mc.method.to_string();
-        let sname = self.prog.structs[sid as usize].name.clone();
-        // 固有メソッド / trait 実装のメソッド → なければ実装している trait のデフォルトメソッド
-        let Some(id) = self
-            .prog
-            .method(sid, &name)
-            .or_else(|| self.prog.default_method(sid, &name))
-        else {
+        // (メソッドがなく `impl Deref` があれば、deref した先で探す: `rc.borrow_mut()`)
+        let (a, o, sid, id) = loop {
+            let (a, o, sid) = loop {
+                p = match p {
+                    Place::Mem(a, o, Ty::Struct(sid)) => break (a, o, sid),
+                    Place::Mem(a, o, Ty::Ref(_, Ty::Dyn(tr)) | Ty::Box(Ty::Dyn(tr))) => {
+                        let fat = self.addr_plus(a, o);
+                        return self.dyn_method_call(fat, tr, mc);
+                    }
+                    Place::Mem(a, o, Ty::Ref(_, i) | Ty::Box(i)) => {
+                        let ptr = self.b.ins().load(PTR, mf(), a, o);
+                        Place::Mem(ptr, 0, *i)
+                    }
+                    Place::Var(v, Ty::Ref(_, i) | Ty::Box(i)) => {
+                        let ptr = self.b.use_var(v);
+                        Place::Mem(ptr, 0, *i)
+                    }
+                    p => {
+                        let t = self.prog.tn(p.ty());
+                        return err(
+                            mc.method.span(),
+                            format!("no method `{}` on type `{t}`", mc.method),
+                        );
+                    }
+                }
+            };
+            if let Some(id) = self
+                .prog
+                .method(sid, &name)
+                .or_else(|| self.prog.default_method(sid, &name))
+            {
+                break (a, o, sid, id);
+            }
+            let sd = &self.prog.structs[sid as usize];
+            let gens = sd.args.clone();
+            let base = sd.name.split('<').next().unwrap_or("").to_string();
+            if let Some(did) = self.prog.method(sid, "deref") {
+                let target = match self.prog.sigs[did as usize].ret {
+                    Ty::Ref(_, t) => *t,
+                    _ => return err(mc.span(), "bad `deref` signature"),
+                };
+                let target = self.prog.partial_subst(target, &gens.iter().map(|&g| Some(g)).collect::<Vec<_>>());
+                let recv = self.addr_plus(a, o);
+                let _ = base;
+                let (v, vt) = self.call_fn_vals(did, &[(recv, Ty::Ref(false, intern(Ty::Struct(sid))))], mc.span())?;
+                let inner_t = match vt {
+                    Ty::Ref(_, t) => *t,
+                    _ => target,
+                };
+                p = Place::Mem(v.unwrap(), 0, inner_t);
+                continue;
+            }
+            let sname = self.prog.structs[sid as usize].name.clone();
             return err(
                 mc.method.span(),
                 format!("no method named `{name}` found for `{sname}`"),
             );
         };
+        let sname = self.prog.structs[sid as usize].name.clone();
         if !self.prog.sigs[id as usize].has_self {
             return err(
                 mc.method.span(),
@@ -3042,6 +3065,16 @@ impl Cx<'_, '_> {
         // 実引数を先に評価する (ジェネリックなら型を見てから呼び先を決める)。
         // 型パラメータは turbofish → 前の引数の順に分かった分だけ、後の引数の期待型に使う
         let mut sol = self.turbofish_sol(&sig0, turbofish)?;
+        // 期待型が戻り値と同じ型の (具体的な) インスタンスなら、そこから型パラメータを解いておく
+        // (`let r: RefCell<Vec<String>> = RefCell::new(vec![]);` の空の vec![] の要素型)
+        if let (Some(Ty::Struct(es)), Ty::Struct(rs)) = (expected, sig0.ret) {
+            if !self.prog.has_param(Ty::Struct(es))
+                && self.prog.has_param(sig0.ret)
+                && self.prog.base_of(es) == self.prog.base_of(rs)
+            {
+                self.prog.match_ty(sig0.ret, Ty::Struct(es), &mut sol);
+            }
+        }
         let mut vals: Vec<(Value, Ty, proc_macro2::Span)> = vec![];
         if let Some((r, rt)) = recv {
             self.prog.match_ty(sig0.params[0], rt, &mut sol);
@@ -7114,6 +7147,18 @@ impl Cx<'_, '_> {
     }
 
     /// prelude の関数 (ジェネリックなら型引数 targs のインスタンス) を、評価済みの引数で呼ぶ
+    /// 受け手の struct の型引数で impl のメソッド (`Rc::<T>::deref`) を値の引数で呼ぶ
+    fn call_fn_vals(&mut self, id: u32, args: &[(Value, Ty)], span: proc_macro2::Span) -> R<V> {
+        let targs = match args.first().map(|a| self.strip_refs(a.1)) {
+            Some(Ty::Struct(sid)) if !self.prog.sigs[id as usize].generics.is_empty() => {
+                self.prog.structs[sid as usize].args.clone()
+            }
+            _ => vec![],
+        };
+        let name = self.prog.names[id as usize].clone();
+        self.call_named(&name, targs, args, span)
+    }
+
     fn call_named(
         &mut self,
         name: &str,

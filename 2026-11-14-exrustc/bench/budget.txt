@@ -108,6 +108,9 @@ ordering_impl.object_bytes 60765
 ordering_inline.binary_bytes 12070
 ordering_inline.cache_bytes 20714
 ordering_inline.object_bytes 20344
+shared.binary_bytes 70114
+shared.cache_bytes 131007
+shared.object_bytes 130552
 sorting.binary_bytes 73953
 sorting.cache_bytes 120697
 sorting.object_bytes 122346

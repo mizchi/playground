@@ -3875,6 +3875,166 @@ impl Debug for String {
     }
 }
 
+// --- Deref / Rc / RefCell / Cell ---
+
+pub trait Deref {
+    type Target;
+    fn deref(&self) -> &Self::Target;
+}
+
+struct __RcBox<T> {
+    strong: usize,
+    weak: usize,
+    val: T,
+}
+
+// 参照カウント (単一スレッド)。弱参照はまだない
+// (ポインタは型を消して持つ: `Rc<RefCell<Node>>` を Node が持つとき、レイアウトが中身を辿らないように)
+pub struct Rc<T> {
+    p: *mut u8,
+}
+
+impl<T> Rc<T> {
+    pub fn new(v: T) -> Rc<T> {
+        let p = unsafe { __exr_malloc(core::mem::size_of::<__RcBox<T>>()) } as *mut __RcBox<T>;
+        unsafe {
+            p.write(__RcBox { strong: 1, weak: 0, val: v });
+        }
+        Rc { p: p as *mut u8 }
+    }
+    fn __bx(&self) -> *mut __RcBox<T> {
+        self.p as *mut __RcBox<T>
+    }
+    pub fn clone(&self) -> Rc<T> {
+        unsafe {
+            (*self.__bx()).strong += 1;
+        }
+        Rc { p: self.p }
+    }
+    pub fn strong_count(this: &Rc<T>) -> usize {
+        unsafe { (*this.__bx()).strong }
+    }
+    pub fn ptr_eq(a: &Rc<T>, b: &Rc<T>) -> bool {
+        a.p == b.p
+    }
+    pub fn as_ref(&self) -> &T {
+        unsafe { &(*self.__bx()).val }
+    }
+}
+
+// (Deref の代わりに固有メソッド: codegen はメソッドが見つからないとき `deref` を探す)
+impl<T> Rc<T> {
+    pub fn deref(&self) -> &T {
+        unsafe { &(*self.__bx()).val }
+    }
+}
+
+impl<T> Drop for Rc<T> {
+    fn drop(&mut self) {
+        unsafe {
+            let b = self.__bx();
+            (*b).strong -= 1;
+            if (*b).strong == 0 {
+                __exr_drop_in_place(&mut (*b).val as *mut T);
+                __exr_free(self.p);
+            }
+        }
+    }
+}
+
+impl<T> Debug for Rc<T> {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_debug(self.as_ref(), f);
+        Ok(())
+    }
+}
+
+impl<T> Display for Rc<T> {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_display(self.as_ref(), f);
+        Ok(())
+    }
+}
+
+// 内部可変性。借用の検査はしない (borrow / borrow_mut は参照をそのまま返す)
+pub struct RefCell<T> {
+    val: T,
+}
+
+impl<T> RefCell<T> {
+    pub fn new(v: T) -> RefCell<T> {
+        RefCell { val: v }
+    }
+    pub fn borrow(&self) -> &T {
+        &self.val
+    }
+    pub fn borrow_mut(&self) -> &mut T {
+        unsafe { &mut *(&self.val as *const T as *mut T) }
+    }
+    pub fn into_inner(self) -> T {
+        self.val
+    }
+    pub fn replace(&self, v: T) -> T {
+        __core_replace(self.borrow_mut(), v)
+    }
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.val
+    }
+}
+
+impl<T> Debug for RefCell<T> {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_dbg_begin::<()>(f, "RefCell", 0);
+        __exr_dbg_item::<()>(f, 0, "value");
+        __exr_debug(&self.val, f);
+        __exr_dbg_item_end::<()>(f);
+        __exr_dbg_end::<()>(f, 1, 0, false);
+        Ok(())
+    }
+}
+
+pub struct Cell<T> {
+    val: T,
+}
+
+impl<T> Cell<T> {
+    pub fn new(v: T) -> Cell<T> {
+        Cell { val: v }
+    }
+    pub fn get(&self) -> T {
+        unsafe { (&self.val as *const T).read() }
+    }
+    pub fn set(&self, v: T) {
+        unsafe {
+            let p = &self.val as *const T as *mut T;
+            __exr_drop_in_place(p);
+            p.write(v);
+        }
+    }
+    pub fn replace(&self, v: T) -> T {
+        let p = &self.val as *const T as *mut T;
+        unsafe {
+            let old = p.read();
+            p.write(v);
+            old
+        }
+    }
+    pub fn into_inner(self) -> T {
+        self.val
+    }
+}
+
+impl<T> Debug for Cell<T> {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_dbg_begin::<()>(f, "Cell", 0);
+        __exr_dbg_item::<()>(f, 0, "value");
+        __exr_debug(&self.val, f);
+        __exr_dbg_item_end::<()>(f);
+        __exr_dbg_end::<()>(f, 1, 0, false);
+        Ok(())
+    }
+}
+
 impl<T> Debug for Vec<T> {
     fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
         __exr_dbg_begin::<()>(f, "", 2);
