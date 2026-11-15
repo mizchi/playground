@@ -5691,8 +5691,29 @@ impl Cx<'_, '_> {
             let has_next = struct_has_next(self, bt)
                 || matches!(strip_paren(&f.expr), Expr::MethodCall(_))
                     && struct_has_next(self, self.peek(&f.expr));
+            // (ユーザの `impl IntoIterator for &Coll` / `for Coll`)
+            let user_into = match bt {
+                Some(Ty::Struct(s)) => {
+                    let by_ref = matches!(strip_paren(&f.expr), Expr::Reference(_));
+                    if by_ref && self.prog.method(s, "__ref_into_iter").is_some() {
+                        Some(true)
+                    } else if !by_ref && self.prog.method(s, "into_iter").is_some() {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
             let via: Option<Expr> = if has_next {
                 None
+            } else if let Some(by_ref) = user_into {
+                let fe = &f.expr;
+                Some(if by_ref {
+                    syn::parse_quote!((#fe).__ref_into_iter())
+                } else {
+                    syn::parse_quote!((#fe).into_iter())
+                })
             } else {
                 let fe = &f.expr;
                 Some(match strip_paren(fe) {

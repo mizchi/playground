@@ -4638,6 +4638,11 @@ pub trait Rem {
     type Output;
     fn rem(self, rhs: Self) -> Self::Output;
 }
+// `impl IntoIterator for &Coll`: 名前だけ (for がユーザの into_iter を呼ぶ)
+pub trait IntoIterator {
+    fn __into_iter_mark(&self) {}
+}
+
 // `impl From<X> for S`: trait は名前だけ (型パラメータのある trait はまだないので、impl のシグネチャを使う)
 // (宣言の引数の型は使わない。メソッドがないと trait ごと選ばれないので 1 つ置く)
 pub trait From {

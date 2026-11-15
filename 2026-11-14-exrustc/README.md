@@ -399,6 +399,7 @@ bench/regress.sh
   - char のリテラル・範囲のパターン（`'a'..='z'`）、文字列リテラルのパターン（`match s { "add" => .. }`）
   - 引数のパターン（`fn index(&self, (i, j): (usize, usize))`）、参照への演算子の impl（`impl Add for &M`）
   - `Iterator` を受ける引数への `&Vec` / スライス / 配列（`a.iter().zip(&b)`）、範囲の添字を受け手にしたメソッド（`v[a..b].iter()`）
+  - ユーザの `impl IntoIterator for &Coll`（`for x in &c`）、型パラメータ以外を縛る where 節（`where C::Item: Debug` / `where Self: Sized`。読み飛ばす）
   - 自分を `Option<Box<..>>` で含むジェネリックな型（`Node<T> { next: Option<Box<Node<T>>> }`）
   - ブランケット impl（`impl<T: Display> Describe for T`。境界は検査せず、メソッドが見つからないときにどの型でも探す）
   - `-> impl Iterator<Item = T>` などクロージャ以外の `impl Trait` の戻り値（プログラムを組み立てた直後に本体を型推論して具体型を入れる。呼び出し側のキャッシュのキーには解いた型が入る）

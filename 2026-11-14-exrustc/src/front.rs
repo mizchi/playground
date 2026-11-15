@@ -3345,7 +3345,7 @@ impl Program {
                             "Add" | "Sub" | "Mul" | "Div" | "Rem" | "Neg" | "Not" | "BitAnd" | "BitOr" | "BitXor"
                                 | "Shl" | "Shr" | "AddAssign" | "SubAssign" | "MulAssign" | "DivAssign"
                                 | "RemAssign" | "BitAndAssign" | "BitOrAssign" | "BitXorAssign" | "ShlAssign"
-                                | "ShrAssign" | "Index" | "IndexMut"
+                                | "ShrAssign" | "Index" | "IndexMut" | "IntoIterator"
                         )
                     ))
                 // (`<` と sort は比較の glue から partial_cmp / cmp を呼ぶ)
@@ -3675,15 +3675,17 @@ fn collect_generics(g: &syn::Generics, out: &mut Vec<(String, Vec<String>)>) -> 
             let syn::WherePredicate::Type(pt) = pr else {
                 continue;
             };
+            // (`where C::Item: Debug` / `where Self: Sized` など、型パラメータ以外への境界は検査に使わないので読み飛ばす)
             let syn::Type::Path(tp) = &pt.bounded_ty else {
-                return err(pt.span(), "unsupported where clause");
+                continue;
             };
             let Some(id) = tp.path.get_ident() else {
-                return err(pt.span(), "unsupported where clause");
+                continue;
             };
             let bs = bound_names(&pt.bounds)?;
             match out.iter_mut().find(|g| *id == g.0) {
                 Some(g) => g.1.extend(bs),
+                None if id == "Self" => {}
                 None => return err(pt.span(), "where clause on an unknown type parameter"),
             }
         }

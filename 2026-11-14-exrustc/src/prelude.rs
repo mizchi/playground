@@ -166,7 +166,7 @@ fn is_cmp_trait(h: usize) -> bool {
 /// 演算子の trait (宣言はユーザが手で impl するときだけ付ける)
 const OP_TRAITS: &[&str] = &[
     "Add", "Sub", "Mul", "Div", "Rem", "Neg", "Not", "BitAnd", "BitOr", "BitXor", "AddAssign", "SubAssign",
-    "MulAssign", "DivAssign", "RemAssign", "Index", "IndexMut", "From", "Deref",
+    "MulAssign", "DivAssign", "RemAssign", "Index", "IndexMut", "From", "Deref", "IntoIterator",
 ];
 
 /// 演算子の trait の宣言か
@@ -844,6 +844,10 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     if chain {
         need.insert("next");
     }
+    // (`impl IntoIterator for &Coll` の into_iter はイテレータを返す)
+    if user_src.contains("IntoIterator for") {
+        need.extend(["__into_iter_mark", "Iterator", "next", "iter"]);
+    }
     let iter_lib = need.contains("Iterator")
         || need.contains("HashMap")
         || need.contains("BTreeMap")
@@ -866,6 +870,9 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     let cmp_impl = user_impls.iter().any(|t| matches!(*t, "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Clone" | "Copy" | "Default"))
         || need.contains("Reverse");
     let op_impls: Vec<&str> = user_impls.iter().copied().filter(|t| OP_TRAITS.contains(t)).collect();
+    if op_impls.contains(&"IntoIterator") {
+        need.extend(["__into_iter_mark", "Iterator", "next", "iter"]);
+    }
     // (再帰する型は Box / Vec を通るので、そのときは glue を付ける。それ以外の型の比較は codegen が直接展開する)
     if ["Box", "Vec", "vec", "String"].iter().any(|n| need.contains(n)) {
         need.insert("__exr_cmp");

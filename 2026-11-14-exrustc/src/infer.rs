@@ -551,6 +551,12 @@ impl Inf<'_> {
                 let value = def.value;
                 Some(self.known_g(value, &mut pv))
             }
+            // (参照の型への impl の関連型: `impl IntoIterator for &Coll` の IntoIter)
+            Some(Shape::Ref(..)) => {
+                let t = self.resolve(v)?;
+                let a = self.prog.assoc_of(t, name)?;
+                Some(self.known(a))
+            }
             _ => None,
         }
     }
@@ -1691,7 +1697,18 @@ impl Inf<'_> {
                         None => {
                             // Iterator: 式全体の型の `Item`
                             // (型引数が未定のアダプタの列 `(0..n).step_by(2)` でも Item を型変数のまま辿る)
-                            let fv = if adapters.is_empty() { bv } else { self.expr(&f.expr) };
+                            let mut fv = if adapters.is_empty() { bv } else { self.expr(&f.expr) };
+                            // (ユーザの `impl IntoIterator for &Coll` / `for Coll`: into_iter が返すイテレータの Item)
+                            let user_into = match self.resolve(fv) {
+                                Some(Ty::Ref(_, Ty::Struct(sid))) => self.prog.method(*sid, "__ref_into_iter"),
+                                // (`for x in &c`: c の型で `__ref_into_iter` を探す)
+                                Some(Ty::Struct(sid)) if by_ref.is_some() => self.prog.method(sid, "__ref_into_iter"),
+                                Some(Ty::Struct(sid)) if self.prog.method(sid, "next").is_none() => self.prog.method(sid, "into_iter"),
+                                _ => None,
+                            };
+                            if let Some(id) = user_into {
+                                fv = self.apply_recv(Some(id), vec![], fv);
+                            }
                             let it = match self.assoc_var(fv, "Item") {
                                 Some(v) => v,
                                 None => match self.resolve(fv).and_then(|t| self.prog.assoc_of(t, "Item")) {
