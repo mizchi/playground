@@ -420,7 +420,7 @@ fn owner(h: usize) -> Option<&'static str> {
                         | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" | "Rev" | "StepBy" | "Peekable"
                         | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks"
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
-                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "RangeFrom" => Some(w),
+                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "RangeFrom" | "TryFromIntError" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,
@@ -697,6 +697,22 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             }
         }
     }
+    // Box を通した再帰型の `==` は glue 関数で (その場で展開すると止まらない)
+    if need.contains("Box") && user_src.contains("PartialEq") {
+        need.insert("__exr_eq");
+    }
+    if need.contains("BTreeMap") && user_src.contains(".range(") {
+        need.extend(["range", "__bt_span", "Range", "RangeInclusive"]);
+        if open_range(user_src) || user_src.contains("..))") {
+            need.insert("RangeFrom");
+        }
+    }
+    if user_src.contains(".or_default()") {
+        need.extend(["or_default", "__exr_default"]);
+    }
+    if user_src.contains("try_into") {
+        need.extend(["TryFromIntError", "Result"]);
+    }
     if open_range(user_src) {
         need.insert("RangeFrom");
     }
@@ -782,6 +798,10 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     if need.contains("extend") {
         need.extend(["__extend_ref", "into_iter", "iter", "Iterator"]);
     }
+    // (アダプタの列があれば、その元 (Range など) の next も要る)
+    if chain {
+        need.insert("next");
+    }
     let iter_lib = need.contains("Iterator")
         || need.contains("HashMap")
         || need.contains("BTreeMap")
@@ -811,8 +831,11 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     if cmp_impl {
         need.extend(["eq", "cmp", "partial_cmp", "__exr_eq_marker", "Ordering", "__exr_copy_marker"]);
     }
+    // (trait の名前は prelude の名前の候補にないので、derive(Ord) はソースの文字列で見る)
     if ORD_NAMES.iter().any(|n| need.contains(n))
         || (iter_lib && (need.contains("max") || need.contains("min")))
+        || (user_src.contains("Ord)") || user_src.contains("Ord,") || user_src.contains("Ord for"))
+            && (need.contains("max") || need.contains("min") || need.contains("clamp"))
     {
         need.insert("__exr_cmp");
         // (手書きの impl を glue が呼ぶときに Ordering を i32 にする)

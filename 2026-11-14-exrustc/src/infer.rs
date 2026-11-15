@@ -36,6 +36,7 @@ fn is_builtin_scalar_method(n: &str) -> bool {
             | "div_euclid"
             | "next_power_of_two"
             | "isqrt"
+            | "try_into"
             | "leading_ones"
             | "trailing_ones"
             | "saturating_add"
@@ -1602,14 +1603,16 @@ impl Inf<'_> {
                         },
                         None => {
                             // Iterator: 式全体の型の `Item`
-                            let fv = self.expr(&f.expr);
-                            let it = self
-                                .resolve(fv)
-                                .and_then(|t| self.prog.assoc_of(t, "Item"));
-                            iter_item = Some(match it {
-                                Some(t) => self.known(t),
-                                None => self.var(),
-                            });
+                            // (型引数が未定のアダプタの列 `(0..n).step_by(2)` でも Item を型変数のまま辿る)
+                            let fv = if adapters.is_empty() { bv } else { self.expr(&f.expr) };
+                            let it = match self.assoc_var(fv, "Item") {
+                                Some(v) => v,
+                                None => match self.resolve(fv).and_then(|t| self.prog.assoc_of(t, "Item")) {
+                                    Some(t) => self.known(t),
+                                    None => self.var(),
+                                },
+                            };
+                            iter_item = Some(it);
                             self.var()
                         }
                     }
@@ -2299,6 +2302,15 @@ impl Inf<'_> {
                 self.option_of(rv)
             }
             "leading_ones" | "trailing_ones" => self.known(Ty::U32),
+            // `x.try_into()`: Result<T, TryFromIntError> (T は使われ方から)
+            "try_into" => match (self.prog.struct_index.get("Result"), self.prog.struct_index.get("TryFromIntError")) {
+                (Some(&rb), Some(&eb)) => {
+                    let t = self.var();
+                    let e = self.known(Ty::Struct(eb));
+                    self.adt(rb, vec![t, e])
+                }
+                _ => self.var(),
+            },
             "wrapping_neg" | "abs" | "signum" | "swap_bytes" | "to_ascii_uppercase"
             | "to_ascii_lowercase" | "next_power_of_two" | "isqrt" => rv,
             "pow" | "rotate_left" | "rotate_right" | "wrapping_pow" | "saturating_pow" => {

@@ -2245,6 +2245,26 @@ impl<T: Copy + Ord> Iterator for Range<T> {
     }
 }
 
+// BTreeMap::range の添字の範囲 [a, b)
+impl<T> Range<T> {
+    pub fn __bt_span<V>(&self, m: &BTreeMap<T, V>) -> (usize, usize) {
+        (m.bt_find(&self.start).0, m.bt_find(&self.end).0)
+    }
+}
+
+impl<T> RangeInclusive<T> {
+    pub fn __bt_span<V>(&self, m: &BTreeMap<T, V>) -> (usize, usize) {
+        let (i, found) = m.bt_find(&self.end);
+        (m.bt_find(&self.start).0, if found { i + 1 } else { i })
+    }
+}
+
+impl<T> RangeFrom<T> {
+    pub fn __bt_span<V>(&self, m: &BTreeMap<T, V>) -> (usize, usize) {
+        (m.bt_find(&self.start).0, m.len())
+    }
+}
+
 // `(1..)`: 終わりのない範囲
 pub struct RangeFrom<T> {
     pub start: T,
@@ -4352,6 +4372,11 @@ fn __exr_cmp<T>(a: &T, b: &T) -> i32 {
     0
 }
 
+// a == b (Box を通した再帰型の derive(PartialEq) 用。本体は codegen が作る)
+fn __exr_eq<T>(a: &T, b: &T) -> bool {
+    false
+}
+
 fn __exr_ordering<G>(c: i32) -> Ordering {
     if c < 0 {
         Ordering::Less
@@ -4688,6 +4713,16 @@ impl<K, V> Entry<K, V> {
             unsafe { &mut *m.vs.add(i) }
         } else {
             self.or_insert(f())
+        }
+    }
+    pub fn or_default(self) -> &mut V {
+        if self.found {
+            let m = self.map;
+            let i = self.idx;
+            drop(self.key);
+            unsafe { &mut *m.vs.add(i) }
+        } else {
+            self.or_insert(__exr_default::<V>())
         }
     }
     pub fn and_modify<F: FnOnce(&mut V)>(self, f: F) -> Entry<K, V> {
@@ -5051,6 +5086,12 @@ impl<K, V> BTreeMap<K, V> {
     }
     pub fn iter(&self) -> BtIter<K, V> {
         BtIter { ks: self.ks.ptr as *const K, vs: self.vs.ptr as *const V, i: 0, len: self.ks.len }
+    }
+    // `m.range(a..b)` / `a..=b` / `a..`: 範囲のキーだけを順に
+    pub fn range<R>(&self, r: R) -> BtIter<K, V> {
+        let (a, b) = r.__bt_span(self);
+        let b = if b < a { a } else { b };
+        BtIter { ks: self.ks.ptr as *const K, vs: self.vs.ptr as *const V, i: a, len: b }
     }
     pub fn iter_mut(&mut self) -> BtIterMut<K, V> {
         BtIterMut { ks: self.ks.ptr as *const K, vs: self.vs.ptr, i: 0, len: self.ks.len }
@@ -6585,6 +6626,17 @@ impl __FromStr for u128 {
             Ok((_, v)) => Ok(v),
             Err(e) => Err(e),
         }
+    }
+}
+
+// `300u32.try_into()` などの失敗
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TryFromIntError(());
+
+impl Display for TryFromIntError {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_fmt_str::<()>(f, "out of range integral type conversion attempted");
+        Ok(())
     }
 }
 

@@ -794,6 +794,8 @@ pub struct Program {
     pub item_of: Vec<Option<u32>>,
     pub structs: AdtTable,
     pub struct_index: FxMap<String, u32>,
+    /// バリアント名 → (enum, 番号)。`use E::*;` で取り込んだバリアントを短い名前で引く (同名が複数なら引かない)
+    pub variant_names: FxMap<String, Option<(u32, usize)>>,
     /// 名前の最後のセグメント → 関数 ID 群 (`len` → `A::len`, `B::len`)。参照の過大近似用
     pub by_last: FxMap<String, Vec<u32>>,
     /// trait 名 → その trait で宣言された関数
@@ -1487,6 +1489,7 @@ impl Program {
             item_of: vec![],
             structs: AdtTable::new(),
             struct_index: FxMap::default(),
+            variant_names: FxMap::default(),
             by_last: FxMap::default(),
             traits: FxMap::default(),
             impls: HashSet::new(),
@@ -1573,6 +1576,18 @@ impl Program {
         // レイアウトの途中で作ったインスタンス (`Node` の中の `RefCell<Node>`) は、まだ大きさの決まっていない
         // 型で計算されているので、全部決まってから取り直す
         p.relayout_instances();
+        for sid in 0..p.structs.len() {
+            let sd = &p.structs[sid];
+            if !sd.is_enum || sd.base.is_some() || sd.name.starts_with('#') {
+                continue;
+            }
+            for (vi, v) in sd.variants.iter().enumerate() {
+                p.variant_names
+                    .entry(v.name.clone())
+                    .and_modify(|e| *e = None)
+                    .or_insert(Some((sid as u32, vi)));
+            }
+        }
         // deep hash = 値・参照を問わずフィールドから推移的に届く全 struct の定義ハッシュ。
         // 参照経由 (`&'a Other`) でもフィールドオフセットはコードに埋まるので含める。
         let n_defs = sdefs.len();
@@ -2679,6 +2694,10 @@ impl Program {
             let en = match n.as_str() {
                 "Some" | "None" => "Option",
                 "Ok" | "Err" => "Result",
+                // `use Expr::*;` したバリアント (大文字で始まり、ほかの enum と名前が重ならないもの)
+                _ if n.starts_with(|c: char| c.is_ascii_uppercase()) => {
+                    return self.variant_names.get(&n).copied().flatten();
+                }
                 _ => return None,
             };
             let sid = *self.struct_index.get(en)?;
@@ -2780,6 +2799,12 @@ impl Program {
         }
         let m = &p.path.segments[1].ident;
         let ms = m.to_string();
+        // `i64::from(7u32)` / `u32::from('a')`: 数値への変換はキャスト (広げる変換だけが書ける)
+        if ms == "from" && c.args.len() == 1 && self.fn_by_path(&p.path, self_sid).is_none() {
+            let a0 = &c.args[0];
+            let tyi = &p.path.segments[0].ident;
+            return Some(syn::parse_quote!(((#a0) as #tyi)));
+        }
         if ms.starts_with("from") || ms.starts_with("try_from") || ms == "default" || ms == "new" {
             return None;
         }

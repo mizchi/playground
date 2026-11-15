@@ -380,6 +380,10 @@ bench/regress.sh
   - 書式の `{:e}` / `{:E}`（精度つきも）、幅・精度を引数から取る `{:w$}` / `{:.p$}` / `{:.*}`、`{:12e}` のような幅と型の組み合わせ
   - `println!` などの書式マクロの引数の中の型推論（parse し直したノードの型はソース上の位置で codegen に渡す）
   - 終わりのない範囲 `(1..)`、`char::is_ascii_digit` などを関数の値として渡すこと
+  - `use E::*;` で取り込んだバリアントを短い名前で使うこと、`Box` を通した再帰型の derive(PartialEq)（比較の glue 関数を作る）
+  - `try_into`（整数どうし。範囲外は `TryFromIntError`）、`i64::from(x)`、char の範囲 `'a'..='e'`
+  - `BTreeMap::range`（`a..b` / `a..=b` / `a..`）、`HashMap` の `entry(..).or_default()`
+  - `for x in (0..n).step_by(k)` のようにアダプタを通した for のループ変数の型推論
   - `const fn` を const の初期化式から呼ぶこと、範囲パターンの端に const（`i32::MIN..=-1`）、`?Sized` 境界
 - panic：
   - `#[panic_handler]` があればそれを呼ぶ（範囲外アクセス・`unwrap`・`assert!`・`panic!` など）

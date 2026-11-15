@@ -323,6 +323,8 @@ impl Worker {
                 cx.hash_glue_body(sig)
             } else if prog.index.get("__exr_cmp") == Some(&body_id) {
                 cx.cmp_glue_body(sig)
+            } else if prog.index.get("__exr_eq") == Some(&body_id) {
+                cx.eq_glue_body(sig)
             } else if prog.index.get("__exr_clone") == Some(&body_id) {
                 cx.clone_glue_body(sig)
             } else if prog.index.get("__exr_default") == Some(&body_id) {
@@ -3807,8 +3809,14 @@ impl Cx<'_, '_> {
                 self.b.switch_to_block(done);
                 Ok(res)
             }
-            // 参照は指す先の値で比べる
-            Ty::Ref(_, inner) if !t.is_fat() => {
+            // (Box の先の struct は glue 関数で: 再帰型をその場で展開しない)
+            Ty::Box(inner @ Ty::Struct(_)) if self.prog.index.contains_key("__exr_eq") => {
+                let r = Ty::Ref(false, intern(*inner));
+                let (v, _) = self.call_named("__exr_eq", vec![*inner], &[(a, r), (b, r)], span)?;
+                Ok(v.unwrap())
+            }
+            // 参照と Box は指す先の値で比べる
+            Ty::Ref(_, inner) | Ty::Box(inner) if !t.is_fat() => {
                 let (x, y) = match clif_ty(*inner) {
                     Some(ct) if !inner.is_agg() => (
                         self.b.ins().load(ct, mf(), a, 0),
@@ -3852,18 +3860,59 @@ impl Cx<'_, '_> {
                 let ta = self.b.ins().load(ct, mf(), a, 0);
                 let tb = self.b.ins().load(ct, mf(), b, 0);
                 let tag_eq = self.b.ins().icmp(IntCC::Equal, ta, tb);
-                let mut any = self.b.ins().iconst(types::I8, 0);
+                // フィールドが数値だけなら分岐せずに全バリアントを比べる (読んでも安全)
+                let plain = variants.iter().all(|(_, fs)| {
+                    fs.iter().all(|f| f.1.is_int() || f.1.is_float() || matches!(f.1, Ty::Bool | Ty::Char | Ty::Unit))
+                });
+                if plain {
+                    let mut any = self.b.ins().iconst(types::I8, 0);
+                    for (discr, fields) in variants {
+                        let is_v = self.b.ins().icmp_imm_s(IntCC::Equal, ta, discr);
+                        let mut acc = is_v;
+                        for (_, ft, off) in fields {
+                            let (x, y) = self.load_field(a, b, ft, off);
+                            let c = self.agg_or_scalar_eq(x, y, ft, span)?;
+                            acc = self.b.ins().band(acc, c);
+                        }
+                        any = self.b.ins().bor(any, acc);
+                    }
+                    return Ok(self.b.ins().band(tag_eq, any));
+                }
+                // タグで分岐してから、そのバリアントのフィールドだけを比べる
+                // (ほかのバリアントの場所を読むと、`None` のときの String のポインタなどを辿ってしまう)
+                let done = self.b.create_block();
+                let res = self.b.append_block_param(done, types::I8);
+                let zero = self.b.ins().iconst(types::I8, 0);
+                let start = self.b.create_block();
+                self.b.ins().brif(tag_eq, start, &[], done, &[zero.into()]);
+                self.b.switch_to_block(start);
                 for (discr, fields) in variants {
+                    if fields.is_empty() {
+                        let is_v = self.b.ins().icmp_imm_s(IntCC::Equal, ta, discr);
+                        let one_v = self.b.ins().iconst(types::I8, 1);
+                        let next = self.b.create_block();
+                        self.b.ins().brif(is_v, done, &[one_v.into()], next, &[]);
+                        self.b.switch_to_block(next);
+                        continue;
+                    }
                     let is_v = self.b.ins().icmp_imm_s(IntCC::Equal, ta, discr);
-                    let mut acc = is_v;
+                    let vb = self.b.create_block();
+                    let next = self.b.create_block();
+                    self.b.ins().brif(is_v, vb, &[], next, &[]);
+                    self.b.switch_to_block(vb);
+                    let mut acc = self.b.ins().iconst(types::I8, 1);
                     for (_, ft, off) in fields {
                         let (x, y) = self.load_field(a, b, ft, off);
                         let c = self.agg_or_scalar_eq(x, y, ft, span)?;
                         acc = self.b.ins().band(acc, c);
                     }
-                    any = self.b.ins().bor(any, acc);
+                    self.b.ins().jump(done, &[acc.into()]);
+                    self.b.switch_to_block(next);
                 }
-                Ok(self.b.ins().band(tag_eq, any))
+                let z2 = self.b.ins().iconst(types::I8, 0);
+                self.b.ins().jump(done, &[z2.into()]);
+                self.b.switch_to_block(done);
+                Ok(res)
             }
             t => err(
                 span,
@@ -3911,6 +3960,15 @@ impl Cx<'_, '_> {
                 _ if lt.signed() => ins.sshr(l, r),
                 _ => ins.ushr(l, r),
             });
+        }
+        // char の範囲 (`'a'..='e'`) の prelude が `v + 1` で次の文字にする
+        if lt == Ty::Char && rt.is_int() && matches!(op, Add(_) | Sub(_)) {
+            let r32 = match rt.bits() {
+                32 => r,
+                b if b > 32 => self.b.ins().ireduce(types::I32, r),
+                _ => self.b.ins().uextend(types::I32, r),
+            };
+            return Ok(if matches!(op, Add(_)) { self.b.ins().iadd(l, r32) } else { self.b.ins().isub(l, r32) });
         }
         self.same(b.right.span(), rt, lt)?;
         if lt.is_float() {
@@ -4918,6 +4976,7 @@ impl Cx<'_, '_> {
             "div_euclid",
             "next_power_of_two",
             "isqrt",
+            "try_into",
             "leading_ones",
             "trailing_ones",
             "saturating_add",
@@ -5274,6 +5333,73 @@ impl Cx<'_, '_> {
                 let v = v.unwrap();
                 let v = if ct == types::I64 { v } else { self.b.ins().ireduce(ct, v) };
                 (Some(v), t)
+            }
+            "try_into" => {
+                // 型は型推論の記録 (Result<T, TryFromIntError>) から
+                let rt = self.lets.get(&(mc as *const syn::ExprMethodCall as usize)).copied().or_else(|| {
+                    if self.in_fmt_args > 0 {
+                        self.lets.get(&crate::infer::pos_key(&Expr::MethodCall(mc.clone()))).copied()
+                    } else {
+                        None
+                    }
+                });
+                let Some(Ty::Struct(rs)) = rt else {
+                    return err(mc.span(), "cannot infer the target type of `try_into`");
+                };
+                let Some(&dt) = self.prog.structs[rs as usize].args.first() else {
+                    return err(mc.span(), "cannot infer the target type of `try_into`");
+                };
+                if !dt.is_int() {
+                    return err(mc.span(), "`try_into` is only supported between integer types");
+                }
+                // i128 に広げて範囲を見る (u128 の上半分は符号なしで比べる)
+                let w = if ct == types::I128 {
+                    a
+                } else if s {
+                    self.b.ins().sextend(types::I128, a)
+                } else {
+                    self.b.ins().uextend(types::I128, a)
+                };
+                let z = self.int_const(Ty::I128, 0);
+                let lo_ok = if s && !dt.signed() {
+                    self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, w, z)
+                } else if s {
+                    let lo = self.int_const(Ty::I128, crate::front::prim_assoc_const(dt, "MIN").unwrap());
+                    self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, w, lo)
+                } else {
+                    self.b.ins().iconst(types::I8, 1)
+                };
+                let hi_ok = if dt == Ty::U128 {
+                    self.b.ins().iconst(types::I8, 1)
+                } else {
+                    let hi = self.int_const(Ty::I128, crate::front::prim_assoc_const(dt, "MAX").unwrap());
+                    if t == Ty::U128 {
+                        self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, w, hi)
+                    } else {
+                        self.b.ins().icmp(IntCC::SignedLessThanOrEqual, w, hi)
+                    }
+                };
+                let ok = self.b.ins().band(lo_ok, hi_ok);
+                let dct = clif_ty(dt).unwrap();
+                let v = if dct == types::I128 { w } else { self.b.ins().ireduce(dct, w) };
+                let out = self.temp(Ty::Struct(rs));
+                let vs = &self.prog.structs[rs as usize].variants;
+                let okv = vs.iter().position(|v| v.name == "Ok").unwrap();
+                let errv = vs.iter().position(|v| v.name == "Err").unwrap();
+                let off = vs[okv].fields[0].2;
+                let yes = self.b.create_block();
+                let no = self.b.create_block();
+                let done = self.b.create_block();
+                self.b.ins().brif(ok, yes, &[], no, &[]);
+                self.b.switch_to_block(yes);
+                self.store_tag(out, rs, okv);
+                self.b.ins().store(mf(), v, out, off as i32);
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(no);
+                self.store_tag(out, rs, errv);
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(done);
+                (Some(out), Ty::Struct(rs))
             }
             "leading_ones" | "trailing_ones" => {
                 let n = self.b.ins().bnot(a);
@@ -8625,6 +8751,23 @@ impl Cx<'_, '_> {
             return Err("internal: bad cmp glue signature".into());
         };
         let c = self.cmp_at(a, b, **t)?;
+        self.b.ins().return_(&[c]);
+        Ok(())
+    }
+
+    /// `__exr_eq::<T>(a: &T, b: &T) -> bool` の本体
+    fn eq_glue_body(&mut self, sig: &FnSig) -> R<()> {
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        self.b.switch_to_block(entry);
+        self.b.seal_block(entry);
+        let a = self.b.block_params(entry)[0];
+        let b = self.b.block_params(entry)[1];
+        let Some(Ty::Ref(_, t)) = sig.params.first() else {
+            return Err("internal: bad eq glue signature".into());
+        };
+        let span = proc_macro2::Span::call_site();
+        let c = self.agg_or_scalar_eq(a, b, **t, span)?;
         self.b.ins().return_(&[c]);
         Ok(())
     }
