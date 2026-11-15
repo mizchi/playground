@@ -215,8 +215,8 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
             }
             if depth == 0 && !st.seen_ident {
                 let w = &s[start..i];
-                // `unsafe impl` に備えて unsafe は読み飛ばす
-                if w != b"unsafe" {
+                // `unsafe impl` / `pub trait` に備えて unsafe と pub は読み飛ばす
+                if w != b"unsafe" && w != b"pub" {
                     st.seen_ident = true;
                     impl_pending = w == b"impl" || w == b"trait";
                     is_trait = w == b"trait";

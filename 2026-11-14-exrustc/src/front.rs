@@ -63,6 +63,25 @@ pub enum Ty {
     Fn(&'static FnTy),
     /// `Box<T>`: ヒープへの所有ポインタ (`Box<dyn Trait>` は fat)。drop で中身を drop して free する
     Box(&'static Ty),
+    /// 関連型 `T::Item` (T が型パラメータのときだけ現れる。具体型になったら impl の定義に置き換わる)
+    Assoc(&'static AssocTy),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AssocTy {
+    pub base: Ty,
+    pub name: String,
+}
+
+pub fn intern_assoc(a: AssocTy) -> &'static AssocTy {
+    static TABLE: OnceLock<Mutex<HashSet<&'static AssocTy>>> = OnceLock::new();
+    let mut tab = TABLE.get_or_init(Default::default).lock().unwrap();
+    if let Some(&r) = tab.get(&a) {
+        return r;
+    }
+    let r: &'static AssocTy = Box::leak(Box::new(a));
+    tab.insert(r);
+    r
 }
 
 impl Ty {
@@ -214,7 +233,8 @@ impl Ty {
             | Ty::Array(..)
             | Ty::Slice(_)
             | Ty::Str
-            | Ty::Dyn(_) => 0,
+            | Ty::Dyn(_)
+            | Ty::Assoc(_) => 0,
         }
     }
 }
@@ -239,6 +259,10 @@ pub enum TySyn {
     Dyn(String),
     /// `fn(A, B) -> R` (最後が戻り値)
     FnPtr(Vec<TySyn>),
+    /// 関連型 `T::Item` / `Self::Item`
+    Assoc(Box<TySyn>, String),
+    /// 型推論に任せる `_` (`collect::<Vec<_>>()`)
+    Infer,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -311,6 +335,34 @@ pub fn parse_tysyn(t: &syn::Type, self_ty: Option<&TySyn>) -> R<TySyn> {
                 e => return err(e.span(), "array length must be a literal or a const"),
             };
             TySyn::Array(Box::new(parse_tysyn(&a.elem, self_ty)?), len)
+        }
+        syn::Type::Infer(_) => TySyn::Infer,
+        // `Self::Item` / `I::Item` (大文字で始まる 2 セグメントのパス)
+        syn::Type::Path(p)
+            if p.qself.is_none()
+                && p.path.segments.len() == 2
+                && p.path.segments[0].arguments.is_none()
+                && p.path.segments[1].arguments.is_none()
+                && p.path.segments[0]
+                    .ident
+                    .to_string()
+                    .starts_with(|c: char| c.is_ascii_uppercase()) =>
+        {
+            let b = p.path.segments[0].ident.to_string();
+            let base = if b == "Self" {
+                self_ty.cloned().unwrap_or(TySyn::Named("Self".into()))
+            } else {
+                TySyn::Named(b)
+            };
+            TySyn::Assoc(Box::new(base), p.path.segments[1].ident.to_string())
+        }
+        // `<T as Iterator>::Item`
+        syn::Type::Path(p) if p.qself.is_some() && p.path.segments.len() >= 2 => {
+            let q = p.qself.as_ref().unwrap();
+            TySyn::Assoc(
+                Box::new(parse_tysyn(&q.ty, self_ty)?),
+                p.path.segments.last().unwrap().ident.to_string(),
+            )
         }
         syn::Type::Path(p) if p.qself.is_none() => {
             // `core::ffi::c_int` などは最後のセグメントで見る
@@ -577,6 +629,16 @@ pub struct Summary {
     pub statics: Vec<(String, TySyn, String, bool)>,
     /// fn 本体の中のクロージャ (前順)。[`crate::closure`] を参照
     pub closures: Vec<ClosureSyn>,
+    /// impl の関連型 (`type Item = u32;`)
+    pub assocs: Vec<AssocSyn>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AssocSyn {
+    pub name: String,
+    pub self_ty: TySyn,
+    pub generics: Vec<String>,
+    pub value: TySyn,
 }
 
 /// 持ち上げたクロージャ 1 個分 (struct と fn)
@@ -714,7 +776,21 @@ pub struct Program {
     pub drop_impls: crate::fxhash::FxSet<u32>,
     /// drop が要る型がありうるか (prelude に drop glue があるか。Box も Drop もなければ false)
     pub has_drop: bool,
+    /// impl の関連型の定義
+    pub assocs: Vec<AssocDef>,
 }
+
+/// `impl<..> Trait for S<..> { type Name = Value; }`
+pub struct AssocDef {
+    pub name: String,
+    /// impl の self 型と値 (impl の型パラメータを Param で含む)
+    pub self_ty: Ty,
+    pub value: Ty,
+    pub ngen: usize,
+}
+
+/// 型推論に任せる `_` の印 (型パラメータの番号としては使わない値)
+pub const HOLE: u8 = 250;
 
 /// 持ち上げたクロージャ ([`crate::closure`])
 pub struct ClosureDef {
@@ -914,7 +990,17 @@ pub fn parse_item(src: &str, it: &SrcItem) -> R<syn::Item> {
                 sig: f.sig,
                 block: Box::new(f.block),
             })),
-            other => err(other.span(), "only fns are supported in impl blocks")
+            syn::ImplItem::Type(t) => Ok(syn::Item::Type(syn::ItemType {
+                attrs: t.attrs,
+                vis: t.vis,
+                type_token: t.type_token,
+                ident: t.ident,
+                generics: t.generics,
+                eq_token: t.eq_token,
+                ty: Box::new(t.ty),
+                semi_token: t.semi_token,
+            })),
+            other => err(other.span(), "only fns and associated types are supported in impl blocks")
                 .map_err(|e| relocate_err(e, it)),
         },
     }
@@ -943,6 +1029,10 @@ pub fn parse_and_summarize(
 ) -> R<(Summary, Option<syn::Item>)> {
     if let ItemKind::TraitMember(_) = it.kind {
         let ow = owner.ok_or("trait member without trait")?;
+        // `type Item;` (関連型の宣言) は何も持たない
+        if let Ok(syn::TraitItem::Type(_)) = syn::parse_str::<syn::TraitItem>(&src[it.start..it.end]) {
+            return Ok((Summary::default(), None));
+        }
         let f = parse_trait_member(src, it)?;
         let mut sig = parse_sig(&f.sig, false, false, Some(ow)).map_err(|e| relocate_err(e, it))?;
         sig.has_body = f.default.is_some();
@@ -987,6 +1077,15 @@ pub fn relocate_err(e: String, it: &SrcItem) -> String {
 pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
     let mut sm = Summary::default();
     match item {
+        syn::Item::Type(t) if owner.is_some() => {
+            let ow = owner.unwrap();
+            sm.assocs.push(AssocSyn {
+                name: t.ident.to_string(),
+                self_ty: ow.self_ty.clone(),
+                generics: ow.generics.iter().map(|g| g.0.clone()).collect(),
+                value: parse_tysyn(&t.ty, Some(&ow.self_ty))?,
+            });
+        }
         syn::Item::Fn(f) if owner.is_some() => {
             let ow = owner.unwrap();
             let mut sig = parse_sig(&f.sig, false, false, Some(ow))?;
@@ -1327,6 +1426,7 @@ impl Program {
             closure_of_struct: FxMap::default(),
             drop_impls: Default::default(),
             has_drop: false,
+            assocs: vec![],
         };
         // 0. const / static の名前 (配列の長さで使うので型より先に)
         for (ii, sm) in sums.iter().enumerate() {
@@ -1422,7 +1522,14 @@ impl Program {
                                 stack.extend(sd.args.iter().copied());
                                 continue;
                             }
-                            if (sid as usize) < n_defs {
+                            if (sid as usize) < n_defs && sdefs[sid as usize].1.contains("{closure#") {
+                                // クロージャの struct: レイアウトは型引数 (キャプチャの型) で決まり、本体は
+                                // クロージャの fn の側のキーに入るので、親アイテムのハッシュは入れない
+                                // (クロージャを 1 つ編集しても、それを受け取る map などのインスタンスは作り直さない)
+                                let mut kh = KeyHasher::new();
+                                kh.add(&sdefs[sid as usize].1);
+                                hs.push(kh.finish());
+                            } else if (sid as usize) < n_defs {
                                 hs.push(items[sdefs[sid as usize].0].hash);
                                 if drop_names.contains(sdefs[sid as usize].1.as_str()) {
                                     hs.push(0xd0d0);
@@ -1453,6 +1560,24 @@ impl Program {
             for (_, t, _, _) in &sm.statics {
                 p.consts[k].ty = p.resolve(t).map_err(|e| format!("{}:1: {e}", it.line))?;
                 k += 1;
+            }
+        }
+        // 関連型 (関数のシグネチャの `Self::Item` を解決するので先に)
+        for (it, sm) in items.iter().zip(sums) {
+            for a in &sm.assocs {
+                let gn: Vec<&str> = a.generics.iter().map(|g| g.as_str()).collect();
+                let self_ty = p
+                    .resolve_g(&a.self_ty, &gn)
+                    .map_err(|e| format!("{}:1: {e}", it.line))?;
+                let value = p
+                    .resolve_g(&a.value, &gn)
+                    .map_err(|e| format!("{}:1: {e}", it.line))?;
+                p.assocs.push(AssocDef {
+                    name: a.name.clone(),
+                    self_ty,
+                    value,
+                    ngen: gn.len(),
+                });
             }
         }
         // 3. 関数
@@ -1655,6 +1780,12 @@ impl Program {
 
     /// 型 t が trait tr を実装しているか
     pub fn implements(&self, t: Ty, tr: &str) -> bool {
+        // `Iterator<Item = T>` は trait の名前で見る (関連型の制約は呼び出し側で解く)
+        if let Some(i) = tr.find('<') {
+            if parse_fn_bound(tr).is_none() {
+                return self.implements(t, tr[..i].trim());
+            }
+        }
         match t {
             Ty::Struct(sid) if self.closure_of_struct.contains_key(&self.base_of(sid)) => {
                 // クロージャ: Fn 系と、キャプチャがすべて Copy なら Copy / Clone
@@ -1764,6 +1895,26 @@ impl Program {
             TySyn::Slice(inner) => Ty::Slice(intern(r(inner)?)),
             TySyn::Str => Ty::Str,
             TySyn::Dyn(s) => Ty::Dyn(intern_str(s)),
+            TySyn::Infer => Ty::Param(HOLE),
+            TySyn::Assoc(b, n) => {
+                let bt = r(b)?;
+                if self.has_param(bt) {
+                    Ty::Assoc(intern_assoc(AssocTy {
+                        base: bt,
+                        name: n.clone(),
+                    }))
+                } else {
+                    match self.assoc_of(bt, n) {
+                        Some(t) => t,
+                        None => {
+                            return Err(format!(
+                                "cannot find associated type `{n}` for `{}`",
+                                self.tn(bt)
+                            ));
+                        }
+                    }
+                }
+            }
             TySyn::FnPtr(v) => {
                 let mut ts = v.iter().map(r).collect::<R<Vec<Ty>>>()?;
                 let ret = ts.pop().unwrap_or(Ty::Unit);
@@ -2031,8 +2182,27 @@ impl Program {
                 .iter()
                 .any(|&a| self.has_param(a)),
             Ty::Fn(f) => f.params.iter().chain([&f.ret]).any(|&a| self.has_param(a)),
+            // 関連型は具体型ではない (型パラメータを含むときだけ現れる)
+            Ty::Assoc(_) => true,
             _ => false,
         }
+    }
+
+    /// 具体型 t の関連型 name (`impl Iterator for Counter { type Item = u32; }` なら u32)
+    pub fn assoc_of(&self, t: Ty, name: &str) -> Option<Ty> {
+        for a in &self.assocs {
+            if a.name != name {
+                continue;
+            }
+            let mut sol = vec![None; a.ngen];
+            if self.match_ty(a.self_ty, t, &mut sol) {
+                let Some(args) = sol.iter().copied().collect::<Option<Vec<Ty>>>() else {
+                    continue;
+                };
+                return Some(self.subst(a.value, &args));
+            }
+        }
+        None
     }
 
     /// 型パラメータに型引数を入れる
@@ -2044,6 +2214,17 @@ impl Program {
             Ty::Array(i, n) => Ty::Array(intern(self.subst(*i, args)), n),
             Ty::Slice(i) => Ty::Slice(intern(self.subst(*i, args))),
             Ty::Box(i) => Ty::Box(intern(self.subst(*i, args))),
+            Ty::Assoc(a) => {
+                let b = self.subst(a.base, args);
+                if self.has_param(b) {
+                    Ty::Assoc(intern_assoc(AssocTy {
+                        base: b,
+                        name: a.name.clone(),
+                    }))
+                } else {
+                    self.assoc_of(b, &a.name).unwrap_or(t)
+                }
+            }
             Ty::Fn(f) if self.has_param(t) => Ty::Fn(intern_fn(FnTy {
                 params: f.params.iter().map(|&p| self.subst(p, args)).collect(),
                 ret: self.subst(f.ret, args),
@@ -2075,6 +2256,8 @@ impl Program {
     /// 仮引数型 pt (型パラメータを含む) と実引数型 at を突き合わせて型パラメータを解く
     pub fn match_ty(&self, pt: Ty, at: Ty, sol: &mut [Option<Ty>]) -> bool {
         match (pt, at) {
+            // 関連型からは解けない (具体型が分かってから置き換わる)
+            (Ty::Assoc(_), _) => true,
             (Ty::Param(i), t) => match sol.get(i as usize).copied().flatten() {
                 Some(prev) => prev == t,
                 None => {
@@ -2122,6 +2305,7 @@ impl Program {
             Ty::Str => TySyn::Str,
             Ty::Dyn(s) => TySyn::Dyn(s.to_string()),
             Ty::Box(i) => TySyn::App("Box".into(), vec![self.ty_syn(*i)]),
+            Ty::Assoc(a) => TySyn::Assoc(Box::new(self.ty_syn(a.base)), a.name.clone()),
             Ty::Fn(f) => TySyn::FnPtr(
                 f.params.iter().chain([&f.ret]).map(|&t| self.ty_syn(t)).collect(),
             ),
@@ -2449,6 +2633,7 @@ impl Program {
             Ty::Str => "str".into(),
             Ty::Dyn(s) => format!("dyn {}", s.replace(" (", "(").replace("( ", "(").replace(" )", ")")),
             Ty::Box(i) => format!("Box<{}>", self.tn(*i)),
+            Ty::Assoc(a) => format!("<{}>::{}", self.tn(a.base), a.name),
             Ty::Fn(f) => {
                 let ps: Vec<String> = f.params.iter().map(|&p| self.tn(p)).collect();
                 match f.ret {
@@ -2509,6 +2694,10 @@ impl Program {
                 h.add(&110u8);
                 self.hash_ty(*i, h);
             }
+            Ty::Assoc(a) => {
+                h.add(&(111u8, a.name.as_str()));
+                self.hash_ty(a.base, h);
+            }
             Ty::Fn(f) => {
                 h.add(&(109u8, f.params.len()));
                 for &p in f.params.iter().chain([&f.ret]) {
@@ -2565,6 +2754,8 @@ impl Program {
         let has_consts = !self.const_index.is_empty();
         for &(a, b) in &it.idents {
             let s = &src[a as usize..b as usize];
+            // `for` はイテレータなら名前を書かずに next を呼ぶ
+            let s = if s == "for" { "next" } else { s };
             if let Some(ids) = self.by_last.get(s) {
                 fns.extend_from_slice(ids);
             }
@@ -2598,10 +2789,11 @@ impl Program {
         // `vec![..]` / `"..".to_string()` は名前を書かずに Vec の realloc / String::from を使う
         stack.extend(self.index.get("__exr_realloc").copied());
         stack.extend(self.index.get("String::from").copied());
+        stack.extend(self.index.get("__exr_str_chars").copied());
         // `impl Drop` の drop は drop glue から、メソッド `eq` は `==` から (名前を書かずに) 呼ばれる
         stack.extend((0..self.names.len() as u32).filter(|&i| {
             let s = &self.sigs[i as usize];
-            s.impl_trait.as_deref() == Some("Drop")
+            matches!(s.impl_trait.as_deref(), Some("Drop"))
                 || (s.has_self && self.names[i as usize].ends_with("::eq"))
         }));
         while let Some(i) = stack.pop() {
@@ -2691,6 +2883,12 @@ impl Enc for TySyn {
                 out.push(32);
                 v.enc(out);
             }
+            TySyn::Assoc(b, n) => {
+                out.push(33);
+                b.enc(out);
+                n.enc(out);
+            }
+            TySyn::Infer => out.push(34),
         }
     }
     fn dec(r: &mut Rd) -> Option<Self> {
@@ -2707,6 +2905,8 @@ impl Enc for TySyn {
             c @ (29 | 30) => TySyn::Ptr(c == 30, Box::new(TySyn::dec(r)?)),
             31 => TySyn::Dyn(String::dec(r)?),
             32 => TySyn::FnPtr(Vec::dec(r)?),
+            33 => TySyn::Assoc(Box::new(TySyn::dec(r)?), String::dec(r)?),
+            34 => TySyn::Infer,
             _ => return None,
         })
     }
@@ -2771,6 +2971,13 @@ crate::enc_struct!(Summary {
     consts,
     statics,
     closures,
+    assocs,
+});
+crate::enc_struct!(AssocSyn {
+    name,
+    self_ty,
+    generics,
+    value,
 });
 crate::enc_struct!(ClosureSyn {
     name,
@@ -2864,6 +3071,13 @@ fn bound_names(bs: &Bounds) -> R<Vec<String>> {
                             t.path.segments.last().map(|s| &s.arguments),
                             Some(syn::PathArguments::Parenthesized(_))
                         ) =>
+                    {
+                        v.push(bound_string(t))
+                    }
+                    // `Iterator<Item = u32>`: 関連型の制約つき (文字列のまま持ち、呼び出し側で解く)
+                    syn::TypeParamBound::Trait(t)
+                        if t.path.segments.len() == 1
+                            && matches!(t.path.segments[0].arguments, syn::PathArguments::AngleBracketed(_)) =>
                     {
                         v.push(bound_string(t))
                     }

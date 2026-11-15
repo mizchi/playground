@@ -105,6 +105,11 @@ struct Inf<'p> {
     ret: u32,
     /// Shape::Adt の型引数の型変数
     adt_args: Vec<u32>,
+    /// 呼び出しの引数を推論している深さと、本体の推論を後回しにしたクロージャ (式, 引数, 戻り値)
+    defer: u32,
+    pending: Vec<(*const syn::ExprClosure, Vec<u32>, u32)>,
+    /// 0 でなければ式の型を記録しない (一時的に parse したノードの推論中)
+    no_record: u32,
 }
 
 /// sig はこの関数 (インスタンスなら型引数を入れた後) のシグネチャ、env は `Self` と型パラメータ
@@ -136,6 +141,9 @@ pub fn infer_full(
         lets: vec![],
         ret: 0,
         adt_args: vec![],
+        defer: 0,
+        pending: vec![],
+        no_record: 0,
     };
     s.ret = match ret {
         // 一部だけ分かっている型 (`Result<?, u8>`): 型パラメータの所を型変数にする
@@ -200,6 +208,8 @@ impl Inf<'_> {
                 let i = self.known(*inner);
                 self.with(Shape::Bx(i))
             }
+            // 関連型 (まだ決まっていない) は分からないものとして扱う
+            Ty::Assoc(_) => self.var(),
             Ty::Array(e, n) => {
                 let i = self.known(*e);
                 self.with(Shape::Arr(i, n))
@@ -447,6 +457,66 @@ impl Inf<'_> {
             }
         }
     }
+    /// 型変数 v の関連型 name の型変数 (`Range<?T>` の Item → ?T、`Filter<I, P>` の Item → I の Item)
+    fn assoc_var(&mut self, v: u32, name: &str) -> Option<u32> {
+        let r = self.find(v);
+        match self.shape[r as usize] {
+            Some(Shape::Known(t)) => {
+                let a = self.prog.assoc_of(t, name)?;
+                Some(self.known(a))
+            }
+            Some(Shape::Adt(b, st, l)) => {
+                let prog = self.prog;
+                let def = prog.assocs.iter().find(|a| {
+                    a.name == name
+                        && matches!(a.self_ty, Ty::Struct(sid) if prog.base_of(sid) == b)
+                })?;
+                let Ty::Struct(ssid) = def.self_ty else { return None };
+                let sargs = prog.structs[ssid as usize].args.clone();
+                let vars = self.adt_vars_of(st, l);
+                let mut pv: Vec<Option<u32>> = vec![None; def.ngen];
+                for (a, &vv) in sargs.iter().zip(&vars) {
+                    if let Ty::Param(i) = a {
+                        if let Some(slot) = pv.get_mut(*i as usize) {
+                            *slot = Some(vv);
+                        }
+                    }
+                }
+                let value = def.value;
+                Some(self.known_g(value, &mut pv))
+            }
+            _ => None,
+        }
+    }
+
+    /// 型パラメータの関連型の制約 (`Self: Iterator<Item = S>`) で単一化する
+    fn unify_assoc_bounds(&mut self, generics: &[(String, Vec<String>)], pv: &mut Vec<Option<u32>>) {
+        let names: Vec<&str> = generics.iter().map(|g| g.0.as_str()).collect();
+        for (g, (_, bounds)) in generics.iter().enumerate() {
+            let Some(v) = pv.get(g).copied().flatten() else { continue };
+            for b in bounds {
+                if !b.contains("Item") || !b.contains('=') {
+                    continue;
+                }
+                let Ok(tb) = syn::parse_str::<syn::TraitBound>(b) else { continue };
+                let Some(syn::PathArguments::AngleBracketed(ab)) =
+                    tb.path.segments.last().map(|s| &s.arguments)
+                else {
+                    continue;
+                };
+                for a in &ab.args {
+                    let syn::GenericArgument::AssocType(at) = a else { continue };
+                    let Ok(ts) = crate::front::parse_tysyn(&at.ty, None) else { continue };
+                    let Ok(want) = self.prog.resolve_g(&ts, &names) else { continue };
+                    let w = self.known_g(want, pv);
+                    if let Some(actual) = self.assoc_var(v, &at.ident.to_string()) {
+                        self.unify(w, actual);
+                    }
+                }
+            }
+        }
+    }
+
     /// 型パラメータに `Fn(A) -> B` の境界があり、渡したのがクロージャなら A / B と単一化する
     fn unify_fn_bounds(&mut self, generics: &[(String, Vec<String>)], pv: &mut Vec<Option<u32>>) {
         for (g, (_, bounds)) in generics.iter().enumerate() {
@@ -647,6 +717,11 @@ impl Inf<'_> {
                 let vars: Vec<u32> = args.into_iter().map(|a| self.known_g(a, pv)).collect();
                 self.adt(base, vars)
             }
+            Ty::Assoc(a) => {
+                let b = self.known_g(a.base, pv);
+                let name = a.name.clone();
+                self.assoc_var(b, &name).unwrap_or_else(|| self.var())
+            }
             t => self.with(Shape::Known(t)),
         }
     }
@@ -680,6 +755,7 @@ impl Inf<'_> {
         }
         let prog = self.prog;
         self.unify_fn_bounds(&prog.sigs[id as usize].generics, &mut pv);
+        self.unify_assoc_bounds(&prog.sigs[id as usize].generics, &mut pv);
         self.known_g(ret, &mut pv)
     }
 
@@ -704,6 +780,7 @@ impl Inf<'_> {
                 }
                 let prog = self.prog;
                 self.unify_fn_bounds(&prog.sigs[id as usize].generics, &mut pv);
+                self.unify_assoc_bounds(&prog.sigs[id as usize].generics, &mut pv);
                 self.known_g(ret, &mut pv)
             }
             None => self.var(),
@@ -733,6 +810,46 @@ impl Inf<'_> {
     }
 
     /// 参照型の変数を辿って中身へ。参照を通ったら束縛モードを Ref にする
+    fn closure_body(&mut self, c: &syn::ExprClosure, vs: &[u32], rv: u32) {
+        self.scopes.push(vec![]);
+        for (p, &v) in c.inputs.iter().zip(vs) {
+            self.pat(p, v, None);
+        }
+        let saved = self.ret;
+        self.ret = rv;
+        let b = self.expr(&c.body);
+        self.unify(b, rv);
+        self.ret = saved;
+        self.scopes.pop();
+    }
+
+    fn finish_closures(&mut self, mark: usize) {
+        while self.pending.len() > mark {
+            let (c, vs, rv) = self.pending.remove(mark);
+            let saved = std::mem::take(&mut self.defer);
+            // SAFETY: c は infer() の間生きている関数の AST の中を指す
+            let c = unsafe { &*c };
+            self.closure_body(c, &vs, rv);
+            self.defer = saved;
+        }
+    }
+
+    /// 算術・比較の被演算子: 整数 (か未知) への参照なら中身
+    fn num_operand(&mut self, v: u32) -> u32 {
+        let r = self.find(v);
+        match self.shape[r as usize] {
+            Some(Shape::Ref(_, i)) => {
+                let ri = self.find(i);
+                match self.shape[ri as usize] {
+                    None => i,
+                    Some(Shape::Known(t)) if t.is_int() || matches!(t, Ty::Char | Ty::Bool) => i,
+                    _ => v,
+                }
+            }
+            _ => v,
+        }
+    }
+
     /// 式の文脈 (フィールド・メソッド・添字) の自動 deref: 参照と Box を剥がす
     fn deref_expr(&mut self, mut v: u32) -> u32 {
         loop {
@@ -940,7 +1057,17 @@ impl Inf<'_> {
     /// 式の型変数。値を作る式 (リテラル・構築・呼び出し) は結果の型も記録し、
     /// codegen が期待型のないところで使う (`Pair { a: 1 }.swap()` の 1 を後ろの使用から決める)
     fn expr(&mut self, e: &Expr) -> u32 {
+        // 呼び出しの引数のクロージャは、呼び先の境界 (`F: FnMut(Self::Item) -> B`) と単一化してから本体を推論する
+        let call = matches!(e, Expr::Call(_) | Expr::MethodCall(_));
+        let mark = self.pending.len();
+        if call {
+            self.defer += 1;
+        }
         let v = self.expr_inner(e);
+        if call {
+            self.defer -= 1;
+            self.finish_closures(mark);
+        }
         if matches!(
             e,
             Expr::Lit(_)
@@ -952,7 +1079,8 @@ impl Inf<'_> {
                 | Expr::Try(_)
                 | Expr::Index(_)
                 | Expr::Field(_)
-        ) {
+        ) && self.no_record == 0
+        {
             self.lets.push((e as *const Expr as usize, v));
         }
         v
@@ -961,6 +1089,23 @@ impl Inf<'_> {
     fn expr_inner(&mut self, e: &Expr) -> u32 {
         use BinOp::*;
         match e {
+            // 値としての `a..b` / `a..=b`: prelude の Range<T> / RangeInclusive<T>
+            Expr::Range(rg) => {
+                let name = if matches!(rg.limits, syn::RangeLimits::Closed(_)) {
+                    "RangeInclusive"
+                } else {
+                    "Range"
+                };
+                let el = self.var();
+                for x in rg.start.iter().chain(rg.end.iter()) {
+                    let xv = self.expr(x);
+                    self.unify(el, xv);
+                }
+                match self.prog.struct_index.get(name) {
+                    Some(&b) => self.adt(b, vec![el]),
+                    None => self.var(),
+                }
+            }
             // `vec![a, b]` / `vec![x; n]`: Vec<要素の型>
             Expr::Macro(m)
                 if m.mac.path.is_ident("vec") && self.prog.struct_index.contains_key("Vec") =>
@@ -981,10 +1126,14 @@ impl Inf<'_> {
                         .map(|v| v.into_iter().collect())
                         .unwrap_or_default(),
                 };
+                // (parse し直したノードは推論の後で捨てるので、アドレスで型を記録しない。
+                //  解放されたアドレスが codegen の作るノードと重なると別の式の型を引いてしまう)
+                self.no_record += 1;
                 for x in &xs {
                     let v = self.expr(x);
                     self.unify(el, v);
                 }
+                self.no_record -= 1;
                 let vb = self.prog.struct_index["Vec"];
                 self.adt(vb, vec![el])
             }
@@ -1078,6 +1227,7 @@ impl Inf<'_> {
                     }
                 }
                 adapters.reverse();
+                let mut iter_item = None;
                 let item = if let Expr::Range(rg) = e {
                     let v = self.var();
                     for x in rg.start.iter().chain(rg.end.iter()) {
@@ -1106,13 +1256,28 @@ impl Inf<'_> {
                             _ => {}
                         }
                     }
-                    let el = self.elem_of(bv).unwrap_or_else(|| self.var());
-                    match mode {
-                        Some(m) => self.with(Shape::Ref(m, el)),
-                        None => el,
+                    match self.elem_of(bv) {
+                        Some(el) => match mode {
+                            Some(m) => self.with(Shape::Ref(m, el)),
+                            None => el,
+                        },
+                        None => {
+                            // Iterator: 式全体の型の `Item`
+                            let fv = self.expr(&f.expr);
+                            let it = self
+                                .resolve(fv)
+                                .and_then(|t| self.prog.assoc_of(t, "Item"));
+                            iter_item = Some(match it {
+                                Some(t) => self.known(t),
+                                None => self.var(),
+                            });
+                            self.var()
+                        }
                     }
                 };
-                let item = if adapters.iter().any(|a| a == "enumerate") {
+                let item = if let Some(it) = iter_item {
+                    it
+                } else if adapters.iter().any(|a| a == "enumerate") {
                     let base = self.prog.tuple_base(2);
                     let u = self.known(Ty::Usize);
                     self.adt(base, vec![u, item])
@@ -1248,6 +1413,12 @@ impl Inf<'_> {
             Expr::Binary(b) => {
                 let l = self.expr(&b.left);
                 let r = self.expr(&b.right);
+                // `&i64 * 10` / `acc + x` (x: &i64): 参照は値として計算する (codegen と同じ)
+                let (l, r) = if matches!(b.op, And(_) | Or(_) | Shl(_) | Shr(_) | ShlAssign(_) | ShrAssign(_)) {
+                    (l, r)
+                } else {
+                    (self.num_operand(l), self.num_operand(r))
+                };
                 match b.op {
                     And(_) | Or(_) => {
                         let k = self.known(Ty::Bool);
@@ -1403,20 +1574,17 @@ impl Inf<'_> {
                 };
                 self.adt_args.extend(vs.iter().copied().chain([rv]));
                 // codegen がクロージャの型引数を決めるのに使う: 引数 (パターンのアドレス) と戻り値 (式のアドレス)
-                for (p, &v) in c.inputs.iter().zip(&vs) {
-                    self.lets.push((p as *const Pat as usize, v));
+                if self.no_record == 0 {
+                    for (p, &v) in c.inputs.iter().zip(&vs) {
+                        self.lets.push((p as *const Pat as usize, v));
+                    }
+                    self.lets.push((c as *const syn::ExprClosure as usize, rv));
                 }
-                self.lets.push((c as *const syn::ExprClosure as usize, rv));
-                self.scopes.push(vec![]);
-                for (p, &v) in c.inputs.iter().zip(&vs) {
-                    self.pat(p, v, None);
+                if self.defer > 0 && self.no_record == 0 {
+                    self.pending.push((c as *const syn::ExprClosure, vs, rv));
+                } else {
+                    self.closure_body(c, &vs, rv);
                 }
-                let saved = self.ret;
-                self.ret = rv;
-                let b = self.expr(&c.body);
-                self.unify(b, rv);
-                self.ret = saved;
-                self.scopes.pop();
                 self.with(Shape::Clo(st, n))
             }
             Expr::MethodCall(mc)
@@ -1441,6 +1609,14 @@ impl Inf<'_> {
                         self.option_of(rr)
                     }
                     "swap" => self.known(Ty::Unit),
+                    // 値としての `xs.iter()` / `iter_mut()`: prelude の Iter<T> / IterMut<T>
+                    "iter" | "iter_mut" => {
+                        let name = if mc.method == "iter" { "Iter" } else { "IterMut" };
+                        match self.prog.struct_index.get(name) {
+                            Some(&b) => self.adt(b, vec![el]),
+                            None => self.var(),
+                        }
+                    }
                     "as_ptr" => {
                         let k = self.resolve(el).map(|t| Ty::Ptr(false, intern(t)));
                         match k {
@@ -1513,7 +1689,14 @@ impl Inf<'_> {
                             return self.apply_recv(Some(id), args, rv);
                         }
                     }
-                    // struct でない受け手: 整数などの組み込みメソッド (min / max など)
+                    // struct でない受け手: 整数などの組み込みメソッド (min / max など)。
+                    // 受け手の型が分からない未知のメソッドは分からないまま
+                    if self.resolve(rv).is_none()
+                        && !is_builtin_scalar_method(&n)
+                        && !matches!(n.as_str(), "min" | "max" | "len" | "is_empty")
+                    {
+                        return self.var();
+                    }
                     return self.scalar_method(mc, r, rv, args);
                 }
                 self.apply_recv(callee, args, rv)

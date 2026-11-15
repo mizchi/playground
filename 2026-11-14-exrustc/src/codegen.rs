@@ -513,6 +513,34 @@ fn is_promotable(cx: &Cx, e: &Expr) -> bool {
     }
 }
 
+/// `_` の穴を含む型か
+fn has_hole(prog: &Program, t: Ty) -> bool {
+    match t {
+        Ty::Param(i) => i == crate::front::HOLE,
+        Ty::Ref(_, i) | Ty::Ptr(_, i) | Ty::Array(i, _) | Ty::Slice(i) | Ty::Box(i) => has_hole(prog, *i),
+        Ty::Struct(sid) => prog.structs[sid as usize].args.iter().any(|&a| has_hole(prog, a)),
+        _ => false,
+    }
+}
+
+/// `Iterator<Item = T>` の (Item, T)
+fn assoc_constraint(b: &str) -> Option<(String, crate::front::TySyn)> {
+    if !b.contains('=') || crate::front::parse_fn_bound(b).is_some() {
+        return None;
+    }
+    let tb: syn::TraitBound = syn::parse_str(b).ok()?;
+    let syn::PathArguments::AngleBracketed(ab) = &tb.path.segments.last()?.arguments else {
+        return None;
+    };
+    ab.args.iter().find_map(|a| match a {
+        syn::GenericArgument::AssocType(at) => Some((
+            at.ident.to_string(),
+            crate::front::parse_tysyn(&at.ty, None).ok()?,
+        )),
+        _ => None,
+    })
+}
+
 fn strip_paren(e: &Expr) -> &Expr {
     match e {
         Expr::Paren(p) => strip_paren(&p.expr),
@@ -821,9 +849,13 @@ impl Cx<'_, '_> {
                             pat_name(&pt.pat)?,
                             Some(self.prog.parse_ty(&pt.ty, &self.env)?),
                         ),
+                        // (型推論は強制変換の行き先 `[T]` などを入れてしまうことがあるので、サイズ不定の型は使わない)
                         p => (
                             pat_name(p)?,
-                            self.lets.get(&crate::infer::let_key(l)).copied(),
+                            self.lets
+                                .get(&crate::infer::let_key(l))
+                                .copied()
+                                .filter(|t| !matches!(t, Ty::Slice(_) | Ty::Str | Ty::Dyn(_))),
                         ),
                     };
                     let Some(init) = &l.init else {
@@ -837,6 +869,8 @@ impl Cx<'_, '_> {
                         diverged = true;
                         continue;
                     }
+                    // `let v: Vec<_> = ..`: 穴のある注釈は期待型としてだけ使う
+                    let ann = ann.filter(|&a| !has_hole(self.prog, a));
                     let ty = ann.unwrap_or(t);
                     self.same(init.expr.span(), t, ty)?;
                     self.bind(name, ty, v);
@@ -980,10 +1014,17 @@ impl Cx<'_, '_> {
                     .prog
                     .method(sid, &name)
                     .or_else(|| self.prog.default_method(sid, &name))?;
-                Some(
-                    self.prog
-                        .subst(self.prog.sigs[id as usize].ret, &[Ty::Struct(sid)]),
-                )
+                // 型パラメータは受け手から分かる分だけ (Self / impl の型パラメータ) 入れる
+                let sig = &self.prog.sigs[id as usize];
+                let mut sol = vec![None; sig.generics.len()];
+                if sig.trait_of.is_some() {
+                    if let Some(s0) = sol.first_mut() {
+                        *s0 = Some(Ty::Struct(sid));
+                    }
+                } else if let Some(st) = sig.self_ty {
+                    self.prog.match_ty(st, Ty::Struct(sid), &mut sol);
+                }
+                Some(self.prog.partial_subst(sig.ret, &sol)).filter(|&t| !self.prog.has_param(t))
                 .filter(|&t| !self.prog.has_param(t))
             }
             Expr::Paren(p) => self.peek(&p.expr),
@@ -1485,6 +1526,7 @@ impl Cx<'_, '_> {
             }
             Expr::Call(c) => self.call(c, expected),
             Expr::Closure(c) => self.closure_value(c, expected),
+            Expr::Range(rg) => self.range_value(rg, expected),
             Expr::Tuple(t) if t.elems.is_empty() => Ok((None, Ty::Unit)),
             Expr::Tuple(t) => self.tuple_lit(t, expected),
             Expr::Array(a) => self.array_lit(a, expected),
@@ -1497,7 +1539,7 @@ impl Cx<'_, '_> {
                 Ok(self.read(p))
             }
             Expr::ForLoop(f) => self.for_(f),
-            Expr::MethodCall(mc) => self.method_call(mc),
+            Expr::MethodCall(mc) => self.method_call(mc, expected),
             Expr::Cast(c) => {
                 let to = self.prog.parse_ty(&c.ty, &self.env)?;
                 // `&x as &dyn Trait` は期待型つきの評価 (強制変換) と同じ
@@ -2088,6 +2130,81 @@ impl Cx<'_, '_> {
         ))
     }
 
+    /// 関連型の制約から型パラメータを解く (`I: Iterator<Item = T>` / `where Self: Iterator<Item = &T>`)。
+    /// `collect::<Vec<_>>()` の `_` は `Self::Item` で埋める
+    fn solve_assoc_bounds(&self, sig: &FnSig, sol: &mut [Option<Ty>]) {
+        let names: Vec<&str> = sig.generics.iter().map(|g| g.0.as_str()).collect();
+        for _ in 0..2 {
+            for (g, (_, bounds)) in sig.generics.iter().enumerate() {
+                let Some(gt) = sol[g] else { continue };
+                if self.prog.has_param(gt) {
+                    continue;
+                }
+                for b in bounds {
+                    let Some((name, want)) = assoc_constraint(b) else { continue };
+                    let Ok(want) = self.prog.resolve_g(&want, &names) else { continue };
+                    if let Some(actual) = self.prog.assoc_of(gt, &name) {
+                        self.prog.match_ty(want, actual, sol);
+                    }
+                }
+            }
+        }
+        for g in 0..sol.len() {
+            let Some(t) = sol[g] else { continue };
+            if !has_hole(self.prog, t) || !sig.generics[g].1.iter().any(|b| b == "__FromIter") {
+                continue;
+            }
+            let item = sol
+                .first()
+                .copied()
+                .flatten()
+                .filter(|&s| !self.prog.has_param(s))
+                .and_then(|s| self.prog.assoc_of(s, "Item"));
+            if let Some(item) = item {
+                let mut args: Vec<Ty> = (0..=crate::front::HOLE).map(Ty::Param).collect();
+                args[crate::front::HOLE as usize] = item;
+                sol[g] = Some(self.prog.subst(t, &args));
+            }
+        }
+    }
+
+    /// 値としての `a..b` / `a..=b`: prelude の Range / RangeInclusive
+    fn range_value(&mut self, rg: &syn::ExprRange, expected: Option<Ty>) -> R<V> {
+        let incl = matches!(rg.limits, syn::RangeLimits::Closed(_));
+        let name = if incl { "RangeInclusive" } else { "Range" };
+        let (Some(lo), Some(hi)) = (&rg.start, &rg.end) else {
+            return err(rg.span(), "only `a..b` / `a..=b` ranges can be used as values");
+        };
+        let Some(&base) = self.prog.struct_index.get(name) else {
+            return err(rg.span(), "ranges can only be used directly in `for` loops here");
+        };
+        let mut et = match expected {
+            Some(Ty::Struct(sid)) if self.prog.base_of(sid) == base => {
+                self.prog.structs[sid as usize].args.first().copied()
+            }
+            _ => None,
+        };
+        if et.is_none() {
+            et = self.peek(lo).or_else(|| self.peek(hi));
+        }
+        let (lv, lt) = self.expr(lo, et)?;
+        let (hv, ht) = self.expr(hi, Some(lt))?;
+        self.same(hi.span(), ht, lt)?;
+        let sid = self.prog.instantiate(base, vec![lt]).or_else(|e| err(rg.span(), e))?;
+        let st = Ty::Struct(sid);
+        let a = self.temp(st);
+        let fields = self.prog.structs[sid as usize].fields.clone();
+        for (n, ft, off) in fields {
+            let v = match n.as_str() {
+                "start" => lv,
+                "end" => hv,
+                _ => Some(self.b.ins().iconst(types::I8, 0)),
+            };
+            self.write(Place::Mem(a, off as i32, ft), v);
+        }
+        Ok((Some(a), st))
+    }
+
     /// `Fn(A, B) -> R` (dyn の中身) の引数と戻り値の型
     fn dyn_fn_sig(&self, s: &str) -> R<(Vec<Ty>, Ty)> {
         let Some((_, ps, r)) = crate::front::parse_fn_bound(s) else {
@@ -2197,7 +2314,7 @@ impl Cx<'_, '_> {
 
     /// `recv.m(args)`: レシーバを自動 deref して struct を見つけ、
     /// メソッドの self 型に合わせて自動参照 (`&self` / `&mut self`) かコピー (`self`) で渡す
-    fn method_call(&mut self, mc: &syn::ExprMethodCall) -> R<V> {
+    fn method_call(&mut self, mc: &syn::ExprMethodCall, expected: Option<Ty>) -> R<V> {
         if let Some(r) = self.builtin_method(mc)? {
             return Ok(r);
         }
@@ -2290,7 +2407,7 @@ impl Cx<'_, '_> {
             Some((recv, recv_ty)),
             &args,
             mc.turbofish.as_ref(),
-            None,
+            expected,
             mc.span(),
         )
     }
@@ -2354,7 +2471,9 @@ impl Cx<'_, '_> {
                     return err(a.span(), "only type arguments are supported");
                 };
                 if let Some(slot) = sol.get_mut(first + i) {
-                    *slot = Some(self.prog.parse_ty(t, &self.env)?);
+                    // `_` は推論に任せる。`Vec<_>` のように一部だけ `_` なら穴として持つ
+                    let ty = self.prog.parse_ty(t, &self.env)?;
+                    *slot = (ty != Ty::Param(crate::front::HOLE)).then_some(ty);
                 }
             }
         }
@@ -2391,6 +2510,13 @@ impl Cx<'_, '_> {
             if self.prog.match_ty(sig.ret, rt, &mut s2) {
                 sol = s2;
             }
+        }
+        self.solve_assoc_bounds(&sig, &mut sol);
+        if let Some(i) = sol.iter().position(|s| s.is_some_and(|t| has_hole(self.prog, t))) {
+            return err(
+                span,
+                format!("cannot infer type parameter `{}`; annotate the type", sig.generics[i].0),
+            );
         }
         let Some(args) = sol.iter().copied().collect::<Option<Vec<Ty>>>() else {
             let i = sol.iter().position(|s| s.is_none()).unwrap();
@@ -2730,6 +2856,12 @@ impl Cx<'_, '_> {
         };
         // 比較は参照で比べるのでムーブしない (一時値は文の終わりまで所有する)
         let cmp = is_cmp(&b.op);
+        // `x * 10` (x: &i64): リテラルの型は参照の中身
+        let deref_num = |t: Option<Ty>| match t {
+            Some(Ty::Ref(_, i)) if i.is_int() => Some(*i),
+            t => t,
+        };
+        let hint = deref_num(hint);
         let (l, lt) = self.operand(&b.left, hint, cmp)?;
         let Some(l) = l else {
             return Ok((None, Ty::Never));
@@ -2737,7 +2869,7 @@ impl Cx<'_, '_> {
         let rhint = if is_shift {
             self.peek(&b.right)
         } else {
-            Some(lt)
+            deref_num(Some(lt))
         };
         let (r, rt) = self.operand(&b.right, rhint.or(Some(lt)), cmp)?;
         let Some(r) = r else {
@@ -2746,6 +2878,29 @@ impl Cx<'_, '_> {
 
         // `String == &str` / `&str == String`: String を &str にして比べる
         let (mut l, mut lt, mut r, mut rt) = (l, lt, r, rt);
+        // `i32 + &i32` など: 整数への参照は値にしてから計算する (core の `impl Add<&i32> for i32` 相当)
+        if let (Ty::Ref(_, a), Ty::Ref(_, c)) = (lt, rt) {
+            if a == c && (a.is_int() || matches!(a, Ty::Char | Ty::Bool)) && !is_shift {
+                let ct = clif_ty(*a).unwrap();
+                l = self.b.ins().load(ct, mf(), l, 0);
+                r = self.b.ins().load(ct, mf(), r, 0);
+                lt = *a;
+                rt = *a;
+            }
+        }
+        if !matches!(b.op, Eq(_) | Ne(_)) || !lt.is_agg() {
+            if let (true, Ty::Ref(_, i)) = (lt.is_int(), rt) {
+                if *i == lt {
+                    r = self.b.ins().load(clif_ty(lt).unwrap(), mf(), r, 0);
+                    rt = lt;
+                }
+            } else if let (Ty::Ref(_, i), true) = (lt, rt.is_int()) {
+                if *i == rt && !is_shift {
+                    l = self.b.ins().load(clif_ty(rt).unwrap(), mf(), l, 0);
+                    lt = rt;
+                }
+            }
+        }
         let str_ref = Ty::Ref(false, intern(Ty::Str));
         if matches!(b.op, Eq(_) | Ne(_)) && lt != rt {
             if let (Ty::Struct(sid), true) = (lt, rt == str_ref) {
@@ -3439,6 +3594,15 @@ impl Cx<'_, '_> {
             Ok(Ty::Struct(this.prog.instantiate(ob, vec![t])?))
         };
         match name.as_str() {
+            // 値としての `xs.iter()` / `xs.iter_mut()`: prelude の Iter / IterMut
+            "iter" | "iter_mut" if self.prog.index.contains_key("__exr_slice_iter") || name == "iter_mut" => {
+                let (base, len, elem) = self.indexable(&mc.receiver)?;
+                let m = name == "iter_mut";
+                let fat = self.make_fat_v(base, len);
+                let f = if m { "__exr_slice_iter_mut" } else { "__exr_slice_iter" };
+                self.call_named(f, vec![elem], &[(fat, Ty::Ref(m, intern(Ty::Slice(intern(elem)))))], mc.span())
+                    .map(Some)
+            }
             "len" | "is_empty" => {
                 let (_, len, _) = self.indexable(&mc.receiver)?;
                 if name == "len" {
@@ -3589,6 +3753,15 @@ impl Cx<'_, '_> {
                 Some(self.b.ins().load(PTR, mf(), fat, 0)),
                 Ty::Ptr(false, intern(Ty::U8)),
             ),
+            // `s.chars()` / `s.bytes()`
+            "chars" => {
+                return self
+                    .call_named("__exr_str_chars", vec![], &[(fat, Ty::Ref(false, intern(Ty::Str)))], mc.span())
+                    .map(Some);
+            }
+            "bytes" => {
+                return err(mc.span(), "`bytes()` on `&str` is not supported; use `s.as_bytes().iter()`");
+            }
             // `"..".to_string()` / `to_owned()` は prelude の String::from
             "to_string" | "to_owned" => {
                 return self
@@ -4014,6 +4187,38 @@ impl Cx<'_, '_> {
         let enumerate = adapters.iter().any(|a| a == "enumerate");
         if let Expr::Range(rg) = e {
             return self.for_range(f, rg, rev, enumerate);
+        }
+        // 配列・スライス・Vec でなければ Iterator: `while let Some(pat) = it.next() { .. }`
+        let base_ty = self.peek(match e {
+            Expr::Reference(r) => &r.expr,
+            e => e,
+        });
+        let mut bt = base_ty;
+        while let Some(Ty::Ref(_, i)) = bt {
+            if bt.is_some_and(|t| t.is_fat()) {
+                break;
+            }
+            bt = Some(*i);
+        }
+        let iterator = match bt {
+            Some(Ty::Struct(sid)) => self.vec_fields(sid).is_none(),
+            _ => false,
+        };
+        if iterator {
+            self.scopes.push(vec![]);
+            let (v, t) = self.expr(&f.expr, None)?;
+            if t == Ty::Never {
+                self.pop_scope();
+                return Ok((None, Ty::Never));
+            }
+            self.bind("__exr_it".into(), t, v);
+            let call: Expr = syn::parse_quote!(__exr_it.next());
+            let fp = &f.pat;
+            let pat: Pat = syn::parse_quote!(Some(#fp));
+            let r = self.while_let_parts(&pat, &call, &f.body);
+            self.pop_scope();
+            r?;
+            return Ok((None, Ty::Unit));
         }
         // 配列 / スライスを添字で回す
         let (by_ref, base_e): (Option<bool>, &Expr) = match e {
@@ -4583,6 +4788,12 @@ impl Cx<'_, '_> {
             self.write(Place::Mem(ptr, 0, t), v);
             return Ok(Some((Some(ptr), Ty::Box(intern(t)))));
         }
+        // prelude の Chars が使う u32 → char (検査しない)
+        if name == "__exr_char_from_u32" {
+            let (v, t) = self.expr(&c.args[0], Some(Ty::U32))?;
+            self.same(c.args[0].span(), t, Ty::U32)?;
+            return Ok(Some((v, Ty::Char)));
+        }
         // `core::slice::from_raw_parts(p, n)` / `_mut` と `core::str::from_utf8_unchecked(b)`
         if matches!(name.as_str(), "from_raw_parts" | "from_raw_parts_mut" | "from_utf8_unchecked")
             && !(p.path.segments.len() == 1 && self.prog.index.contains_key(&name))
@@ -4909,22 +5120,27 @@ impl Cx<'_, '_> {
         let Expr::Let(l) = &*w.cond else {
             unreachable!()
         };
+        self.while_let_parts(&l.pat, &l.expr, &w.body)
+    }
+
+    /// `while let pat = e { body }` (for ループのイテレータ版からも使う)
+    fn while_let_parts(&mut self, pat: &Pat, e: &Expr, body: &syn::Block) -> R<V> {
         let header = self.b.create_block();
         let exit = self.b.create_block();
         self.b.ins().jump(header, &[]);
         self.b.switch_to_block(header);
         // 毎回 match 対象を評価し直す (一時値は 1 回ごとに drop する)
         let t0 = self.temps.len();
-        let Some(place) = self.scrutinee(&l.expr)? else {
+        let Some(place) = self.scrutinee(e)? else {
             return Ok((None, Ty::Never));
         };
         let sflag = self.last_scrut;
-        self.pat_test(&l.pat, place, exit)?;
+        self.pat_test(pat, place, exit)?;
         self.scopes.push(vec![]);
         let ob = self.owned_binds;
-        self.pat_bind(&l.pat, place, BindMode::Move)?;
+        self.pat_bind(pat, place, BindMode::Move)?;
         if self.owned_binds > ob {
-            self.release(&l.expr, sflag);
+            self.release(e, sflag);
         }
         self.loops.push(Loop {
             cont: header,
@@ -4933,11 +5149,11 @@ impl Cx<'_, '_> {
             depth: self.scopes.len() - 1,
             temps: t0,
         });
-        let (_, bt) = self.block(&w.body, Some(Ty::Unit))?;
+        let (_, bt) = self.block(body, Some(Ty::Unit))?;
         self.loops.pop();
         self.pop_scope();
         if bt != Ty::Never {
-            self.same(w.body.span(), bt, Ty::Unit)?;
+            self.same(body.span(), bt, Ty::Unit)?;
             self.drop_for_exit(usize::MAX, t0);
             self.b.ins().jump(header, &[]);
         } else {

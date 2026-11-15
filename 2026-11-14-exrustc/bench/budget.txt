@@ -26,6 +26,9 @@ gen1000.object_bytes 634418
 hello.binary_bytes 6451
 hello.cache_bytes 3202
 hello.object_bytes 4132
+iterators.binary_bytes 45981
+iterators.cache_bytes 81747
+iterators.object_bytes 86091
 lsp1000.mem_bytes 20843
 methods.binary_bytes 7232
 methods.cache_bytes 6072

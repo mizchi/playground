@@ -114,6 +114,8 @@ pub struct Session {
     disk: Cache,
     mem: FxMap<Key, Vec<u8>>,
     used: FxSet<Key>,
+    /// prelude の選択の、アイテムごとの結果
+    sel: crate::prelude::SelectCache,
 }
 
 struct Timer {
@@ -206,6 +208,7 @@ impl Session {
             disk: Cache::empty(),
             mem: FxMap::default(),
             used: FxSet::default(),
+            sel: Default::default(),
         }
     }
 
@@ -422,7 +425,7 @@ impl Session {
     /// 型検査だけを行い、全診断を返す (LSP 用)。到達しない関数も検査する。
     /// 検査に通った関数は「OK」の印をキャッシュし、次回は parse もしない。
     pub fn check(&mut self, src: &str) -> Vec<Diagnostic> {
-        let out = match with_prelude(src) {
+        let out = match with_prelude(src, &mut self.sel) {
             Ok((full, items)) => self.check_inner(&full, items),
             Err(e) => vec![e],
         };
@@ -499,7 +502,7 @@ impl Session {
 
     /// ビルドして実行ファイルを書く。キャッシュの書き戻しは save_cache で行う。
     pub fn build(&mut self, src: &str, output: &Path) -> Result<BuildReport, String> {
-        let r = with_prelude(src).and_then(|(full, items)| self.build_inner(&full, items, output));
+        let r = with_prelude(src, &mut self.sel).and_then(|(full, items)| self.build_inner(&full, items, output));
         if r.is_err() {
             self.used.clear();
         }
@@ -680,9 +683,12 @@ impl Session {
 /// ユーザのソースの後ろに、使われうる prelude のアイテム (Option / Result など) を付ける。
 /// 後ろに付けるのでユーザのコードの行番号は変わらない。ユーザのコードの字句解析はここで 1 回だけ行い、
 /// prelude の分だけ追加で字句解析して結合する
-fn with_prelude(src: &str) -> Result<(std::borrow::Cow<'_, str>, Vec<SrcItem>), String> {
+fn with_prelude<'a>(
+    src: &'a str,
+    cache: &mut crate::prelude::SelectCache,
+) -> Result<(std::borrow::Cow<'a, str>, Vec<SrcItem>), String> {
     let mut items = lexer::split(src)?;
-    let extra = crate::prelude::select(src, &items);
+    let extra = crate::prelude::select_with(src, &items, cache);
     if extra.is_empty() {
         // prelude を使わなければソースはそのまま (コピーしない)
         return Ok((std::borrow::Cow::Borrowed(src), items));

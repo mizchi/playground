@@ -130,6 +130,12 @@ bench/regress.sh
       同じ時間帯に HEAD と並べて測ると ±10% 程度の揺れの中。callgrind の命令数も HEAD 以下。
     - 本物の増加は prelude の選択（+26%）だけだった。prelude の名前が増え、先頭 1 byte ごとの候補表が長くなったのが原因。(先頭 1 byte, 長さ) で引く表にして HEAD より少なくした。
     - `==` は識別子として現れないので、prelude の `Vec::eq` / `String::eq` が付かず、ポインタを比べていた。eq は型と一緒に付け、到達可能性の根にも入れた。
+  - Iterator の追加時
+    - サイズ予算がほぼ全部の例で超過した（hello のキャッシュが 3.2 KB → 10.8 KB）。`for x in v.iter()`・変数名の `count`・`a.max(b)`・`Option::take`・フィールドの `.next` で、イテレータの部品が丸ごと付いていた。
+      付ける条件を「イテレータを作る呼び出しの後ろにアダプタ・消費メソッドが続く」などに絞り、既存の例の予算は 1 byte も緩めずに通るようにした。
+    - LSP の 1 関数編集で prelude の選択が +63%（候補の名前が増えたため）。アイテムのハッシュごとに結果を Session に覚え、変わっていないアイテムは走査しないようにした。callgrind で `Session::check` は HEAD より少ない。
+    - 型推論が一時的に parse したマクロの引数の型をアドレスで記録していたため、解放後のアドレスに codegen が作ったノードが重なり、別の式の型（`&str`）を引いていた。一時ノードは記録しないようにした。
+    - クロージャを 1 つ編集すると、それを受け取る map などのインスタンスが 65 個作り直されていた。クロージャの struct の deep hash から親アイテムのハッシュを外し、18 個（親とクロージャだけ）にした。
 
 ## 対応している言語サブセット（no_std の範囲）
 
@@ -142,7 +148,7 @@ bench/regress.sh
 検証は、そうしたプログラムを rustc でもビルドし、実行結果（標準出力と終了コード）が一致することで行う。
 
 - rustc 側は libcore だけでビルドする（`-C panic=abort`）。
-- 比較は `tests/compare.sh` が行う。対象は `examples/*.rs` の 19 本で、そのうち no_std は 6 本（`nostd_calc` は字句解析と後置記法の電卓で、ジェネリック struct・`?`・const 配列・`&&str` の自動 deref を使う）。
+- 比較は `tests/compare.sh` が行う。対象は `examples/*.rs` の 20 本で、そのうち no_std は 6 本（`nostd_calc` は字句解析と後置記法の電卓で、ジェネリック struct・`?`・const 配列・`&&str` の自動 deref を使う）。
 
 ### 言語
 
@@ -190,6 +196,14 @@ bench/regress.sh
   - `String`：`new` / `from` / `with_capacity` / `push_str` / `push(char)`（UTF-8 に符号化）/ `len` / `is_empty` / `as_str` / `as_bytes` / `clear` / `truncate` / `clone` / `==`（`String` 同士と `&str`）、`"..".to_string()` / `to_owned()`
   - `&str` / `&[T]` の `==` は中身で比べる
   - Vec / String のメソッドは、型の名前がコードに現れたときだけ prelude から付ける（自分の struct に `push` があるだけでは付かない）
+- Iterator（`examples/iterators.rs`）：prelude に `trait Iterator { type Item; fn next(..); .. }` とアダプタを Rust で書いてある
+  - 関連型：`type Item = u32;`（impl）と `Self::Item` / `I::Item`（シグネチャ）、`I: Iterator<Item = T>` / `where Self: Iterator<Item = &T>` の制約で型パラメータを解く
+  - 自前の `impl Iterator for S`、`for x in it`（`while let Some(x) = it.next()` にする）
+  - 作るもの：`v.iter()` / `iter_mut()` / `into_iter()`（Vec・配列・スライス）、`(a..b)` / `(a..=b)` を値として、`s.chars()`（UTF-8 を復号）
+  - アダプタ：`map` / `filter` / `filter_map` / `enumerate` / `zip` / `take` / `skip` / `take_while` / `chain` / `copied` / `cloned`
+  - 消費：`collect`（`Vec<_>` / `String`、`collect::<Vec<_>>()` と `let v: Vec<_> = ..` の `_` も）/ `sum` / `product` / `count` / `fold` / `for_each` / `any` / `all` / `find` / `position` / `last` / `nth` / `max` / `min`
+  - クロージャの引数の型は、呼び先の境界（`F: FnMut(Self::Item) -> B`）を関連型まで解いて決める。型推論も関連型を辿る（`let s: i64 = (1..=10).sum();` の範囲は i64）
+  - prelude のイテレータ部品は、イテレータを作ってアダプタ・消費メソッドを呼ぶコード（`v.iter().map(` / `(0..n).sum(` / `impl Iterator` / `.chars()`）があるときだけ付ける。`for x in v.iter()` だけ、`Option::map` だけ、変数名の `count` だけでは付けない
 - Drop（`examples/drop.rs`、`examples/drop_more.rs`。drop の順序を rustc と比べ、valgrind でリーク・二重解放がないことを確かめる）：
   - `impl Drop for S`（ジェネリックな impl も）、`drop(x)`
   - スコープの終わりで宣言と逆順に drop する。対象は return / `?` / break / continue で抜けるスコープ、値を捨てる式文、`let _ = e`、代入で上書きされる古い値
@@ -264,8 +278,9 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
 ### 未対応
 
 - `Box<[T]>`、`Box::into_raw` などの Box の関数（`new` 以外）
-- イテレータ（`v.iter().map(..)`、`s.chars()`、`collect`）。`for` で直接回す形（`for x in &v` / `v.iter()` / `v.iter_mut()` / `v`）だけ使える
 - `format!` / `String + &str` / `Vec` のスライスメソッドの一部（prelude に書いたもの以外。`&v` を `&[T]` にすれば組み込みのスライスメソッドは使える）
+- イテレータの制限：`rev`（値として。`for` の中なら可）、`DoubleEndedIterator` / `ExactSizeIterator`、`peekable` / `flat_map` / `step_by`、`collect` は `Vec<T>` と `String` だけ、`sum` / `product` は整数だけ
+- 関連型の制限：trait の関連型は `Self::X` / `T::X` / `<T as Tr>::X` の形だけ。関連型に境界（`type Item: Copy;`）は付けられない
 - 書式化（`write!` / `core::fmt`）
 - Drop の制限
   - panic では drop しない（unwind しない）
@@ -455,7 +470,7 @@ rustc 側はほとんどが std 由来。
 ## 次にやること
 
 - **言語**
-  - モジュール、`core::fmt` 相当の書式化、イテレータ（`Iterator` trait と `map` / `filter` / `collect`）
+  - モジュール、`core::fmt` 相当の書式化、`DoubleEndedIterator`（値としての `rev`）、`HashMap`
   - 浮動小数点、オーバーフロー検査（debug ビルドの rustc と同じ panic）
   - 単相化をレイアウトでキーにして共有する（`Vec<A>` と `Vec<B>` を 1 つにする。blaze の polymorph）
   - 最小の自前 std（relax 方式）
