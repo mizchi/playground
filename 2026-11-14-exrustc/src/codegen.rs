@@ -307,6 +307,7 @@ impl Worker {
                 vtables: vec![],
                 gvs: HashMap::new(),
                 cmp_depth: 0,
+                pending_label: None,
             };
             let r = if prog.index.get(crate::prelude::DROP_GLUE) == Some(&body_id) {
                 cx.drop_glue_body(sig)
@@ -440,6 +441,11 @@ struct Loop {
     cont: Block,
     brk: Block,
     breaks: usize,
+    /// `'outer: loop` のラベル
+    label: Option<String>,
+    /// `break v` の値の型 (brk の引数で渡す)。ラベル付きブロックは continue できない
+    val: Option<Ty>,
+    is_block: bool,
     /// ループに入ったときのスコープの深さと一時値の数 (break / continue でそこまで drop する)
     depth: usize,
     temps: usize,
@@ -462,6 +468,8 @@ struct Cx<'a, 'p> {
     cc: CallConv,
     scopes: Vec<Vec<(String, Loc, Ty)>>,
     loops: Vec<Loop>,
+    /// 次に作るループに付けるラベル
+    pending_label: Option<String>,
     ret: Ty,
     is_main: bool,
     /// impl の中なら self 型
@@ -1356,8 +1364,8 @@ impl Cx<'_, '_> {
             Expr::Paren(p) => self.expr(&p.expr, expected),
             Expr::Group(g) => self.expr(&g.expr, expected),
             Expr::Block(b) => {
-                if b.label.is_some() {
-                    return err(b.span(), "labeled blocks are not supported");
+                if let Some(l) = &b.label {
+                    return self.labeled_block(l.name.ident.to_string(), &b.block, expected);
                 }
                 self.block(&b.block, expected)
             }
@@ -1463,9 +1471,7 @@ impl Cx<'_, '_> {
             Expr::If(i) => self.if_(i, expected),
             Expr::While(w) if matches!(&*w.cond, Expr::Let(_)) => self.while_let(w),
             Expr::While(w) => {
-                if w.label.is_some() {
-                    return err(w.span(), "loop labels are not supported");
-                }
+                self.pending_label = w.label.as_ref().map(|l| l.name.ident.to_string());
                 let header = self.b.create_block();
                 let body = self.b.create_block();
                 let exit = self.b.create_block();
@@ -1487,6 +1493,9 @@ impl Cx<'_, '_> {
                     cont: header,
                     brk: exit,
                     breaks: 0,
+                    label: self.pending_label.take(),
+                    val: None,
+                    is_block: false,
                     depth: self.scopes.len(),
                     temps: t0,
                 });
@@ -1504,9 +1513,7 @@ impl Cx<'_, '_> {
                 Ok((None, Ty::Unit))
             }
             Expr::Loop(l) => {
-                if l.label.is_some() {
-                    return err(l.span(), "loop labels are not supported");
-                }
+                self.pending_label = l.label.as_ref().map(|l| l.name.ident.to_string());
                 let body = self.b.create_block();
                 let exit = self.b.create_block();
                 self.b.ins().jump(body, &[]);
@@ -1515,6 +1522,9 @@ impl Cx<'_, '_> {
                     cont: body,
                     brk: exit,
                     breaks: 0,
+                    label: self.pending_label.take(),
+                    val: None,
+                    is_block: false,
                     depth: self.scopes.len(),
                     temps: self.temps.len(),
                 });
@@ -1532,31 +1542,55 @@ impl Cx<'_, '_> {
                     // break のない loop は値を返さない (型は !)
                     return Ok((None, Ty::Never));
                 }
+                // `break v` の値は exit の引数
+                if let Some(t) = lp.val {
+                    let v = self.b.block_params(exit).first().copied();
+                    return Ok((v, t));
+                }
                 Ok((None, Ty::Unit))
             }
             Expr::Break(br) => {
-                if br.label.is_some() || br.expr.is_some() {
-                    return err(
-                        br.span(),
-                        "labeled break / break with value is not supported",
-                    );
-                }
-                let Some(lp) = self.loops.last_mut() else {
-                    return err(br.span(), "`break` outside of a loop");
+                let label = br.label.as_ref().map(|l| l.ident.to_string());
+                let Some(li) = self.loop_index(label.as_deref(), true) else {
+                    return err(br.span(), "`break` outside of a loop (or unknown label)");
                 };
+                // `break v`: 値を評価してから抜ける (型は最初の break で決まる)
+                let mut args = vec![];
+                if let Some(e) = &br.expr {
+                    let want = self.loops[li].val;
+                    let (v, t) = self.expr(e, want)?;
+                    if t == Ty::Never {
+                        return Ok((None, Ty::Never));
+                    }
+                    match want {
+                        Some(w) => self.same(e.span(), t, w)?,
+                        None => {
+                            let brk = self.loops[li].brk;
+                            let ct = if t.is_agg() || t.is_fat() { PTR } else { clif_ty(t).unwrap_or(types::I8) };
+                            if t != Ty::Unit {
+                                self.b.append_block_param(brk, ct);
+                            }
+                            self.loops[li].val = Some(t);
+                        }
+                    }
+                    if let Some(v) = v {
+                        args.push(v);
+                    }
+                }
+                let lp = &mut self.loops[li];
                 lp.breaks += 1;
                 let (t, d, tt) = (lp.brk, lp.depth, lp.temps);
                 self.drop_for_exit(d, tt);
-                self.b.ins().jump(t, &[]);
+                let args: Vec<_> = args.into_iter().map(|v| v.into()).collect();
+                self.b.ins().jump(t, &args);
                 Ok(self.dead())
             }
             Expr::Continue(c) => {
-                if c.label.is_some() {
-                    return err(c.span(), "labeled continue is not supported");
-                }
-                let Some(lp) = self.loops.last() else {
-                    return err(c.span(), "`continue` outside of a loop");
+                let label = c.label.as_ref().map(|l| l.ident.to_string());
+                let Some(li) = self.loop_index(label.as_deref(), false) else {
+                    return err(c.span(), "`continue` outside of a loop (or unknown label)");
                 };
+                let lp = &self.loops[li];
                 let (t, d, tt) = (lp.cont, lp.depth, lp.temps);
                 self.drop_for_exit(d, tt);
                 self.b.ins().jump(t, &[]);
@@ -4454,9 +4488,7 @@ impl Cx<'_, '_> {
     // --- for ループ ------------------------------------------------------
 
     fn for_(&mut self, f: &syn::ExprForLoop) -> R<V> {
-        if f.label.is_some() {
-            return err(f.span(), "loop labels are not supported");
-        }
+        self.pending_label = f.label.as_ref().map(|l| l.name.ident.to_string());
         // 外側からアダプタ (`.rev()` / `.enumerate()` / `.iter()` ...) を剥がす
         let mut e: &Expr = &f.expr;
         let mut adapters = vec![];
@@ -4671,6 +4703,9 @@ impl Cx<'_, '_> {
             cont: step,
             brk: exit,
             breaks: 0,
+            label: self.pending_label.take(),
+            val: None,
+            is_block: false,
             // パターンの束縛のスコープも break で drop する
             depth: self.scopes.len() - 1,
             temps: self.temps.len(),
@@ -5439,9 +5474,7 @@ impl Cx<'_, '_> {
     }
 
     fn while_let(&mut self, w: &syn::ExprWhile) -> R<V> {
-        if w.label.is_some() {
-            return err(w.span(), "loop labels are not supported");
-        }
+        self.pending_label = w.label.as_ref().map(|l| l.name.ident.to_string());
         let Expr::Let(l) = &*w.cond else {
             unreachable!()
         };
@@ -5471,6 +5504,9 @@ impl Cx<'_, '_> {
             cont: header,
             brk: exit,
             breaks: 0,
+            label: self.pending_label.take(),
+            val: None,
+            is_block: false,
             depth: self.scopes.len() - 1,
             temps: t0,
         });
@@ -7704,5 +7740,50 @@ impl Cx<'_, '_> {
         let res = self.expr(&e, expected)?;
         self.pop_scope();
         Ok(Some(res))
+    }
+}
+
+impl Cx<'_, '_> {
+    /// break / continue の行き先のループ (ラベルがなければいちばん内側のループ。ラベル付きブロックは飛ばす)
+    fn loop_index(&self, label: Option<&str>, is_break: bool) -> Option<usize> {
+        self.loops.iter().rposition(|l| match label {
+            Some(n) => l.label.as_deref() == Some(n) && (is_break || !l.is_block),
+            None => !l.is_block,
+        })
+    }
+
+    /// `'a: { .. break 'a v; .. }`
+    fn labeled_block(&mut self, label: String, blk: &syn::Block, expected: Option<Ty>) -> R<V> {
+        let exit = self.b.create_block();
+        self.loops.push(Loop {
+            cont: exit,
+            brk: exit,
+            breaks: 0,
+            label: Some(label),
+            val: expected.filter(|_| false),
+            is_block: true,
+            depth: self.scopes.len(),
+            temps: self.temps.len(),
+        });
+        let (v, t) = self.block(blk, expected)?;
+        let lp = self.loops.pop().unwrap();
+        if lp.breaks == 0 {
+            return Ok((v, t));
+        }
+        // 末尾の値も break と同じく exit の引数で渡す
+        if t != Ty::Never {
+            if let Some(w) = lp.val {
+                self.same(blk.span(), t, w)?;
+            } else if t != Ty::Unit {
+                return err(blk.span(), "a labeled block that breaks without a value must have type `()`");
+            }
+            let args: Vec<_> = v.into_iter().map(|v| v.into()).collect();
+            self.b.ins().jump(exit, &args);
+        }
+        self.b.switch_to_block(exit);
+        match lp.val {
+            Some(t) => Ok((self.b.block_params(exit).first().copied(), t)),
+            None => Ok((None, Ty::Unit)),
+        }
     }
 }

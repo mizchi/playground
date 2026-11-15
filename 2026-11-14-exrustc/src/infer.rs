@@ -110,6 +110,8 @@ struct Inf<'p> {
     pending: Vec<(*const syn::ExprClosure, Vec<u32>, u32)>,
     /// parse し直したマクロの引数。後回しにしたクロージャ (pending) が指すので推論の終わりまで持っておく
     keep: Vec<Vec<Expr>>,
+    /// 囲んでいるループ / ラベル付きブロック: (ラベル, 値の型, ブロックか, break があったか)
+    brk: Vec<(Option<String>, u32, bool, bool)>,
     /// 0 でなければ式の型を記録しない (一時的に parse したノードの推論中)
     no_record: u32,
     /// `it.collect()` の (受け手, 結果): 最後に結果が Vec<T> / HashMap<K, V> なら Item と単一化する
@@ -148,6 +150,7 @@ pub fn infer_full(
         defer: 0,
         pending: vec![],
         keep: vec![],
+        brk: vec![],
         no_record: 0,
         collects: vec![],
     };
@@ -1118,7 +1121,36 @@ impl Inf<'_> {
         if call {
             self.defer += 1;
         }
-        let v = self.expr_inner(e);
+        // ループとラベル付きブロック: break の値の型を集める
+        let lname = |l: &Option<syn::Label>| l.as_ref().map(|l| l.name.ident.to_string());
+        let frame = match e {
+            Expr::Loop(l) => Some((lname(&l.label), false)),
+            Expr::While(w) => Some((lname(&w.label), false)),
+            Expr::ForLoop(f) => Some((lname(&f.label), false)),
+            Expr::Block(b) if b.label.is_some() => Some((lname(&b.label), true)),
+            _ => None,
+        };
+        let v = match frame {
+            None => self.expr_inner(e),
+            Some((label, is_block)) => {
+                let rv = self.var();
+                self.brk.push((label, rv, is_block, false));
+                let v = self.expr_inner(e);
+                let (_, rv, _, broke) = self.brk.pop().unwrap();
+                match e {
+                    // break のない loop は !
+                    Expr::Loop(_) if !broke => self.known(Ty::Never),
+                    Expr::Loop(_) => rv,
+                    Expr::Block(_) if broke => {
+                        if self.resolve(v) != Some(Ty::Never) {
+                            self.unify(rv, v);
+                        }
+                        rv
+                    }
+                    _ => v,
+                }
+            }
+        };
         if call {
             self.defer -= 1;
             self.finish_closures(mark);
@@ -1542,7 +1574,25 @@ impl Inf<'_> {
                 }
                 self.known(Ty::Never)
             }
-            Expr::Break(_) | Expr::Continue(_) => self.known(Ty::Never),
+            Expr::Break(b) => {
+                let label = b.label.as_ref().map(|l| l.ident.to_string());
+                let fi = self.brk.iter().rposition(|f| match &label {
+                    Some(n) => f.0.as_deref() == Some(n.as_str()),
+                    None => !f.2,
+                });
+                let v = match &b.expr {
+                    Some(e) => Some(self.expr(e)),
+                    None => None,
+                };
+                if let Some(fi) = fi {
+                    self.brk[fi].3 = true;
+                    let rv = self.brk[fi].1;
+                    let v = v.unwrap_or_else(|| self.known(Ty::Unit));
+                    self.unify(rv, v);
+                }
+                self.known(Ty::Never)
+            }
+            Expr::Continue(_) => self.known(Ty::Never),
             Expr::Call(c) => {
                 if let Expr::Path(p) = &*c.func {
                     if let Some((sid, vi)) = self.prog.variant_by_path(&p.path, self.self_sid) {
