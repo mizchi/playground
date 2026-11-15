@@ -1261,7 +1261,8 @@ fn emit_object(
             .declare_data(
                 &format!("_xS{}", c.name),
                 Linkage::Local,
-                c.stat == Some(true),
+                // (static は mut でなくても書き込めるところに置く: OnceLock / Cell などの内部可変性)
+                c.stat.is_some(),
                 false,
             )
             .map_err(|e| e.to_string())?;

@@ -571,3 +571,78 @@ fn find_calls(
     }
     Ok(())
 }
+
+/// `include_str!("path")` / `include_bytes!("path")` (path は文字列リテラル、`dir` からの相対) を、ファイルの中身の
+/// リテラル (改行などはエスケープして 1 行に収める: 後ろの行番号を変えない) に置き換える。無ければ None
+pub fn expand_includes(src: &str, dir: &std::path::Path) -> Result<Option<String>, String> {
+    if !src.contains("include_str!(") && !src.contains("include_bytes!(") {
+        return Ok(None);
+    }
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    let mut changed = false;
+    loop {
+        let a = rest.find("include_str!(");
+        let b = rest.find("include_bytes!(");
+        let (i, bytes) = match (a, b) {
+            (Some(a), Some(b)) => if a < b { (a, false) } else { (b, true) },
+            (Some(a), None) => (a, false),
+            (None, Some(b)) => (b, true),
+            (None, None) => break,
+        };
+        let head = if bytes { "include_bytes!(" } else { "include_str!(" };
+        let line_start = rest[..i].rfind('\n').map(|k| k + 1).unwrap_or(0);
+        let in_comment = rest[line_start..i].contains("//");
+        let after = &rest[i + head.len()..];
+        let lit = after.trim_start();
+        let parsed = (!in_comment && lit.starts_with('"'))
+            .then(|| lit[1..].find('"').map(|e| (&lit[1..1 + e], &lit[1 + e + 1..])))
+            .flatten()
+            .and_then(|(p, tail)| {
+                let t = tail.trim_start();
+                t.starts_with(')').then(|| (p, src.len() - (t.len() - 1)))
+            });
+        let Some((p, end_abs)) = parsed.filter(|(p, _)| !p.contains('\\')) else {
+            out.push_str(&rest[..i + head.len()]);
+            rest = &rest[i + head.len()..];
+            continue;
+        };
+        let path = dir.join(p);
+        let data = std::fs::read(&path).map_err(|e| format!("couldn't read `{}`: {e}", path.display()))?;
+        out.push_str(&rest[..i]);
+        if bytes {
+            out.push_str("b\"");
+        } else {
+            std::str::from_utf8(&data).map_err(|_| format!("`{}` wasn't a utf-8 file", path.display()))?;
+            out.push('"');
+        }
+        if bytes {
+            for &c in &data {
+                match c {
+                    b'"' => out.push_str("\\\""),
+                    b'\\' => out.push_str("\\\\"),
+                    0x20..=0x7e => out.push(c as char),
+                    _ => out.push_str(&format!("\\x{c:02x}")),
+                }
+            }
+        } else {
+            for ch in std::str::from_utf8(&data).unwrap().chars() {
+                match ch {
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    c if (c as u32) < 0x20 || c as u32 == 0x7f => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+                    c => out.push(c),
+                }
+            }
+        }
+        out.push('"');
+        let consumed = end_abs - (src.len() - rest.len());
+        rest = &rest[consumed..];
+        changed = true;
+    }
+    out.push_str(rest);
+    Ok(changed.then_some(out))
+}

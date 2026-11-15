@@ -341,6 +341,7 @@ impl Worker {
                 checked: (None, vec![]),
                 hoisted: vec![],
                 in_fmt_args: 0,
+                late_flags: vec![],
                 owned: vec![],
                 temps: vec![],
                 owned_binds: 0,
@@ -380,12 +381,24 @@ impl Worker {
             self.loc_used = cx.loc_used;
             r?;
             cx.b.seal_all_blocks();
+            if !cx.late_flags.is_empty() {
+                use cranelift_codegen::cursor::{Cursor, FuncCursor};
+                let entry = cx.b.func.layout.entry_block().unwrap();
+                let mut pos = FuncCursor::new(&mut cx.b.func).at_first_insertion_point(entry);
+                for &ss in &cx.late_flags {
+                    let z = pos.ins().iconst(types::I8, 0);
+                    pos.ins().stack_store(PTR, z, ss, 0);
+                }
+            }
             cx.b.finalize(isa.frontend_config());
         }
         Ok(())
     }
 
     fn emit(&mut self, prog: &Program, id: u32, isa: &dyn TargetIsa) -> R<Blob> {
+        if std::env::var_os("CRUSTC_DUMP_CLIF").is_some() {
+            eprintln!("{}", self.ctx.func.display());
+        }
         self.ctx
             .compile(isa, &mut ControlPlane::default())
             .map_err(|e| {
@@ -626,6 +639,8 @@ struct Cx<'a, 'p> {
     hoisted: Vec<(String, Value, Value, Ty, Option<(Value, Value, Value)>)>,
     /// 書式マクロの引数を評価している深さ (型推論の記録をソース上の位置で引く)
     in_fmt_args: u32,
+    /// 入口以外のブロックで作った drop フラグ (入口で 0 にしておく: `a || f(format!(..))` の右辺の一時値)
+    late_flags: Vec<StackSlot>,
     /// drop の責任を持つローカル変数 (スコープの深さ順) と、文の終わりで drop する一時値
     owned: Vec<Owned>,
     temps: Vec<Owned>,
@@ -2984,6 +2999,25 @@ impl Cx<'_, '_> {
                 let v = self.b.ins().iconst(types::I64, ((l as i64) << 16) | c as i64);
                 let a = self.symbol_addr(NS_STATIC, ci);
                 self.b.ins().store(mf(), v, a, 0);
+            }
+        }
+        // `it.flatten()` (要素が &Vec<T> / &[T] / &[T; N]): `it.flat_map(|x| x.iter())`
+        if mc.method == "flatten" && mc.args.is_empty() {
+            let item = self.peek(&mc.receiver).filter(|&t| !self.prog.has_param(t)).and_then(|t| self.prog.assoc_of(t, "Item"));
+            let by_ref = match item {
+                Some(Ty::Ref(_, Ty::Slice(_) | Ty::Array(..))) => true,
+                Some(Ty::Ref(_, Ty::Struct(sid))) => self.vec_fields(*sid).is_some(),
+                _ => false,
+            };
+            if let (true, Some(Ty::Ref(_, inner))) = (by_ref, item) {
+                let el = match inner {
+                    Ty::Slice(e) | Ty::Array(e, _) => **e,
+                    Ty::Struct(sid) => self.prog.structs[*sid as usize].args[0],
+                    _ => unreachable!(),
+                };
+                let (v, t) = self.expr(&mc.receiver, None)?;
+                let Some(v) = v else { return Ok((None, Ty::Never)) };
+                return self.call_named("__exr_flatten_ref", vec![t, el], &[(v, t)], mc.span());
             }
         }
         // `v.get(a..b)` (Vec): スライスにしてから (`(&v[..]).get(a..b)`)
@@ -5700,6 +5734,12 @@ impl Cx<'_, '_> {
             }
             "contains" => {
                 if !(elem.is_int() || matches!(elem, Ty::Bool | Ty::Char)) {
+                    if let Some(&id) = self.prog.index.get("__exr_slice_contains") {
+                        let (base, len, elem) = self.indexable(&mc.receiver)?;
+                        let fat = self.make_fat_v(base, len);
+                        let st = Ty::Ref(false, intern(Ty::Slice(intern(elem))));
+                        return self.call_fn(id, Some((fat, st)), &args, None, None, mc.span()).map(Some);
+                    }
                     return err(
                         mc.span(),
                         "contains is only supported for integer / bool / char elements",
@@ -5785,6 +5825,7 @@ impl Cx<'_, '_> {
             // split / lines / trim / starts_with / ends_with / contains / find: prelude の関数
             "split" | "split_whitespace" | "lines" | "trim" | "starts_with" | "ends_with" | "contains" | "find"
                 if !(m_name(mc) == "split" && mc.args.first().is_some_and(|a| self.peek(a) != Some(Ty::Char)))
+                    && !matches!(mc.args.first(), Some(Expr::Closure(_)))
                     && self.prog.index.contains_key(match m_name(mc).as_str() {
                     "split" => "__exr_str_split",
                     "split_whitespace" => "__exr_str_split_ws",
@@ -7559,7 +7600,11 @@ impl Cx<'_, '_> {
                 let (e, pat, guard) = parser
                     .parse2(mac.tokens.clone())
                     .or_else(|er| err(mac.span(), er))?;
-                let Some(place) = self.scrutinee(&e)? else {
+                // (parse し直した式: 型推論の記録は位置で引く)
+                self.in_fmt_args += 1;
+                let sc = self.scrutinee(&e);
+                self.in_fmt_args -= 1;
+                let Some(place) = sc? else {
                     return Ok((None, Ty::Never));
                 };
                 let no = self.b.create_block();
@@ -8492,6 +8537,10 @@ impl Cx<'_, '_> {
                 };
                 self.test_variant(p, sid, vi, pi.span(), fail)
             }
+            Pat::Ident(pi) if const_lit_pat(self.prog, pi).is_some() => {
+                let lp = const_lit_pat(self.prog, pi).unwrap();
+                self.pat_test(&lp, p, fail)
+            }
             Pat::Ident(pi) => match &pi.subpat {
                 Some((_, sub)) => self.pat_test(sub, p, fail),
                 None => Ok(()),
@@ -8783,6 +8832,7 @@ impl Cx<'_, '_> {
         match pat {
             Pat::Wild(_) | Pat::Rest(_) | Pat::Lit(_) | Pat::Range(_) | Pat::Path(_) => Ok(()),
             Pat::Ident(pi) if unit_variant_ident(self.prog, pi).is_some() => Ok(()),
+            Pat::Ident(pi) if const_lit_pat(self.prog, pi).is_some() => Ok(()),
             Pat::Ident(pi) => {
                 if let Some((_, sub)) = &pi.subpat {
                     self.pat_bind(sub, p, mode)?;
@@ -8940,6 +8990,24 @@ fn member_name(m: &syn::Member) -> String {
     }
 }
 
+/// 識別子のパターンが const (初期値がリテラル) を指すなら、そのリテラルのパターン (`Some(BOX_FREE)`)
+pub(crate) fn const_lit_pat(prog: &Program, pi: &syn::PatIdent) -> Option<Pat> {
+    if pi.by_ref.is_some() || pi.mutability.is_some() || pi.subpat.is_some() {
+        return None;
+    }
+    let n = pi.ident.to_string();
+    if !n.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return None;
+    }
+    let &ci = prog.const_index.get(&n)?;
+    let c = &prog.consts[ci as usize];
+    if c.stat.is_some() {
+        return None;
+    }
+    let l: syn::ExprLit = syn::parse_str(&c.expr).ok()?;
+    Some(Pat::Lit(syn::PatLit { attrs: vec![], lit: l.lit }))
+}
+
 /// 識別子のパターンが unit バリアント (`None` など) に解決されるなら、そのパス
 pub(crate) fn unit_variant_ident(prog: &Program, pi: &syn::PatIdent) -> Option<syn::Path> {
     if pi.by_ref.is_some() || pi.mutability.is_some() || pi.subpat.is_some() {
@@ -9002,6 +9070,9 @@ impl Cx<'_, '_> {
         let ss = self
             .b
             .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 1, 0));
+        if self.b.current_block() != self.b.func.layout.entry_block() {
+            self.late_flags.push(ss);
+        }
         let one = self.b.ins().iconst(types::I8, 1);
         self.b.ins().stack_store(PTR, one, ss, 0);
         ss
@@ -9334,7 +9405,18 @@ impl Cx<'_, '_> {
         self.clear_flag(o.flag);
         let addr = match o.loc {
             Loc::Slot(ss) => self.b.ins().stack_addr(PTR, ss, 0),
-            Loc::Ptr(a) => a,
+            // (スタックの一時値のアドレスは作り直す: `a || f(format!(..))` の右辺の一時値は、drop する所を支配しない枝で作られる)
+            Loc::Ptr(a) => match self.b.func.dfg.value_def(a) {
+                cranelift_codegen::ir::ValueDef::Result(inst, _) => match self.b.func.dfg.insts[inst] {
+                    cranelift_codegen::ir::InstructionData::StackAddr {
+                        opcode: cranelift_codegen::ir::Opcode::StackAddr,
+                        stack_slot,
+                        offset,
+                    } => self.b.ins().stack_addr(PTR, stack_slot, offset),
+                    _ => a,
+                },
+                _ => a,
+            },
             Loc::Var(v) => {
                 let x = self.b.use_var(v);
                 let ss = self.slot(o.ty);

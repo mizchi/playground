@@ -1065,6 +1065,17 @@ fn __exr_slice_chunks<T>(s: &[T], n: usize) -> Chunks<T> {
     Chunks { ptr: s.as_ptr(), len: s.len(), n: n, i: 0 }
 }
 
+fn __exr_slice_contains<T: PartialEq>(s: &[T], x: &T) -> bool {
+    let mut i = 0;
+    while i < s.len() {
+        if s[i] == *x {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn __exr_slice_to_vec<T: Clone>(s: &[T]) -> Vec<T> {
     let mut r = Vec::with_capacity(s.len());
     let mut i = 0;
@@ -2154,6 +2165,15 @@ pub trait Iterator {
         }
         None
     }
+    fn find_map<B, F: FnMut(Self::Item) -> Option<B>>(&mut self, f: F) -> Option<B> {
+        let mut f = f;
+        while let Some(x) = self.next() {
+            if let Some(y) = f(x) {
+                return Some(y);
+            }
+        }
+        None
+    }
     fn position<P: FnMut(Self::Item) -> bool>(&mut self, p: P) -> Option<usize> {
         let mut p = p;
         let mut i = 0;
@@ -2615,6 +2635,33 @@ impl<I: Iterator, U, B> Iterator for Flatten<I, U, B> {
             }
         }
     }
+}
+
+// 参照の列 (&Vec<T> / &[T] / &[T; N]) の flatten: 中身を参照で順に (`it.flat_map(|x| x.iter())` と同じ)
+pub struct FlattenRef<I, T> {
+    iter: I,
+    cur: Option<Iter<T>>,
+}
+
+impl<I: Iterator, T> Iterator for FlattenRef<I, T> {
+    type Item = &T;
+    fn next(&mut self) -> Option<&T> {
+        loop {
+            if let Some(c) = &mut self.cur {
+                if let Some(x) = c.next() {
+                    return Some(x);
+                }
+            }
+            match self.iter.next() {
+                Some(a) => self.cur = Some(__exr_slice_iter(&a[..])),
+                None => return None,
+            }
+        }
+    }
+}
+
+fn __exr_flatten_ref<I: Iterator, T>(it: I) -> FlattenRef<I, T> {
+    FlattenRef { iter: it, cur: None }
 }
 
 pub struct Cycle<I> {
@@ -5550,6 +5597,40 @@ pub struct Cell<T> {
     val: T,
 }
 
+// `std::sync::OnceLock` (スレッドは 1 本なので、初期化済みかどうかと値だけ)
+pub struct OnceLock<T> {
+    val: Option<T>,
+}
+
+impl<T> OnceLock<T> {
+    pub const fn new() -> OnceLock<T> {
+        OnceLock { val: None }
+    }
+    pub fn get(&self) -> Option<&T> {
+        self.val.as_ref()
+    }
+    pub fn get_or_init<F: FnOnce() -> T>(&self, f: F) -> &T {
+        if self.val.is_none() {
+            let v = f();
+            let p = &self.val as *const Option<T> as *mut Option<T>;
+            unsafe {
+                p.write(Some(v));
+            }
+        }
+        self.val.as_ref().unwrap()
+    }
+    pub fn set(&self, v: T) -> Result<(), T> {
+        if self.val.is_some() {
+            return Err(v);
+        }
+        let p = &self.val as *const Option<T> as *mut Option<T>;
+        unsafe {
+            p.write(Some(v));
+        }
+        Ok(())
+    }
+}
+
 impl<T> Cell<T> {
     pub fn new(v: T) -> Cell<T> {
         Cell { val: v }
@@ -7846,6 +7927,30 @@ fn __exr_str_trim_matches_fn<F: FnMut(char) -> bool>(s: &str, f: F) -> &str {
     __exr_str_trim_end_matches_fn(t, |c| f(c))
 }
 
+fn __exr_str_starts_with_fn<F: FnMut(char) -> bool>(s: &str, f: F) -> bool {
+    let mut f = f;
+    if s.is_empty() {
+        return false;
+    }
+    let (c, _) = __exr_decode_at::<()>(s.as_ptr(), 0);
+    f(c)
+}
+
+fn __exr_str_ends_with_fn<F: FnMut(char) -> bool>(s: &str, f: F) -> bool {
+    let mut f = f;
+    let b = s.as_bytes();
+    if b.is_empty() {
+        return false;
+    }
+    // 継続バイト (10xxxxxx) を戻って最後の文字の先頭へ
+    let mut i = b.len() - 1;
+    while i > 0 && (b[i] & 0xC0) == 0x80 {
+        i -= 1;
+    }
+    let (c, _) = __exr_decode_at::<()>(s.as_ptr(), i);
+    f(c)
+}
+
 fn __exr_str_find_fn<F: FnMut(char) -> bool>(s: &str, f: F) -> Option<usize> {
     let mut f = f;
     let mut a = 0;
@@ -7973,6 +8078,91 @@ impl Iterator for SplitStr {
         }
         self.done = true;
         Some(__exr_sub::<()>(unsafe { self.p.add(st) }, self.len - st))
+    }
+}
+
+// `s.match_indices("ab")`: 重ならない一致の (位置, 一致した部分)
+pub struct MatchIndices {
+    p: *const u8,
+    len: usize,
+    i: usize,
+    sep: *const u8,
+    slen: usize,
+}
+
+impl Iterator for MatchIndices {
+    type Item = (usize, &str);
+    fn next(&mut self) -> Option<(usize, &str)> {
+        if self.slen == 0 {
+            return None;
+        }
+        let mut k = self.i;
+        while k + self.slen <= self.len {
+            let mut j = 0;
+            while j < self.slen && unsafe { *self.p.add(k + j) == *self.sep.add(j) } {
+                j += 1;
+            }
+            if j == self.slen {
+                self.i = k + self.slen;
+                return Some((k, __exr_sub::<()>(unsafe { self.p.add(k) }, self.slen)));
+            }
+            k += 1;
+        }
+        self.i = self.len;
+        None
+    }
+}
+
+fn __exr_str_match_indices<G>(s: &str, t: &str) -> MatchIndices {
+    MatchIndices { p: s.as_ptr(), len: s.len(), i: 0, sep: t.as_ptr(), slen: t.len() }
+}
+
+// `s.rsplit("::")`: 後ろから区切る
+pub struct RSplitStr {
+    p: *const u8,
+    end: usize,
+    sep: *const u8,
+    slen: usize,
+    done: bool,
+}
+
+impl Iterator for RSplitStr {
+    type Item = &str;
+    fn next(&mut self) -> Option<&str> {
+        if self.done {
+            return None;
+        }
+        let e = self.end;
+        if self.slen > 0 && self.slen <= e {
+            let mut k = e - self.slen + 1;
+            while k > 0 {
+                k -= 1;
+                let mut j = 0;
+                while j < self.slen && unsafe { *self.p.add(k + j) == *self.sep.add(j) } {
+                    j += 1;
+                }
+                if j == self.slen {
+                    self.end = k;
+                    return Some(__exr_sub::<()>(unsafe { self.p.add(k + self.slen) }, e - k - self.slen));
+                }
+            }
+        }
+        self.done = true;
+        Some(__exr_sub::<()>(self.p, e))
+    }
+}
+
+fn __exr_str_rsplit<G>(s: &str, t: &str) -> RSplitStr {
+    RSplitStr { p: s.as_ptr(), end: s.len(), sep: t.as_ptr(), slen: t.len(), done: false }
+}
+
+fn __exr_str_rsplit_once<G>(s: &str, p: &str) -> Option<(&str, &str)> {
+    match __exr_str_rfind::<()>(s, p) {
+        Some(i) => Some((
+            __exr_sub::<()>(s.as_ptr(), i),
+            __exr_sub::<()>(unsafe { s.as_ptr().add(i + p.len()) }, s.len() - i - p.len()),
+        )),
+        None => None,
     }
 }
 

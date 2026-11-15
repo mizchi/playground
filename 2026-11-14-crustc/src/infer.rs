@@ -1291,6 +1291,10 @@ impl Inf<'_> {
                     self.pat_fields(v, sid, Some(vi));
                 }
             }
+            Pat::Ident(pi) if crate::codegen::const_lit_pat(self.prog, pi).is_some() => {
+                let lp = crate::codegen::const_lit_pat(self.prog, pi).unwrap();
+                self.pat(&lp, v, mode);
+            }
             Pat::Ident(pi) => {
                 if let Some((_, sub)) = &pi.subpat {
                     self.pat(sub, v, mode);
@@ -1583,6 +1587,26 @@ impl Inf<'_> {
                 self.no_record -= 1;
                 v
             }
+            // `matches!(e, pat)`: bool (e は codegen が parse し直すので位置で記録する)
+            Expr::Macro(m) if m.mac.path.is_ident("matches") => {
+                use syn::parse::Parser;
+                let parser = |input: syn::parse::ParseStream| -> syn::Result<Expr> {
+                    let e: Expr = input.parse()?;
+                    let _: proc_macro2::TokenStream = input.parse()?;
+                    Ok(e)
+                };
+                if let Ok(e) = parser.parse2(m.mac.tokens.clone()) {
+                    let ki = self.keep.len();
+                    self.keep.push(vec![e]);
+                    let x: *const Expr = &self.keep[ki][0];
+                    self.no_record += 1;
+                    self.pos_record += 1;
+                    self.expr(unsafe { &*x });
+                    self.pos_record -= 1;
+                    self.no_record -= 1;
+                }
+                self.known(Ty::Bool)
+            }
             Expr::Macro(m) if is_fmt_macro(&m.mac) => {
                 self.fmt_width_vars(&m.mac);
                 self.var()
@@ -1686,6 +1710,19 @@ impl Inf<'_> {
                         let v = self.expr(x);
                         let k = self.known(Ty::Usize);
                         self.unify(v, k);
+                    }
+                    // (`s[a..b]` の s が str / String なら str)
+                    let d = self.deref_expr(b);
+                    let r = self.find(d);
+                    let is_str = match self.shape[r as usize] {
+                        Some(Shape::Known(Ty::Str)) => true,
+                        Some(Shape::Known(Ty::Struct(sid))) => {
+                            self.prog.structs[sid as usize].base.is_none() && self.prog.structs[sid as usize].name == "String"
+                        }
+                        _ => false,
+                    };
+                    if is_str {
+                        return self.known(Ty::Str);
                     }
                     return match self.elem_of(b) {
                         Some(e) => self.with(Shape::Slc(e)),

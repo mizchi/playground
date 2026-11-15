@@ -70,6 +70,16 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // `include_str!("..")` / `include_bytes!("..")`: 入力ファイルのディレクトリから読んでリテラルに
+    let dir = input.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+    let src = match crustc::macros::expand_includes(&src, &dir) {
+        Ok(Some(s)) => s,
+        Ok(None) => src,
+        Err(e) => {
+            eprintln!("error: {}: {e}", input.display());
+            std::process::exit(1);
+        }
+    };
     let mut s = Session::new(o);
     if mode == "check" {
         let diags = s.check(&src);

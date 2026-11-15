@@ -406,7 +406,7 @@ const ITER_NAMES: &[&str] = &[
     "Iterator", "next", "map", "filter", "filter_map", "collect", "sum", "product", "count",
     "fold", "for_each", "any", "all", "find", "position", "rposition", "partition", "cycle", "nth", "zip", "chain", "take", "skip",
     "take_while", "copied", "cloned", "into_iter", "flat_map", "flatten", "step_by", "peekable", "skip_while", "scan",
-    "inspect",
+    "inspect", "find_map",
 ];
 
 /// prelude のアイテムの識別子を need に足す (Iterator のメソッド名はメソッド呼び出しの位置だけ)
@@ -420,7 +420,8 @@ fn add_idents(need: &mut HashSet<&'static str>, it: &SrcItem) {
         if matches!(w, "width" | "precision" | "fill" | "sign_plus") && !method_call_at(bytes, a as usize, b as usize) {
             continue;
         }
-        need.insert(w);
+        // (`__core_replace` は `replace` として定義を引く)
+        need.insert(w.strip_prefix("__core_").unwrap_or(w));
     }
 }
 
@@ -450,11 +451,11 @@ fn owner(h: usize) -> Option<&'static str> {
                     .iter()
                     .map(|&(a, b)| &PRELUDE[a as usize..b as usize])
                     .find_map(|w| match w {
-                        "Vec" | "String" | "HashMap" | "Reverse" | "BinaryHeap" | "SplitStr" | "CharIndices"
+                        "Vec" | "String" | "HashMap" | "Reverse" | "BinaryHeap" | "SplitStr" | "RSplitStr" | "FlattenRef" | "MatchIndices" | "CharIndices"
                         | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" | "Rev" | "StepBy" | "Peekable"
                         | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks"
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
-                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "RangeFrom" | "TryFromIntError" | "TryFromSliceError" | "Stdin" | "StdinLock" | "StdinLines" | "Stdout" | "StdoutLock"
+                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "OnceLock" | "RangeFrom" | "TryFromIntError" | "TryFromSliceError" | "Stdin" | "StdinLock" | "StdinLines" | "Stdout" | "StdoutLock"
                         | "BufWriter" | "IoError" | "__DynError" | "Args" | "DefaultHasher" | "VarError" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
@@ -673,6 +674,13 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     {
         need.extend(["__exr_str_split_str", "Iterator"]);
     }
+    // `s.rsplit("::")` (後ろから区切るイテレータ)
+    if need.contains("rsplit") {
+        need.extend(["__exr_str_rsplit", "Iterator", "next"]);
+    }
+    if need.contains("match_indices") {
+        need.extend(["__exr_str_match_indices", "Iterator", "next"]);
+    }
     if need.contains("from") && need.contains("char") {
         need.insert("__exr_char_from_u8");
     }
@@ -684,6 +692,10 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     }
     if need.contains("flat_map") || need.contains("flatten") {
         need.extend(["__flat_prep", "__flat_next", "__Flat", "__flat_mark", "reverse", "pop", "take"]);
+    }
+    // (参照の列の flatten は `flat_map(|x| x.iter())` にする)
+    if need.contains("flatten") {
+        need.extend(["__exr_flatten_ref", "FlattenRef", "__exr_slice_iter", "Iter"]);
     }
     // `T::default()` / `Default::default()` / `..Default::default()` / unwrap_or_default / mem::take
     if ["default", "Default", "unwrap_or_default", "take"].iter().any(|n| need.contains(n)) {
@@ -702,6 +714,10 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     }
     if need.contains("drain") {
         need.insert("__drain");
+    }
+    // 配列・スライスの contains (要素が整数などでなければ PartialEq で比べる prelude の関数)
+    if need.contains("contains") {
+        need.insert("__exr_slice_contains");
     }
     for (m, f) in [
         ("windows", "__exr_slice_windows"),
