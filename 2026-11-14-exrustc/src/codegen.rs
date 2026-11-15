@@ -1183,6 +1183,29 @@ impl Cx<'_, '_> {
                 _ => None,
             },
             Expr::Unary(u) => self.peek(&u.expr),
+            // `&v[a..b]`: スライス (文字列なら &str)
+            Expr::Reference(r) if matches!(strip_paren(&r.expr), Expr::Index(ix) if matches!(&*ix.index, Expr::Range(_))) => {
+                let Expr::Index(ix) = strip_paren(&r.expr) else { unreachable!() };
+                let mut t = self.peek(&ix.expr)?;
+                while let Ty::Ref(_, i) = t {
+                    if t.is_fat() {
+                        break;
+                    }
+                    t = *i;
+                }
+                let m = r.mutability.is_some();
+                match t {
+                    Ty::Array(e, _) => Some(Ty::Ref(m, intern(Ty::Slice(e)))),
+                    Ty::Ref(_, Ty::Slice(e)) => Some(Ty::Ref(m, intern(Ty::Slice(e)))),
+                    Ty::Ref(_, Ty::Str) => Some(Ty::Ref(m, intern(Ty::Str))),
+                    Ty::Struct(sid) => match self.vec_fields(sid) {
+                        Some((_, _, e)) => Some(Ty::Ref(m, intern(Ty::Slice(intern(e))))),
+                        None if self.prog.structs[sid as usize].name == "String" => Some(Ty::Ref(m, intern(Ty::Str))),
+                        None => None,
+                    },
+                    _ => None,
+                }
+            }
             Expr::Reference(r) => {
                 Some(Ty::Ref(r.mutability.is_some(), intern(self.peek(&r.expr)?)))
             }
@@ -2693,6 +2716,30 @@ impl Cx<'_, '_> {
     /// `recv.m(args)`: レシーバを自動 deref して struct を見つけ、
     /// メソッドの self 型に合わせて自動参照 (`&self` / `&mut self`) かコピー (`self`) で渡す
     fn method_call(&mut self, mc: &syn::ExprMethodCall, expected: Option<Ty>) -> R<V> {
+        // `v[a..b].iter()` / `s[1..].len()`: 範囲の添字の受け手は自動で借用する (書き換えるメソッドは &mut)
+        if let Expr::Index(ix) = strip_paren(&mc.receiver) {
+            if matches!(&*ix.index, Expr::Range(_))
+                && !matches!(
+                    mc.method.to_string().as_str(),
+                    "sort" | "sort_unstable" | "sort_by" | "sort_unstable_by" | "sort_by_key" | "sort_unstable_by_key"
+                        | "sort_by_cached_key"
+                )
+            {
+                let mutating = matches!(
+                    mc.method.to_string().as_str(),
+                    "reverse" | "swap" | "fill" | "rotate_left" | "rotate_right" | "iter_mut" | "copy_from_slice"
+                        | "clone_from_slice" | "split_at_mut"
+                );
+                let (r, m, args) = (&mc.receiver, &mc.method, &mc.args);
+                let tf = &mc.turbofish;
+                let e: Expr = if mutating {
+                    syn::parse_quote!((&mut #r).#m #tf (#args))
+                } else {
+                    syn::parse_quote!((&#r).#m #tf (#args))
+                };
+                return self.expr(&e, expected);
+            }
+        }
         // 値としての `[a, b].into_iter()`: Vec にしてから (配列の変数で要素が Copy なら iter().copied())
         if mc.method == "into_iter" && mc.args.is_empty() {
             if let Expr::Array(a) = strip_paren(&mc.receiver) {
@@ -3170,6 +3217,48 @@ impl Cx<'_, '_> {
             self.prog.match_ty(sig0.params[0], rt, &mut sol);
             vals.push((r, rt, span));
         }
+        // `Iterator` を受ける引数に Vec / &Vec / スライス / 配列を渡したら (IntoIterator 相当) イテレータにする
+        let conv: Vec<Option<Expr>> = args
+            .iter()
+            .zip(&sig0.params[skip..])
+            .map(|(a, &pt)| {
+                let Ty::Param(g) = pt else { return None };
+                let iter_bound = sig0.generics.get(g as usize).is_some_and(|gg| gg.1.iter().any(|b| b.starts_with("Iterator")));
+                if !iter_bound {
+                    return None;
+                }
+                let t = self.peek(a)?;
+                if self.is_iterator_ty(t) {
+                    return None;
+                }
+                let mut base = t;
+                while let Ty::Ref(_, i) = base {
+                    if base.is_fat() {
+                        break;
+                    }
+                    base = *i;
+                }
+                let is_vec = matches!(base, Ty::Struct(sid) if self.vec_fields(sid).is_some());
+                let seq = is_vec || matches!(base, Ty::Array(..) | Ty::Ref(_, Ty::Slice(_)));
+                if !seq {
+                    return None;
+                }
+                Some(match (t, strip_paren(a)) {
+                    (Ty::Ref(..), Expr::Reference(r)) => {
+                        let inner = &r.expr;
+                        syn::parse_quote!((#inner).iter())
+                    }
+                    (Ty::Ref(..), _) => syn::parse_quote!((#a).iter()),
+                    _ => syn::parse_quote!((#a).into_iter()),
+                })
+            })
+            .collect();
+        let conv_refs: Vec<&Expr> = args
+            .iter()
+            .zip(&conv)
+            .map(|(a, c)| c.as_ref().unwrap_or(*a))
+            .collect();
+        let args: &[&Expr] = &conv_refs;
         for (a, &pt) in args.iter().zip(&sig0.params[skip..]) {
             let mut exp = Some(self.prog.partial_subst(pt, &sol)).filter(|&t| !self.prog.has_param(t));
             // `F: Fn(A) -> B` の引数にクロージャを渡すなら、A / B をクロージャの型の手がかりにする
@@ -3582,6 +3671,27 @@ impl Cx<'_, '_> {
             if !m.is_empty() && self.prog.method(sid, m).is_some() {
                 let (l, r) = (&b.left, &b.right);
                 let mi = syn::Ident::new(m, b.span());
+                let e: Expr = syn::parse_quote!((#l).#mi(#r));
+                return self.expr(&e, expected);
+            }
+        }
+        // `&a + &b` (`impl Add for &M`): `(&a).__ref_add(&b)`
+        if let Some(Ty::Ref(_, Ty::Struct(sid))) = self.peek(&b.left) {
+            let m = match b.op {
+                Add(_) => "add",
+                Sub(_) => "sub",
+                Mul(_) => "mul",
+                Div(_) => "div",
+                Rem(_) => "rem",
+                BitAnd(_) => "bitand",
+                BitOr(_) => "bitor",
+                BitXor(_) => "bitxor",
+                _ => "",
+            };
+            let rm = format!("__ref_{m}");
+            if !m.is_empty() && self.prog.method(*sid, &rm).is_some() {
+                let (l, r) = (&b.left, &b.right);
+                let mi = syn::Ident::new(&rm, b.span());
                 let e: Expr = syn::parse_quote!((#l).#mi(#r));
                 return self.expr(&e, expected);
             }
@@ -4635,8 +4745,22 @@ impl Cx<'_, '_> {
                 let r = &mc.receiver;
                 let m = &mc.method;
                 let args = &mc.args;
-                let e: Expr = syn::parse_quote!((#r).as_str().#m(#args));
-                return self.expr(&e, None).map(Some);
+                let tf = &mc.turbofish;
+                let e: Expr = syn::parse_quote!((#r).as_str().#m #tf (#args));
+                // (型推論が元の呼び出しに記録した型を、作り直したノードにも写す: `t.parse()` の T)
+                if let Some(&t) = self.lets.get(&(mc as *const syn::ExprMethodCall as usize)) {
+                    self.lets.insert(&e as *const Expr as usize, t);
+                    if let Expr::MethodCall(nm) = &e {
+                        self.lets.insert(nm as *const syn::ExprMethodCall as usize, t);
+                    }
+                }
+                let r = self.expr(&e, None).map(Some);
+                // (e はここで捨てるので、そのアドレスの記録も消す)
+                self.lets.remove(&(&e as *const Expr as usize));
+                if let Expr::MethodCall(nm) = &e {
+                    self.lets.remove(&(nm as *const syn::ExprMethodCall as usize));
+                }
+                return r;
             }
         }
         if let (Some((f, m)), Ty::Array(..) | Ty::Ref(_, Ty::Slice(_))) = (slice_fn, rt) {
@@ -6886,6 +7010,26 @@ impl Cx<'_, '_> {
                 self.b.switch_to_block(ok);
                 Ok(())
             }
+            // 文字列のパターン (`match s { "add" => .. }`): &str (と &&str) の中身で比べる
+            Pat::Lit(l) if matches!(l.lit, Lit::Str(_)) => {
+                let sref = Ty::Ref(false, intern(Ty::Str));
+                let mut p = p;
+                while let Ty::Ref(_, i) = p.ty() {
+                    if p.ty() == sref || *i == Ty::Str {
+                        break;
+                    }
+                    let (v, _) = self.read(p);
+                    p = Place::Mem(v.unwrap(), 0, *i);
+                }
+                if !matches!(p.ty(), Ty::Ref(_, Ty::Str)) {
+                    return err(l.span(), format!("mismatched types: expected `{}`, found `&str`", self.prog.tn(p.ty())));
+                }
+                let (v, _) = self.read(p);
+                let (c, _) = self.lit(&l.lit, Some(sref))?;
+                let cond = self.eq_at(v.unwrap(), c.unwrap(), sref, l.span())?;
+                self.require(cond, fail);
+                Ok(())
+            }
             _ => {
                 let (p, _) = self.pat_deref(p, BindMode::Move);
                 let t = p.ty();
@@ -6894,16 +7038,16 @@ impl Cx<'_, '_> {
                         let (v, _) = self.read(p);
                         let (c, ct) = self.lit(&l.lit, Some(t))?;
                         self.same(l.span(), ct, t)?;
-                        if !(t.is_int() || t == Ty::Bool) {
-                            return err(l.span(), "literal patterns need an integer or bool");
+                        if !(t.is_int() || t == Ty::Bool || t == Ty::Char) {
+                            return err(l.span(), "literal patterns need an integer, char, bool or string");
                         }
                         let cond = self.b.ins().icmp(IntCC::Equal, v.unwrap(), c.unwrap());
                         self.require(cond, fail);
                         Ok(())
                     }
                     Pat::Range(r) => {
-                        if !t.is_int() {
-                            return err(r.span(), "range patterns need an integer");
+                        if !(t.is_int() || t == Ty::Char) {
+                            return err(r.span(), "range patterns need an integer or char");
                         }
                         let (v, _) = self.read(p);
                         let v = v.unwrap();
@@ -7529,18 +7673,24 @@ impl Cx<'_, '_> {
     /// 式 e (ローカル変数か、そのフィールド) から値をムーブした: 変数のフラグを下ろす
     fn mark_moved(&mut self, e: &Expr) {
         let mut e = e;
+        let mut via_field = false;
         loop {
             match e {
                 Expr::Paren(p) => e = &p.expr,
                 Expr::Group(g) => e = &g.expr,
                 // 参照越しのフィールドからはムーブできない (Copy 以外は rustc が弾く)
-                Expr::Field(f) => e = &f.base,
+                Expr::Field(f) => {
+                    via_field = true;
+                    e = &f.base
+                }
                 Expr::Path(p) => {
                     let Some(id) = p.path.get_ident() else { return };
                     if let Some((loc, t)) = self.lookup(&id.to_string()) {
                         if matches!(t, Ty::Ref(..) | Ty::Ptr(..)) {
                             return;
                         }
+                        // (Box の中身のフィールドをムーブしたときも Box ごとムーブ済みにする: 領域はリークする)
+                        let _ = via_field;
                         if let Some(f) = self.flag_of_loc(loc) {
                             self.clear_flag(f);
                         }

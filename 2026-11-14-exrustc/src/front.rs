@@ -589,6 +589,11 @@ impl StructDef {
     }
 }
 
+thread_local! {
+    /// 作っている途中のインスタンス (基の型, 型引数) と、途中で取った番号
+    static INSTANTIATING: std::cell::RefCell<Vec<((u32, Vec<Ty>), Option<u32>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// struct / enum の表。後からインスタンス (`Option<i64>` など) を足せる (並列のコード生成中にも)。
 /// 要素は Box で持ち、決して削除・移動しないので、`&self` から要素への参照を返せる
 pub struct AdtTable {
@@ -618,6 +623,11 @@ impl AdtTable {
     }
     fn get_mut(&mut self, i: usize) -> &mut StructDef {
         &mut self.v.get_mut().unwrap()[i]
+    }
+    /// 先に番号だけ取ったインスタンスの中身を入れる (まだ誰にも公開していない番号だけに使う)
+    fn replace(&self, i: u32, d: StructDef) {
+        let mut g = self.v.lock().unwrap();
+        *g[i as usize] = d;
     }
 }
 
@@ -1008,6 +1018,32 @@ pub fn fn_ast(prog: &Program, f: syn::ItemFn, body: u32) -> syn::ItemFn {
 /// syn で 1 アイテムを parse する。エラー位置はファイル全体での行に補正する。
 /// impl のヘッダは空の impl として、メンバは `Item::Fn` に直して返す。
 pub fn parse_item(src: &str, it: &SrcItem) -> R<syn::Item> {
+    let mut item = parse_item_raw(src, it)?;
+    if let syn::Item::Fn(f) = &mut item {
+        desugar_param_patterns(f);
+    }
+    Ok(item)
+}
+
+/// 引数のパターン (`fn f((i, j): (usize, usize))`) は名前の引数にして、本体の先頭で `let (i, j) = 引数;` にする
+fn desugar_param_patterns(f: &mut syn::ItemFn) {
+    let mut lets: Vec<syn::Stmt> = vec![];
+    for (k, a) in f.sig.inputs.iter_mut().enumerate() {
+        let syn::FnArg::Typed(pt) = a else { continue };
+        if matches!(&*pt.pat, syn::Pat::Ident(_) | syn::Pat::Wild(_)) {
+            continue;
+        }
+        let name = syn::Ident::new(&format!("__exr_arg{k}"), proc_macro2::Span::call_site());
+        let pat = std::mem::replace(&mut *pt.pat, syn::parse_quote!(#name));
+        lets.push(syn::parse_quote!(let #pat = #name;));
+    }
+    if !lets.is_empty() {
+        lets.append(&mut f.block.stmts);
+        f.block.stmts = lets;
+    }
+}
+
+fn parse_item_raw(src: &str, it: &SrcItem) -> R<syn::Item> {
     let text = &src[it.start..it.end];
     let fix = |e: syn::Error| {
         let s = e.span().start();
@@ -1165,6 +1201,8 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
             // Display と Debug はどちらも fmt なので、trait 名で区別する (`P::<Display>::fmt`)
             let name = match ow.impl_trait.as_deref() {
                 Some(t @ ("Display" | "Debug")) => format!("{}::<{t}>::{}", ow.base, f.sig.ident),
+                // (参照への impl のメソッドは名前を分ける: `impl Add for &M` の add は `M::__ref_add`)
+                _ if matches!(ow.self_ty, TySyn::Ref(..)) => format!("{}::__ref_{}", ow.base, f.sig.ident),
                 _ => format!("{}::{}", ow.base, f.sig.ident),
             };
             lift_closures(f, &name, &mut sig, Some(&ow.self_ty), &mut sm)?;
@@ -1186,7 +1224,12 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
                 sm.impl_trait = Some(id.to_string());
             }
             collect_generics(&im.generics, &mut sm.impl_generics)?;
-            let syn::Type::Path(tp) = &*im.self_ty else {
+            // `impl Add for &M`: M のメソッド `__ref_add` (self は &M) として持つ
+            let self_path = match &*im.self_ty {
+                syn::Type::Reference(r) if im.trait_.is_some() => &*r.elem,
+                t => t,
+            };
+            let syn::Type::Path(tp) = self_path else {
                 return err(im.self_ty.span(), "unsupported impl self type");
             };
             if tp.path.segments.len() != 1 {
@@ -1846,6 +1889,10 @@ impl Program {
                 }
                 return Err(format!("{}:1: cannot find type `{sn}`", it.line));
             };
+            // (参照への impl は trait の実装としては数えない: 演算子だけが `__ref_*` を呼ぶ)
+            if matches!(sm.impl_self_ty, Some(TySyn::Ref(..))) {
+                continue;
+            }
             if !p.impls.insert((sid, tr.clone())) {
                 return Err(format!(
                     "{}:1: conflicting implementations of trait `{tr}` for `{sn}`",
@@ -2348,6 +2395,48 @@ impl Program {
         if let Some(&id) = self.structs.inst.lock().unwrap().get(&(base, args.clone())) {
             return Ok(id);
         }
+        // 自分を (Box などの中に) 含む型 (`Node<T> { next: Option<Box<Node<T>>> }`): 作っている途中の
+        // インスタンスがまた要求されたら、先に番号だけ取って返す (中身は外側が作り終えてから入れる)
+        let key = (base, args.clone());
+        let pending = INSTANTIATING.with(|v| {
+            let mut v = v.borrow_mut();
+            match v.iter_mut().find(|e| e.0 == key) {
+                Some(e) => Some(*e.1.get_or_insert_with(|| {
+                    let b = &self.structs[base as usize];
+                    let names: Vec<String> = args.iter().map(|&t| self.tn(t)).collect();
+                    let mut d = StructDef::blank(format!("{}<{}>", b.name, names.join(", ")), b.is_enum);
+                    d.base = Some(base);
+                    d.args = args.clone();
+                    self.structs.push(d)
+                })),
+                None => {
+                    v.push((key.clone(), None));
+                    None
+                }
+            }
+        });
+        if let Some(id) = pending {
+            return Ok(id);
+        }
+        let r = self.instantiate_inner(base, args);
+        let placeholder = INSTANTIATING.with(|v| v.borrow_mut().pop().and_then(|e| e.1));
+        let d = r?;
+        let mut g = self.structs.inst.lock().unwrap();
+        if let Some(&id) = g.get(&key) {
+            return Ok(id);
+        }
+        let id = match placeholder {
+            Some(pid) => {
+                self.structs.replace(pid, d);
+                pid
+            }
+            None => self.structs.push(d),
+        };
+        g.insert(key, id);
+        Ok(id)
+    }
+
+    fn instantiate_inner(&self, base: u32, args: Vec<Ty>) -> R<StructDef> {
         let b = &self.structs[base as usize];
         if b.generics.len() != args.len() {
             return Err(format!(
@@ -2399,13 +2488,7 @@ impl Program {
                 d.align = align;
             }
         }
-        let mut g = self.structs.inst.lock().unwrap();
-        if let Some(&id) = g.get(&(base, args.clone())) {
-            return Ok(id);
-        }
-        let id = self.structs.push(d);
-        g.insert((base, args), id);
-        Ok(id)
+        Ok(d)
     }
 
     /// フィールドを宣言順に自然なアラインメントで並べる (repr(C) 相当)

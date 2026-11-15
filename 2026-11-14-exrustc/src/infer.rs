@@ -1843,7 +1843,16 @@ impl Inf<'_> {
                 let l = self.expr(&b.left);
                 let r = self.expr(&b.right);
                 // `&i64 * 10` / `acc + x` (x: &i64): 参照は値として計算する (codegen と同じ)
-                let (l, r) = if matches!(b.op, And(_) | Or(_) | Shl(_) | Shr(_) | ShlAssign(_) | ShrAssign(_)) {
+                // (片方が struct かその参照なら演算子のオーバーロード: 参照を数値とみなして外さない)
+                let is_adt = |this: &mut Self, v: u32| {
+                    let mut t = this.resolve(v);
+                    while let Some(Ty::Ref(_, i)) = t {
+                        t = Some(*i);
+                    }
+                    matches!(t, Some(Ty::Struct(_)))
+                };
+                let adt = is_adt(self, l) || is_adt(self, r);
+                let (l, r) = if adt || matches!(b.op, And(_) | Or(_) | Shl(_) | Shr(_) | ShlAssign(_) | ShrAssign(_)) {
                     (l, r)
                 } else {
                     (self.num_operand(l), self.num_operand(r))
@@ -1867,6 +1876,35 @@ impl Inf<'_> {
                         self.known(Ty::Unit)
                     }
                     _ => {
+                        // 演算子のオーバーロード (`impl Add for V` / `impl Mul<i32> for V` / `impl Add for &M`):
+                        // 戻り値は add などのメソッドの型
+                        let m = match b.op {
+                            Add(_) => "add",
+                            Sub(_) => "sub",
+                            Mul(_) => "mul",
+                            Div(_) => "div",
+                            Rem(_) => "rem",
+                            BitAnd(_) => "bitand",
+                            BitOr(_) => "bitor",
+                            BitXor(_) => "bitxor",
+                            _ => "",
+                        };
+                        let lt = self.resolve(l);
+                        let found = match lt {
+                            Some(Ty::Struct(sid)) if !m.is_empty() => self.prog.method(sid, m).map(|id| (id, l)),
+                            Some(Ty::Ref(_, Ty::Struct(sid))) if !m.is_empty() => {
+                                self.prog.method(*sid, &format!("__ref_{m}")).map(|id| (id, l))
+                            }
+                            // (左がまだ分からない `&b * m`: 右が `&M` で `impl Mul for &M` があればそれ)
+                            None if !m.is_empty() => match self.resolve(r) {
+                                Some(Ty::Ref(_, Ty::Struct(sid))) => self.prog.method(*sid, &format!("__ref_{m}")).map(|id| (id, l)),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some((id, recv)) = found {
+                            return self.apply_recv(Some(id), vec![r], recv);
+                        }
                         self.unify(l, r);
                         l
                     }
