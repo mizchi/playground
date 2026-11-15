@@ -717,6 +717,13 @@ fn with_prelude<'a>(
 ) -> Result<(std::borrow::Cow<'a, str>, Vec<SrcItem>), String> {
     let mut items = lexer::split(src)?;
     let extra = crate::prelude::select_with(src, &items, cache);
+    // (デバッグ用: 付けた prelude をソースの後ろに続く行番号つきで stderr に出す)
+    if std::env::var_os("EXRUSTC_DUMP_PRELUDE").is_some() {
+        let l0 = src.bytes().filter(|&c| c == b'\n').count() + 2;
+        for (i, l) in extra.lines().enumerate() {
+            eprintln!("{:5} {l}", l0 + i);
+        }
+    }
     if extra.is_empty() {
         // prelude を使わなければソースはそのまま (コピーしない)
         return Ok((std::borrow::Cow::Borrowed(src), items));

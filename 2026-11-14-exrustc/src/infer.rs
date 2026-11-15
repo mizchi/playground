@@ -743,6 +743,31 @@ impl Inf<'_> {
     }
 
     /// メソッド呼び出し: recv はレシーバ (auto-deref 済み) の型変数。`Self` (impl の self 型 / trait の Self) と単一化する
+    /// prelude の helper `f(recv, args..)` の戻り値 (turbofish は型引数の前から)
+    fn apply_helper(&mut self, id: u32, mc: &syn::ExprMethodCall, args: Vec<u32>) -> u32 {
+        let sig = &self.prog.sigs[id as usize];
+        let (params, ret, ng) = (sig.params[1.min(sig.params.len())..].to_vec(), sig.ret, sig.generics.len());
+        let mut pv: Vec<Option<u32>> = vec![None; ng];
+        if let Some(tf) = &mc.turbofish {
+            for (i, a) in tf.args.iter().enumerate().take(ng) {
+                if let syn::GenericArgument::Type(t) = a {
+                    if let Ok(t) = self.prog.parse_ty(t, self.env) {
+                        pv[i] = Some(self.known(t));
+                    }
+                }
+            }
+        }
+        for (a, p) in args.into_iter().zip(params) {
+            // (char を渡す &str の引数は推論では見ない)
+            if p == Ty::Ref(false, intern(Ty::Str)) {
+                continue;
+            }
+            let k = self.known_g(p, &mut pv);
+            self.unify(a, k);
+        }
+        self.known_g(ret, &mut pv)
+    }
+
     fn apply_recv(&mut self, callee: Option<u32>, args: Vec<u32>, recv: u32) -> u32 {
         let Some(id) = callee else { return self.var() };
         let sig = &self.prog.sigs[id as usize];
@@ -1169,6 +1194,10 @@ impl Inf<'_> {
         ) && self.no_record == 0
         {
             self.lets.push((e as *const Expr as usize, v));
+            // (メソッド呼び出しはノード自体でも引けるようにする: codegen の helper が戻り値の型を見る)
+            if let Expr::MethodCall(mc) = e {
+                self.lets.push((mc as *const syn::ExprMethodCall as usize, v));
+            }
         }
         v
     }
@@ -1844,6 +1873,21 @@ impl Inf<'_> {
                         }
                     }
                 }
+                // String にないメソッド (`s.to_uppercase()`): &str の helper
+                if callee.is_none() {
+                    if let Some(b) = sid {
+                        if self.prog.structs[self.prog.base_of(b) as usize].name == "String" {
+                            let h = if n == "split" && args.first().is_some_and(|&a| self.resolve(a) != Some(Ty::Char)) {
+                                "split_str".to_string()
+                            } else {
+                                n.clone()
+                            };
+                            if let Some(&id) = self.prog.index.get(&format!("__exr_str_{h}")) {
+                                return self.apply_helper(id, mc, args);
+                            }
+                        }
+                    }
+                }
                 let r = self.apply_recv(callee, args, rv);
                 if n == "collect" {
                     self.collects.push((rv, r));
@@ -1862,6 +1906,27 @@ impl Inf<'_> {
             _ => None,
         };
         let name = mc.method.to_string();
+        // prelude の `__exr_str_<m>` / `__exr_char_<m>` (シグネチャで推論する)
+        let pre = match self.shape[root as usize] {
+            Some(Shape::Known(Ty::Str)) => Some("__exr_str_"),
+            Some(Shape::Known(Ty::Char)) => Some("__exr_char_"),
+            _ => None,
+        };
+        if let Some(pre) = pre {
+            let h = if name == "split" && pre == "__exr_str_" && args.first().is_some_and(|&a| self.resolve(a) != Some(Ty::Char)) {
+                "split_str".to_string()
+            } else if name == "split_whitespace" {
+                "split_ws".to_string()
+            } else {
+                name.clone()
+            };
+            if let Some(&id) = self.prog.index.get(&format!("{pre}{h}")) {
+                let builtin = matches!(name.as_str(), "len" | "is_empty" | "as_bytes" | "as_ptr");
+                if !builtin {
+                    return self.apply_helper(id, mc, args);
+                }
+            }
+        }
         // &str
         if let Some(Shape::Known(Ty::Str)) = self.shape[root as usize] {
             return match name.as_str() {

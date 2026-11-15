@@ -2626,6 +2626,16 @@ impl Program {
             }
             2 => {
                 let ty = p.segments[0].ident.to_string();
+                // `char::from_digit(d, 10)` / `char::from_u32(x)` / `char::from(b)`: prelude の `__exr_char_*`
+                if ty == "char" {
+                    let m = p.segments[1].ident.to_string();
+                    let m = match m.as_str() {
+                        "from_u32" => "from_u32_checked".to_string(),
+                        "from" => "from_u8".to_string(),
+                        _ => m,
+                    };
+                    return self.index.get(&format!("__exr_char_{m}")).copied();
+                }
                 let ty = if ty == "Self" {
                     self.structs[self.base_of(self_sid?) as usize].name.clone()
                 } else {
@@ -2852,6 +2862,17 @@ impl Program {
             // (書式化の部品と Display / Debug の impl も、codegen が名前を書かずに呼ぶ)
             matches!(s.impl_trait.as_deref(), Some("Drop"))
                 || (s.has_self && self.names[i as usize].ends_with("::eq"))
+                // (演算子 `a + b` は codegen が `a.add(b)` にする)
+                || (s.has_self
+                    && matches!(
+                        s.impl_trait.as_deref(),
+                        Some(
+                            "Add" | "Sub" | "Mul" | "Div" | "Rem" | "Neg" | "Not" | "BitAnd" | "BitOr" | "BitXor"
+                                | "Shl" | "Shr" | "AddAssign" | "SubAssign" | "MulAssign" | "DivAssign"
+                                | "RemAssign" | "BitAndAssign" | "BitOrAssign" | "BitXorAssign" | "ShlAssign"
+                                | "ShrAssign"
+                        )
+                    ))
                 // (`<` と sort は比較の glue から partial_cmp / cmp を呼ぶ)
                 || (s.has_self
                     && matches!(s.impl_trait.as_deref(), Some("PartialOrd" | "Ord"))

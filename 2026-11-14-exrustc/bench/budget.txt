@@ -81,6 +81,9 @@ ordering_inline.object_bytes 20344
 sorting.binary_bytes 73953
 sorting.cache_bytes 120697
 sorting.object_bytes 122346
+strings_chars.binary_bytes 86503
+strings_chars.cache_bytes 145345
+strings_chars.object_bytes 142833
 structs.binary_bytes 7266
 structs.cache_bytes 5075
 structs.object_bytes 6048
