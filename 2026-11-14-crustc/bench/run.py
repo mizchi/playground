@@ -41,7 +41,9 @@ def bench(n):
         gen(n, 1, src)
         edit = measure(build)
         r1 = subprocess.run([out], capture_output=True, text=True).stdout.strip()
-        rows.append((tool, cold, noop, edit, os.path.getsize(out), du(store), r1))
+        # (crustc のキャッシュは機械語を .o から引くので、.o も足して数える)
+        extra = du(out + ".o") if store.endswith(".crcache") else 0
+        rows.append((tool, cold, noop, edit, os.path.getsize(out), du(store) + extra, r1))
 
     exe = os.path.join(d, "exr")
     scenario("crustc (auto)", [EXR, src, "-o", exe], exe, exe + ".crcache")
@@ -67,7 +69,7 @@ def bench(n):
 
 def print_rows(n, rows):
     print(f"\n### N = {n} 関数\n")
-    print("| tool | cold ms | no-op ms | 1関数編集 ms | peak RSS (cold) | binary | cache/incr dir | out |")
+    print("| tool | cold ms | no-op ms | 1関数編集 ms | peak RSS (cold) | binary | cache(+.o)/incr dir | out |")
     print("|---|---:|---:|---:|---:|---:|---:|---|")
     for tool, cold, noop, edit, size, store, res in rows:
         f = lambda x: "-" if x is None else f"{x[0]:.1f}"

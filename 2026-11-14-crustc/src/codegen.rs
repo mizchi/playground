@@ -60,6 +60,8 @@ pub struct Blob {
     /// 場所 (行) を機械語やデータに書き込んだなら、そのときのアイテムの開始行 - 1。
     /// キャッシュから読むときに今の開始行と違えばコンパイルし直す (行がずれたら場所も変わる)
     pub line_base: Option<u32>,
+    /// キャッシュから読んだ機械語の参照 (長さ, ハッシュ)。中身は前回の `.o` から取り出す (code は空)
+    pub code_ref: Option<(u32, u64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -430,6 +432,7 @@ impl Worker {
             vtables: std::mem::take(&mut self.vtables),
             traps,
             line_base: self.loc_used.then_some(self.line_base),
+            code_ref: None,
         })
     }
 }

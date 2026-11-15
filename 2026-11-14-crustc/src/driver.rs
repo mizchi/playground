@@ -138,6 +138,69 @@ impl Timer {
     }
 }
 
+/// 前回の出力の `.o` の関数の機械語 (関数ごとのセクション) を、(長さ, ハッシュ) で引く
+struct ObjCode {
+    data: Vec<u8>,
+    index: FxMap<(u32, u64), (usize, usize)>,
+}
+
+impl ObjCode {
+    fn load(path: &Path) -> ObjCode {
+        let data = std::fs::read(path).unwrap_or_default();
+        let mut index = FxMap::default();
+        let rd = |o: usize, n: usize| -> Option<u64> {
+            let b = data.get(o..o + n)?;
+            let mut v = [0u8; 8];
+            v[..n].copy_from_slice(b);
+            Some(u64::from_le_bytes(v))
+        };
+        // ELF64 の symtab を辿り、実行可能なセクションにある関数のシンボル (位置と大きさ) の機械語を全部ハッシュする
+        (|| -> Option<()> {
+            if data.get(..4)? != b"\x7fELF" || data[4] != 2 {
+                return None;
+            }
+            let shoff = rd(0x28, 8)? as usize;
+            let shentsize = rd(0x3A, 2)? as usize;
+            let mut shnum = rd(0x3C, 2)? as usize;
+            if shnum == 0 {
+                shnum = rd(shoff + 0x20, 8)? as usize;
+            }
+            let sh = |i: usize| -> Option<(u64, u64, usize, usize, u64)> {
+                let h = shoff + i * shentsize;
+                Some((rd(h + 4, 4)?, rd(h + 8, 8)?, rd(h + 0x18, 8)? as usize, rd(h + 0x20, 8)? as usize, rd(h + 0x38, 8)?))
+            };
+            for i in 0..shnum {
+                let (ty, _, off, size, entsize) = sh(i)?;
+                if ty != 2 || entsize != 24 {
+                    continue; // SHT_SYMTAB
+                }
+                for k in 0..size / 24 {
+                    let e = off + k * 24;
+                    let info = *data.get(e + 4)?;
+                    let shndx = rd(e + 6, 2)? as usize;
+                    let (value, sz) = (rd(e + 8, 8)? as usize, rd(e + 16, 8)? as usize);
+                    if info & 0xF != 2 || sz == 0 || shndx == 0 || shndx >= shnum {
+                        continue; // STT_FUNC で、定義されているもの
+                    }
+                    let (sty, sflags, soff, _, _) = sh(shndx)?;
+                    if sty != 1 || sflags & 4 == 0 {
+                        continue;
+                    }
+                    let code = data.get(soff + value..soff + value + sz)?;
+                    index.insert((sz as u32, crate::cache::code_hash(code)), (soff + value, sz));
+                }
+            }
+            Some(())
+        })();
+        ObjCode { data, index }
+    }
+
+    fn find(&self, len: u32, h: u64) -> Option<&[u8]> {
+        let &(o, n) = self.index.get(&(len, h))?;
+        Some(&self.data[o..o + n])
+    }
+}
+
 fn make_isa(o: &Options) -> OwnedTargetIsa {
     let mut f = settings::builder();
     f.set("opt_level", if o.opt { "speed_and_size" } else { "none" })
@@ -563,6 +626,7 @@ impl Session {
         let mut n_hit = 0;
         let mut n_compiled = 0;
         let mut wave = user_live.clone();
+        let mut old_code: Option<ObjCode> = None;
         while !wave.is_empty() {
             let mut misses = vec![];
             let mut keys: FxMap<u32, Key> = FxMap::default();
@@ -574,11 +638,20 @@ impl Session {
                     let body = insts.lock().unwrap().body_of(id);
                     a.prog.item_of[body as usize].map(|i| a.items[i as usize].line as u32 - 1)
                 };
-                match self
+                let hit = self
                     .get(k)
                     .and_then(|d| cache::decode_blob(d, &a.prog, &insts))
-                    .filter(|b| b.line_base.is_none() || b.line_base == lb)
-                {
+                    .filter(|b| b.line_base.is_none() || b.line_base == lb);
+                // (機械語の中身は前回の `.o` から。見つからなければ (`.o` を消した、など) コンパイルし直す)
+                let hit = hit.and_then(|mut b| {
+                    if let Some((len, h)) = b.code_ref {
+                        let oc = old_code.get_or_insert_with(|| ObjCode::load(&output.with_extension("o")));
+                        b.code = oc.find(len, h)?.to_vec();
+                        b.code_ref = None;
+                    }
+                    Some(b)
+                });
+                match hit {
                     Some(b) => {
                         n_hit += 1;
                         blobs.insert(id, b);
@@ -599,7 +672,8 @@ impl Session {
             n_compiled += misses.len();
             for (id, b) in compiled {
                 let mut buf = vec![];
-                cache::encode_blob(&b, &a.prog, &insts.lock().unwrap(), &mut buf);
+                // (機械語は出力の `.o` に入るので、キャッシュには長さとハッシュだけ書く)
+                cache::encode_blob(&b, &a.prog, &insts.lock().unwrap(), &mut buf, true);
                 self.put(keys[&id], buf);
                 blobs.insert(id, b);
             }
@@ -976,13 +1050,42 @@ fn emit_object(
     let cc = isa.default_call_conv();
     let mut b = ObjectBuilder::new(isa, "exr", cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
-    // 関数ごとにセクションを分ける → リンカの --gc-sections が効く
-    b.per_function_section(true);
+    // 関数は 1 つの .text に並べる (関数ごとのセクションは 1 関数あたり section header 128 byte。
+    // panic の表がほとんどの関数を参照するので --gc-sections はもともと効かない)
+    b.per_function_section(false);
     let mut m = ObjectModule::new(b);
+    // 置く関数: main / export から、機械語のリロケーションと vtable を辿って届くものだけ
+    // (リンカの --gc-sections の代わり。呼ばれないクロージャや helper のインスタンスを置かない)
+    let mut reach: FxSet<u32> = FxSet::default();
+    let mut stack: Vec<u32> = user_live
+        .iter()
+        .copied()
+        .filter(|&u| {
+            let s = &prog.sigs[u as usize];
+            s.is_main || s.export
+        })
+        .collect();
+    while let Some(u) = stack.pop() {
+        if !reach.insert(u) {
+            continue;
+        }
+        let Some(b) = blobs.get(&u) else { continue };
+        for r in &b.relocs {
+            if let Target::Func(f) = r.target {
+                stack.push(f);
+            }
+        }
+        for vt in &b.vtables {
+            stack.extend(vt.iter().copied().filter(|&f| f != u32::MAX));
+        }
+    }
+    let unreached = |u: u32| blobs.contains_key(&u) && !reach.contains(&u);
+    let user_live: Vec<u32> = user_live.iter().copied().filter(|&u| !unreached(u)).collect();
+    let user_live = &user_live[..];
     let mut ids: FxMap<u32, cranelift_module::FuncId> = FxMap::default();
     for (i, sig) in prog.sigs.iter().enumerate() {
         // ジェネリック関数そのものは ABI を持たない (インスタンスだけを置く)
-        if !live[i] || sig.is_generic() || !sig.has_body {
+        if !live[i] || sig.is_generic() || !sig.has_body || unreached(i as u32) {
             continue;
         }
         let linkage = if sig.is_extern {
@@ -1000,6 +1103,7 @@ fn emit_object(
     // インスタンスはシンボル名順に並べる (登録順は並列実行で変わるが、.o は決定的にしたい)
     let mut order: Vec<u32> = (0..insts.list.len() as u32)
         .map(|i| insts.n_fns + i)
+        .filter(|&i| !unreached(i))
         .collect();
     order.sort_by(|a, b| {
         insts

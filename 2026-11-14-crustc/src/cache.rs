@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use crate::codegen::{Blob, BlobReloc, Target};
 use crate::front::{Insts, Program};
 
-const MAGIC: &[u8; 8] = b"EXRC0001";
+const MAGIC: &[u8; 8] = b"CRCC0002";
 
 pub type Key = u128;
 
@@ -66,6 +66,25 @@ impl Rd<'_> {
     }
     fn u64(&mut self) -> Option<u64> {
         Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
+    fn uv(&mut self) -> Option<u64> {
+        let mut v = 0u64;
+        let mut sh = 0;
+        loop {
+            let b = self.u8()?;
+            v |= ((b & 0x7F) as u64) << sh;
+            if b < 0x80 {
+                return Some(v);
+            }
+            sh += 7;
+            if sh > 63 {
+                return None;
+            }
+        }
+    }
+    fn sv(&mut self) -> Option<i64> {
+        let u = self.uv()?;
+        Some((u >> 1) as i64 ^ -((u & 1) as i64))
     }
     fn u128(&mut self) -> Option<u128> {
         Some(u128::from_le_bytes(self.take(16)?.try_into().ok()?))
@@ -155,28 +174,61 @@ impl Cache {
 
 /// 機械語 + リロケーションを書く。呼び先がインスタンスなら (元の関数名, 型引数) で書くので、
 /// 次のビルドでインスタンス番号が変わっても読み戻せる
-pub fn encode_blob(b: &Blob, prog: &Program, insts: &Insts, out: &mut Vec<u8>) {
-    out.extend_from_slice(&b.align.to_le_bytes());
-    out.extend_from_slice(&(b.code.len() as u32).to_le_bytes());
-    out.extend_from_slice(&b.code);
-    out.extend_from_slice(&(b.relocs.len() as u32).to_le_bytes());
+/// 機械語のハッシュ (キャッシュは機械語の代わりにこれを持ち、中身は `.o` から引く)
+pub fn code_hash(code: &[u8]) -> u64 {
+    let mut h = KeyHasher::new();
+    h.add(code);
+    h.finish() as u64
+}
+
+/// 符号なしの可変長整数 (7 bit ずつ、上位ビットが続きの印)
+fn put_uv(out: &mut Vec<u8>, mut v: u64) {
+    while v >= 0x80 {
+        out.push(v as u8 | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+
+/// 符号つき (zigzag) の可変長整数
+fn put_sv(out: &mut Vec<u8>, v: i64) {
+    put_uv(out, ((v << 1) ^ (v >> 63)) as u64);
+}
+
+/// 機械語 + リロケーション + 無名データ + vtable + panic の場所を書く。整数はすべて可変長、
+/// オフセットと行は前の値からの差で書く (1 関数あたり十数 byte + 1 か所あたり 4〜5 byte)。
+/// code_ref: 機械語は書かずに (長さ, ハッシュ) だけ書く (同じ機械語が出力の `.o` にあるとき)
+pub fn encode_blob(b: &Blob, prog: &Program, insts: &Insts, out: &mut Vec<u8>, code_ref: bool) {
+    put_uv(out, b.align as u64);
+    if code_ref {
+        put_uv(out, 1);
+        put_uv(out, b.code.len() as u64);
+        out.extend_from_slice(&code_hash(&b.code).to_le_bytes());
+    } else {
+        put_uv(out, 0);
+        put_uv(out, b.code.len() as u64);
+        out.extend_from_slice(&b.code);
+    }
+    put_uv(out, b.relocs.len() as u64);
+    let mut prev = 0u32;
     for r in &b.relocs {
-        out.extend_from_slice(&r.offset.to_le_bytes());
+        put_sv(out, r.offset as i64 - prev as i64);
+        prev = r.offset;
         out.push(r.kind);
-        out.extend_from_slice(&r.addend.to_le_bytes());
+        put_sv(out, r.addend);
         match r.target {
             Target::Func(id) => put_func(out, id, prog, insts),
             Target::Vtable(k) => {
                 out.push(5);
-                out.extend_from_slice(&k.to_le_bytes());
+                put_uv(out, k as u64);
             }
             Target::SelfOffset(o) => {
                 out.push(1);
-                out.extend_from_slice(&o.to_le_bytes());
+                put_uv(out, o as u64);
             }
             Target::Data(k) => {
                 out.push(3);
-                out.extend_from_slice(&k.to_le_bytes());
+                put_uv(out, k as u64);
             }
             // static は名前で (番号はアイテムの並びで変わる)
             Target::Static(ci) => {
@@ -187,34 +239,32 @@ pub fn encode_blob(b: &Blob, prog: &Program, insts: &Insts, out: &mut Vec<u8>) {
             }
         }
     }
-    out.extend_from_slice(&(b.datas.len() as u32).to_le_bytes());
+    put_uv(out, b.datas.len() as u64);
     for d in &b.datas {
-        out.extend_from_slice(&(d.len() as u32).to_le_bytes());
+        put_uv(out, d.len() as u64);
         out.extend_from_slice(d);
     }
-    // vtable と panic の trap の表は (ほとんどの関数にはないので) あるときだけ書く
-    let tail = !b.vtables.is_empty() || !b.traps.is_empty() || b.line_base.is_some();
-    if tail {
-        out.extend_from_slice(&(b.vtables.len() as u32).to_le_bytes());
-        for vt in &b.vtables {
-            out.extend_from_slice(&(vt.len() as u32).to_le_bytes());
-            for &f in vt {
-                put_func(out, f, prog, insts);
-            }
+    put_uv(out, b.vtables.len() as u64);
+    for vt in &b.vtables {
+        put_uv(out, vt.len() as u64);
+        for &f in vt {
+            put_func(out, f, prog, insts);
         }
     }
-    if !b.traps.is_empty() || b.line_base.is_some() {
-        out.extend_from_slice(&(b.traps.len() as u32).to_le_bytes());
-        // (1 か所 8 byte: オフセット 20 bit | メッセージ番号 + 1 13 bit | 種類・行・列 31 bit。表と同じ形)
-        for &(o, i, m) in &b.traps {
-            let m1 = if m >= (1 << 13) - 1 { 0 } else { m as u64 + 1 };
-            let w = ((o as u64) << 44) | (m1 << 31) | (i as u64 & 0x7FFF_FFFF);
-            out.extend_from_slice(&w.to_le_bytes());
-        }
+    // panic の場所: (オフセットの差, 種類とメッセージ番号, 行の差, 列)
+    put_uv(out, b.traps.len() as u64);
+    let (mut po, mut pl) = (0i64, 0i64);
+    for &(o, info, m) in &b.traps {
+        let (kind, line, col) = (info >> 27, (info >> 11) & 0xFFFF, info & 0x7FF);
+        put_sv(out, o as i64 - po);
+        po = o as i64;
+        let m1 = if m == u32::MAX { 0 } else { m as u64 + 1 };
+        put_uv(out, kind as u64 | (m1 << 4));
+        put_sv(out, line as i64 - pl);
+        pl = line as i64;
+        put_uv(out, col as u64);
     }
-    if let Some(lb) = b.line_base {
-        out.extend_from_slice(&lb.to_le_bytes());
-    }
+    put_uv(out, b.line_base.map_or(0, |l| l as u64 + 1));
 }
 
 /// 関数への参照: 普通の関数は名前 (タグ 0)、インスタンスは (元の関数名, 型引数) (タグ 2)
@@ -313,21 +363,31 @@ pub fn request_insts(d: &[u8], prog: &Program, insts: &Mutex<Insts>) -> bool {
 /// encode_blob の逆。インスタンスへの参照は insts に要求し直す (pending に積まれる)
 pub fn decode_blob(d: &[u8], prog: &Program, insts: &Mutex<Insts>) -> Option<Blob> {
     let mut r = Rd(d, 0);
-    let align = r.u32()?;
-    let n = r.u32()? as usize;
-    let code = r.take(n)?.to_vec();
-    let nr = r.u32()? as usize;
+    let align = r.uv()? as u32;
+    let (code, code_ref) = match r.uv()? {
+        0 => {
+            let n = r.uv()? as usize;
+            (r.take(n)?.to_vec(), None)
+        }
+        _ => {
+            let len = r.uv()? as u32;
+            (vec![], Some((len, r.u64()?)))
+        }
+    };
+    let nr = r.uv()? as usize;
     let mut relocs = Vec::with_capacity(nr);
+    let mut prev = 0i64;
     for _ in 0..nr {
-        let offset = r.u32()?;
+        prev += r.sv()?;
+        let offset = prev as u32;
         let kind = r.u8()?;
-        let addend = r.u64()? as i64;
+        let addend = r.sv()?;
         let tag = r.u8()?;
         let target = match tag {
             0 | 2 => Target::Func(get_func(&mut r, tag, prog, insts)?),
-            5 => Target::Vtable(r.u32()?),
-            1 => Target::SelfOffset(r.u32()?),
-            3 => Target::Data(r.u32()?),
+            5 => Target::Vtable(r.uv()? as u32),
+            1 => Target::SelfOffset(r.uv()? as u32),
+            3 => Target::Data(r.uv()? as u32),
             4 => {
                 let len = r.u16()? as usize;
                 let name = std::str::from_utf8(r.take(len)?).ok()?;
@@ -342,35 +402,39 @@ pub fn decode_blob(d: &[u8], prog: &Program, insts: &Mutex<Insts>) -> Option<Blo
             target,
         });
     }
-    let nd = r.u32()? as usize;
+    let nd = r.uv()? as usize;
     let mut datas = Vec::with_capacity(nd);
     for _ in 0..nd {
-        let n = r.u32()? as usize;
+        let n = r.uv()? as usize;
         datas.push(r.take(n)?.to_vec());
     }
-    let mut vtables = vec![];
-    if r.1 < r.0.len() {
-        let nv = r.u32()? as usize;
-        for _ in 0..nv {
-            let n = r.u32()? as usize;
-            let mut vt = Vec::with_capacity(n);
-            for _ in 0..n {
-                let tag = r.u8()?;
-                vt.push(get_func(&mut r, tag, prog, insts)?);
-            }
-            vtables.push(vt);
-        }
-    }
-    let mut traps = vec![];
-    if r.1 < r.0.len() {
-        let n = r.u32()? as usize;
+    let nv = r.uv()? as usize;
+    let mut vtables = Vec::with_capacity(nv);
+    for _ in 0..nv {
+        let n = r.uv()? as usize;
+        let mut vt = Vec::with_capacity(n);
         for _ in 0..n {
-            let w = r.u64()?;
-            let m1 = ((w >> 31) & 0x1FFF) as u32;
-            traps.push(((w >> 44) as u32, (w & 0x7FFF_FFFF) as u32, m1.wrapping_sub(1)));
+            let tag = r.u8()?;
+            vt.push(get_func(&mut r, tag, prog, insts)?);
         }
+        vtables.push(vt);
     }
-    let line_base = if r.1 < r.0.len() { Some(r.u32()?) } else { None };
+    let nt = r.uv()? as usize;
+    let mut traps = Vec::with_capacity(nt);
+    let (mut po, mut pl) = (0i64, 0i64);
+    for _ in 0..nt {
+        po += r.sv()?;
+        let km = r.uv()?;
+        pl += r.sv()?;
+        let col = r.uv()? as u32;
+        let info = ((km & 0xF) as u32) << 27 | ((pl as u32) & 0xFFFF) << 11 | (col & 0x7FF);
+        let m = (km >> 4) as u32;
+        traps.push((po as u32, info, m.wrapping_sub(1)));
+    }
+    let line_base = match r.uv()? {
+        0 => None,
+        l => Some(l as u32 - 1),
+    };
     Some(Blob {
         align,
         code,
@@ -379,5 +443,6 @@ pub fn decode_blob(d: &[u8], prog: &Program, insts: &Mutex<Insts>) -> Option<Blo
         vtables,
         traps,
         line_base,
+        code_ref,
     })
 }
