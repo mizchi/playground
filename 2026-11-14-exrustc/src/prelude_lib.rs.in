@@ -2779,6 +2779,13 @@ pub trait BitXor {
     type Output;
     fn bitxor(self, rhs: Self) -> Self::Output;
 }
+pub trait Index {
+    type Output;
+    fn index(&self, i: Self) -> &Self::Output;
+}
+pub trait IndexMut {
+    fn index_mut(&mut self, i: Self) -> &mut Self;
+}
 pub trait AddAssign {
     fn add_assign(&mut self, rhs: Self);
 }
@@ -3381,6 +3388,753 @@ impl<K, V> __FromIter for HashMap<K, V> {
             m.insert(k, v);
         }
         m
+    }
+}
+
+// --- HashSet<T> (HashMap<T, ()> の上に) ---
+
+pub struct HashSet<T> {
+    m: HashMap<T, ()>,
+}
+
+impl<T> HashSet<T> {
+    pub fn new() -> HashSet<T> {
+        HashSet { m: HashMap::new() }
+    }
+    pub fn with_capacity(n: usize) -> HashSet<T> {
+        HashSet { m: HashMap::with_capacity(n) }
+    }
+    pub fn insert(&mut self, x: T) -> bool {
+        self.m.insert(x, ()).is_none()
+    }
+    pub fn contains(&self, x: &T) -> bool {
+        self.m.contains_key(x)
+    }
+    pub fn remove(&mut self, x: &T) -> bool {
+        self.m.remove(x).is_some()
+    }
+    pub fn len(&self) -> usize {
+        self.m.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.m.len() == 0
+    }
+    pub fn clear(&mut self) {
+        self.m.clear();
+    }
+    pub fn iter(&self) -> HmKeys<T, ()> {
+        self.m.keys()
+    }
+    pub fn into_iter(self) -> SetIntoIter<T> {
+        SetIntoIter { it: self.m.into_iter() }
+    }
+    pub fn get(&self, x: &T) -> Option<&T> {
+        let mut it = self.m.keys();
+        while let Some(k) = it.next() {
+            if *k == *x {
+                return Some(k);
+            }
+        }
+        None
+    }
+    // 和・積・差 (std はイテレータを返す。ここでは要素の参照の IntoIter)
+    pub fn union(&self, o: &HashSet<T>) -> IntoIter<&T> {
+        let mut r = Vec::new();
+        let mut a = self.m.keys();
+        while let Some(x) = a.next() {
+            r.push(x);
+        }
+        let mut b = o.m.keys();
+        while let Some(x) = b.next() {
+            if !self.m.contains_key(x) {
+                r.push(x);
+            }
+        }
+        r.into_iter()
+    }
+    pub fn intersection(&self, o: &HashSet<T>) -> IntoIter<&T> {
+        let mut r = Vec::new();
+        let mut a = self.m.keys();
+        while let Some(x) = a.next() {
+            if o.m.contains_key(x) {
+                r.push(x);
+            }
+        }
+        r.into_iter()
+    }
+    pub fn difference(&self, o: &HashSet<T>) -> IntoIter<&T> {
+        let mut r = Vec::new();
+        let mut a = self.m.keys();
+        while let Some(x) = a.next() {
+            if !o.m.contains_key(x) {
+                r.push(x);
+            }
+        }
+        r.into_iter()
+    }
+    pub fn is_subset(&self, o: &HashSet<T>) -> bool {
+        let mut a = self.m.keys();
+        while let Some(x) = a.next() {
+            if !o.m.contains_key(x) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+pub struct SetIntoIter<T> {
+    it: HmIntoIter<T, ()>,
+}
+
+impl<T> Iterator for SetIntoIter<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        match self.it.next() {
+            Some((k, _)) => Some(k),
+            None => None,
+        }
+    }
+}
+
+impl<T> __FromIter for HashSet<T> {
+    fn __from_iter<I: Iterator>(it: I) -> HashSet<T> {
+        let mut it = it;
+        let mut s = HashSet::new();
+        while let Some(x) = it.next() {
+            s.insert(x);
+        }
+        s
+    }
+}
+
+impl<T> Debug for HashSet<T> {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_dbg_begin::<()>(f, "", 3);
+        let mut n = 0;
+        let mut it = self.m.keys();
+        while let Some(k) = it.next() {
+            __exr_dbg_item::<()>(f, n, "");
+            __exr_debug(k, f);
+            __exr_dbg_item_end::<()>(f);
+            n += 1;
+        }
+        __exr_dbg_end::<()>(f, n, 3, false);
+        Ok(())
+    }
+}
+
+// --- BTreeMap<K, V> / BTreeSet<T> (キーの順に並べた Vec と二分探索。木ではないが、並びと API は std と同じ) ---
+
+pub struct BTreeMap<K, V> {
+    ks: Vec<K>,
+    vs: Vec<V>,
+}
+
+impl<K, V> BTreeMap<K, V> {
+    pub fn new() -> BTreeMap<K, V> {
+        BTreeMap { ks: Vec::new(), vs: Vec::new() }
+    }
+    // (見つかった位置, 見つかったか)。見つからなければ入れる位置
+    fn bt_find(&self, k: &K) -> (usize, bool) {
+        let mut lo = 0;
+        let mut hi = self.ks.len;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let c = __exr_cmp::<K>(unsafe { &*self.ks.ptr.add(mid) }, k);
+            if c == 0 {
+                return (mid, true);
+            } else if c < 0 {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        (lo, false)
+    }
+    pub fn insert(&mut self, k: K, v: V) -> Option<V> {
+        let (i, found) = self.bt_find(&k);
+        if found {
+            drop(k);
+            unsafe {
+                let p = self.vs.ptr.add(i);
+                let old = p.read();
+                p.write(v);
+                Some(old)
+            }
+        } else {
+            self.ks.insert(i, k);
+            self.vs.insert(i, v);
+            None
+        }
+    }
+    pub fn get(&self, k: &K) -> Option<&V> {
+        let (i, found) = self.bt_find(k);
+        if found { Some(unsafe { &*self.vs.ptr.add(i) }) } else { None }
+    }
+    pub fn get_mut(&mut self, k: &K) -> Option<&mut V> {
+        let (i, found) = self.bt_find(k);
+        if found { Some(unsafe { &mut *self.vs.ptr.add(i) }) } else { None }
+    }
+    pub fn contains_key(&self, k: &K) -> bool {
+        self.bt_find(k).1
+    }
+    pub fn remove(&mut self, k: &K) -> Option<V> {
+        let (i, found) = self.bt_find(k);
+        if found {
+            self.ks.remove(i);
+            Some(self.vs.remove(i))
+        } else {
+            None
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.ks.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.ks.len == 0
+    }
+    pub fn clear(&mut self) {
+        self.ks.clear();
+        self.vs.clear();
+    }
+    pub fn iter(&self) -> BtIter<K, V> {
+        BtIter { ks: self.ks.ptr as *const K, vs: self.vs.ptr as *const V, i: 0, len: self.ks.len }
+    }
+    pub fn iter_mut(&mut self) -> BtIterMut<K, V> {
+        BtIterMut { ks: self.ks.ptr as *const K, vs: self.vs.ptr, i: 0, len: self.ks.len }
+    }
+    pub fn keys(&self) -> Iter<K> {
+        self.ks.iter()
+    }
+    pub fn values(&self) -> Iter<V> {
+        self.vs.iter()
+    }
+    pub fn values_mut(&mut self) -> IterMut<V> {
+        self.vs.iter_mut()
+    }
+    pub fn into_iter(self) -> BtIntoIter<K, V> {
+        let mut m = self;
+        let ks = Vec { ptr: m.ks.ptr, cap: m.ks.cap, len: m.ks.len };
+        let vs = Vec { ptr: m.vs.ptr, cap: m.vs.cap, len: m.vs.len };
+        m.ks.ptr = 0usize as *mut K;
+        m.ks.cap = 0;
+        m.ks.len = 0;
+        m.vs.ptr = 0usize as *mut V;
+        m.vs.cap = 0;
+        m.vs.len = 0;
+        BtIntoIter { k: ks.into_iter(), v: vs.into_iter() }
+    }
+    // `m[&k]`
+    pub fn index(&self, k: &K) -> &V {
+        match self.get(k) {
+            Some(v) => v,
+            None => panic!("key not found"),
+        }
+    }
+    pub fn first_key_value(&self) -> Option<(&K, &V)> {
+        if self.ks.len == 0 { None } else { Some(unsafe { (&*self.ks.ptr, &*self.vs.ptr) }) }
+    }
+    pub fn last_key_value(&self) -> Option<(&K, &V)> {
+        let n = self.ks.len;
+        if n == 0 { None } else { Some(unsafe { (&*self.ks.ptr.add(n - 1), &*self.vs.ptr.add(n - 1)) }) }
+    }
+    pub fn pop_first(&mut self) -> Option<(K, V)> {
+        if self.ks.len == 0 { None } else { Some((self.ks.remove(0), self.vs.remove(0))) }
+    }
+    pub fn pop_last(&mut self) -> Option<(K, V)> {
+        match self.ks.pop() {
+            Some(k) => Some((k, self.vs.pop().unwrap())),
+            None => None,
+        }
+    }
+    pub fn entry(&mut self, k: K) -> BtEntry<K, V> {
+        let (i, found) = self.bt_find(&k);
+        BtEntry { map: self, key: Some(k), idx: i, found: found }
+    }
+}
+
+pub struct BtEntry<K, V> {
+    map: &mut BTreeMap<K, V>,
+    key: Option<K>,
+    idx: usize,
+    found: bool,
+}
+
+impl<K, V> BtEntry<K, V> {
+    pub fn or_insert(self, v: V) -> &mut V {
+        let m = self.map;
+        let i = self.idx;
+        let mut key = self.key;
+        if self.found {
+            drop(v);
+        } else {
+            m.ks.insert(i, key.take().unwrap());
+            m.vs.insert(i, v);
+        }
+        unsafe { &mut *m.vs.ptr.add(i) }
+    }
+    pub fn or_insert_with<F: FnOnce() -> V>(self, f: F) -> &mut V {
+        let m = self.map;
+        let i = self.idx;
+        let mut key = self.key;
+        if !self.found {
+            m.ks.insert(i, key.take().unwrap());
+            m.vs.insert(i, f());
+        }
+        unsafe { &mut *m.vs.ptr.add(i) }
+    }
+    pub fn or_default(self) -> &mut V {
+        let m = self.map;
+        let i = self.idx;
+        let mut key = self.key;
+        if !self.found {
+            m.ks.insert(i, key.take().unwrap());
+            m.vs.insert(i, __exr_default::<V>());
+        }
+        unsafe { &mut *m.vs.ptr.add(i) }
+    }
+    pub fn and_modify<F: FnOnce(&mut V)>(self, f: F) -> BtEntry<K, V> {
+        let e = self;
+        if e.found {
+            f(unsafe { &mut *e.map.vs.ptr.add(e.idx) });
+        }
+        e
+    }
+}
+
+pub struct BtIter<K, V> {
+    ks: *const K,
+    vs: *const V,
+    i: usize,
+    len: usize,
+}
+
+impl<K, V> Iterator for BtIter<K, V> {
+    type Item = (&K, &V);
+    fn next(&mut self) -> Option<(&K, &V)> {
+        if self.i < self.len {
+            self.i += 1;
+            Some(unsafe { (&*self.ks.add(self.i - 1), &*self.vs.add(self.i - 1)) })
+        } else {
+            None
+        }
+    }
+}
+
+impl<K, V> BtIter<K, V> {
+    pub fn next_back(&mut self) -> Option<(&K, &V)> {
+        if self.i < self.len {
+            self.len -= 1;
+            Some(unsafe { (&*self.ks.add(self.len), &*self.vs.add(self.len)) })
+        } else {
+            None
+        }
+    }
+}
+
+pub struct BtIterMut<K, V> {
+    ks: *const K,
+    vs: *mut V,
+    i: usize,
+    len: usize,
+}
+
+impl<K, V> Iterator for BtIterMut<K, V> {
+    type Item = (&K, &mut V);
+    fn next(&mut self) -> Option<(&K, &mut V)> {
+        if self.i < self.len {
+            self.i += 1;
+            Some(unsafe { (&*self.ks.add(self.i - 1), &mut *self.vs.add(self.i - 1)) })
+        } else {
+            None
+        }
+    }
+}
+
+pub struct BtIntoIter<K, V> {
+    k: IntoIter<K>,
+    v: IntoIter<V>,
+}
+
+impl<K, V> Iterator for BtIntoIter<K, V> {
+    type Item = (K, V);
+    fn next(&mut self) -> Option<(K, V)> {
+        match self.k.next() {
+            Some(k) => Some((k, self.v.next().unwrap())),
+            None => None,
+        }
+    }
+}
+
+impl<K, V> __FromIter for BTreeMap<K, V> {
+    fn __from_iter<I: Iterator>(it: I) -> BTreeMap<K, V> {
+        let mut it = it;
+        let mut m = BTreeMap::new();
+        while let Some((k, v)) = it.next() {
+            m.insert(k, v);
+        }
+        m
+    }
+}
+
+impl<K, V> Debug for BTreeMap<K, V> {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_dbg_begin::<()>(f, "", 3);
+        let mut i = 0;
+        while i < self.ks.len {
+            __exr_dbg_item::<()>(f, i, "");
+            unsafe {
+                __exr_debug(&*self.ks.ptr.add(i), f);
+                f.buf.push_str(": ");
+                __exr_debug(&*self.vs.ptr.add(i), f);
+            }
+            __exr_dbg_item_end::<()>(f);
+            i += 1;
+        }
+        __exr_dbg_end::<()>(f, self.ks.len, 3, false);
+        Ok(())
+    }
+}
+
+pub struct BTreeSet<T> {
+    v: Vec<T>,
+}
+
+impl<T> BTreeSet<T> {
+    pub fn new() -> BTreeSet<T> {
+        BTreeSet { v: Vec::new() }
+    }
+    fn bs_find(&self, x: &T) -> (usize, bool) {
+        let mut lo = 0;
+        let mut hi = self.v.len;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let c = __exr_cmp::<T>(unsafe { &*self.v.ptr.add(mid) }, x);
+            if c == 0 {
+                return (mid, true);
+            } else if c < 0 {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        (lo, false)
+    }
+    pub fn insert(&mut self, x: T) -> bool {
+        let (i, found) = self.bs_find(&x);
+        if found {
+            drop(x);
+            false
+        } else {
+            self.v.insert(i, x);
+            true
+        }
+    }
+    pub fn contains(&self, x: &T) -> bool {
+        self.bs_find(x).1
+    }
+    pub fn remove(&mut self, x: &T) -> bool {
+        let (i, found) = self.bs_find(x);
+        if found {
+            self.v.remove(i);
+        }
+        found
+    }
+    pub fn len(&self) -> usize {
+        self.v.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.v.len == 0
+    }
+    pub fn clear(&mut self) {
+        self.v.clear();
+    }
+    pub fn iter(&self) -> Iter<T> {
+        self.v.iter()
+    }
+    pub fn into_iter(self) -> IntoIter<T> {
+        let mut s = self;
+        let v = Vec { ptr: s.v.ptr, cap: s.v.cap, len: s.v.len };
+        s.v.ptr = 0usize as *mut T;
+        s.v.cap = 0;
+        s.v.len = 0;
+        v.into_iter()
+    }
+    pub fn first(&self) -> Option<&T> {
+        self.v.first()
+    }
+    pub fn last(&self) -> Option<&T> {
+        self.v.last()
+    }
+    pub fn pop_first(&mut self) -> Option<T> {
+        if self.v.len == 0 { None } else { Some(self.v.remove(0)) }
+    }
+    pub fn pop_last(&mut self) -> Option<T> {
+        self.v.pop()
+    }
+}
+
+impl<T> __FromIter for BTreeSet<T> {
+    fn __from_iter<I: Iterator>(it: I) -> BTreeSet<T> {
+        let mut it = it;
+        let mut s = BTreeSet::new();
+        while let Some(x) = it.next() {
+            s.insert(x);
+        }
+        s
+    }
+}
+
+impl<T> Debug for BTreeSet<T> {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_dbg_begin::<()>(f, "", 3);
+        let mut i = 0;
+        while i < self.v.len {
+            __exr_dbg_item::<()>(f, i, "");
+            unsafe {
+                __exr_debug(&*self.v.ptr.add(i), f);
+            }
+            __exr_dbg_item_end::<()>(f);
+            i += 1;
+        }
+        __exr_dbg_end::<()>(f, self.v.len, 3, false);
+        Ok(())
+    }
+}
+
+// --- VecDeque<T> (リングバッファ) ---
+
+pub struct VecDeque<T> {
+    ptr: *mut T,
+    cap: usize,
+    head: usize,
+    len: usize,
+}
+
+impl<T> VecDeque<T> {
+    pub fn new() -> VecDeque<T> {
+        VecDeque { ptr: core::ptr::null_mut(), cap: 0, head: 0, len: 0 }
+    }
+    pub fn with_capacity(n: usize) -> VecDeque<T> {
+        let mut d = VecDeque::new();
+        d.dq_grow(n);
+        d
+    }
+    fn dq_at(&self, i: usize) -> *mut T {
+        let mut j = self.head + i;
+        if j >= self.cap {
+            j -= self.cap;
+        }
+        unsafe { self.ptr.add(j) }
+    }
+    // 容量を n 以上にし、要素を先頭から詰め直す
+    fn dq_grow(&mut self, n: usize) {
+        if n <= self.cap {
+            return;
+        }
+        let c = if n < 4 { 4 } else { n };
+        let sz = core::mem::size_of::<T>();
+        let np = unsafe { __exr_realloc(0usize as *mut u8, if sz == 0 { 1 } else { c * sz }) } as *mut T;
+        let mut i = 0;
+        while i < self.len {
+            unsafe {
+                np.add(i).write(self.dq_at(i).read());
+            }
+            i += 1;
+        }
+        if !self.ptr.is_null() {
+            unsafe {
+                __exr_free(self.ptr as *mut u8);
+            }
+        }
+        self.ptr = np;
+        self.cap = c;
+        self.head = 0;
+    }
+    pub fn push_back(&mut self, x: T) {
+        if self.len == self.cap {
+            self.dq_grow(if self.cap == 0 { 4 } else { self.cap * 2 });
+        }
+        unsafe {
+            self.dq_at(self.len).write(x);
+        }
+        self.len += 1;
+    }
+    pub fn push_front(&mut self, x: T) {
+        if self.len == self.cap {
+            self.dq_grow(if self.cap == 0 { 4 } else { self.cap * 2 });
+        }
+        self.head = if self.head == 0 { self.cap - 1 } else { self.head - 1 };
+        unsafe {
+            self.ptr.add(self.head).write(x);
+        }
+        self.len += 1;
+    }
+    pub fn pop_front(&mut self) -> Option<T> {
+        if self.len == 0 {
+            return None;
+        }
+        let x = unsafe { self.ptr.add(self.head).read() };
+        self.head += 1;
+        if self.head == self.cap {
+            self.head = 0;
+        }
+        self.len -= 1;
+        Some(x)
+    }
+    pub fn pop_back(&mut self) -> Option<T> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        Some(unsafe { self.dq_at(self.len).read() })
+    }
+    pub fn front(&self) -> Option<&T> {
+        if self.len == 0 { None } else { Some(unsafe { &*self.dq_at(0) }) }
+    }
+    pub fn back(&self) -> Option<&T> {
+        if self.len == 0 { None } else { Some(unsafe { &*self.dq_at(self.len - 1) }) }
+    }
+    pub fn front_mut(&mut self) -> Option<&mut T> {
+        if self.len == 0 { None } else { Some(unsafe { &mut *self.dq_at(0) }) }
+    }
+    pub fn back_mut(&mut self) -> Option<&mut T> {
+        if self.len == 0 { None } else { Some(unsafe { &mut *self.dq_at(self.len - 1) }) }
+    }
+    pub fn get(&self, i: usize) -> Option<&T> {
+        if i < self.len { Some(unsafe { &*self.dq_at(i) }) } else { None }
+    }
+    pub fn get_mut(&mut self, i: usize) -> Option<&mut T> {
+        if i < self.len { Some(unsafe { &mut *self.dq_at(i) }) } else { None }
+    }
+    // `d[i]` (Index)
+    pub fn index(&self, i: usize) -> &T {
+        if i >= self.len {
+            panic!("index out of bounds");
+        }
+        unsafe { &*self.dq_at(i) }
+    }
+    pub fn index_mut(&mut self, i: usize) -> &mut T {
+        if i >= self.len {
+            panic!("index out of bounds");
+        }
+        unsafe { &mut *self.dq_at(i) }
+    }
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    pub fn clear(&mut self) {
+        while let Some(x) = self.pop_front() {
+            drop(x);
+        }
+    }
+    pub fn iter(&self) -> DqIter<T> {
+        DqIter { d: self as *const VecDeque<T>, i: 0, n: self.len }
+    }
+    pub fn into_iter(self) -> DqIntoIter<T> {
+        DqIntoIter { d: self }
+    }
+}
+
+impl<T: PartialEq> VecDeque<T> {
+    pub fn contains(&self, x: &T) -> bool {
+        let mut i = 0;
+        while i < self.len {
+            if unsafe { *self.dq_at(i) == *x } {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+}
+
+impl<T> Drop for VecDeque<T> {
+    fn drop(&mut self) {
+        self.clear();
+        if !self.ptr.is_null() {
+            unsafe {
+                __exr_free(self.ptr as *mut u8);
+            }
+        }
+    }
+}
+
+pub struct DqIter<T> {
+    d: *const VecDeque<T>,
+    i: usize,
+    n: usize,
+}
+
+impl<T> Iterator for DqIter<T> {
+    type Item = &T;
+    fn next(&mut self) -> Option<&T> {
+        if self.i < self.n {
+            self.i += 1;
+            Some(unsafe { &*(*self.d).dq_at(self.i - 1) })
+        } else {
+            None
+        }
+    }
+}
+
+impl<T> DqIter<T> {
+    pub fn next_back(&mut self) -> Option<&T> {
+        if self.i < self.n {
+            self.n -= 1;
+            Some(unsafe { &*(*self.d).dq_at(self.n) })
+        } else {
+            None
+        }
+    }
+}
+
+pub struct DqIntoIter<T> {
+    d: VecDeque<T>,
+}
+
+impl<T> Iterator for DqIntoIter<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        self.d.pop_front()
+    }
+}
+
+impl<T> __FromIter for VecDeque<T> {
+    fn __from_iter<I: Iterator>(it: I) -> VecDeque<T> {
+        let mut it = it;
+        let mut d = VecDeque::new();
+        while let Some(x) = it.next() {
+            d.push_back(x);
+        }
+        d
+    }
+}
+
+impl<T> Debug for VecDeque<T> {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_dbg_begin::<()>(f, "", 2);
+        let mut i = 0;
+        while i < self.len {
+            __exr_dbg_item::<()>(f, i, "");
+            unsafe {
+                __exr_debug(&*self.dq_at(i), f);
+            }
+            __exr_dbg_item_end::<()>(f);
+            i += 1;
+        }
+        if self.len == 0 && f.alt {
+            f.indent -= 1;
+            f.buf.pop_byte();
+            f.buf.push(']');
+            return Ok(());
+        }
+        __exr_dbg_end::<()>(f, self.len, 2, false);
+        Ok(())
     }
 }
 

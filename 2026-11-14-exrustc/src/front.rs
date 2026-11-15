@@ -2889,7 +2889,7 @@ impl Program {
                             "Add" | "Sub" | "Mul" | "Div" | "Rem" | "Neg" | "Not" | "BitAnd" | "BitOr" | "BitXor"
                                 | "Shl" | "Shr" | "AddAssign" | "SubAssign" | "MulAssign" | "DivAssign"
                                 | "RemAssign" | "BitAndAssign" | "BitOrAssign" | "BitXorAssign" | "ShlAssign"
-                                | "ShrAssign"
+                                | "ShrAssign" | "Index" | "IndexMut"
                         )
                     ))
                 // (`<` と sort は比較の glue から partial_cmp / cmp を呼ぶ)

@@ -17,6 +17,9 @@ closures.object_bytes 22612
 closures_in_macros.binary_bytes 36422
 closures_in_macros.cache_bytes 72309
 closures_in_macros.object_bytes 72979
+collections.binary_bytes 107276
+collections.cache_bytes 193804
+collections.object_bytes 194745
 defaults.binary_bytes 39110
 defaults.cache_bytes 86428
 defaults.object_bytes 79447

@@ -140,6 +140,10 @@ pub fn clif_sig(s: &FnSig, cc: CallConv) -> Signature {
         sig.params.push(AbiParam::new(PTR));
     }
     for &p in &s.params {
+        // (サイズ 0 のスカラー `()` の引数は渡さない)
+        if !p.is_agg() && clif_ty(p).is_none() {
+            continue;
+        }
         sig.params.push(abi_param(p));
     }
     if s.is_main {
@@ -757,10 +761,18 @@ impl Cx<'_, '_> {
         if is_sret(sig) {
             self.sret = Some(params.remove(0));
         }
-        for ((arg, v), &ty) in f.sig.inputs.iter().zip(params).zip(&sig.params) {
+        let mut params = params.into_iter();
+        for (arg, &ty) in f.sig.inputs.iter().zip(&sig.params) {
             let name = match arg {
                 syn::FnArg::Receiver(_) => "self".to_string(),
                 syn::FnArg::Typed(pt) => pat_name(&pt.pat)?,
+            };
+            if !ty.is_agg() && clif_ty(ty).is_none() {
+                self.bind(name, ty, None);
+                continue;
+            }
+            let Some(v) = params.next() else {
+                return Err("internal: parameter count mismatch".into());
             };
             if ty.is_agg() {
                 // 呼び出し側がコピー済みなので、そのメモリをそのまま使う (値渡しの引数は呼び出された側が drop する)
@@ -1273,6 +1285,23 @@ impl Cx<'_, '_> {
                 match (v, t) {
                     (Some(p), Ty::Ref(_, inner)) => Ok(Place::Mem(p, 0, *inner)),
                     _ => err(ix.span(), "internal: bad map index"),
+                }
+            }
+            // `d[i]` / `m[&k]` (impl Index / IndexMut、VecDeque / BTreeMap): `*x.index_mut(i)` / `*x.index(i)`
+            Expr::Index(ix)
+                if matches!(self.peek(&ix.expr).map(|t| self.strip_refs(t)),
+                    Some(Ty::Struct(sid)) if self.vec_fields(sid).is_none()
+                        && (self.prog.method(sid, "index").is_some() || self.prog.method(sid, "index_mut").is_some())) =>
+            {
+                let Some(Ty::Struct(sid)) = self.peek(&ix.expr).map(|t| self.strip_refs(t)) else { unreachable!() };
+                let m = if self.prog.method(sid, "index_mut").is_some() { "index_mut" } else { "index" };
+                let mi = syn::Ident::new(m, ix.span());
+                let (b, k) = (&ix.expr, &ix.index);
+                let e: Expr = syn::parse_quote!((#b).#mi(#k));
+                let (v, t) = self.expr(&e, None)?;
+                match (v, t) {
+                    (Some(p), Ty::Ref(_, inner)) => Ok(Place::Mem(p, 0, *inner)),
+                    _ => err(ix.span(), "`index` must return a reference"),
                 }
             }
             Expr::Index(ix) if !matches!(&*ix.index, Expr::Range(_)) => {
@@ -2883,6 +2912,28 @@ impl Cx<'_, '_> {
             }
             // 自動 deref 強制: `&&T` を `&T` の引数に渡す
             let want = self.prog.partial_subst(pt, &sol);
+            // `m.get("k")` (キーが &str / String の map: std の Borrow 相当): &str を &&str / &String にする
+            if let (Ty::Ref(_, wi), Ty::Ref(_, Ty::Str), Some(val)) = (want, t, v) {
+                if matches!(wi, Ty::Ref(_, Ty::Str)) {
+                    let tmp = self.temp(*wi);
+                    self.copy(tmp, val, *wi);
+                    v = Some(tmp);
+                    t = want;
+                } else if let Ty::Struct(ws) = wi {
+                    if self.prog.structs[*ws as usize].base.is_none()
+                        && self.prog.structs[*ws as usize].name == "String"
+                        && self.prog.index.contains_key("String::from")
+                    {
+                        let sref = Ty::Ref(false, intern(Ty::Str));
+                        let (sv, st) = self.call_named("String::from", vec![], &[(val, sref)], a.span())?;
+                        if let Some(sv) = sv {
+                            self.own_temp(sv, st);
+                            v = Some(sv);
+                            t = Ty::Ref(false, intern(st));
+                        }
+                    }
+                }
+            }
             // (`&Box<T>` も `&T` に)
             while let (Ty::Ref(_, _), Ty::Ref(m, inner @ (Ty::Ref(..) | Ty::Box(_))), Some(val)) =
                 (want, t, v)
@@ -2907,7 +2958,12 @@ impl Cx<'_, '_> {
                 }
             }
             self.prog.match_ty(pt, t, &mut sol);
-            vals.push((v.unwrap(), t, a.span()));
+            // (`()` の引数は値を持たない: 渡すときに飛ばす)
+            let v = match v {
+                Some(v) => v,
+                None => self.b.ins().iconst(types::I8, 0),
+            };
+            vals.push((v, t, a.span()));
         }
         let arg_tys: Vec<Ty> = vals.iter().map(|v| v.1).collect();
         // 引数の型から改めて解く。引数に現れない型パラメータ (クロージャの戻り値など) は sol から
@@ -2944,6 +3000,9 @@ impl Cx<'_, '_> {
     }
 
     fn push_arg(&mut self, vals: &mut Vec<Value>, v: Value, pt: Ty) {
+        if !pt.is_agg() && clif_ty(pt).is_none() {
+            return;
+        }
         if pt.is_agg() {
             // 値渡し: 呼び出し側でコピーしてから渡す
             let tmp = self.temp(pt);

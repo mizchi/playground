@@ -164,7 +164,7 @@ fn is_cmp_trait(h: usize) -> bool {
 /// 演算子の trait (宣言はユーザが手で impl するときだけ付ける)
 const OP_TRAITS: &[&str] = &[
     "Add", "Sub", "Mul", "Div", "Rem", "Neg", "Not", "BitAnd", "BitOr", "BitXor", "AddAssign", "SubAssign",
-    "MulAssign", "DivAssign", "RemAssign",
+    "MulAssign", "DivAssign", "RemAssign", "Index", "IndexMut",
 ];
 
 /// 演算子の trait の宣言か
@@ -347,7 +347,9 @@ fn owner(h: usize) -> Option<&'static str> {
                     .find_map(|w| match w {
                         "Vec" | "String" | "HashMap" | "Reverse" | "BinaryHeap" | "SplitStr" | "CharIndices"
                         | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" | "Rev" | "StepBy" | "Peekable"
-                        | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks" => Some(w),
+                        | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks"
+                        | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
+                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,
@@ -504,8 +506,20 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             }
         }
     }
+    if need.contains("HashSet") {
+        need.extend(["HashMap", "keys", "into_iter", "contains_key", "next"]);
+    }
     if need.contains("HashMap") {
         need.extend(["__exr_hash", "__exr_hash_bytes"]);
+    }
+    if need.contains("BTreeMap") || need.contains("BTreeSet") {
+        need.extend(["__exr_cmp", "Vec", "insert", "remove", "next"]);
+    }
+    if need.contains("VecDeque") {
+        need.extend(["next", "Drop", "index", "index_mut"]);
+    }
+    if need.contains("BTreeMap") {
+        need.insert("index");
     }
     // `s + "x"` / `s += "x"`: String の add / add_assign (演算子は識別子として現れない)
     if need.contains("String") || need.contains("to_string") || need.contains("format") {
@@ -587,6 +601,9 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     }
     let iter_lib = need.contains("Iterator")
         || need.contains("HashMap")
+        || need.contains("BTreeMap")
+        || need.contains("BTreeSet")
+        || need.contains("VecDeque")
         || ["split", "split_whitespace", "lines"].iter().any(|n| need.contains(n))
         || need.contains("chars")
         || chain
