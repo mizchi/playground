@@ -185,7 +185,7 @@ fn gated_trait(h: usize) -> Option<&'static str> {
     it.idents
         .iter()
         .map(|&(a, b)| &PRELUDE[a as usize..b as usize])
-        .find(|w| matches!(*w, "Hasher" | "Hash" | "__BoolThen" | "__AsBytes"))
+        .find(|w| matches!(*w, "Hasher" | "Hash" | "__BoolThen" | "__AsBytes" | "__PathExt" | "__AsPathStr"))
 }
 
 /// ユーザが手で impl している (`impl Ord for S` / `impl<T> Add for W<T>`) trait の名前 (最後のセグメント)
@@ -447,16 +447,22 @@ fn owner(h: usize) -> Option<&'static str> {
                 if !matches!(it.kind, ItemKind::ImplHeader) {
                     return None;
                 }
-                it.idents
+                // (`impl From<String> for PathBuf` は PathBuf のもの: `for` があればその後ろの型で見る)
+                let ws: Vec<&'static str> = it.idents.iter().map(|&(a, b)| &PRELUDE[a as usize..b as usize]).collect();
+                let from = ws.iter().position(|w| *w == "for").map(|i| i + 1).unwrap_or(0);
+                // (`impl __PathExt for str` のように後ろの型が持ち主でなければ、trait の名前で)
+                ws[from..]
                     .iter()
-                    .map(|&(a, b)| &PRELUDE[a as usize..b as usize])
+                    .chain(ws[..from].iter())
+                    .copied()
                     .find_map(|w| match w {
                         "Vec" | "String" | "HashMap" | "Reverse" | "BinaryHeap" | "SplitStr" | "RSplitStr" | "FlattenRef" | "MatchIndices" | "CharIndices"
                         | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" | "Rev" | "StepBy" | "Peekable"
                         | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks"
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
                         | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "OnceLock" | "RangeFrom" | "TryFromIntError" | "TryFromSliceError" | "Stdin" | "StdinLock" | "StdinLines" | "Stdout" | "StdoutLock"
-                        | "BufWriter" | "IoError" | "__DynError" | "Args" | "DefaultHasher" | "VarError" => Some(w),
+                        | "BufWriter" | "IoError" | "__DynError" | "Args" | "DefaultHasher" | "VarError"
+                        | "PathBuf" | "__PathExt" | "__AsPathStr" | "Command" | "__ExitStatus" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
                         w if w.starts_with("Hm") => Some("HashMap"),
                         _ => None,
@@ -470,7 +476,9 @@ fn owner(h: usize) -> Option<&'static str> {
 fn defined_name(src: &str, it: &SrcItem) -> Option<String> {
     // (起動時に prelude の全アイテムで呼ぶので、Vec を作らずに辿る)
     let mut ids = it.idents.iter().map(|&(a, b)| &src[a as usize..b as usize]);
-    ids.find(|w| matches!(*w, "fn" | "struct" | "enum" | "static"))?;
+    // (型の別名 `pub type Path = str;` も。impl の中の関連型 `type Item` は除く)
+    let alias = matches!(it.kind, ItemKind::Normal);
+    ids.find(|w| matches!(*w, "fn" | "struct" | "enum" | "static") || (alias && *w == "type"))?;
     ids.next().map(|s| s.strip_prefix("__core_").unwrap_or(s).to_string())
 }
 
@@ -599,6 +607,19 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     // (イテレータの列は必ず作るもの (iter / into_iter / chars / 範囲 / 自前の impl Iterator) から始まる。
     //  Option::map や自分の型の fold だけでは付けない)
     let producer = ["iter", "iter_mut", "into_iter"].iter().any(|n| need.contains(n));
+    // std::path / std::process::Command / env::var_os / split_paths / fs::remove_file
+    if ["std::path", "PathBuf", "Path::", "&Path", "process::Command", "Command::new", "var_os", "split_paths", "remove_file", "OsStr"]
+        .iter()
+        .any(|n| user_src.contains(n))
+    {
+        need.extend([
+            "Path", "OsStr", "OsString", "PathBuf", "__PathExt", "__AsPathStr", "__AsBytes", "__exr_path_new", "__exr_path_mode",
+            "__exr_fs_remove_file", "__exr_env_var_os", "__exr_env_split_paths", "IntoIter", "into_iter", "Deref", "deref",
+            "Command", "__ExitStatus", "__ProcOutput", "IoError", "Result", "Option", "String", "Vec", "Display", "Debug", "push", "split",
+            "SplitStr", "Iterator", "next", "trim_end_matches", "rfind", "truncate", "starts_with", "ends_with", "push_str",
+            "IntoIterator", "extend_from_slice", "file_stem", "set_extension", "__exr_c_path", "__exr_cstr",
+        ]);
+    }
     // &str の split / lines などは prelude の関数 (イテレータを返すものはイテレータの部品も要る)
     for (m, f) in [
         ("split", "__exr_str_split"),
@@ -949,7 +970,11 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     let user_impls = user_impl_traits(user_src);
     let cmp_impl = user_impls.iter().any(|t| matches!(*t, "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Clone" | "Copy" | "Default"))
         || need.contains("Reverse");
-    let op_impls: Vec<&str> = user_impls.iter().copied().filter(|t| OP_TRAITS.contains(t)).collect();
+    let mut op_impls: Vec<&str> = user_impls.iter().copied().filter(|t| OP_TRAITS.contains(t)).collect();
+    // (prelude の PathBuf は Deref と From を impl する)
+    if need.contains("PathBuf") {
+        op_impls.extend(["Deref", "From", "IntoIterator"]);
+    }
     if op_impls.contains(&"IntoIterator") {
         need.extend(["__into_iter_mark", "Iterator", "next", "iter"]);
     }

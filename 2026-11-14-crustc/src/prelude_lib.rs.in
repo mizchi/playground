@@ -1988,6 +1988,10 @@ impl String {
     pub fn add_assign<G>(&mut self, t: &str) {
         self.push_str(t);
     }
+    // (`String::from_utf8_lossy(..)` は String を返すので、Cow の into_owned / to_mut はそのまま)
+    pub fn into_owned(self) -> String {
+        self
+    }
     pub fn as_str(&self) -> &str {
         unsafe { core::str::from_utf8_unchecked(self.vec.as_slice()) }
     }
@@ -5084,6 +5088,466 @@ pub fn __exr_env_var<K>(key: K) -> Result<String, VarError> {
         return Err(VarError::NotPresent);
     }
     Ok(String::from(__exr_cstr::<()>(p)))
+}
+
+// --- std::path / std::ffi (パスは UTF-8 の文字列として持つ: Path = str、OsString = String) ---
+
+pub type Path = str;
+pub type OsStr = str;
+pub type OsString = String;
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PathBuf {
+    s: String,
+}
+
+unsafe extern "C" {
+    #[link_name = "stat"]
+    fn __exr_stat(path: *const u8, buf: *mut u8) -> i32;
+}
+
+unsafe extern "C" {
+    #[link_name = "unlink"]
+    fn __exr_unlink(path: *const u8) -> i32;
+}
+
+// stat の st_mode (S_IFMT の部分)。失敗なら 0
+fn __exr_path_mode<G>(p: &str) -> u32 {
+    let c = __exr_c_path::<()>(p.as_bytes());
+    let mut buf = [0u64; 32];
+    let r = unsafe { __exr_stat(c.as_ptr(), buf.as_mut_ptr() as *mut u8) };
+    if r != 0 {
+        return 0;
+    }
+    // (x86_64 の struct stat: st_mode は 24 byte 目からの u32)
+    (buf[3] as u32) & 0o170000
+}
+
+// Path (= str) のメソッド
+pub trait __PathExt {
+    fn display(&self) -> &str;
+    fn is_absolute(&self) -> bool;
+    fn is_relative(&self) -> bool;
+    fn join(&self, p: &str) -> PathBuf;
+    fn file_name(&self) -> Option<&str>;
+    fn file_stem(&self) -> Option<&str>;
+    fn extension(&self) -> Option<&str>;
+    fn parent(&self) -> Option<&str>;
+    fn with_extension(&self, e: &str) -> PathBuf;
+    fn to_string_lossy(&self) -> String;
+    fn to_str(&self) -> Option<&str>;
+    fn as_os_str(&self) -> &str;
+    fn to_path_buf(&self) -> PathBuf;
+    fn exists(&self) -> bool;
+    fn is_file(&self) -> bool;
+    fn is_dir(&self) -> bool;
+}
+
+impl __PathExt for str {
+    fn display(&self) -> &str {
+        self
+    }
+    fn is_absolute(&self) -> bool {
+        self.starts_with('/')
+    }
+    fn is_relative(&self) -> bool {
+        !self.starts_with('/')
+    }
+    fn join(&self, p: &str) -> PathBuf {
+        let mut b = PathBuf { s: String::from(self) };
+        b.push(p);
+        b
+    }
+    fn file_name(&self) -> Option<&str> {
+        let t = self.trim_end_matches('/');
+        let n = match t.rfind('/') {
+            Some(i) => &t[i + 1..],
+            None => t,
+        };
+        if n.is_empty() || n == ".." || (n == "." && t.len() == self.len()) {
+            None
+        } else {
+            Some(n)
+        }
+    }
+    fn file_stem(&self) -> Option<&str> {
+        let n = self.file_name()?;
+        if n == ".." {
+            return Some(n);
+        }
+        match n.rfind('.') {
+            Some(0) | None => Some(n),
+            Some(i) => Some(&n[..i]),
+        }
+    }
+    fn extension(&self) -> Option<&str> {
+        let n = self.file_name()?;
+        match n.rfind('.') {
+            Some(0) | None => None,
+            Some(i) => Some(&n[i + 1..]),
+        }
+    }
+    fn parent(&self) -> Option<&str> {
+        let t = self.trim_end_matches('/');
+        if t.is_empty() {
+            return None;
+        }
+        match t.rfind('/') {
+            Some(0) => Some("/"),
+            Some(i) => Some(t[..i].trim_end_matches('/')),
+            None => Some(""),
+        }
+    }
+    fn with_extension(&self, e: &str) -> PathBuf {
+        let mut b = PathBuf { s: String::from(self) };
+        b.set_extension(e);
+        b
+    }
+    fn to_string_lossy(&self) -> String {
+        String::from(self)
+    }
+    fn to_str(&self) -> Option<&str> {
+        Some(self)
+    }
+    fn as_os_str(&self) -> &str {
+        self
+    }
+    fn to_path_buf(&self) -> PathBuf {
+        PathBuf { s: String::from(self) }
+    }
+    fn exists(&self) -> bool {
+        __exr_path_mode::<()>(self) != 0
+    }
+    fn is_file(&self) -> bool {
+        __exr_path_mode::<()>(self) == 0o100000
+    }
+    fn is_dir(&self) -> bool {
+        __exr_path_mode::<()>(self) == 0o040000
+    }
+}
+
+impl PathBuf {
+    pub fn new() -> PathBuf {
+        PathBuf { s: String::new() }
+    }
+    // (std と同じく、絶対パスを足すと置き換え)
+    pub fn push(&mut self, p: &str) {
+        if p.starts_with('/') {
+            self.s = String::from(p);
+            return;
+        }
+        if !self.s.is_empty() && !self.s.ends_with('/') {
+            self.s.push('/');
+        }
+        self.s.push_str(p);
+    }
+    pub fn pop(&mut self) -> bool {
+        match __PathExt::parent(self.s.as_str()) {
+            Some(q) => {
+                let n = q.len();
+                self.s.truncate(n);
+                true
+            }
+            None => false,
+        }
+    }
+    pub fn set_extension(&mut self, e: &str) -> bool {
+        let Some(stem) = __PathExt::file_stem(self.s.as_str()) else { return false };
+        let end = stem.as_ptr() as usize - self.s.as_str().as_ptr() as usize + stem.len();
+        self.s.truncate(end);
+        if !e.is_empty() {
+            self.s.push('.');
+            self.s.push_str(e);
+        }
+        true
+    }
+    pub fn as_path(&self) -> &str {
+        self.s.as_str()
+    }
+    pub fn into_os_string(self) -> String {
+        self.s
+    }
+}
+
+impl Deref for PathBuf {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.s.as_str()
+    }
+}
+
+impl From<&str> for PathBuf {
+    fn from(s: &str) -> PathBuf {
+        PathBuf { s: String::from(s) }
+    }
+}
+
+impl From<String> for PathBuf {
+    fn from(s: String) -> PathBuf {
+        PathBuf { s: s }
+    }
+}
+
+impl Debug for PathBuf {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        write!(f, "{:?}", self.s.as_str())
+    }
+}
+
+// パスとして受け取れる型 (&str / String / PathBuf)
+pub trait __AsPathStr {
+    fn __as_path_str(&self) -> &str;
+}
+impl __AsPathStr for str {
+    fn __as_path_str(&self) -> &str {
+        self
+    }
+}
+impl __AsPathStr for String {
+    fn __as_path_str(&self) -> &str {
+        self.as_str()
+    }
+}
+impl __AsPathStr for PathBuf {
+    fn __as_path_str(&self) -> &str {
+        self.s.as_str()
+    }
+}
+impl __AsBytes for PathBuf {
+    fn __as_bytes(&self) -> &[u8] {
+        self.s.as_bytes()
+    }
+}
+
+// `Path::new(s)`: 同じ文字列
+pub fn __exr_path_new<P: __AsPathStr>(p: &P) -> &str {
+    p.__as_path_str()
+}
+
+pub fn __exr_fs_remove_file<P>(path: P) -> Result<(), IoError> {
+    let c = __exr_c_path::<()>(path.__as_bytes());
+    if unsafe { __exr_unlink(c.as_ptr()) } != 0 {
+        return Err(IoError::last_os_error());
+    }
+    Ok(())
+}
+
+pub fn __exr_env_var_os<K>(key: K) -> Option<String> {
+    let c = __exr_c_path::<()>(key.__as_bytes());
+    let p = unsafe { __exr_getenv(c.as_ptr()) };
+    if p.is_null() {
+        return None;
+    }
+    Some(String::from(__exr_cstr::<()>(p)))
+}
+
+// `env::split_paths(&path)`: `:` で区切った PathBuf の列
+pub fn __exr_env_split_paths<P: __AsPathStr>(p: &P) -> IntoIter<PathBuf> {
+    let mut v: Vec<PathBuf> = Vec::new();
+    for d in p.__as_path_str().split(':') {
+        v.push(PathBuf { s: String::from(d) });
+    }
+    v.into_iter()
+}
+
+// --- std::process::Command (fork / execvp / pipe / waitpid) ---
+
+unsafe extern "C" {
+    #[link_name = "fork"]
+    fn __exr_fork() -> i32;
+}
+unsafe extern "C" {
+    #[link_name = "execvp"]
+    fn __exr_execvp(file: *const u8, argv: *const *const u8) -> i32;
+}
+unsafe extern "C" {
+    #[link_name = "pipe2"]
+    fn __exr_pipe2(fds: *mut i32, flags: i32) -> i32;
+}
+unsafe extern "C" {
+    #[link_name = "dup2"]
+    fn __exr_dup2(a: i32, b: i32) -> i32;
+}
+unsafe extern "C" {
+    #[link_name = "_exit"]
+    fn __exr_exit_now(code: i32);
+}
+unsafe extern "C" {
+    #[link_name = "waitpid"]
+    fn __exr_waitpid(pid: i32, status: *mut i32, opts: i32) -> i32;
+}
+unsafe extern "C" {
+    #[link_name = "poll"]
+    fn __exr_poll(fds: *mut i32, n: u64, timeout: i32) -> i32;
+}
+
+pub struct Command {
+    prog: String,
+    args: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct __ExitStatus {
+    raw: i32,
+}
+
+pub struct __ProcOutput {
+    pub status: __ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+impl __ExitStatus {
+    pub fn success(&self) -> bool {
+        self.raw == 0
+    }
+    pub fn code(&self) -> Option<i32> {
+        if self.raw & 0x7f == 0 { Some((self.raw >> 8) & 0xff) } else { None }
+    }
+}
+
+impl Display for __ExitStatus {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        match self.code() {
+            Some(c) => write!(f, "exit status: {}", c),
+            None => write!(f, "signal: {}", self.raw & 0x7f),
+        }
+    }
+}
+
+impl Debug for __ExitStatus {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        match self.code() {
+            Some(c) => write!(f, "ExitStatus(unix_wait_status({}))", c << 8),
+            None => write!(f, "ExitStatus(unix_wait_status({}))", self.raw),
+        }
+    }
+}
+
+impl Command {
+    pub fn new<S: __AsPathStr>(prog: &S) -> Command {
+        Command { prog: String::from(prog.__as_path_str()), args: Vec::new() }
+    }
+    pub fn arg<S: __AsPathStr>(&mut self, a: &S) -> &mut Command {
+        self.args.push(String::from(a.__as_path_str()));
+        self
+    }
+    pub fn args<I>(&mut self, it: I) -> &mut Command {
+        for a in it {
+            self.args.push(String::from(a.__as_path_str()));
+        }
+        self
+    }
+    pub fn get_program(&self) -> &str {
+        self.prog.as_str()
+    }
+    // 子を起動する。capture なら stdout / stderr を pipe にして (fd の組を返す)
+    fn __spawn(&self, capture: bool) -> Result<(i32, i32, i32), IoError> {
+        let mut cs: Vec<Vec<u8>> = Vec::new();
+        cs.push(__exr_c_path::<()>(self.prog.as_bytes()));
+        for a in self.args.iter() {
+            cs.push(__exr_c_path::<()>(a.as_bytes()));
+        }
+        let mut argv: Vec<*const u8> = Vec::new();
+        for c in cs.iter() {
+            argv.push(c.as_ptr());
+        }
+        argv.push(core::ptr::null());
+        let mut out = [0i32; 2];
+        let mut err = [0i32; 2];
+        let mut ex = [0i32; 2];
+        // (exec の失敗は close-on-exec の pipe で親に errno を送る)
+        unsafe {
+            if capture && (__exr_pipe2(out.as_mut_ptr(), 0x80000) != 0 || __exr_pipe2(err.as_mut_ptr(), 0x80000) != 0) {
+                return Err(IoError::last_os_error());
+            }
+            if __exr_pipe2(ex.as_mut_ptr(), 0x80000) != 0 {
+                return Err(IoError::last_os_error());
+            }
+            let pid = __exr_fork();
+            if pid < 0 {
+                return Err(IoError::last_os_error());
+            }
+            if pid == 0 {
+                if capture {
+                    __exr_dup2(out[1], 1);
+                    __exr_dup2(err[1], 2);
+                }
+                __exr_execvp(argv[0], argv.as_ptr());
+                let e = *__exr_errno_location();
+                __exr_write(ex[1], &e as *const i32 as *const u8, 4);
+                __exr_exit_now(127);
+            }
+            __exr_close(ex[1]);
+            if capture {
+                __exr_close(out[1]);
+                __exr_close(err[1]);
+            }
+            let mut e = 0i32;
+            let n = __exr_read(ex[0], &mut e as *mut i32 as *mut u8, 4);
+            __exr_close(ex[0]);
+            if n == 4 {
+                let mut st = 0i32;
+                __exr_waitpid(pid, &mut st as *mut i32, 0);
+                if capture {
+                    __exr_close(out[0]);
+                    __exr_close(err[0]);
+                }
+                return Err(IoError { code: e });
+            }
+            Ok((pid, out[0], err[0]))
+        }
+    }
+    pub fn status(&mut self) -> Result<__ExitStatus, IoError> {
+        let (pid, _, _) = self.__spawn(false)?;
+        let mut st = 0i32;
+        unsafe {
+            __exr_waitpid(pid, &mut st as *mut i32, 0);
+        }
+        Ok(__ExitStatus { raw: st })
+    }
+    pub fn output(&mut self) -> Result<__ProcOutput, IoError> {
+        let (pid, o, e) = self.__spawn(true)?;
+        let mut so: Vec<u8> = Vec::new();
+        let mut se: Vec<u8> = Vec::new();
+        // (両方を poll で読む: 片方が詰まっても止まらない)
+        let mut open = [true, true];
+        let mut buf = [0u8; 4096];
+        while open[0] || open[1] {
+            let mut fds = [o, if open[0] { 1 } else { 0 }, e, if open[1] { 1 } else { 0 }];
+            if !open[0] {
+                fds[0] = -1;
+            }
+            if !open[1] {
+                fds[2] = -1;
+            }
+            unsafe {
+                __exr_poll(fds.as_mut_ptr(), 2, -1);
+            }
+            for k in 0..2 {
+                if !open[k] || (fds[k * 2 + 1] >> 16) == 0 {
+                    continue;
+                }
+                let fd = if k == 0 { o } else { e };
+                let n = unsafe { __exr_read(fd, buf.as_mut_ptr(), 4096) };
+                if n <= 0 {
+                    open[k] = false;
+                    unsafe {
+                        __exr_close(fd);
+                    }
+                } else if k == 0 {
+                    so.extend_from_slice(&buf[..n as usize]);
+                } else {
+                    se.extend_from_slice(&buf[..n as usize]);
+                }
+            }
+        }
+        let mut st = 0i32;
+        unsafe {
+            __exr_waitpid(pid, &mut st as *mut i32, 0);
+        }
+        Ok(__ProcOutput { status: __ExitStatus { raw: st }, stdout: so, stderr: se })
+    }
 }
 
 // 1 行 (改行まで。改行も入れる) を buf の後ろに足す。読んだバイト数 (0 なら終わり)

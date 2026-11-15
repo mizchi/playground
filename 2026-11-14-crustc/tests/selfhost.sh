@@ -4,6 +4,7 @@
 #   lexer: src/lexer.rs と src/cache.rs の KeyHasher (SipHash) → crustc 自身のソースを字句解析してアイテムとハッシュを出す
 #   prelude: src/prelude.rs (prelude の項目を名前で選ぶ。lexer / fxhash / KeyHasher と、build.rs が作る表を含む)
 #            → probe / examples をユーザのソースとして、選ばれた prelude の長さとハッシュを出す
+#   link:  src/link.rs (リンカを探して直接起動する) と src/testgen.rs → C の .o をリンクして実行する (std::path / process::Command)
 #   enc:   src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と src/fxhash.rs (FxHasher / FxMap)
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -37,6 +38,24 @@ for opt in "" -O; do
     echo "ok   prelude $opt (${#pin[@]} files)"
   else
     echo "DIFF prelude $opt"; diff "$out/prelude.rustc.out" "$out/prelude.crustc.out" | head; fail=1
+  fi
+done
+python3 tests/selfhost/build_link.py > "$out/link_main.rs"
+printf '#include <stdio.h>\nint main(void){puts("hello from obj");return 0;}\n' > "$out/hello.c"
+cc -c "$out/hello.c" -o "$out/hello.o" || exit 1
+rustc --edition 2024 -O -Awarnings "$out/link_main.rs" -o "$out/link_rustc" || exit 1
+rm -f "$out/hello_x" "$out/hello_x.link"
+"$out/link_rustc" "$out/hello.o" "$out/hello_x" > "$out/link.rustc.out"
+for opt in "" -O; do
+  if ! target/release/crustc "$out/link_main.rs" -o "$out/link_crustc" $opt; then
+    echo "FAIL link $opt (crustc)"; fail=1; continue
+  fi
+  rm -f "$out/hello_x" "$out/hello_x.link"
+  "$out/link_crustc" "$out/hello.o" "$out/hello_x" > "$out/link.crustc.out"
+  if cmp -s "$out/link.rustc.out" "$out/link.crustc.out"; then
+    echo "ok   link $opt ($(wc -l < "$out/link.rustc.out") lines)"
+  else
+    echo "DIFF link $opt"; diff "$out/link.rustc.out" "$out/link.crustc.out" | head; fail=1
   fi
 done
 python3 tests/selfhost/build_enc.py > "$out/enc_main.rs"

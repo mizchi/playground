@@ -3138,6 +3138,21 @@ impl Cx<'_, '_> {
             };
             return self.expr(&e, expected);
         }
+        // `os_string.push("..")` (OsString は String): 文字列を足す
+        if mc.method == "push" && mc.args.len() == 1 {
+            let is_string = |t: Option<Ty>| {
+                matches!(t.map(|t| self.strip_refs(t)), Some(Ty::Struct(sid)) if self.prog.structs[sid as usize].base.is_none() && self.prog.structs[sid as usize].name == "String")
+            };
+            let a = &mc.args[0];
+            let at = self.peek(a);
+            if is_string(self.peek(&mc.receiver))
+                && (matches!(at.map(|t| self.strip_refs(t)), Some(Ty::Str)) || (matches!(at, Some(Ty::Ref(..))) && is_string(at)))
+            {
+                let r = &mc.receiver;
+                let e: Expr = syn::parse_quote!((#r).push_str(#a));
+                return self.expr(&e, expected);
+            }
+        }
         // prelude の `s.__push_piece(c)` (String への collect): 要素の型で push / push_str
         if mc.method == "__push_piece" && mc.args.len() == 1 {
             let (r, a) = (&mc.receiver, &mc.args[0]);
@@ -3249,6 +3264,19 @@ impl Cx<'_, '_> {
         }
         if let Some(r) = self.prim_trait_method(mc)? {
             return Ok(r);
+        }
+        // (メソッドがなく、Deref の先が構造体でない (`PathBuf` → str): `recv.deref().m(..)` にして str などのメソッドを探す)
+        if let Some(Ty::Struct(sid)) = self.peek(&mc.receiver).map(|t| self.strip_refs(t)) {
+            let name = mc.method.to_string();
+            if self.prog.method(sid, &name).is_none() && self.prog.default_method(sid, &name).is_none() {
+                if let Some(did) = self.prog.method(sid, "deref") {
+                    if matches!(self.prog.sigs[did as usize].ret, Ty::Ref(_, Ty::Str | Ty::Slice(_))) {
+                        let (r, m, args, tf) = (&mc.receiver, &mc.method, &mc.args, &mc.turbofish);
+                        let e: Expr = syn::parse_quote!((#r).deref().#m #tf (#args));
+                        return self.expr(&e, expected);
+                    }
+                }
+            }
         }
         let mut recv_temp = None;
         let mut p = if is_place_expr(&mc.receiver) {
@@ -3391,7 +3419,10 @@ impl Cx<'_, '_> {
                 if matches!(i, Ty::Str | Ty::Slice(_) | Ty::Array(..)) {
                     break;
                 }
-                v = self.b.ins().load(PTR, mf(), v, 0);
+                // (`&&str` の値は `&str` (fat) の置き場所のアドレスで、`&str` の表現と同じ: 読まない)
+                if !i.is_fat() {
+                    v = self.b.ins().load(PTR, mf(), v, 0);
+                }
                 vt = *i;
             }
             if matches!(vt, Ty::Array(..)) {
@@ -3581,6 +3612,31 @@ impl Cx<'_, '_> {
         Ok((iid, g.sig(self.prog, iid).clone()))
     }
 
+    /// 同じ名前の trait impl の関数 (`P::from` が `From<&str>` と `From<String>`) から、最初の引数の型で選ぶ
+    fn pick_overload(&self, id: u32, recv: Option<Ty>, args: &[&Expr]) -> u32 {
+        let Some(cands) = self.prog.overloads.get(&self.prog.names[id as usize]) else {
+            return id;
+        };
+        let Some(at) = recv.or_else(|| args.first().and_then(|a| self.peek(a))) else {
+            return id;
+        };
+        let fits = |c: u32, at: Ty| {
+            let sig = &self.prog.sigs[c as usize];
+            let mut sol = vec![None; sig.generics.len()];
+            sig.params.first().is_some_and(|&pt| self.prog.match_ty(pt, at, &mut sol))
+        };
+        if let Some(&c) = cands.iter().find(|&&c| fits(c, at)) {
+            return c;
+        }
+        // (`&String` は `&str` の候補に: deref の強制変換)
+        let deref = match at {
+            Ty::Ref(m, Ty::Struct(sid)) if self.prog.structs[*sid as usize].name == "String" => Some(Ty::Ref(m, intern(Ty::Str))),
+            Ty::Ref(_, Ty::Ref(m, i)) => Some(Ty::Ref(*m, i)),
+            _ => None,
+        };
+        deref.and_then(|d| cands.iter().copied().find(|&c| fits(c, d))).unwrap_or(id)
+    }
+
     fn call_fn(
         &mut self,
         id: u32,
@@ -3590,6 +3646,7 @@ impl Cx<'_, '_> {
         expected: Option<Ty>,
         span: proc_macro2::Span,
     ) -> R<V> {
+        let id = self.pick_overload(id, recv.map(|r| r.1), args);
         let sig0 = self.prog.sigs[id as usize].clone();
         let skip = recv.is_some() as usize;
         if sig0.params.len() != args.len() + skip {
@@ -5420,7 +5477,8 @@ impl Cx<'_, '_> {
             && self.prog.index.contains_key("__exr_join_str")
         {
             let own = match self.peek(&mc.receiver).map(|t| self.strip_refs(t)) {
-                Some(Ty::Struct(sid)) => self.vec_fields(sid).is_none() && self.prog.method(sid, &name).is_some(),
+                // (Vec でない構造体の join (`path_buf.join("x")`) は組み込みではない)
+                Some(Ty::Struct(sid)) => self.vec_fields(sid).is_none(),
                 _ => false,
             };
             if !own {

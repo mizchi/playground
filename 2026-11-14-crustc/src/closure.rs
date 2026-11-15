@@ -196,6 +196,13 @@ pub fn free_vars(c: &ExprClosure) -> Vec<String> {
             {
                 for e in &es {
                     self.visit_expr(e);
+                    // (書式文字列に直接書いた名前 `{cands:?}` も使う変数)
+                    if let Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(l), .. }) = e {
+                        for n in fmt_inline_names(&l.value()) {
+                            let id = syn::Ident::new(&n, proc_macro2::Span::call_site());
+                            self.visit_expr(&syn::parse_quote!(#id));
+                        }
+                    }
                 }
             }
         }
@@ -207,6 +214,33 @@ pub fn free_vars(c: &ExprClosure) -> Vec<String> {
     };
     v.visit_expr_closure(c);
     v.out
+}
+
+/// 書式文字列の `{name}` / `{name:?}` に直接書いた名前
+pub fn fmt_inline_names(f: &str) -> Vec<String> {
+    let b = f.as_bytes();
+    let mut out = vec![];
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'{' {
+            if b.get(i + 1) == Some(&b'{') {
+                i += 2;
+                continue;
+            }
+            let st = i + 1;
+            let mut j = st;
+            while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+                j += 1;
+            }
+            if j > st && !b[st].is_ascii_digit() && matches!(b.get(j), Some(b'}') | Some(b':')) {
+                out.push(f[st..j].to_string());
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// キャプチャ = 自由変数のうち、親の関数で束縛されている名前

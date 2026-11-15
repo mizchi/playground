@@ -845,6 +845,9 @@ pub struct Program {
     /// ブランケット impl のメソッド (名前 → 関数 id) と、その self 型の型パラメータ名
     pub blanket: FxMap<String, u32>,
     pub blanket_selfs: std::collections::HashSet<String>,
+    /// 同じ型への別々の trait impl が同じ名前の関数を持つもの (`impl From<&str> for P` と `impl From<String> for P`):
+    /// 最初の名前 → 候補の関数 (2 つ目以降は `P::from#1` のような名前)。呼び出し側が引数の型で選ぶ
+    pub overloads: FxMap<String, Vec<u32>>,
     /// 名前の最後のセグメント → 関数 ID 群 (`len` → `A::len`, `B::len`)。参照の過大近似用
     pub by_last: FxMap<String, Vec<u32>>,
     /// trait 名 → その trait で宣言された関数
@@ -1630,6 +1633,7 @@ impl Program {
             opt: false,
             blanket: FxMap::default(),
             blanket_selfs: Default::default(),
+            overloads: Default::default(),
             by_last: FxMap::default(),
             traits: FxMap::default(),
             impls: HashSet::new(),
@@ -1834,9 +1838,18 @@ impl Program {
                 .map(|(n, s)| (n, s))
                 .chain(cnames.iter().zip(sm.closures.iter().map(|c| &c.sig)));
             for (name, ss) in fns {
-                if p.index.contains_key(name) {
-                    return Err(format!("{}:1: duplicate definition of `{name}`", it.line));
-                }
+                let mut sym_suffix = String::new();
+                let name = &if let Some(&prev) = p.index.get(name) {
+                    if ss.impl_trait.is_none() || p.sigs[prev as usize].impl_trait.is_none() {
+                        return Err(format!("{}:1: duplicate definition of `{name}`", it.line));
+                    }
+                    let k = p.overloads.entry(name.clone()).or_insert_with(|| vec![prev]);
+                    k.push(p.names.len() as u32);
+                    sym_suffix = format!("#{}", k.len() - 1);
+                    format!("{name}{sym_suffix}")
+                } else {
+                    name.clone()
+                };
                 let gnames: Vec<&str> = ss.generics.iter().map(|g| g.0.as_str()).collect();
                 let mut params = vec![];
                 for t in &ss.params {
@@ -1885,7 +1898,8 @@ impl Program {
                         it.line
                     ));
                 }
-                let last = name.rsplit("::").next().unwrap().to_string();
+                // (同名の trait impl の関数 `P::from#1` も `from` で引く)
+                let last = name.rsplit("::").next().unwrap().split('#').next().unwrap().to_string();
                 // (`io::stdin()` / `mem::swap(..)` は prelude の `__core_*`: 名前の後ろで引けるようにする)
                 if let Some(short) = last.strip_prefix("__core_") {
                     p.by_last.entry(short.to_string()).or_default().push(p.names.len() as u32);
@@ -1904,7 +1918,7 @@ impl Program {
                 p.sigs.push(FnSig {
                     params,
                     ret,
-                    symbol: ss.symbol.clone(),
+                    symbol: format!("{}{sym_suffix}", ss.symbol),
                     is_extern: ss.is_extern,
                     is_main: ss.is_main,
                     impl_of,
@@ -2002,7 +2016,14 @@ impl Program {
             if matches!(sm.impl_self_ty, Some(TySyn::Ref(..))) {
                 continue;
             }
-            if !p.impls.insert((sid, tr.clone())) {
+            // (型引数を取る trait は別々の引数で何度も実装できる: `impl From<&str> for P` と `impl From<String> for P`)
+            if !p.impls.insert((sid, tr.clone()))
+                && !matches!(
+                    tr.as_str(),
+                    "From" | "TryFrom" | "Add" | "Sub" | "Mul" | "Div" | "Rem" | "BitAnd" | "BitOr" | "BitXor" | "Shl" | "Shr"
+                        | "AddAssign" | "SubAssign" | "MulAssign" | "DivAssign" | "Extend" | "FromIterator" | "AsRef"
+                )
+            {
                 return Err(format!(
                     "{}:1: conflicting implementations of trait `{tr}` for `{sn}`",
                     it.line
@@ -2152,7 +2173,10 @@ impl Program {
                     || (matches!(tr, "Copy" | "Clone" | "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Debug" | "Hash" | "Default")
                         && self.implements(*e, tr))
             }
-            Ty::Str => matches!(tr, "Display" | "Debug" | "PartialEq" | "Eq" | "Hash" | "PartialOrd" | "Ord"),
+            Ty::Str => {
+                matches!(tr, "Display" | "Debug" | "PartialEq" | "Eq" | "Hash" | "PartialOrd" | "Ord")
+                    || self.prim_impls.contains(&(Ty::Str, tr.to_string()))
+            }
             Ty::Slice(e) => matches!(tr, "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Debug" | "Hash") && self.implements(*e, tr),
             Ty::Dyn(_) => false,
             // 関数ポインタ: Fn 系 (引数の数が合うもの) と Copy
@@ -3265,6 +3289,10 @@ impl Program {
                 ("fs", "write") => Some("__exr_fs_write"),
                 ("env", "args") => Some("__exr_env_args"),
                 ("env", "var") => Some("__exr_env_var"),
+                ("env", "var_os") => Some("__exr_env_var_os"),
+                ("env", "split_paths") => Some("__exr_env_split_paths"),
+                ("fs", "remove_file") => Some("__exr_fs_remove_file"),
+                ("Path", "new") => Some("__exr_path_new"),
                 _ => None,
             };
             if let Some(c) = core {
@@ -3548,7 +3576,10 @@ impl Program {
         // (`process::exit` は名前を書かずに呼ばれる: あれば根にする。使われなければ要約で選ばれない)
         stack.extend(self.index.get("__core_process_exit").copied());
         // (`fs::read_to_string` / `env::args` などはパスで引くので、名前からは届かない)
-        for n in ["__exr_fs_read", "__exr_fs_read_to_string", "__exr_fs_write", "__exr_env_args", "__exr_env_var"] {
+        for n in [
+            "__exr_fs_read", "__exr_fs_read_to_string", "__exr_fs_write", "__exr_env_args", "__exr_env_var",
+            "__exr_env_var_os", "__exr_env_split_paths", "__exr_fs_remove_file", "__exr_path_new",
+        ] {
             stack.extend(self.index.get(n).copied());
         }
         // const の式から呼ぶ関数 (`const N: u32 = sq(4);`。const は使う場所で式として展開される)
@@ -3578,7 +3609,7 @@ impl Program {
                             "Add" | "Sub" | "Mul" | "Div" | "Rem" | "Neg" | "Not" | "BitAnd" | "BitOr" | "BitXor"
                                 | "Shl" | "Shr" | "AddAssign" | "SubAssign" | "MulAssign" | "DivAssign"
                                 | "RemAssign" | "BitAndAssign" | "BitOrAssign" | "BitXorAssign" | "ShlAssign"
-                                | "ShrAssign" | "Index" | "IndexMut" | "IntoIterator"
+                                | "ShrAssign" | "Index" | "IndexMut" | "IntoIterator" | "Deref" | "DerefMut"
                         )
                     ))
                 // (`<` と sort は比較の glue から partial_cmp / cmp を呼ぶ)

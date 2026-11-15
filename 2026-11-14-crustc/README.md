@@ -118,7 +118,7 @@ crustc（debug / `-O`）と rustc（`-Cincremental` / `-O`）でビルドし、c
 tests/probe.sh
 ```
 
-よく使う機能の小さいプログラム（`tests/probe/*.rs`、84 本）を rustc と比べ、通った数を出す。
+よく使う機能の小さいプログラム（`tests/probe/*.rs`、85 本）を rustc と比べ、通った数を出す。
 
 ```bash
 tests/selfhost.sh
@@ -127,6 +127,7 @@ tests/selfhost.sh
 セルフホストの確認。crustc 自身のソースのうち外部クレートに依存しない部分を crustc でコンパイルし、rustc でコンパイルしたものと出力を比べる。
 - `src/lexer.rs`（と `src/cache.rs` の KeyHasher = std の DefaultHasher 2 つ）：crustc 自身のソース・examples・probe の 144 ファイルを字句解析し、アイテムの区切りと 128 bit のハッシュが rustc 版と完全に一致する。
 - `src/prelude.rs`（prelude の項目を名前で選ぶ。lexer / fxhash / KeyHasher と、build.rs が作る 46 万文字の表 `PRELUDE_ITEMS` を含む）：probe と examples の 125 ファイルをユーザのソースとして、選ばれた prelude の長さ・行数・ハッシュが rustc 版と一致する（-O で rustc 版 0.13 秒に対し 0.40 秒）。
+- `src/link.rs`（リンカを探して直接起動する）と `src/testgen.rs`：C の `.o` を自分でリンクして実行し（2 回目は保存したリンク行で）、出力が rustc 版と一致する。`std::path` と `std::process::Command` を使う。
 - `src/enc.rs`（キャッシュの直列化。`enc_struct!` マクロと trait の静的呼び出し `T::dec(r)`）と `src/fxhash.rs`（FxHasher / `FxMap`）：構造体・Vec・Option・タプルを符号化して戻し、バイト列とハッシュが rustc 版と一致する（-O でも）。
 
 環境変数：`CRUSTC_DUMP_PRELUDE=1` は付けた prelude を stderr に出す。`CRUSTC_NO_STRIP=1` は出力のシンボルを残す（callgrind などで関数名を見るため）。
@@ -941,6 +942,18 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
 - const のパターン（`Some(BOX_FREE) | Some(DROP_GLUE)`、初期値がリテラルの const）
 - `&s[a..b]`（s: &str / String）の型推論、`matches!` の中のメソッドの連鎖（parse し直した式の型を位置で引く）
 - 修正：`a || f(&format!(..))` の右辺の一時値の drop フラグが、右辺を通らないとき初期化されていなかった（入口で 0 にする）
+
+#### セルフホストの第 4 段階: link.rs + testgen.rs
+
+- `std::path`：`Path`（= str）/ `PathBuf` / `OsStr` / `OsString`（= String）。`join` / `push` / `file_name` / `file_stem` / `extension` / `parent` /
+  `with_extension` / `set_extension` / `display` / `to_string_lossy` / `is_file` / `is_dir` / `exists`（stat）
+- `std::process::Command`：`new` / `arg` / `args` / `output` / `status`（fork + execvp。exec の失敗は close-on-exec の pipe で受け取り `Err` にする。
+  stdout と stderr は poll で両方読む）、`ExitStatus`（`success` / `code` / Display）
+- `env::var_os` / `env::split_paths`、`fs::remove_file`
+- 同じ型への複数の `impl From<A> for T` / `impl From<B> for T`（呼び出し側が最初の引数の型で選ぶ）
+- Deref の先が str の型のメソッド（`path_buf.join(..)` → str の trait のメソッド）、`os_string.push("..")`
+- 書式文字列に直接書いた名前（`format!("{cands:?}")`）をクロージャのキャプチャとして数える
+- 修正：`&&str` を受け手にした str の trait メソッドが 1 段余計に読んでいた
 
 ### 途中で分かったこと
 

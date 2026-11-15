@@ -2501,8 +2501,11 @@ impl Inf<'_> {
                             return self.known(e);
                         }
                     }
-                    if let Some(&ss) = self.prog.struct_index.get("String") {
-                        return self.known(Ty::Struct(ss));
+                    // (列でない受け手 (`path.join("x")`) は trait のメソッドとして下で見る)
+                    if elem.is_some() || t.is_none() {
+                        if let Some(&ss) = self.prog.struct_index.get("String") {
+                            return self.known(Ty::Struct(ss));
+                        }
                     }
                 }
                 // 組み込みの比較 (`3.cmp(&5)` / derive した型の cmp): Ordering / Option<Ordering>
