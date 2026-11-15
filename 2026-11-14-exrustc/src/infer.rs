@@ -108,6 +108,8 @@ struct Inf<'p> {
     /// 呼び出しの引数を推論している深さと、本体の推論を後回しにしたクロージャ (式, 引数, 戻り値)
     defer: u32,
     pending: Vec<(*const syn::ExprClosure, Vec<u32>, u32)>,
+    /// parse し直したマクロの引数。後回しにしたクロージャ (pending) が指すので推論の終わりまで持っておく
+    keep: Vec<Vec<Expr>>,
     /// 0 でなければ式の型を記録しない (一時的に parse したノードの推論中)
     no_record: u32,
     /// `it.collect()` の (受け手, 結果): 最後に結果が Vec<T> / HashMap<K, V> なら Item と単一化する
@@ -145,6 +147,7 @@ pub fn infer_full(
         adt_args: vec![],
         defer: 0,
         pending: vec![],
+        keep: vec![],
         no_record: 0,
         collects: vec![],
     };
@@ -1181,8 +1184,12 @@ impl Inf<'_> {
                 // (parse し直したノードは推論の後で捨てるので、アドレスで型を記録しない。
                 //  解放されたアドレスが codegen の作るノードと重なると別の式の型を引いてしまう)
                 self.no_record += 1;
-                for x in &xs {
-                    let v = self.expr(x);
+                let ki = self.keep.len();
+                self.keep.push(xs);
+                for i in 0..self.keep[ki].len() {
+                    // (Vec を keep に移しても要素のアドレスは変わらない)
+                    let x: *const Expr = &self.keep[ki][i];
+                    let v = self.expr(unsafe { &*x });
                     self.unify(el, v);
                 }
                 self.no_record -= 1;
@@ -1632,7 +1639,7 @@ impl Inf<'_> {
                     }
                     self.lets.push((c as *const syn::ExprClosure as usize, rv));
                 }
-                if self.defer > 0 && self.no_record == 0 {
+                if self.defer > 0 {
                     self.pending.push((c as *const syn::ExprClosure, vs, rv));
                 } else {
                     self.closure_body(c, &vs, rv);

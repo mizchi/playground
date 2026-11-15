@@ -964,7 +964,7 @@ impl Insts {
 /// 関数 body の AST。クロージャなら親の本体から k 番目を取り出して fn にする
 pub fn fn_ast(prog: &Program, f: syn::ItemFn, body: u32) -> syn::ItemFn {
     match prog.closures.get(&body) {
-        Some(cd) => crate::closure::synth(crate::closure::closures_of(&f.block)[cd.k as usize]),
+        Some(cd) => crate::closure::synth(&crate::closure::closures_of(&f.block)[cd.k as usize]),
         None => f,
     }
 }
@@ -1362,7 +1362,8 @@ fn lift_closures(
         let syn::Expr::Closure(tc) = tail else {
             return bad();
         };
-        let k = cs.iter().position(|c| std::ptr::eq(*c, tc)).unwrap();
+        let key = closure::closure_key(tc);
+        let k = cs.iter().position(|c| closure::closure_key(c) == key).unwrap();
         let syn::ReturnType::Type(_, rt) = &f.sig.output else {
             unreachable!()
         };

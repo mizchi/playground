@@ -171,6 +171,9 @@ bench/regress.sh
     - 型推論が `Vec<T>::extend` の `Item = T` を `v.extend(w.iter())` の `&i32` と単一化して、`v` を `Vec<&i32>` にしていた。extend は引数の要素型（参照なら中身。`&str` は除く）から v の要素型を決めるようにした。
     - 途中で見つけた既存のバグ：`&&str` の `to_string()` の型を推論できず、`a.iter().map(|s| s.to_string())` のクロージャの戻り値が決まらなかった。
     - サイズ予算・callgrind（gen1000 / hello / vec_string / binary_heap）はどれも ±1% 以内。
+  - マクロの引数の中のクロージャの追加時
+    - 要約と codegen が `|` を含むマクロの引数だけを parse してクロージャを数える。callgrind は gen1000 +0.2%、iterators +0.7%、formatting ±0%。
+    - 型推論は `vec![..]` の引数を parse し直したノードを推論の終わりまで持ち、クロージャの本体を呼び先の境界が分かるまで後回しにできるようにした（`vec![v.iter().map(|x| x * x).sum::<i32>(); 2]`）。
 
 ## 対応している言語サブセット（no_std の範囲）
 
@@ -292,6 +295,9 @@ bench/regress.sh
   - `?`（Option / Result）
   - マクロ：`panic!` / `unreachable!` / `todo!` / `assert!` / `assert_eq!` / `assert_ne!` / `debug_assert*!` / `matches!`
     - メッセージは書式化しない
+    - `assert_eq!` / `assert_ne!` は `==` / `!=` として比べる（Option・Vec・String と `&str` なども）
+    - マクロの引数の中のクロージャも使える（`println!("{:?}", v.iter().map(|x| x * 2).collect::<Vec<_>>())`、`examples/closures_in_macros.rs`）。
+      クロージャは最初の `|` の位置で識別する（codegen がマクロの引数を parse し直してもノードの対応が取れる）
 - パターン：
   - `_`、束縛（`ref` / `mut`）、`x @ p`、リテラル、範囲、`|`
   - バリアント、struct、タプル、`&p`、入れ子、ガード
@@ -349,7 +355,7 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
   - クロージャの本体から `move` キャプチャした値をムーブすること（FnOnce として消費する使い方）はエラーにする
   - 一時値の寿命は rustc の規則の近似（let の初期化式の一時値は常にブロックの終わりまで延びる）
 - クロージャの制限
-  - マクロの引数の中のクロージャ（`assert!(f(|x| x))` の `|x| x`）
+  - クロージャを返すクロージャ（`|a| move |b| a + b`）
   - Fn / FnMut / FnOnce を区別しない（`FnMut` のクロージャを `&dyn Fn` にしてもエラーにならない）
   - ローカル変数をキャプチャするクロージャを `impl Fn` で返すこと（引数のキャプチャだけ対応）
 - `dyn` の制限：`Self` やジェネリクスを使うメソッド（object safe でないもの）は dyn 経由で呼べない。`dyn A + B` は不可

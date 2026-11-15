@@ -262,7 +262,7 @@ impl Worker {
         let (mut taken, closures) = addr_taken(f);
         for (i, c) in closures.into_iter().enumerate() {
             let k = base_k + i as u32;
-            closure_ix.insert(c as *const syn::ExprClosure as usize, k);
+            closure_ix.insert(c, k);
             // 参照でキャプチャされる変数はスタックに置く
             if let Some(cd) = prog.closure_by.get(&(root, k)).and_then(|i| prog.closures.get(i)) {
                 if !cd.by_move {
@@ -370,8 +370,8 @@ impl Worker {
 
 /// `&x` / `&mut x.f` などでアドレスを取られるローカル変数名 (shadowing は無視した過大近似)と、
 /// 本体のクロージャ式 (前順。[`crate::closure::closures_of`] と同じ順)。1 回の走査で集める
-fn addr_taken(f: &syn::ItemFn) -> (HashSet<String>, Vec<&syn::ExprClosure>) {
-    struct V<'a>(HashSet<String>, Vec<&'a syn::ExprClosure>);
+fn addr_taken(f: &syn::ItemFn) -> (HashSet<String>, Vec<(usize, usize)>) {
+    struct V(HashSet<String>, Vec<(usize, usize)>);
     fn root(e: &Expr) -> Option<String> {
         match e {
             Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
@@ -381,7 +381,7 @@ fn addr_taken(f: &syn::ItemFn) -> (HashSet<String>, Vec<&syn::ExprClosure>) {
             _ => None,
         }
     }
-    impl<'ast> Visit<'ast> for V<'ast> {
+    impl<'ast> Visit<'ast> for V {
         fn visit_expr_reference(&mut self, r: &'ast syn::ExprReference) {
             if let Some(n) = root(&r.expr) {
                 self.0.insert(n);
@@ -389,8 +389,14 @@ fn addr_taken(f: &syn::ItemFn) -> (HashSet<String>, Vec<&syn::ExprClosure>) {
             syn::visit::visit_expr_reference(self, r);
         }
         fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
-            self.1.push(c);
+            self.1.push(crate::closure::closure_key(c));
             syn::visit::visit_expr_closure(self, c);
+        }
+        // (マクロの引数の中のクロージャも、要約と同じ順に数える)
+        fn visit_macro(&mut self, m: &'ast syn::Macro) {
+            for e in crate::closure::macro_exprs(m) {
+                self.visit_expr(&e);
+            }
         }
         fn visit_item(&mut self, _: &'ast syn::Item) {}
     }
@@ -479,7 +485,7 @@ struct Cx<'a, 'p> {
     caps: Vec<(String, Ty, bool, u32)>,
     /// クロージャを書いた大元の関数と、この本体のクロージャ式 (アドレス) → 番号
     root: u32,
-    closure_ix: HashMap<usize, u32>,
+    closure_ix: HashMap<(usize, usize), u32>,
     /// 次に作るクロージャの引数・戻り値の型の手がかり (呼び先の `F: Fn(A) -> B` から)
     closure_hint: Option<(Vec<Ty>, Option<Ty>)>,
     /// drop の責任を持つローカル変数 (スコープの深さ順) と、文の終わりで drop する一時値
@@ -1791,8 +1797,8 @@ impl Cx<'_, '_> {
     fn closure_value(&mut self, c: &syn::ExprClosure, expected: Option<Ty>) -> R<V> {
         let prog = self.prog;
         let hint = self.closure_hint.take();
-        let Some(&k) = self.closure_ix.get(&(c as *const syn::ExprClosure as usize)) else {
-            return err(c.span(), "closures inside macro arguments are not supported");
+        let Some(&k) = self.closure_ix.get(&crate::closure::closure_key(c)) else {
+            return err(c.span(), "internal: unknown closure");
         };
         let Some(&cid) = prog.closure_by.get(&(self.root, k)) else {
             return err(c.span(), "internal: unregistered closure");
@@ -4907,26 +4913,18 @@ impl Cx<'_, '_> {
                 if args.len() < 2 {
                     return err(mac.span(), format!("{name}! needs two arguments"));
                 }
-                let hint = self.peek(&args[0]).or_else(|| self.peek(&args[1]));
-                let (l, lt) = self.expr(&args[0], hint)?;
-                let (r, rt) = self.expr(&args[1], Some(lt))?;
-                self.same(args[1].span(), rt, lt)?;
-                let (Some(l), Some(r)) = (l, r) else {
-                    return Ok((None, Ty::Unit));
-                };
-                if !(lt.is_int() || matches!(lt, Ty::Bool | Ty::Char)) {
-                    return err(
-                        mac.span(),
-                        format!("{name}! is only supported for integers, bool and char"),
-                    );
-                }
-                let cc = if name.ends_with("_eq") {
-                    IntCC::Equal
+                // `a == b` / `a != b` として比べる (構造的な比較・手書きの eq・String と &str も)
+                let (a, b) = (&args[0], &args[1]);
+                let e: Expr = if name.ends_with("_eq") {
+                    syn::parse_quote!((#a) == (#b))
                 } else {
-                    IntCC::NotEqual
+                    syn::parse_quote!((#a) != (#b))
                 };
-                let c = self.b.ins().icmp(cc, l, r);
-                self.panic_unless(c);
+                let (c, ct) = self.expr(&e, Some(Ty::Bool))?;
+                self.same(mac.span(), ct, Ty::Bool)?;
+                if let Some(c) = c {
+                    self.panic_unless(c);
+                }
                 Ok((None, Ty::Unit))
             }
             "matches" => {

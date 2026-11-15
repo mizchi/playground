@@ -17,14 +17,49 @@ use std::collections::HashSet;
 use syn::visit::Visit;
 use syn::{Expr, ExprClosure, Pat};
 
+/// クロージャの識別子: 最初の `|` の位置 (行, 列)。マクロの引数は codegen で parse し直すので
+/// ノードのアドレスでは同じクロージャを指せないが、トークンの位置は変わらない
+pub fn closure_key(c: &ExprClosure) -> (usize, usize) {
+    let s = c.or1_token.spans[0].start();
+    (s.line, s.column)
+}
+
+/// マクロの引数を式の列として読む (クロージャ (`|`) を含むものだけ。`vec![x; n]` も)
+pub fn macro_exprs(m: &syn::Macro) -> Vec<Expr> {
+    fn has_pipe(ts: &proc_macro2::TokenStream) -> bool {
+        ts.clone().into_iter().any(|t| match t {
+            proc_macro2::TokenTree::Punct(p) => p.as_char() == '|',
+            proc_macro2::TokenTree::Group(g) => has_pipe(&g.stream()),
+            _ => false,
+        })
+    }
+    if !has_pipe(&m.tokens) {
+        return vec![];
+    }
+    use syn::punctuated::Punctuated;
+    if let Ok(es) = m.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated) {
+        return es.into_iter().collect();
+    }
+    let ts = &m.tokens;
+    match syn::parse2::<Expr>(quote::quote!([#ts])) {
+        Ok(e) => vec![e],
+        Err(_) => vec![],
+    }
+}
+
 /// 本体の中のクロージャ式 (前順)。入れ子のクロージャは外側の直後に並ぶ。
-/// マクロの引数の中は数えない (codegen で parse し直すので同じノードを指せない)
-pub fn closures_of(b: &syn::Block) -> Vec<&ExprClosure> {
-    struct V<'a>(Vec<&'a ExprClosure>);
-    impl<'a> Visit<'a> for V<'a> {
+/// マクロの引数の中も数える (codegen も同じ順に数え、[`closure_key`] で対応を取る)
+pub fn closures_of(b: &syn::Block) -> Vec<ExprClosure> {
+    struct V(Vec<ExprClosure>);
+    impl<'a> Visit<'a> for V {
         fn visit_expr_closure(&mut self, c: &'a ExprClosure) {
-            self.0.push(c);
+            self.0.push(c.clone());
             syn::visit::visit_expr_closure(self, c);
+        }
+        fn visit_macro(&mut self, m: &'a syn::Macro) {
+            for e in macro_exprs(m) {
+                self.visit_expr(&e);
+            }
         }
         fn visit_item(&mut self, _: &'a syn::Item) {}
     }

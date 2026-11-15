@@ -11,6 +11,9 @@ binary_heap_extend.object_bytes 122984
 closures.binary_bytes 13902
 closures.cache_bytes 22947
 closures.object_bytes 22612
+closures_in_macros.binary_bytes 36422
+closures_in_macros.cache_bytes 72309
+closures_in_macros.object_bytes 72979
 drop.binary_bytes 11953
 drop.cache_bytes 15410
 drop.object_bytes 16774
