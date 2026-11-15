@@ -2,6 +2,7 @@
 # セルフホストの確認: crustc 自身のソースの一部 (外部クレートに依存しないもの) を crustc でコンパイルし、
 # rustc でコンパイルしたものと同じ入力で同じ出力になるかを確かめる。
 #   lexer: src/lexer.rs と src/cache.rs の KeyHasher (SipHash) → crustc 自身のソースを字句解析してアイテムとハッシュを出す
+#   enc:   src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と src/fxhash.rs (FxHasher / FxMap)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 cargo build --release -q || exit 1
@@ -21,4 +22,16 @@ if cmp -s "$out/lexer.rustc.out" "$out/lexer.crustc.out"; then
 else
   echo "DIFF lexer"; diff "$out/lexer.rustc.out" "$out/lexer.crustc.out" | head; fail=1
 fi
+python3 tests/selfhost/build_enc.py > "$out/enc_main.rs"
+rustc --edition 2024 -O -Awarnings "$out/enc_main.rs" -o "$out/enc_rustc" || exit 1
+for opt in "" -O; do
+  if ! target/release/crustc "$out/enc_main.rs" -o "$out/enc_crustc" $opt; then
+    echo "FAIL enc $opt (crustc)"; fail=1; continue
+  fi
+  if cmp -s <("$out/enc_rustc") <("$out/enc_crustc"); then
+    echo "ok   enc $opt ($("$out/enc_rustc" | wc -l) lines)"
+  else
+    echo "DIFF enc $opt"; diff <("$out/enc_rustc") <("$out/enc_crustc") | head; fail=1
+  fi
+done
 exit $fail

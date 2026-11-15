@@ -8292,6 +8292,17 @@ impl Display for TryFromIntError {
     }
 }
 
+// `s[..4].try_into()` (スライス → 配列) の失敗
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TryFromSliceError(());
+
+impl Display for TryFromSliceError {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), __FmtError> {
+        __exr_fmt_str::<()>(f, "could not convert slice to array");
+        Ok(())
+    }
+}
+
 // `u32::from_str_radix(s, 16)` (2〜36 進。数字は 0-9 / a-z / A-Z)
 trait __Radix {
     fn from_str_radix(s: &str, radix: u32) -> Result<Self, ParseIntError>;

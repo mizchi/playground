@@ -2951,8 +2951,22 @@ impl Cx<'_, '_> {
                 let seg = p.path.segments[n - 2].clone();
                 let ty = syn::Type::Path(syn::TypePath { qself: None, path: syn::Path::from(seg) });
                 self.seg_self = Some(self.prog.parse_ty(&ty, &self.env)?);
+            } else if n == 2 && self.prog.sigs[id as usize].self_ty.is_some_and(|t| self.prog.has_param(t)) {
+                // `T::dec(r)` (T はインスタンスの中で具体的な型): ジェネリックな impl の型引数を Self から
+                let seg = p.path.segments[0].clone();
+                let ty = syn::Type::Path(syn::TypePath { qself: None, path: syn::Path::from(seg) });
+                self.seg_self = self.prog.parse_ty(&ty, &self.env).ok().filter(|&t| !self.prog.has_param(t));
             }
         }
+        // (期待型が無ければ型推論の記録から: `x = Tr::dec(r)?` の Self)
+        let expected = expected.or_else(|| {
+            let sig = &self.prog.sigs[id as usize];
+            if sig.trait_of.is_some() && !sig.has_self {
+                self.lets.get(&(c as *const syn::ExprCall as usize)).copied().filter(|&t| !self.prog.has_param(t))
+            } else {
+                None
+            }
+        });
         let r = self.call_fn(id, None, &args, tf, expected, c.span());
         self.seg_self = None;
         r
@@ -2971,6 +2985,24 @@ impl Cx<'_, '_> {
                 let a = self.symbol_addr(NS_STATIC, ci);
                 self.b.ins().store(mf(), v, a, 0);
             }
+        }
+        // `v.get(a..b)` (Vec): スライスにしてから (`(&v[..]).get(a..b)`)
+        if (mc.method == "get" || mc.method == "get_mut")
+            && matches!(mc.args.first(), Some(Expr::Range(_)))
+            && matches!(self.peek(&mc.receiver).map(|t| self.strip_refs(t)), Some(Ty::Struct(sid)) if self.vec_fields(sid).is_some())
+        {
+            let (r, m, args) = (&mc.receiver, &mc.method, &mc.args);
+            let r: Expr = if matches!(self.peek(r), Some(Ty::Ref(..))) { syn::parse_quote!((*#r)) } else { (**r).clone() };
+            let e: Expr = syn::parse_quote!((#r)[..].#m(#args));
+            let t0 = self.lets.get(&(mc as *const syn::ExprMethodCall as usize)).copied();
+            if let (Some(t), Expr::MethodCall(nm)) = (t0, &e) {
+                self.lets.insert(nm as *const syn::ExprMethodCall as usize, t);
+            }
+            let r = self.expr(&e, expected);
+            if let (Some(_), Expr::MethodCall(nm)) = (t0, &e) {
+                self.lets.remove(&(nm as *const syn::ExprMethodCall as usize));
+            }
+            return r;
         }
         // `v[a..b].iter()` / `s[1..].len()`: 範囲の添字の受け手は自動で借用する (書き換えるメソッドは &mut)
         if let Expr::Index(ix) = strip_paren(&mc.receiver) {
@@ -2993,7 +3025,16 @@ impl Cx<'_, '_> {
                 } else {
                     syn::parse_quote!((&#r).#m #tf (#args))
                 };
-                return self.expr(&e, expected);
+                // (型推論が元の呼び出しに記録した型を、作り直したノードにも写す: `s[..4].try_into()`)
+                let t0 = self.lets.get(&(mc as *const syn::ExprMethodCall as usize)).copied();
+                if let (Some(t), Expr::MethodCall(nm)) = (t0, &e) {
+                    self.lets.insert(nm as *const syn::ExprMethodCall as usize, t);
+                }
+                let r = self.expr(&e, expected);
+                if let (Some(_), Expr::MethodCall(nm)) = (t0, &e) {
+                    self.lets.remove(&(nm as *const syn::ExprMethodCall as usize));
+                }
+                return r;
             }
         }
         // 値としての `[a, b].into_iter()`: Vec にしてから (配列の変数で要素が Copy なら iter().copied())
@@ -3462,7 +3503,32 @@ impl Cx<'_, '_> {
                 _ => None,
             };
             if let Some(imp) = imp {
-                return Ok((imp, self.prog.sigs[imp as usize].clone()));
+                let isig = &self.prog.sigs[imp as usize];
+                if !isig.is_generic() {
+                    return Ok((imp, isig.clone()));
+                }
+                // ジェネリックな impl (`impl<T: D> D for Vec<T>`): Self との照合で impl の型引数を、
+                // メソッド自身の型引数は trait 側の解 (Self の後ろ) から
+                let mut s2: Vec<Option<Ty>> = vec![None; isig.generics.len()];
+                if let Some(st) = isig.self_ty {
+                    self.prog.match_ty(st, args[0], &mut s2);
+                }
+                let own = args.len() - 1;
+                let k0 = s2.len().saturating_sub(own);
+                for (j, &a) in args[1..].iter().enumerate() {
+                    if let Some(slot) = s2.get_mut(k0 + j) {
+                        if slot.is_none() {
+                            *slot = Some(a);
+                        }
+                    }
+                }
+                let Some(iargs) = s2.into_iter().collect::<Option<Vec<Ty>>>() else {
+                    return err(span, format!("cannot infer the type parameters of `{}`", self.prog.names[imp as usize]));
+                };
+                let mut g = self.insts.lock().unwrap();
+                let iid = g.request(self.prog, imp, iargs).or_else(|e| err(span, e))?;
+                self.requested.push(iid);
+                return Ok((iid, g.sig(self.prog, iid).clone()));
             }
             if !sig.has_body {
                 return err(
@@ -5496,6 +5562,74 @@ impl Cx<'_, '_> {
                     let c = self.b.ins().icmp_imm_u(IntCC::Equal, len, 0);
                     Ok(Some((Some(c), Ty::Bool)))
                 }
+            }
+            // `s.try_into()`: 長さが N なら Ok([T; N]) (要素をコピー)
+            "try_into" if args.is_empty() => {
+                let rt = self.lets.get(&(mc as *const syn::ExprMethodCall as usize)).copied();
+                let Some(Ty::Struct(rs)) = rt else {
+                    return err(mc.span(), "cannot infer the target type of `try_into`");
+                };
+                let Some(&dt) = self.prog.structs[rs as usize].args.first() else {
+                    return err(mc.span(), "cannot infer the target type of `try_into`");
+                };
+                let Ty::Array(_, n) = dt else {
+                    return err(mc.span(), "`try_into` on a slice is only supported into arrays");
+                };
+                let (base, len, _) = self.indexable(&mc.receiver)?;
+                let out = self.temp(Ty::Struct(rs));
+                let vs = &self.prog.structs[rs as usize].variants;
+                let okv = vs.iter().position(|v| v.name == "Ok").unwrap();
+                let errv = vs.iter().position(|v| v.name == "Err").unwrap();
+                let off = vs[okv].fields[0].2;
+                let c = self.b.ins().icmp_imm_u(IntCC::Equal, len, n as i64);
+                let yes = self.b.create_block();
+                let no = self.b.create_block();
+                let done = self.b.create_block();
+                self.b.ins().brif(c, yes, &[], no, &[]);
+                self.b.switch_to_block(yes);
+                self.store_tag(out, rs, okv);
+                let dst = self.addr_plus(out, off as i32);
+                self.copy(dst, base, dt);
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(no);
+                self.store_tag(out, rs, errv);
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(done);
+                Ok(Some((Some(out), Ty::Struct(rs))))
+            }
+            // `s.get(a..b)` / `get_mut`: 範囲が中なら Some(&s[a..b])
+            "get" | "get_mut" if matches!(args.first(), Some(Expr::Range(_))) => {
+                let Some(Expr::Range(rg)) = args.first() else { unreachable!() };
+                let (base, len, elem) = self.indexable(&mc.receiver)?;
+                let (lo, hi) = self.range_bounds(rg, len)?;
+                let m = name == "get_mut";
+                let st = Ty::Ref(m, intern(Ty::Slice(intern(elem))));
+                let ot = opt(self, st)?;
+                let Ty::Struct(oi) = ot else { unreachable!() };
+                let out = self.temp(ot);
+                let vpos = |this: &Self, n: &str| this.prog.structs[oi as usize].variants.iter().position(|v| v.name == n).unwrap();
+                let (some_vi, none_vi) = (vpos(self, "Some"), vpos(self, "None"));
+                let c1 = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, lo, hi);
+                let c2 = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, hi, len);
+                let c = self.b.ins().band(c1, c2);
+                let inb = self.b.create_block();
+                let outb = self.b.create_block();
+                let done = self.b.create_block();
+                self.b.ins().brif(c, inb, &[], outb, &[]);
+                self.b.switch_to_block(inb);
+                self.store_tag(out, oi, some_vi);
+                let p = self.elem_addr(base, lo, elem);
+                let n = self.b.ins().isub(hi, lo);
+                let fat = self.make_fat_v(p, n);
+                let off = self.prog.structs[oi as usize].variants[some_vi].fields[0].2;
+                let dst = self.addr_plus(out, off as i32);
+                self.copy(dst, fat, st);
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(outb);
+                self.store_tag(out, oi, none_vi);
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(done);
+                Ok(Some((Some(out), ot)))
             }
             "get" | "get_mut" | "first" | "last" => {
                 let (base, len, elem) = self.indexable(&mc.receiver)?;
@@ -11295,6 +11429,13 @@ impl Cx<'_, '_> {
             }
         }
         let exp = expected.or_else(|| self.lets.get(&(c as *const syn::ExprCall as usize)).copied());
+        // (`m::S::default()`: モジュールの部分は飛ばす)
+        let stripped = if p.qself.is_none() { self.prog.strip_mods(&p.path) } else { None };
+        let mut p = p.clone();
+        if let Some(q) = stripped {
+            p.path = q;
+        }
+        let p = &p;
         let t = if let Some(q) = &p.qself {
             self.prog.parse_ty(&q.ty, &self.env).ok()
         } else {
@@ -11309,7 +11450,11 @@ impl Cx<'_, '_> {
                     match self.prog.parse_ty(&ty, &self.env) {
                         Ok(t) => Some(t),
                         // ジェネリックな型の名前だけ (`Vec::default()`): 期待型から
-                        Err(_) => exp.filter(|&e| matches!(e, Ty::Struct(sid) if self.prog.structs[self.prog.base_of(sid) as usize].name == *x)),
+                        // (ジェネリックな別名 `FxMap::default()` も)
+                        Err(_) => exp.filter(|&e| {
+                            self.prog.aliases.contains_key(x.as_str())
+                                || matches!(e, Ty::Struct(sid) if self.prog.structs[self.prog.base_of(sid) as usize].name == *x)
+                        }),
                     }
                 }
                 [_, _, ..] if segs.len() >= 3 && segs[segs.len() - 2] == "Default" => exp,

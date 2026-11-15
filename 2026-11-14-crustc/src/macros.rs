@@ -109,6 +109,8 @@ fn same_tok(a: &TokenTree, b: &TokenTree) -> bool {
         (TokenTree::Ident(x), TokenTree::Ident(y)) => x == y,
         (TokenTree::Punct(x), TokenTree::Punct(y)) => x.as_char() == y.as_char(),
         (TokenTree::Literal(x), TokenTree::Literal(y)) => x.to_string() == y.to_string(),
+        // (目印としてのグループ: 括弧の種類が同じなら)
+        (TokenTree::Group(x), TokenTree::Group(y)) => x.delimiter() == y.delimiter(),
         _ => false,
     }
 }
@@ -118,6 +120,10 @@ fn next_lit(pat: &[Pt], k: usize, follow: Option<&TokenTree>) -> Option<TokenTre
     for p in &pat[k..] {
         match p {
             Pt::Tok(t) => return Some(t.clone()),
+            // (`$t:ty { .. }`: 次が括弧のグループなら、同じ種類の括弧で断片が終わる)
+            Pt::Group(d, _) if *d != Delimiter::None => {
+                return Some(TokenTree::Group(proc_macro2::Group::new(*d, TokenStream::new())));
+            }
             Pt::Group(..) => return None,
             Pt::Rep(_, Some(s), _) => return Some(s.clone()),
             _ => return None,
@@ -353,8 +359,11 @@ fn transcribe(body: &[Pt], binds: &HashMap<String, Bind>, out: &mut String) -> R
                 }
                 Some(Bind::Many(_)) => return Err(format!("macro variable `${name}` is still repeating here")),
                 // (`$crate` など、束縛されていない `$x` はそのまま)
+                // (`$crate::m::f` は `crate::m::f`: モジュールは平らにして最後のセグメントで引く)
                 None => {
-                    if name != "crate" {
+                    if name == "crate" {
+                        out.push_str("crate");
+                    } else {
                         out.push('$');
                         out.push_str(name);
                     }
@@ -517,7 +526,20 @@ fn find_calls(
                                 transcribe(&r.body, &binds, &mut body)?;
                                 // 式の位置は `({ .. })`、トップレベルはアイテムとしてそのまま
                                 let rep = if depth == 0 { body } else { format!("({{ {body} }})") };
-                                let a = name.span().byte_range().start;
+                                let mut a = name.span().byte_range().start;
+                                // (`crate::m!(..)` / `self::m!(..)`: 前のパスも消す)
+                                let mut k = i;
+                                while k >= 3 {
+                                    match (&toks[k - 3], &toks[k - 2], &toks[k - 1]) {
+                                        (TokenTree::Ident(seg), TokenTree::Punct(c1), TokenTree::Punct(c2))
+                                            if c1.as_char() == ':' && c2.as_char() == ':' =>
+                                        {
+                                            a = seg.span().byte_range().start;
+                                            k -= 3;
+                                        }
+                                        _ => break,
+                                    }
+                                }
                                 let mut e = g.span().byte_range().end;
                                 // (トップレベルの `name!(..);` の `;` も取る)
                                 if depth == 0 {

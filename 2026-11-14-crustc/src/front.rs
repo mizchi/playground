@@ -1292,6 +1292,12 @@ pub fn summarize(item: &syn::Item, owner: Option<&Owner>) -> R<Summary> {
                 syn::Type::Reference(r) if im.trait_.is_some() => &*r.elem,
                 t => t,
             };
+            // `impl<A, B> Tr for (A, B)`: タプルの struct (`#tuple2`) のメソッド
+            if let (syn::Type::Tuple(tt), true) = (self_path, im.trait_.is_some()) {
+                sm.impl_self = Some(format!("#tuple{}", tt.elems.len()));
+                sm.impl_self_ty = Some(parse_tysyn(&im.self_ty, None)?);
+                return Ok(sm);
+            }
             // `impl .. for [T; N]` / `for [T]`: 名前は `__array` / `__slice` (比較の impl だけが使う)
             if matches!(self_path, syn::Type::Array(_) | syn::Type::Slice(_)) && im.trait_.is_some() {
                 sm.impl_self = Some(if matches!(self_path, syn::Type::Array(_)) { "__array" } else { "__slice" }.to_string());
@@ -1857,7 +1863,9 @@ impl Program {
                 let mut blanket = false;
                 let impl_of = match &ss.impl_of {
                     Some(n) if Ty::prim(n).is_some() || n == "__array" || n == "__slice" || n == "str" => None,
-                    Some(n) => match p.struct_index.get(n) {
+                    Some(n) => match p.struct_index.get(n).copied().or_else(|| {
+                        n.strip_prefix("#tuple").and_then(|k| k.parse().ok()).map(|k| p.tuple_base(k))
+                    }).as_ref() {
                         Some(&sid) => Some(sid),
                         // ブランケット impl (`impl<T: Display> Describe for T`): どの型のメソッドとしても探す
                         None if ss.generics.iter().any(|g| &g.0 == n) && ss.has_self => {
@@ -1984,7 +1992,7 @@ impl Program {
                 }
                 continue;
             }
-            let Some(&sid) = p.struct_index.get(sn) else {
+            let Some(&sid) = p.struct_index.get(sn).or(sn.strip_prefix("#tuple").and_then(|k| k.parse().ok()).map(|k| p.tuple_base(k)).as_ref()) else {
                 if p.blanket_selfs.contains(sn) {
                     continue;
                 }
@@ -2103,10 +2111,15 @@ impl Program {
             Ty::Struct(_) if tr == "__Flat" && self.implements(t, "Iterator") => true,
             // タプル: 要素がすべて実装していれば (core の impl と同じ)
             Ty::Struct(sid) if self.is_tuple(sid) => {
-                matches!(
+                if matches!(
                     tr,
                     "Copy" | "Clone" | "Sized" | "PartialEq" | "Eq" | "PartialOrd" | "Ord" | "Hash" | "Debug" | "Default"
-                ) && self.structs[sid as usize].fields.iter().all(|f| self.implements(f.1, tr))
+                ) {
+                    self.structs[sid as usize].fields.iter().all(|f| self.implements(f.1, tr))
+                } else {
+                    // ユーザの `impl<A, B> Tr for (A, B)`
+                    self.impls.contains(&(self.base_of(sid), tr.to_string()))
+                }
             }
             // prelude のコレクションと Option は Default (空 / None。中身が 0 のビット列)
             Ty::Struct(sid)
@@ -2338,6 +2351,11 @@ impl Program {
                 let Some(&id) = self.struct_index.get(n) else {
                     return Err(format!("cannot find type `{n}`"));
                 };
+                // `HashMap<K, V, S>` / `HashSet<K, S>`: ハッシャの型 (BuildHasherDefault<..>) は無視して既定のハッシュで
+                let mut args = args.as_slice();
+                if matches!(n.as_str(), "HashMap" | "HashSet") && args.len() == self.structs[id as usize].generics.len() + 1 {
+                    args = &args[..args.len() - 1];
+                }
                 let args = args.iter().map(r).collect::<R<Vec<Ty>>>()?;
                 Ty::Struct(self.instantiate(id, args)?)
             }
@@ -3121,7 +3139,38 @@ impl Program {
     /// 関数として見つからなければ、メソッド呼び出し `(2i32).pow(10)` に書き換える
     pub fn prim_method_call(&self, c: &syn::ExprCall, self_sid: Option<u32>) -> Option<syn::Expr> {
         let syn::Expr::Path(p) = &*c.func else { return None };
-        if p.path.segments.len() != 2 || c.args.is_empty() || p.qself.is_some() {
+        if c.args.is_empty() || p.qself.is_some() {
+            return None;
+        }
+        // `Trait::m(&x, a)` / `crate::m::Trait::m(..)` (self を取るユーザ trait のメソッド): `x.m(a)` に
+        {
+            let q = self.strip_mods(&p.path);
+            let q = q.as_ref().unwrap_or(&p.path);
+            if q.segments.len() == 2 && q.segments.iter().all(|s| s.arguments.is_none()) {
+                let tr = q.segments[0].ident.to_string();
+                let m = &q.segments[1].ident;
+                let ms = m.to_string();
+                if let Some(ds) = self.traits.get(&tr) {
+                    let selfm = ds.iter().any(|&d| {
+                        self.sigs[d as usize].has_self && self.names[d as usize].rsplit("::").next() == Some(ms.as_str())
+                    });
+                    if selfm && !matches!(tr.as_str(), "Ord" | "PartialOrd" | "PartialEq" | "Eq") {
+                        let mut args = c.args.iter();
+                        let a0 = args.next()?;
+                        let rest: Vec<&syn::Expr> = args.collect();
+                        let recv: syn::Expr = match a0 {
+                            syn::Expr::Reference(r) => {
+                                let e = &r.expr;
+                                syn::parse_quote!((#e))
+                            }
+                            _ => syn::parse_quote!((#a0)),
+                        };
+                        return Some(syn::parse_quote!(#recv.#m(#(#rest),*)));
+                    }
+                }
+            }
+        }
+        if p.path.segments.len() != 2 {
             return None;
         }
         let ty = p.path.segments[0].ident.to_string();

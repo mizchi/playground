@@ -1522,8 +1522,15 @@ impl Inf<'_> {
             if let Expr::MethodCall(mc) = e {
                 self.lets.push((mc as *const syn::ExprMethodCall as usize, v));
             }
+            // (関数呼び出しも: `Tr::dec(r)?` の Self を戻り値の型から決める)
+            if let Expr::Call(c) = e {
+                self.lets.push((c as *const syn::ExprCall as usize, v));
+            }
         } else if self.pos_record > 0 && matches!(e, Expr::Lit(_) | Expr::Call(_) | Expr::MethodCall(_) | Expr::Path(_) | Expr::Struct(_) | Expr::Index(_) | Expr::Field(_)) {
-            self.lets.push((pos_key(e), v));
+            let k = pos_key(e);
+            if k != 0 {
+                self.lets.push((k, v));
+            }
         }
         v
     }
@@ -2075,6 +2082,34 @@ impl Inf<'_> {
             }
             Expr::Call(c) => {
                 if let Expr::Path(p) = &*c.func {
+                    // `S::default()` / `<S>::default()` (derive の Default は関数として見えない): S
+                    if c.args.is_empty() && p.path.segments.last().is_some_and(|s| s.ident == "default") {
+                        let sp = self.prog.strip_mods(&p.path);
+                        let pp = sp.as_ref().unwrap_or(&p.path);
+                        let ty: Option<syn::Type> = match &p.qself {
+                            Some(q) => Some((*q.ty).clone()),
+                            None if pp.segments.len() == 2 && pp.segments[0].ident != "Default" => {
+                                Some(syn::Type::Path(syn::TypePath { qself: None, path: syn::Path::from(pp.segments[0].clone()) }))
+                            }
+                            None => None,
+                        };
+                        if let Some(t) = ty.and_then(|t| self.prog.parse_ty(&t, self.env).ok()).filter(|&t| !self.prog.has_param(t)) {
+                            return self.known(t);
+                        }
+                    }
+                    // `u32::from_le_bytes(x)`: 引数は [u8; 4]
+                    let segs = &p.path.segments;
+                    if segs.len() == 2
+                        && c.args.len() == 1
+                        && matches!(segs[1].ident.to_string().as_str(), "from_le_bytes" | "from_be_bytes" | "from_ne_bytes")
+                    {
+                        if let Some(t) = Ty::prim(&segs[0].ident.to_string()).filter(|t| t.is_int()) {
+                            let a = self.expr(&c.args[0]);
+                            let k = self.known(Ty::Array(intern(Ty::U8), t.bits() / 8));
+                            self.unify(a, k);
+                            return self.known(t);
+                        }
+                    }
                     if let Some((sid, vi)) = self.prog.variant_by_path(&p.path, self.self_sid) {
                         let args = c
                             .args
@@ -2220,6 +2255,29 @@ impl Inf<'_> {
                 let ib = self.prog.struct_index["IntoIter"];
                 self.adt(ib, vec![el])
             }
+            // `v.get(a..b)` (Vec / 配列 / スライス): Option<&[T]>
+            Expr::MethodCall(mc)
+                if (mc.method == "get" || mc.method == "get_mut")
+                    && matches!(mc.args.first(), Some(Expr::Range(_)))
+                    && {
+                        let r = self.expr(&mc.receiver);
+                        self.elem_of(r).is_some()
+                    } =>
+            {
+                let r = self.expr(&mc.receiver);
+                let el = self.elem_of(r).unwrap();
+                if let Some(Expr::Range(rg)) = mc.args.first() {
+                    for x in rg.start.iter().chain(rg.end.iter()) {
+                        let v = self.expr(x);
+                        let k = self.known(Ty::Usize);
+                        self.unify(v, k);
+                    }
+                }
+                let m = mc.method == "get_mut";
+                let sl = self.with(Shape::Slc(el));
+                let rr = self.with(Shape::Ref(m, sl));
+                self.option_of(rr)
+            }
             Expr::MethodCall(mc)
                 if {
                     let r = self.expr_peek_elem(&mc.receiver);
@@ -2232,6 +2290,21 @@ impl Inf<'_> {
                 match mc.method.to_string().as_str() {
                     "len" => self.known(Ty::Usize),
                     "is_empty" | "contains" => self.known(Ty::Bool),
+                    // `s.try_into()`: Result<[T; N], TryFromSliceError> (N は使われ方から)
+                    "try_into" if self.prog.struct_index.contains_key("TryFromSliceError") => {
+                        let rb = self.prog.struct_index["Result"];
+                        let eb = self.prog.struct_index["TryFromSliceError"];
+                        let t = self.var();
+                        let e = self.known(Ty::Struct(eb));
+                        self.adt(rb, vec![t, e])
+                    }
+                    // `s.get(a..b)`: Option<&[T]>
+                    "get" | "get_mut" if matches!(mc.args.first(), Some(Expr::Range(_))) => {
+                        let m = mc.method == "get_mut";
+                        let sl = self.with(Shape::Slc(el));
+                        let rr = self.with(Shape::Ref(m, sl));
+                        self.option_of(rr)
+                    }
                     "get" | "get_mut" | "first" | "last" => {
                         for a in args {
                             let k = self.known(Ty::Usize);
@@ -2700,6 +2773,11 @@ pub fn pos_key(e: &Expr) -> usize {
     use syn::spanned::Spanned;
     let sp = e.span();
     let (a, b) = (sp.start(), sp.end());
+    // (作り直したノード (call_site) は位置で区別できない: 記録しない)
+    let cs = proc_macro2::Span::call_site();
+    if a == cs.start() && b == cs.end() {
+        return 0;
+    }
     (1usize << 63)
         | ((a.line & 0xFFFFF) << 43)
         | ((a.column & 0x7FF) << 32)
