@@ -37,10 +37,10 @@ crustc のリンカは wild 0.10.0。どの組み合わせでも出力は rustc 
 |  | crustc -O | 46 | 5 | 28.4 | 22.6 | 69（1.65x） |
 |  | rustc -Cincremental | 143 | 105 | 2226.5 | 365.9 | 1185（28.22x） |
 |  | rustc -O | 165 | - | 0.0 | 363.9 | 42（1.00x） |
-| sieve | crustc | 28 | 4 | 20.4 | 20.6 | 247（2.68x） |
-|  | crustc -O | 28 | 6 | 16.8 | 14.3 | 144（1.57x） |
-|  | rustc -Cincremental | 119 | 90 | 1475.6 | 340.4 | 392（4.25x） |
-|  | rustc -O | 122 | - | 0.0 | 335.0 | 92（1.00x） |
+| sieve | crustc | 26 | 4 | 20.4 | 20.5 | 211（2.30x） |
+|  | crustc -O | 29 | 4 | 16.8 | 14.2 | 130（1.42x） |
+|  | rustc -Cincremental | 131 | 94 | 1475.6 | 340.4 | 431（4.69x） |
+|  | rustc -O | 128 | - | 0.0 | 335.0 | 92（1.00x） |
 | sort | crustc | 42 | 7 | 40.7 | 46.4 | 252（1.33x） |
 |  | crustc -O | 51 | 8 | 32.3 | 30.0 | 195（1.03x） |
 |  | rustc -Cincremental | 174 | 113 | 3102.2 | 384.9 | 1983（10.45x） |
@@ -53,7 +53,7 @@ crustc のリンカは wild 0.10.0。どの組み合わせでも出力は rustc 
 - 1 か所編集の再ビルドは rustc の incremental の 13〜24 倍速い（gen1000 で 28 ms 対 417 ms）。
 - 残すディスク（crustc はキャッシュ + 圧縮した `.o`、rustc は incremental ディレクトリ）は 1/16〜1/210（gen1000 で 105 KiB 対 22156 KiB）。
 - バイナリは、小さいプログラムでは rustc の 1/8〜1/18（rustc は std を静的にリンクする）。gen1000 は debug の検査の分だけ rustc `-O` より大きい。
-- 実行時間は、crustc の debug ビルドが rustc の debug ビルドより速いものが多い（gen1000 と fib を除く）。crustc `-O` は rustc `-O` の 1.0〜2.9 倍（sort は同じ、matmul・sieve・nbody は 1.6〜1.7 倍）。
+- 実行時間は、crustc の debug ビルドが rustc の debug ビルドより速いものが多い（gen1000 と fib を除く）。crustc `-O` は rustc `-O` の 1.0〜2.9 倍（sort は同じ、sieve は 1.4 倍、matmul・nbody は 1.6〜1.7 倍）。
 
 ## 動かし方
 
