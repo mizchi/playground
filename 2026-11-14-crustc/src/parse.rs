@@ -45,6 +45,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
     let mut i = 0;
     let mut line: u32 = 1;
     let mut line_start = 0;
+    let (mut cline_start, mut cpos, mut ccol) = (usize::MAX, 0usize, 0u32);
     while i < b.len() {
         let c = b[i];
         if c == b'\n' {
@@ -86,7 +87,15 @@ pub fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
             continue;
         }
         let start = i;
-        let col = src[line_start..i].chars().count() as u32;
+        // (桁は行頭からの文字数: 前のトークンの位置から数え足す (長い行で 2 乗にならないように))
+        if cline_start != line_start {
+            cline_start = line_start;
+            cpos = line_start;
+            ccol = 0;
+        }
+        ccol += b[cpos..i].iter().filter(|&&x| (x & 0xC0) != 0x80).count() as u32;
+        cpos = i;
+        let col = ccol;
         let tline = line;
         let ch = src[i..].chars().next().unwrap();
         let kind;

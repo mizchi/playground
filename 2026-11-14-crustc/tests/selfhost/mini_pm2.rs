@@ -191,7 +191,8 @@ pub mod proc_macro2 {
             Span { lo: lo, hi: self.i, line: line, column: col }
         }
         fn col(&self, at: usize) -> usize {
-            self.s[self.line_start..at].chars().count()
+            // (UTF-8 の続きのバイトを数えない: chars().count() と同じ)
+            self.b[self.line_start..at].iter().filter(|&&x| (x & 0xC0) != 0x80).count()
         }
         fn bump(&mut self) {
             if self.b[self.i] == b'\n' {

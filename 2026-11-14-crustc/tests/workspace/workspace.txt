@@ -1,0 +1,3 @@
+lib util util/src/lib.rs
+lib geom geom/src/lib.rs util
+bin app app/src/main.rs geom util

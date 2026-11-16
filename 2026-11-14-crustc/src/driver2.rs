@@ -26,20 +26,29 @@ pub fn with_prelude(src: &str) -> R<(String, Vec<SrcItem>, usize)> {
 /// crates: ソースの中のクレートのモジュールの名前 (lexer::rename_module_collisions_in)
 /// fix: モジュールの名前を変えて桁がずれた所 (lexer::rename_module_collisions_fix)
 pub fn with_prelude_in(src: &str, crates: &[String], fix: &mut Vec<(u32, u32, i32)>) -> R<(String, Vec<SrcItem>, usize)> {
+    let mut tm = Timer { on: std::env::var_os("CRUSTC_PROF").is_some(), last: now_ns(), start: now_ns() };
     let tl = lexer::expand_thread_local(src);
     let src: &str = tl.as_deref().unwrap_or(src);
     let expanded = crate::macros::expand(src)?.or(tl.clone());
     let src: &str = expanded.as_deref().unwrap_or(src);
+    tm.lap("macros", String::new());
+    if let Some(p) = std::env::var_os("CRUSTC_DUMP_PRE") {
+        let _ = std::fs::write(p, src);
+    }
     let flat = lexer::flatten_modules_fix(src, crates, fix).or(expanded.clone());
     let src: &str = flat.as_deref().unwrap_or(src);
+    tm.lap("flatten", String::new());
     let hoisted = lexer::hoist_nested_items(src).or(flat.clone());
     let src: &str = hoisted.as_deref().unwrap_or(src);
     let cv = crate::ctors::rewrite_ctor_values(src);
     let src: &str = cv.as_deref().unwrap_or(src);
+    tm.lap("hoist+ctor", String::new());
     let mut items = lexer::split(src)?;
     let user = items.len();
+    tm.lap("split", String::new());
     let mut cache = crate::prelude::SelectCache::default();
     let extra = crate::prelude::select_with(src, &items, &mut cache);
+    tm.lap("prelude", String::new());
     if extra.is_empty() {
         return Ok((src.to_string(), items, user));
     }
@@ -238,6 +247,14 @@ impl Session2 {
 
     /// 今回使ったエントリだけを書く
     pub fn save_cache(&mut self, path: &std::path::Path) -> Result<usize, String> {
+        let n = self.save_cache_keep(path)?;
+        let used = std::mem::take(&mut self.used);
+        self.mem.retain(|k, _| used.contains(k));
+        Ok(n)
+    }
+
+    /// save_cache と同じだが、メモリの上のエントリは残す (ワークスペースで次のクレートが使う)
+    fn save_cache_keep(&mut self, path: &std::path::Path) -> Result<usize, String> {
         if self.opts.no_cache {
             return Ok(0);
         }
@@ -256,8 +273,7 @@ impl Session2 {
         }
         let refs: Vec<(Key, &[u8])> = entries.iter().map(|(k, v)| (*k, &v[..])).collect();
         let n = crate::cache2::Cache2::save(path, &refs)?;
-        let used = std::mem::take(&mut self.used);
-        self.mem.retain(|k, _| used.contains(k));
+        self.used.clear();
         Ok(n)
     }
 
@@ -316,7 +332,10 @@ impl Session2 {
                 self.put(k, b);
             }
         }
+        let mut tm = Timer { on: std::env::var_os("CRUSTC_PROF").is_some(), last: now_ns(), start: now_ns() };
+        tm.lap("summaries", String::new());
         let mut prog = Program::build_with(&items, &sums, self.ctx.lib.is_none())?;
+        tm.lap("program", String::new());
         prog.prelude_from = user as u32;
         prog.overflow_checks = !self.opts.opt;
         prog.opt = self.opts.opt;
@@ -340,6 +359,7 @@ impl Session2 {
             srefs.push(st);
             crefs.push(c);
         }
+        tm.lap("refs", String::new());
         Ok(Analysis { src, items, prog, refs, srefs, crefs, n_parsed, ext_items })
     }
 }
@@ -895,6 +915,10 @@ fn emit_object(a: &Analysis, ctx: &CrateCtx, insts: &Insts, user_live: &[u32], b
             }
         }
     }
+    // (実行ファイルは、依存するクレートが使う unwrap の場所を必ず置く)
+    if ctx.lib.is_none() && !ctx.deps.is_empty() {
+        todo.extend(prog.const_index.get("__EXR_CALLER").copied());
+    }
     todo.sort_unstable();
     todo.dedup();
     let mut done_static: FxSet<u32> = FxSet::default();
@@ -909,8 +933,8 @@ fn emit_object(a: &Analysis, ctx: &CrateCtx, insts: &Insts, user_live: &[u32], b
             trap_table = Some(ci);
             continue;
         }
-        // (依存するクレートの static はそちらの .o にある)
-        if a.is_ext_static(ci) {
+        // (依存するクレートの static はそちらの .o にある。unwrap の場所 (__EXR_CALLER) は実行ファイルの 1 つを皆で使う)
+        if a.is_ext_static(ci) || (ctx.lib.is_some() && c.name == "__EXR_CALLER") {
             continue;
         }
         let dv = crate::ast_consteval::eval_src(prog, &c.expr, c.ty).map_err(|e| format!("in static `{}`: {e}", c.name))?;
@@ -943,7 +967,7 @@ fn emit_object(a: &Analysis, ctx: &CrateCtx, insts: &Insts, user_live: &[u32], b
         let n0 = datas.len();
         place(dv, static_name(ci), &mut datas, &mut todo, &mut nested, &static_name);
         // (ライブラリの static は外に見せる)
-        if ctx.lib.is_some() && c.item < a.prog.prelude_from && !a.ext_items[c.item as usize] {
+        if (ctx.lib.is_some() && c.item < a.prog.prelude_from && !a.ext_items[c.item as usize]) || (ctx.lib.is_none() && !ctx.deps.is_empty() && c.name == "__EXR_CALLER") {
             if let Some(d) = datas[n0..].iter_mut().find(|d| d.0 == static_name(ci)) {
                 d.3 = true;
             }
@@ -1174,6 +1198,73 @@ fn topo(crates: &[CrateSpec]) -> R<Vec<usize>> {
     Ok(order)
 }
 
+/// クレートのソース (`pub mod name { .. }`) のうち、使う側のコンパイルに効く部分のハッシュ。
+/// 総称でない関数の本体は使う側ではコンパイルしない (シンボルで呼ぶ) のでシグネチャだけを入れる。
+/// 総称関数・trait のメンバ・総称の impl のメンバ・`const fn`・`-> impl Trait` は本体も (使う側で実体化・評価する)、
+/// 行も入れる (panic の場所)
+pub fn interface_hash(text: &str) -> Key {
+    let mut h = KeyHasher::new();
+    // (`pub mod name {` と最後の `}` の内側を平らにする)
+    let body = match (text.find('{'), text.rfind('}')) {
+        (Some(a), Some(b)) if a < b => &text[a + 1..b],
+        _ => text,
+    };
+    let flat = lexer::flatten_modules(body);
+    let inner: &str = flat.as_deref().unwrap_or(body);
+    let items = match lexer::split(inner) {
+        Ok(i) => i,
+        Err(_) => {
+            h.add(text);
+            return h.finish();
+        }
+    };
+    for it in &items {
+        let t = &inner[it.start..it.end];
+        let header_generic = match it.kind {
+            ItemKind::ImplMember(hi) => items.get(hi as usize).is_some_and(|hd| inner[hd.start..hd.end].contains('<')),
+            ItemKind::TraitMember(_) => true,
+            _ => false,
+        };
+        let sig_end = t.find('{').unwrap_or(t.len());
+        let sig = &t[..sig_end];
+        let is_fn = sig.contains("fn ");
+        let generic_fn = match (sig.find("fn "), sig.find('(')) {
+            (Some(a), Some(b)) if a < b => sig[a..b].contains('<'),
+            _ => true,
+        };
+        let concrete = is_fn && !header_generic && !generic_fn && !sig.contains("impl ") && !sig.contains("const fn") && sig_end < t.len();
+        if concrete {
+            h.add(&1u8);
+            h.add(sig);
+        } else {
+            h.add(&2u8);
+            h.add(t);
+            if is_fn {
+                h.add(&(it.line as u64));
+            }
+        }
+    }
+    h.finish()
+}
+
+/// 16 進の文字列 (u128::from_str_radix の代わり: crustc の std にはない)
+fn parse_hex(s: &str) -> Option<u128> {
+    let mut v: u128 = 0;
+    for c in s.bytes() {
+        let d = match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => return None,
+        };
+        v = (v << 4) | d as u128;
+    }
+    Some(v)
+}
+
+fn key_hex(k: Key) -> String {
+    format!("{:016x}{:016x}", (k >> 64) as u64, k as u64)
+}
+
 /// ディレクトリを (親も) 作る (std::fs::create_dir_all の代わり: crustc の std にはない)
 fn mkdir_all(dir: &std::path::Path) -> R<()> {
     let s = format!("{}", dir.display());
@@ -1201,6 +1292,64 @@ impl Session2 {
         let r = self.build(&src, output).map_err(|e| if map.files.len() > 1 { self.ctx.map.relocate_err(&e) } else { e });
         self.ctx = CrateCtx::default();
         r
+    }
+
+    /// ワークスペースのクレート i を 1 つコンパイルし、.o・キャッシュ・指紋を書く。(結果, .o が変わったか, 時間 (ns))
+    fn build_one(
+        &mut self,
+        crates: &[CrateSpec],
+        loaded: &[Option<(String, crate::srcmap::SrcMap)>],
+        i: usize,
+        deps: &[usize],
+        fp: &str,
+        out_dir: &std::path::Path,
+    ) -> R<(Report2, bool, u64)> {
+        let c = &crates[i];
+        let t1 = now_ns();
+        let fp_path = out_dir.join(format!("{}.fp", c.name).as_str());
+        let op = out_dir.join(format!("{}.o", c.name).as_str());
+        let cp = out_dir.join(format!("{}.crcache2", c.name).as_str());
+        if !self.opts.no_cache {
+            self.disk = crate::cache2::Cache2::open(cp.as_path());
+        }
+        // ソース: 自分 + 依存するクレート (後ろに付ける)
+        let (own, own_map) = loaded[i].clone().unwrap();
+        let mut src = own.clone();
+        let mut map = own_map.clone();
+        src.push('\n');
+        for &j in deps {
+            let (t, m) = loaded[j].as_ref().unwrap();
+            let at = n_lines(&src) + 1;
+            let f0 = map.files.len() as u32;
+            for &(s, f, first) in &m.segs {
+                map.segs.push((s + at - 1, f + f0, first));
+            }
+            map.files.extend(m.files.iter().cloned());
+            src.push_str(t);
+            src.push('\n');
+        }
+        self.ctx = CrateCtx {
+            lib: if c.lib { Some(c.name.clone()) } else { None },
+            own_lines: n_lines(&own) + 1,
+            map: map.clone(),
+            deps: deps.iter().map(|&j| crates[j].name.clone()).collect(),
+        };
+        let mut r = Report2::default();
+        let a = self.analyze(&src).map_err(|e| format!("crate `{}`: {}", c.name, self.ctx.map.relocate_err(&e)))?;
+        r.items_parsed = a.n_parsed;
+        let obj = self.compile_object(&a, &mut r, None).map_err(|e| format!("crate `{}`: {}", c.name, self.ctx.map.relocate_err(&e)))?;
+        r.object_bytes = obj.len();
+        if !self.opts.no_cache {
+            self.save_cache_keep(cp.as_path())?;
+            std::fs::write(fp_path.as_path(), fp).map_err(|e| format!("{}: {e}", fp_path.display()))?;
+        }
+        let mut changed = false;
+        if !std::fs::read(op.as_path()).is_ok_and(|old| old == obj) {
+            std::fs::write(op.as_path(), &obj).map_err(|e| format!("{}: {e}", op.display()))?;
+            changed = true;
+        }
+        self.ctx = CrateCtx::default();
+        Ok((r, changed, now_ns() - t1))
     }
 
     /// ワークスペースをビルドする: クレートごとに .o を out_dir に作り (変わらなければ書かない)、
@@ -1235,47 +1384,151 @@ impl Session2 {
             }
             order.iter().copied().filter(|&j| seen[j]).collect()
         };
+        // (ライブラリの、使う側に効く部分のハッシュ)
+        // (ソースが前回と同じなら、前回のものを out_dir/<名前>.iface から読む: `ソースのハッシュ インターフェースのハッシュ`)
+        let mut ifaces: Vec<Key> = vec![0; crates.len()];
+        for i in 0..crates.len() {
+            if !crates[i].lib {
+                continue;
+            }
+            let text = &loaded[i].as_ref().unwrap().0;
+            let mut h = KeyHasher::new();
+            h.add(&self.cid);
+            h.add(text);
+            let raw = key_hex(h.finish());
+            let ip = out_dir.join(format!("{}.iface", crates[i].name).as_str());
+            let old = std::fs::read_to_string(ip.as_path()).unwrap_or_default();
+            let hit = match old.split_once(' ') {
+                Some((r, v)) if r == raw && v.len() == 32 => parse_hex(v),
+                _ => None,
+            };
+            ifaces[i] = match hit {
+                Some(v) => v,
+                None => {
+                    let v = interface_hash(text);
+                    let _ = std::fs::write(ip.as_path(), format!("{raw} {}", key_hex(v)));
+                    v
+                }
+            };
+        }
+        // 古いクレート: (番号, 指紋)
+        let mut stale: Vec<(usize, String)> = vec![];
         for &i in &order {
             let c = &crates[i];
             let deps = all_deps(i);
-            // ソース: 自分 + 依存するクレート (後ろに付ける)
-            let (own, own_map) = loaded[i].clone().unwrap();
-            let mut src = own.clone();
-            let mut map = own_map.clone();
-            src.push('\n');
-            for &j in &deps {
-                let (t, m) = loaded[j].as_ref().unwrap();
-                let at = n_lines(&src) + 1;
-                let f0 = map.files.len() as u32;
-                for &(s, f, first) in &m.segs {
-                    map.segs.push((s + at - 1, f + f0, first));
-                }
-                map.files.extend(m.files.iter().cloned());
-                src.push_str(t);
-                src.push('\n');
+            // 指紋: コンパイラ・設定・自分のソース・依存するクレートのインターフェース。前回と同じで .o があれば何もしない
+            let mut h = KeyHasher::new();
+            h.add(&self.cid);
+            h.add(&(self.opts.opt as u8));
+            h.add(&(c.lib as u8));
+            h.add(&loaded[i].as_ref().unwrap().0);
+            for f in &loaded[i].as_ref().unwrap().1.files {
+                h.add(f);
             }
-            self.ctx = CrateCtx {
-                lib: if c.lib { Some(c.name.clone()) } else { None },
-                own_lines: n_lines(&own) + 1,
-                map: map.clone(),
-                deps: deps.iter().map(|&j| crates[j].name.clone()).collect(),
-            };
-            let t1 = now_ns();
-            let mut r = Report2::default();
-            let a = self.analyze(&src).map_err(|e| format!("crate `{}`: {}", c.name, self.ctx.map.relocate_err(&e)))?;
-            r.items_parsed = a.n_parsed;
-            let obj = self.compile_object(&a, &mut r, None).map_err(|e| format!("crate `{}`: {}", c.name, self.ctx.map.relocate_err(&e)))?;
-            r.object_bytes = obj.len();
+            for &j in &deps {
+                h.add(&crates[j].name);
+                h.add(&ifaces[j]);
+                for f in &loaded[j].as_ref().unwrap().1.files {
+                    h.add(f);
+                }
+            }
+            let fp = key_hex(h.finish());
+            let fp_path = out_dir.join(format!("{}.fp", c.name).as_str());
             let op = out_dir.join(format!("{}.o", c.name).as_str());
-            if !std::fs::read(op.as_path()).is_ok_and(|old| old == obj) {
-                std::fs::write(op.as_path(), &obj).map_err(|e| format!("{}: {e}", op.display()))?;
-                changed[i] = true;
+            if !self.opts.no_cache && op.exists() && std::fs::read_to_string(fp_path.as_path()).is_ok_and(|old| old == fp) {
+                if self.opts.time {
+                    eprintln!("  {:<12} fresh", c.name);
+                }
+                rep.crates.push((c.name.clone(), Report2::default()));
+                continue;
+            }
+            stale.push((i, fp));
+        }
+        // (クレートは互いのソースしか使わない (.o は使わない) ので、古いものを fork して同時にコンパイルする)
+        let par = self.opts.jobs.min(stale.len()).max(1);
+        let mut results: Vec<Option<R<(Report2, bool, u64)>>> = vec![None; stale.len()];
+        if par > 1 {
+            let inner = (self.opts.jobs / par).max(1);
+            let mut k0 = 0;
+            while k0 < stale.len() {
+                let k1 = (k0 + par).min(stale.len());
+                let mut kids: Vec<(usize, i32, i32)> = vec![];
+                for k in k0..k1 {
+                    let mut fds = [0i32; 2];
+                    // SAFETY: fds は 2 つの int
+                    if unsafe { c_pipe(fds.as_mut_ptr()) } != 0 {
+                        continue;
+                    }
+                    let pid = unsafe { c_fork() };
+                    if pid == 0 {
+                        unsafe { c_close(fds[0]) };
+                        self.opts.jobs = inner;
+                        let (i, fp) = (stale[k].0, stale[k].1.clone());
+                        let r = self.build_one(crates, &loaded, i, &all_deps(i), &fp, out_dir);
+                        let mut buf = vec![];
+                        match r {
+                            Ok((rp, ch, ns)) => {
+                                buf.push(0);
+                                buf.push(ch as u8);
+                                for v in [rp.fns_compiled as u64, rp.fns_hit as u64, rp.items_parsed as u64, rp.object_bytes as u64, ns] {
+                                    crate::cache2::put_uv(&mut buf, v);
+                                }
+                            }
+                            Err(e) => {
+                                buf.push(1);
+                                buf.extend_from_slice(e.as_bytes());
+                            }
+                        }
+                        write_all(fds[1], &buf);
+                        unsafe { c_close(fds[1]) };
+                        unsafe { c_exit(0) };
+                    }
+                    unsafe { c_close(fds[1]) };
+                    if pid < 0 {
+                        unsafe { c_close(fds[0]) };
+                        continue;
+                    }
+                    kids.push((k, pid, fds[0]));
+                }
+                for (k, pid, fd) in kids {
+                    let d = read_all(fd);
+                    unsafe { c_close(fd) };
+                    let mut st = 0i32;
+                    unsafe { c_waitpid(pid, &mut st, 0) };
+                    let mut r = crate::cache2::Rd { d: &d, pos: 0 };
+                    results[k] = match r.u8() {
+                        Some(0) => {
+                            let ch = r.u8().unwrap_or(1) != 0;
+                            let mut v = [0u64; 5];
+                            for x in v.iter_mut() {
+                                *x = r.uv().unwrap_or(0);
+                            }
+                            let rp = Report2 { fns_compiled: v[0] as usize, fns_hit: v[1] as usize, items_parsed: v[2] as usize, object_bytes: v[3] as usize, linked: false };
+                            Some(Ok((rp, ch, v[4])))
+                        }
+                        Some(_) => Some(Err(String::from_utf8_lossy(&d[1..]).into_owned())),
+                        // (子が落ちた: ここでもう一度 (エラーならそれが出る))
+                        None => None,
+                    };
+                }
+                k0 = k1;
+            }
+        }
+        for k in 0..stale.len() {
+            let (i, fp) = (stale[k].0, stale[k].1.clone());
+            let r = match results[k].take() {
+                Some(r) => r,
+                None => self.build_one(crates, &loaded, i, &all_deps(i), &fp, out_dir),
+            };
+            let (r, ch, ns) = r?;
+            changed[i] = ch;
+            if ch {
                 rep.objects_written += 1;
             }
             if self.opts.time {
-                eprintln!("  {:<12} {:>8.2} ms  {} fns compiled, {} hit, {} items parsed{}", c.name, (now_ns() - t1) as f64 / 1e6, r.fns_compiled, r.fns_hit, r.items_parsed, if changed[i] { "" } else { " (object unchanged)" });
+                eprintln!("  {:<12} {:>8.2} ms  {} fns compiled, {} hit, {} items parsed{}", crates[i].name, ns as f64 / 1e6, r.fns_compiled, r.fns_hit, r.items_parsed, if ch { "" } else { " (object unchanged)" });
             }
-            rep.crates.push((c.name.clone(), r));
+            rep.crates.push((crates[i].name.clone(), r));
         }
         for &i in &order {
             let c = &crates[i];

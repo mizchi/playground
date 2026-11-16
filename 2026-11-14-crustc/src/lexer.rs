@@ -6,6 +6,37 @@
 
 use crate::cache::{Key, KeyHasher};
 
+/// モジュールの名前の付け替えの表用の速いハッシュ (fxhash.rs と同じ方式。lexer は単独でもコンパイルされるので自前で持つ)
+#[derive(Default, Clone, Copy)]
+pub struct LexHasher {
+    hash: u64,
+}
+
+impl std::hash::Hasher for LexHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.hash = (self.hash.rotate_left(5) ^ b as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+        }
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.hash = (self.hash.rotate_left(5) ^ i as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+type LMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<LexHasher>>;
+type LSet<K> = std::collections::HashSet<K, std::hash::BuildHasherDefault<LexHasher>>;
+
+fn name_hash(n: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in n {
+        h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
 pub struct SrcItem {
     pub start: usize,
     pub end: usize,
@@ -947,23 +978,32 @@ pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<
     if mods.is_empty() {
         return None;
     }
-    // トークン k のスコープ (いちばん内側のモジュール。なければ usize::MAX = ルート)
-    let scope_of = |k: usize| -> usize {
-        let mut best = usize::MAX;
-        for (i, m) in mods.iter().enumerate() {
-            if m.1 < k && k < m.2 && (best == usize::MAX || mods[best].1 < m.1) {
-                best = i;
-            }
+    // トークン k のスコープ (いちばん内側のモジュール。なければ usize::MAX = ルート)。
+    // (mods は開く順なので、後のもの (内側) で上書きすれば いちばん内側になる)
+    let mut scope_tab: Vec<usize> = vec![usize::MAX; toks.len()];
+    for (i, m) in mods.iter().enumerate() {
+        let end = m.2.min(toks.len());
+        for st in scope_tab.iter_mut().take(end).skip(m.1 + 1) {
+            *st = i;
         }
-        best
-    };
+    }
+    let scope_of = |k: usize| -> usize { scope_tab[k] };
+    // (`{` のトークン → それを開くモジュール、パス → モジュール)
+    let mut open_of: LMap<usize, usize> = LMap::default();
+    let mut mod_of_path: LMap<Vec<Vec<u8>>, usize> = LMap::default();
+    for (i, m) in mods.iter().enumerate() {
+        open_of.insert(m.1, i);
+        if !mod_of_path.contains_key(&m.0) {
+            mod_of_path.insert(m.0.clone(), i);
+        }
+    }
     // 各スコープのトップレベルのアイテムの名前 (そのスコープの深さの `fn x` / `struct X` など)
     let mut defs: Vec<(Vec<u8>, usize, usize)> = vec![]; // (名前, スコープ, 名前のトークン)
     let mut depth = 0i32;
     let mut scope_depth: Vec<(usize, i32)> = vec![(usize::MAX, 0)];
     let mut k = 0;
     while k < toks.len() {
-        if let Some(m) = mods.iter().position(|m| m.1 == k) {
+        if let Some(&m) = open_of.get(&k) {
             depth += 1;
             scope_depth.push((m, depth));
             k += 1;
@@ -1047,9 +1087,17 @@ pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<
             }
         }
     }
+    // (名前ごとの定義のスコープ: colliding を速くする)
+    let mut def_set: LSet<(usize, Vec<u8>)> = LSet::default();
     for d in &defs {
-        if d.1 != usize::MAX && (in_crate(d.1) || colliding(&d.0)) && !renamed.iter().any(|r| r.0 == d.1 && r.1 == d.0) {
-            renamed.push((d.1, d.0.clone(), new_name(d.1, &d.0)));
+        def_set.insert((d.1, d.0.clone()));
+    }
+    let mut renamed_map: LMap<(usize, Vec<u8>), Vec<u8>> = LMap::default();
+    for d in &defs {
+        if d.1 != usize::MAX && !renamed_map.contains_key(&(d.1, d.0.clone())) && (in_crate(d.1) || colliding(&d.0)) {
+            let nn = new_name(d.1, &d.0);
+            renamed_map.insert((d.1, d.0.clone()), nn.clone());
+            renamed.push((d.1, d.0.clone(), nn));
         }
     }
     // (ぶつかる名前も `use .. as X` の別名もなければ何もしない)
@@ -1075,13 +1123,13 @@ pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<
             // (相対パスで見つからなければ crate からとみなす)
             let mut rel = base.clone();
             rel.extend(rest.iter().cloned());
-            if let Some(i) = mods.iter().position(|m| m.0 == rel) {
+            if let Some(i) = mod_of_path.get(&rel).copied() {
                 return Some(i);
             }
             if !croot.is_empty() {
                 let mut rel = croot.clone();
                 rel.extend(rest.iter().cloned());
-                if let Some(i) = mods.iter().position(|m| m.0 == rel) {
+                if let Some(i) = mod_of_path.get(&rel).copied() {
                     return Some(i);
                 }
             }
@@ -1091,11 +1139,9 @@ pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<
         if base.is_empty() {
             return Some(usize::MAX);
         }
-        mods.iter().position(|m| m.0 == base)
+        mod_of_path.get(&base).copied()
     };
-    let renamed_in = |m: usize, n: &[u8]| -> Option<Vec<u8>> {
-        renamed.iter().find(|r| r.0 == m && r.1.as_slice() == n).map(|r| r.2.clone())
-    };
+    let renamed_in = |m: usize, n: &[u8]| -> Option<Vec<u8>> { renamed_map.get(&(m, n.to_vec())).cloned() };
     // use 文で取り込んだ名前: (スコープ, 使う名前) → 新しい名前。use 文のトークン範囲は書き換えない
     let mut imports: Vec<(usize, Vec<u8>, Vec<u8>)> = vec![];
     let mut use_ranges: Vec<(usize, usize)> = vec![];
@@ -1187,10 +1233,10 @@ pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<
             if let Some(m) = resolve_mod(sc, mpath) {
                 if let Some(nn) = renamed_in(m, &name[0]) {
                     imports.push((sc, local, nn));
-                } else if !defs.iter().any(|d| d.1 == m && d.0.as_slice() == name[0].as_slice()) {
+                } else if !def_set.contains(&(m, name[0].clone())) {
                     // (`pub use` で取り込み直した名前かもしれない: 後で解く)
                     pending.push((sc, local, m, name[0].clone()));
-                } else if local.as_slice() != name[0].as_slice() && defs.iter().any(|d| d.1 == m && d.0.as_slice() == name[0].as_slice()) {
+                } else if local.as_slice() != name[0].as_slice() && def_set.contains(&(m, name[0].clone())) {
                     // (`use crate::parse::{FnSig as PSig}`: 別名はそのモジュールの中で元の名前に)
                     imports.push((sc, local, name[0].clone()));
                 }
@@ -1255,10 +1301,39 @@ pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<
         k += 1;
     }
     // 書き換え
+    // (飛ばすトークン (use 文・バリアント名)、定義の名前のトークン、取り込んだ名前の表 (先のものが勝つ))
+    let mut skip: Vec<bool> = vec![false; toks.len()];
+    for &(a, b) in &use_ranges {
+        for x in skip.iter_mut().take((b + 1).min(toks.len())).skip(a) {
+            *x = true;
+        }
+    }
+    for &v in &variant_toks {
+        skip[v] = true;
+    }
+    let mut def_tok: Vec<bool> = vec![false; toks.len()];
+    for d in &defs {
+        def_tok[d.2] = true;
+    }
+    let mut imp_map: LMap<(usize, Vec<u8>), Vec<u8>> = LMap::default();
+    for i in &imports {
+        if !imp_map.contains_key(&(i.0, i.1.clone())) {
+            imp_map.insert((i.0, i.1.clone()), i.2.clone());
+        }
+    }
+    let imported = |sc: usize, n: &[u8]| -> Option<Vec<u8>> { imp_map.get(&(sc, n.to_vec())).cloned() };
+    // (変える名前・取り込んだ名前のハッシュ: 当たらない名前は表を引かない。偶然当たっても表を引くだけ)
+    let mut interest: LSet<u64> = LSet::default();
+    for r in &renamed {
+        interest.insert(name_hash(&r.1));
+    }
+    for i in &imports {
+        interest.insert(name_hash(&i.1));
+    }
     let mut repl: Vec<(usize, usize, Vec<u8>)> = vec![]; // (開始トークン, 終了トークン (含む), 新しいテキスト)
     let mut k = 0;
     while k < toks.len() {
-        if toks[k].0 != 0 || use_ranges.iter().any(|r| r.0 <= k && k <= r.1) || variant_toks.contains(&k) {
+        if toks[k].0 != 0 || skip[k] {
             k += 1;
             continue;
         }
@@ -1269,11 +1344,20 @@ pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<
             continue;
         }
         // パス `a::b::Name` (先頭から)
-        let mut segs: Vec<Vec<u8>> = vec![tok(k).to_vec()];
         let mut j = k;
         while j + 3 < toks.len() && is_sym(j + 1, b':') && is_sym(j + 2, b':') && toks[j + 3].0 == 0 {
             j += 3;
-            segs.push(tok(j).to_vec());
+        }
+        // (変える名前・取り込んだ名前でもなく、パスの先頭でもないなら何もしない)
+        if j == k && !interest.contains(&name_hash(tok(k))) {
+            k += 1;
+            continue;
+        }
+        let mut segs: Vec<Vec<u8>> = vec![tok(k).to_vec()];
+        let mut jj = k;
+        while jj < j {
+            jj += 3;
+            segs.push(tok(jj).to_vec());
         }
         let sc = scope_of(k);
         if segs.len() >= 2 {
@@ -1284,7 +1368,7 @@ pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<
                     if m == usize::MAX && !(segs[0].as_slice() == b"crate") {
                         continue;
                     }
-                    let re = || imports.iter().find(|i| i.0 == m && i.1 == segs[cut]).map(|i| i.2.clone());
+                    let re = || imported(m, &segs[cut]);
                     if let Some(nn) = renamed_in(m, &segs[cut]).or_else(re) {
                         // segs[..=cut] を新しい名前にする
                         repl.push((k, k + 3 * cut, nn));
@@ -1300,14 +1384,14 @@ pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<
         }
         // 裸の名前 (フィールドの宣言・初期化 `name: ..` は除く)
         let next_colon = k + 1 < toks.len() && is_sym(k + 1, b':') && !(k + 2 < toks.len() && is_sym(k + 2, b':'));
-        let is_def = defs.iter().any(|d| d.2 == k);
+        let is_def = def_tok[k];
         if !next_colon || is_def {
             let n = tok(k);
             let nn = renamed_in(sc, n)
-                .or_else(|| imports.iter().find(|i| i.0 == sc && i.1.as_slice() == n).map(|i| i.2.clone()))
+                .or_else(|| imported(sc, n))
                 .or_else(|| globs.iter().filter(|g| g.0 == sc).find_map(|g| renamed_in(g.1, n)))
                 // (`use super::*;` は親が use で取り込んだ名前も見える)
-                .or_else(|| globs.iter().filter(|g| g.0 == sc).find_map(|g| imports.iter().find(|i| i.0 == g.1 && i.1.as_slice() == n).map(|i| i.2.clone())));
+                .or_else(|| globs.iter().filter(|g| g.0 == sc).find_map(|g| imported(g.1, n)));
             if let Some(nn) = nn {
                 repl.push((k, k, nn));
             }
@@ -1322,6 +1406,8 @@ pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<
     let mut last = 0;
     // (桁のずれ: 今の行と、その行の行頭の out の位置、ずれの合計)
     let (mut line, mut line_start, mut cum, mut scanned) = (1u32, 0usize, 0i32, 0usize);
+    // (行頭からの文字数: 前に数えた所から数え足す)
+    let (mut cl, mut cp, mut cc) = (usize::MAX, 0usize, 0u32);
     for (a, b, t) in &repl {
         let (st, en) = (toks[*a].1, toks[*b].2);
         if st < last {
@@ -1341,7 +1427,14 @@ pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<
         let d = t.len() as i32 - (en - st) as i32;
         if d != 0 {
             cum += d;
-            let col = String::from_utf8_lossy(&out[line_start..]).chars().count() as u32;
+            if cl != line_start {
+                cl = line_start;
+                cp = line_start;
+                cc = 0;
+            }
+            cc += out[cp..].iter().filter(|&&x| (x & 0xC0) != 0x80).count() as u32;
+            cp = out.len();
+            let col = cc;
             fix.push((line, col, cum));
         }
     }

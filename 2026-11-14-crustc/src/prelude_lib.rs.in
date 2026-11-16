@@ -6041,6 +6041,13 @@ fn __exr_on_trap(sig: i32, info: *const u64, ctx: *const u8) {
         __exr_err_str::<()>("\nthread 'main' panicked");
         __exr_panic_tail::<()>();
     }
+    // (行 0: 呼んだ側の場所 (unwrap など))
+    let (line, col) = if line == 0 {
+        let c = unsafe { __EXR_CALLER };
+        (c >> 16, c & 0xFFFF)
+    } else {
+        (line, col)
+    };
     let (f, n, l, c) = __exr_tab_file(ft, line, col);
     __exr_panic_head_at::<()>(f, n, l, c);
     if mi != 0 {

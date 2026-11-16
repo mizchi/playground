@@ -80,15 +80,9 @@ fn main() {
         let out_dir = if output.as_os_str().is_empty() { input.parent().map(|d| d.join("target")).unwrap_or("target".into()) } else { output.clone() };
         let opts = crustc::driver2::Options2 { opt: o.opt, jobs: o.jobs, linker: o.linker.clone(), no_cache: o.no_cache, time: o.time };
         let mut s = crustc::driver2::Session2::new(opts);
-        let cp = out_dir.join("workspace.crcache2");
-        s.load_cache(&cp);
+        // (キャッシュはクレートごとに out_dir/<名前>.crcache2)
         match s.build_workspace(&crates, &out_dir) {
-            Ok(_) => {
-                if let Err(e) = s.save_cache(&cp) {
-                    eprintln!("warning: failed to write cache: {e}");
-                }
-                std::process::exit(0)
-            }
+            Ok(_) => std::process::exit(0),
             Err(e) => {
                 eprintln!("error: {e}");
                 std::process::exit(1);
