@@ -65,6 +65,10 @@ pub type Sp = u32;
 pub const SP: Sp = 0;
 
 pub fn err<T>(_: Sp, msg: impl std::fmt::Display) -> R<T> {
+    // (ACG_PANIC_ERR=1: エラーの場所をバックトレースで調べる)
+    if std::env::var_os("ACG_PANIC_ERR").is_some() {
+        panic!("{msg}");
+    }
     Err(msg.to_string())
 }
 
@@ -215,9 +219,14 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
     };
     let mut closure_ix = HashMap::new();
     let mut taken = addr_taken(&f.block);
-    for (i, c) in crate::ast_closure::closures_of(&f.block).iter().enumerate() {
+    for (i, (a, t)) in crate::ast_closure::closure_slots(&f.block).into_iter().enumerate() {
         let k = base_k + i as u32;
-        closure_ix.entry(format!("{c:?}")).or_insert(k);
+        // (本体に書かれたクロージャはアドレスで、マクロの引数の中のものは式の文字列で引く)
+        // (複製された式のために文字列でも引けるようにする: 同じ文字列なら最初のもの)
+        if let Some(a) = a {
+            closure_ix.insert(format!("@{a}"), k);
+        }
+        closure_ix.entry(t).or_insert(k);
         if let Some(cd) = prog.closure_by.get(&(root, k)).and_then(|i| prog.closures.get(i)) {
             for (i, n) in cd.captures.iter().enumerate() {
                 if !cd.moved.get(i).copied().unwrap_or(false) {

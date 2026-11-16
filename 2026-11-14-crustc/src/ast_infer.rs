@@ -1602,15 +1602,19 @@ impl Inf<'_> {
                 let mut m = crate::fxhash::FxMap::default();
                 let mut keys = crate::fxhash::FxMap::default();
                 // SAFETY: b は推論の間生きている関数の本体を指す
-                for (i, cl) in ast_closure::closures_of(unsafe { &*b }).iter().enumerate() {
-                    keys.entry(format!("{cl:?}")).or_insert(base + i as u32);
+                // (本体に書かれたクロージャはアドレスで、マクロの引数の中のものは式の文字列で引く)
+                for (i, (a, t)) in ast_closure::closure_slots(unsafe { &*b }).into_iter().enumerate() {
+                    if let Some(a) = a {
+                        keys.insert(format!("@{a}"), base + i as u32);
+                    }
+                    keys.entry(t).or_insert(base + i as u32);
                 }
                 let _ = &mut m;
                 self.clo_keys = Some(keys);
                 self.clo_ctx = Some((r, m));
             }
         }
-        let k = self.clo_keys.as_ref().and_then(|ks| ks.get(&format!("{c:?}")).copied());
+        let k = self.clo_keys.as_ref().and_then(|ks| ks.get(&format!("@{}", c as *const Expr as usize)).or_else(|| ks.get(&format!("{c:?}"))).copied());
         if let (Some((root, _)), Some(k)) = (&self.clo_ctx, k) {
             if let Some(&fid) = self.prog.closure_by.get(&(*root, k)) {
                 if let Some(cd) = self.prog.closures.get(&fid) {
@@ -1718,7 +1722,10 @@ impl Inf<'_> {
             }
             hops += 1;
         }
-        if callee.is_none() && n == "clone" && args.is_empty() && sid.is_some() {
+        // (`x.clone()`: struct で clone を持たない (derive の Copy など) か、整数・浮動小数点・bool・char・生ポインタ)
+        let rroot = self.find(rv);
+        let prim = matches!(self.shape[rroot as usize], Some(Shape::Known(t)) if t.is_int() || t.is_float() || matches!(t, Ty::Bool | Ty::Char | Ty::Ptr(..)));
+        if callee.is_none() && n == "clone" && args.is_empty() && (sid.is_some() || prim) {
             return rv;
         }
         let mut avs = vec![];

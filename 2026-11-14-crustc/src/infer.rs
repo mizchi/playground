@@ -1674,7 +1674,9 @@ impl Inf<'_> {
                     hops += 1;
                 }
                 // derive(Clone) の clone (メソッドの本体は codegen が作る): 受け手 (参照を外した) と同じ型
-                if callee.is_none() && n == "clone" && mc.args.is_empty() && sid.is_some() {
+                let rroot = self.find(rv);
+        let prim = matches!(self.shape[rroot as usize], Some(Shape::Known(t)) if t.is_int() || t.is_float() || matches!(t, Ty::Bool | Ty::Char | Ty::Ptr(..)));
+                if callee.is_none() && n == "clone" && mc.args.is_empty() && (sid.is_some() || prim) {
                     return rv;
                 }
                 let mut args: Vec<u32> = mc.args.iter().map(|a| self.expr(a)).collect();

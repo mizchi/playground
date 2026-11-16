@@ -184,6 +184,31 @@ fn collect_closures(e: &Expr, out: &mut Vec<Expr>) {
     each_child(e, &mut |c| collect_closures(c, out));
 }
 
+/// closures_of と同じ順の、クロージャの場所: 本体に書かれたものはアドレス (Some)、マクロの引数の中のもの
+/// (読み直すのでアドレスが決まらない) は None と式の Debug の文字列
+pub fn closure_slots(b: &Block) -> Vec<(Option<usize>, String)> {
+    let mut out = Vec::new();
+    block_exprs(b, &mut |e| collect_slots(e, &mut out));
+    out
+}
+
+fn collect_slots(e: &Expr, out: &mut Vec<(Option<usize>, String)>) {
+    if let Expr::Closure(..) = e {
+        out.push((Some(e as *const Expr as usize), format!("{e:?}")));
+    }
+    if let Expr::Macro(_, g) = e {
+        let mut v = Vec::new();
+        for x in macro_exprs(g) {
+            collect_closures(&x, &mut v);
+        }
+        for c in v {
+            out.push((None, format!("{c:?}")));
+        }
+        return;
+    }
+    each_child(e, &mut |c| collect_slots(c, out));
+}
+
 /// パターンが束縛する名前 (大文字で始まる裸の名前はパスのパターン)
 pub fn pat_idents(p: &Pat, out: &mut Vec<String>) {
     match p {

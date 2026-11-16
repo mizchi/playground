@@ -910,7 +910,7 @@ impl Cx<'_> {
         let Expr::Closure(_, inputs, _, _) = c else { return err(SP, "internal: expected a closure") };
         let prog = self.prog;
         let hint = self.closure_hint.take();
-        let Some(&k) = self.closure_ix.get(&format!("{c:?}")) else {
+        let Some(&k) = self.closure_ix.get(&format!("@{}", c as *const Expr as usize)).or_else(|| self.closure_ix.get(&format!("{c:?}"))) else {
             return err(SP, "internal: unknown closure");
         };
         let Some(&cid) = prog.closure_by.get(&(self.root, k)) else {
