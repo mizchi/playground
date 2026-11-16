@@ -431,6 +431,11 @@ pub fn self_of(name: &str, generics: &[String]) -> TySyn {
 
 impl Program {
     pub fn build(items: &[SrcItem], sums: &[Summary]) -> R<Program> {
+        Program::build_with(items, sums, true)
+    }
+
+    /// need_main: false ならライブラリ (main がなくてよい)
+    pub fn build_with(items: &[SrcItem], sums: &[Summary], need_main: bool) -> R<Program> {
         let mut p = Program {
             names: vec![],
             index: FxMap::default(),
@@ -895,7 +900,7 @@ impl Program {
                 }
             }
         }
-        if !p.index.contains_key("main") {
+        if need_main && !p.index.contains_key("main") {
             return Err("no `main` function".into());
         }
         p.drop_impls = p
@@ -2067,7 +2072,7 @@ impl Program {
     pub fn reachable(&self, refs: &[Vec<u32>]) -> Vec<bool> {
         let mut seen = vec![false; self.names.len()];
         // 根: main・外に見せる関数・panic handler (panic はどこからでも起こりうる)
-        let mut stack = vec![self.index["main"]];
+        let mut stack: Vec<u32> = self.index.get("main").copied().into_iter().collect();
         stack.extend((0..self.names.len() as u32).filter(|&i| self.sigs[i as usize].export));
         stack.extend(self.panic_handler);
         // `Box::new` が呼ぶアロケータと drop が呼ぶ free (prelude にあるのは Box / Drop が使われたときだけ)

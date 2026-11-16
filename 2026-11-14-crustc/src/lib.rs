@@ -9,6 +9,10 @@ pub mod ctors;
 pub mod driver;
 #[cfg(feature = "acg")]
 pub mod driver2;
+#[cfg(feature = "acg")]
+pub mod cache2;
+#[cfg(feature = "acg")]
+pub mod srcmap;
 pub mod elfz;
 pub mod enc;
 pub mod front;
@@ -34,5 +38,6 @@ pub mod program;
 #[doc(hidden)]
 pub mod testgen;
 pub mod types;
+pub mod types_enc;
 
 pub use driver::{BuildReport, Diagnostic, Options, Session, cache_path};

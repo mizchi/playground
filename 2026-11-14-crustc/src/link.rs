@@ -36,10 +36,10 @@ pub fn pick(requested: Option<&str>) -> Result<PathBuf, String> {
 const DRIVER_FLAGS: &[&str] = &["-no-pie", "-s", "-Wl,--gc-sections", "-Wl,--build-id=none", "-Wl,--as-needed", "-lm"];
 
 /// `cc -###` の出力から collect2 の引数を取り出し、プラグイン関連を除いたものを返す。
-fn driver_args(obj: &Path, out: &Path) -> Result<Vec<String>, String> {
+fn driver_args(objs: &[&Path], out: &Path) -> Result<Vec<String>, String> {
     let o = Command::new("cc")
         .arg("-###")
-        .arg(obj)
+        .args(objs)
         .arg("-o")
         .arg(out)
         .args(DRIVER_FLAGS)
@@ -102,16 +102,25 @@ fn shell_split(s: &str) -> Vec<String> {
 }
 
 pub fn link(requested: Option<&str>, obj: &Path, out: &Path) -> Result<String, String> {
+    link_many(requested, &[obj], out)
+}
+
+/// 複数の .o を 1 つの実行ファイルにする
+pub fn link_many(requested: Option<&str>, objs: &[&Path], out: &Path) -> Result<String, String> {
     let linker = pick(requested)?;
     let mut lpath = out.as_os_str().to_owned();
     lpath.push(".link");
     let lpath = PathBuf::from(lpath);
     // 保存したリンク行は (obj, out) のパスにだけ依存する
-    let header = format!("{}\n{}\n", obj.display(), out.display());
+    let mut header = String::new();
+    for o in objs {
+        header.push_str(&format!("{}\n", o.display()));
+    }
+    header.push_str(&format!("{}\n", out.display()));
     let args = match std::fs::read_to_string(&lpath) {
         Ok(s) if s.starts_with(&header) => s[header.len()..].lines().map(String::from).collect(),
         _ => {
-            let a = driver_args(obj, out)?;
+            let a = driver_args(objs, out)?;
             let _ = std::fs::write(&lpath, format!("{header}{}", a.join("\n")));
             a
         }

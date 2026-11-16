@@ -898,6 +898,18 @@ pub fn expand_thread_local(src: &str) -> Option<String> {
 /// - `m::Name` / `crate::m::Name` / `self::Name` / `super::Name` のパス
 /// (フィールド `x.name` / `name: T` / メソッド `.name(..)` は変えない)
 pub fn rename_module_collisions(src: &str) -> Option<String> {
+    rename_module_collisions_in(src, &[])
+}
+
+/// crates: クレートとして読み込んだモジュール (`pub mod geom { .. }`) の名前。その中のアイテムはぶつからなくても
+/// 必ず `geom__Name` にし (どのクレートと一緒にコンパイルしても同じシンボルになるように)、中の `crate::` はそのモジュールを指す
+pub fn rename_module_collisions_in(src: &str, crates: &[String]) -> Option<String> {
+    rename_module_collisions_fix(src, crates, &mut vec![])
+}
+
+/// fix: 名前を変えて桁がずれた所 (行, 新しいテキストでの桁, その行でそこから後ろのずれの合計)。
+/// 元の桁 = 桁 - ずれ (その行で桁が col 以上の最後の項)
+pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<(u32, u32, i32)>) -> Option<String> {
     if !src.contains("mod") {
         return None;
     }
@@ -999,6 +1011,7 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
             j += 1;
         }
     }
+    let in_crate = |m: usize| -> bool { m != usize::MAX && mods[m].0.first().is_some_and(|r| crates.iter().any(|c| c.as_bytes() == r.as_slice())) };
     let colliding = |n: &[u8]| -> bool {
         if std_names.iter().any(|x| x.as_slice() == n) && defs.iter().any(|d| d.0.as_slice() == n && d.1 != usize::MAX) {
             return true;
@@ -1035,7 +1048,7 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
         }
     }
     for d in &defs {
-        if d.1 != usize::MAX && colliding(&d.0) && !renamed.iter().any(|r| r.0 == d.1 && r.1 == d.0) {
+        if d.1 != usize::MAX && (in_crate(d.1) || colliding(&d.0)) && !renamed.iter().any(|r| r.0 == d.1 && r.1 == d.0) {
             renamed.push((d.1, d.0.clone(), new_name(d.1, &d.0)));
         }
     }
@@ -1046,9 +1059,11 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
     // モジュールのパス (`crate::a::b` / `a::b` / `self` / `super`) → mods の番号
     let resolve_mod = |from: usize, segs: &[Vec<u8>]| -> Option<usize> {
         let mut base: Vec<Vec<u8>> = if from == usize::MAX { vec![] } else { mods[from].0.clone() };
+        // (クレートのモジュールの中の `crate::` はそのモジュール)
+        let croot: Vec<Vec<u8>> = if in_crate(from) { vec![mods[from].0[0].clone()] } else { vec![] };
         let mut rest = segs;
         if rest.first().is_some_and(|x| x.as_slice() == b"crate") {
-            base = vec![];
+            base = croot.clone();
             rest = &rest[1..];
         } else if rest.first().is_some_and(|x| x.as_slice() == b"self") {
             rest = &rest[1..];
@@ -1062,6 +1077,13 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
             rel.extend(rest.iter().cloned());
             if let Some(i) = mods.iter().position(|m| m.0 == rel) {
                 return Some(i);
+            }
+            if !croot.is_empty() {
+                let mut rel = croot.clone();
+                rel.extend(rest.iter().cloned());
+                if let Some(i) = mods.iter().position(|m| m.0 == rel) {
+                    return Some(i);
+                }
             }
             base = vec![];
         }
@@ -1079,6 +1101,8 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
     let mut use_ranges: Vec<(usize, usize)> = vec![];
     // `use crate::m::*;` で取り込んだモジュール: (スコープ, モジュール)
     let mut globs: Vec<(usize, usize)> = vec![];
+    // (モジュール m の中で use した名前を取り込むもの: (スコープ, 使う名前, m, m の中の名前))
+    let mut pending: Vec<(usize, Vec<u8>, usize, Vec<u8>)> = vec![];
     let mut k = 0;
     while k < toks.len() {
         if !is_id(k, b"use") {
@@ -1163,6 +1187,9 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
             if let Some(m) = resolve_mod(sc, mpath) {
                 if let Some(nn) = renamed_in(m, &name[0]) {
                     imports.push((sc, local, nn));
+                } else if !defs.iter().any(|d| d.1 == m && d.0.as_slice() == name[0].as_slice()) {
+                    // (`pub use` で取り込み直した名前かもしれない: 後で解く)
+                    pending.push((sc, local, m, name[0].clone()));
                 } else if local.as_slice() != name[0].as_slice() && defs.iter().any(|d| d.1 == m && d.0.as_slice() == name[0].as_slice()) {
                     // (`use crate::parse::{FnSig as PSig}`: 別名はそのモジュールの中で元の名前に)
                     imports.push((sc, local, name[0].clone()));
@@ -1170,6 +1197,25 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
             }
         }
         k = e + 1;
+    }
+    // (再輸出 `pub use crate::shape::Shape;` を辿る)
+    for _ in 0..4 {
+        let mut progress = false;
+        let mut rest = vec![];
+        for p in std::mem::take(&mut pending) {
+            let found = imports.iter().find(|i| i.0 == p.2 && i.1 == p.3).map(|i| i.2.clone());
+            match found {
+                Some(nn) => {
+                    imports.push((p.0, p.1, nn));
+                    progress = true;
+                }
+                None => rest.push(p),
+            }
+        }
+        pending = rest;
+        if !progress {
+            break;
+        }
     }
     // enum のバリアント名の位置 (`enum E { Ty(Ty), A }` の `Ty` / `A`) は名前ではないので変えない
     let mut variant_toks: Vec<usize> = vec![];
@@ -1238,7 +1284,8 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
                     if m == usize::MAX && !(segs[0].as_slice() == b"crate") {
                         continue;
                     }
-                    if let Some(nn) = renamed_in(m, &segs[cut]) {
+                    let re = || imports.iter().find(|i| i.0 == m && i.1 == segs[cut]).map(|i| i.2.clone());
+                    if let Some(nn) = renamed_in(m, &segs[cut]).or_else(re) {
                         // segs[..=cut] を新しい名前にする
                         repl.push((k, k + 3 * cut, nn));
                         done = true;
@@ -1273,6 +1320,8 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
     repl.sort_by_key(|r| r.0);
     let mut out = Vec::with_capacity(s.len() + repl.len() * 8);
     let mut last = 0;
+    // (桁のずれ: 今の行と、その行の行頭の out の位置、ずれの合計)
+    let (mut line, mut line_start, mut cum, mut scanned) = (1u32, 0usize, 0i32, 0usize);
     for (a, b, t) in &repl {
         let (st, en) = (toks[*a].1, toks[*b].2);
         if st < last {
@@ -1281,13 +1330,36 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
         out.extend_from_slice(&s[last..st]);
         out.extend_from_slice(t);
         last = en;
+        while scanned < out.len() {
+            if out[scanned] == b'\n' {
+                line += 1;
+                line_start = scanned + 1;
+                cum = 0;
+            }
+            scanned += 1;
+        }
+        let d = t.len() as i32 - (en - st) as i32;
+        if d != 0 {
+            cum += d;
+            let col = String::from_utf8_lossy(&out[line_start..]).chars().count() as u32;
+            fix.push((line, col, cum));
+        }
     }
     out.extend_from_slice(&s[last..]);
     String::from_utf8(out).ok()
 }
 
 pub fn flatten_modules(src: &str) -> Option<String> {
-    let renamed = rename_module_collisions(src);
+    flatten_modules_in(src, &[])
+}
+
+pub fn flatten_modules_in(src: &str, crates: &[String]) -> Option<String> {
+    flatten_modules_fix(src, crates, &mut vec![])
+}
+
+/// fix: rename_module_collisions_fix と同じ (平らにするのは位置を変えない)
+pub fn flatten_modules_fix(src: &str, crates: &[String], fix: &mut Vec<(u32, u32, i32)>) -> Option<String> {
+    let renamed = rename_module_collisions_fix(src, crates, fix);
     let src: &str = renamed.as_deref().unwrap_or(src);
     if !src.contains("mod") {
         return None;

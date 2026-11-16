@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::acg::{self, Blob, ItemFn, Target};
+use crate::key::{Key, KeyHasher};
 use crate::fxhash::{FxMap, FxSet};
 use crate::lexer::{self, ItemKind, SrcItem};
 use crate::minclif::{DataDef, Reloc};
@@ -19,11 +20,17 @@ pub type R<T> = Result<T, String>;
 /// ユーザのソースの後ろに、使われうる prelude のアイテムを付ける (driver::with_prelude と同じ)。
 /// 返り値は (全体のソース, アイテム, ユーザのアイテムの数)
 pub fn with_prelude(src: &str) -> R<(String, Vec<SrcItem>, usize)> {
+    with_prelude_in(src, &[], &mut vec![])
+}
+
+/// crates: ソースの中のクレートのモジュールの名前 (lexer::rename_module_collisions_in)
+/// fix: モジュールの名前を変えて桁がずれた所 (lexer::rename_module_collisions_fix)
+pub fn with_prelude_in(src: &str, crates: &[String], fix: &mut Vec<(u32, u32, i32)>) -> R<(String, Vec<SrcItem>, usize)> {
     let tl = lexer::expand_thread_local(src);
     let src: &str = tl.as_deref().unwrap_or(src);
     let expanded = crate::macros::expand(src)?.or(tl.clone());
     let src: &str = expanded.as_deref().unwrap_or(src);
-    let flat = lexer::flatten_modules(src).or(expanded.clone());
+    let flat = lexer::flatten_modules_fix(src, crates, fix).or(expanded.clone());
     let src: &str = flat.as_deref().unwrap_or(src);
     let hoisted = lexer::hoist_nested_items(src).or(flat.clone());
     let src: &str = hoisted.as_deref().unwrap_or(src);
@@ -67,35 +74,274 @@ pub struct Analysis {
     pub items: Vec<SrcItem>,
     pub prog: Program,
     pub refs: Vec<Vec<u32>>,
+    /// 関数ごとの、名前で現れる struct と const / static (キャッシュのキー用)
+    pub srefs: Vec<Vec<u32>>,
+    pub crefs: Vec<Vec<u32>>,
+    /// 要約を作り直した (キャッシュになかった) アイテムの数
+    pub n_parsed: usize,
+    /// アイテムごとの、依存するクレートのものか (CrateCtx)
+    pub ext_items: Vec<bool>,
+}
+
+impl Analysis {
+    /// 依存するクレートの .o にある関数 (ここではコンパイルしない)
+    pub fn is_ext(&self, id: u32) -> bool {
+        concrete(&self.prog, id as usize) && self.prog.item_of[id as usize].is_some_and(|ii| self.ext_items[ii as usize])
+    }
+    /// 依存するクレートの static
+    pub fn is_ext_static(&self, ci: u32) -> bool {
+        self.ext_items.get(self.prog.consts[ci as usize].item as usize).copied().unwrap_or(false)
+    }
 }
 
 pub fn analyze(src0: &str, opt: bool) -> R<Analysis> {
-    let (src, items, user) = with_prelude(src0)?;
-    if let Some(p) = std::env::var_os("CRUSTC_DUMP_SRC") {
-        let _ = std::fs::write(p, &src);
+    Session2::new(Options2 { opt, no_cache: true, jobs: 1, ..Default::default() }).analyze(src0)
+}
+
+/// ドライバの設定
+#[derive(Clone, Debug)]
+pub struct Options2 {
+    pub opt: bool,
+    /// 関数のコンパイルに使うプロセスの数 (fork する)
+    pub jobs: usize,
+    pub linker: Option<String>,
+    pub no_cache: bool,
+    /// 段階ごとの時間を stderr に出す
+    pub time: bool,
+}
+
+impl Default for Options2 {
+    fn default() -> Self {
+        Options2 { opt: false, jobs: cpu_count(), linker: None, no_cache: false, time: false }
     }
-    let mut sums: Vec<Summary> = vec![Summary::default(); items.len()];
-    for pass in 0..2 {
-        for (i, it) in items.iter().enumerate() {
-            let header = matches!(it.kind, ItemKind::ImplHeader | ItemKind::TraitHeader);
-            if header != (pass == 0) {
-                continue;
-            }
-            let ow = if pass == 1 { crate::ast_summary::owner_of(it, &sums) } else { None };
-            sums[i] = crate::ast_summary::parse_and_summarize(&src, it, ow.as_ref()).map_err(|e| relocate(e, it))?;
+}
+
+/// 複数のクレートのうちの 1 つをコンパイルするときの情報。ソースは「このクレートのコード (1..=own_lines 行)」の後ろに
+/// 依存するクレートを `pub mod name { .. }` として付けたもの。依存するクレートの (総称でない) 関数と static は
+/// そのクレートの .o にあるので、ここではコンパイルせずシンボルで参照する
+#[derive(Clone, Debug, Default)]
+pub struct CrateCtx {
+    /// ライブラリをコンパイルするときはその名前 (総称でない関数と static を外に見せる)
+    pub lib: Option<String>,
+    /// このクレートのコードの行数 (0 なら全部)
+    pub own_lines: u32,
+    /// 結合したソースの行 → ファイル
+    pub map: crate::srcmap::SrcMap,
+    /// 依存するクレート (推移的に全部。実行ファイルの panic の表がそれらの表を指す)
+    pub deps: Vec<String>,
+}
+
+/// ビルドの結果
+#[derive(Clone, Debug, Default)]
+pub struct Report2 {
+    pub items_parsed: usize,
+    pub fns_compiled: usize,
+    pub fns_hit: usize,
+    pub object_bytes: usize,
+    pub linked: bool,
+}
+
+unsafe extern "C" {
+    #[link_name = "sysconf"]
+    fn c_sysconf(name: i32) -> i64;
+    #[link_name = "stat"]
+    fn c_stat(path: *const u8, buf: *mut u8) -> i32;
+    #[link_name = "clock_gettime"]
+    fn c_clock_gettime(clk: i32, ts: *mut i64) -> i32;
+    #[link_name = "fork"]
+    fn c_fork() -> i32;
+    #[link_name = "pipe"]
+    fn c_pipe(fds: *mut i32) -> i32;
+    #[link_name = "read"]
+    fn c_read(fd: i32, buf: *mut u8, n: usize) -> isize;
+    #[link_name = "write"]
+    fn c_write(fd: i32, buf: *const u8, n: usize) -> isize;
+    #[link_name = "close"]
+    fn c_close(fd: i32) -> i32;
+    #[link_name = "waitpid"]
+    fn c_waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    #[link_name = "mkdir"]
+    fn c_mkdir(path: *const u8, mode: u32) -> i32;
+    #[link_name = "_exit"]
+    fn c_exit(code: i32) -> !;
+}
+
+/// 使える CPU の数
+pub fn cpu_count() -> usize {
+    // SAFETY: _SC_NPROCESSORS_ONLN (84)
+    let n = unsafe { c_sysconf(84) };
+    if n < 1 { 1 } else { n as usize }
+}
+
+/// 単調時計 (ナノ秒)
+fn now_ns() -> u64 {
+    let mut ts = [0i64; 2];
+    // SAFETY: CLOCK_MONOTONIC (1)。ts は timespec と同じ並び
+    unsafe { c_clock_gettime(1, ts.as_mut_ptr()) };
+    ts[0] as u64 * 1_000_000_000 + ts[1] as u64
+}
+
+/// コンパイラ自身の識別 (実行ファイルの大きさと更新時刻): 作り直したらキャッシュを使わない
+fn compiler_id() -> Key {
+    let mut buf = [0u8; 256];
+    // SAFETY: "/proc/self/exe" は NUL で終わる。buf は struct stat (144 byte) より大きい
+    let r = unsafe { c_stat(b"/proc/self/exe\0".as_ptr(), buf.as_mut_ptr()) };
+    let mut h = KeyHasher::new();
+    h.add("driver2-1");
+    if r == 0 {
+        // (x86-64: st_size は 48、st_mtim は 88 / 96)
+        h.add(&buf[48..56]);
+        h.add(&buf[88..104]);
+    }
+    h.finish()
+}
+
+/// 時間の計測 (-time)
+struct Timer {
+    on: bool,
+    last: u64,
+    start: u64,
+}
+
+impl Timer {
+    fn lap(&mut self, what: &str, extra: String) {
+        if !self.on {
+            return;
+        }
+        let t = now_ns();
+        eprintln!("  {:<10} {:>8.2} ms  {}", what, (t - self.last) as f64 / 1e6, extra);
+        self.last = t;
+    }
+}
+
+/// キャッシュを持つドライバ (driver.rs の Session と同じ使い方)
+pub struct Session2 {
+    pub opts: Options2,
+    cid: Key,
+    disk: crate::cache2::Cache2,
+    mem: FxMap<Key, Vec<u8>>,
+    used: FxSet<Key>,
+    /// 複数のクレートのうちの 1 つをコンパイルするとき
+    pub ctx: CrateCtx,
+}
+
+impl Session2 {
+    pub fn new(opts: Options2) -> Session2 {
+        Session2 { opts, cid: compiler_id(), disk: crate::cache2::Cache2::empty(), mem: FxMap::default(), used: FxSet::default(), ctx: CrateCtx::default() }
+    }
+
+    pub fn load_cache(&mut self, path: &std::path::Path) {
+        if !self.opts.no_cache {
+            self.disk = crate::cache2::Cache2::open(path);
         }
     }
-    let mut prog = Program::build(&items, &sums)?;
-    prog.prelude_from = user as u32;
-    prog.overflow_checks = !opt;
-    prog.opt = opt;
-    resolve_opaque(&mut prog, &src, &items)?;
-    let mut refs = Vec::with_capacity(prog.item_of.len());
-    for ii in &prog.item_of {
-        let (f, _, _) = ii.map(|ii| prog.refs(&src, &items[ii as usize])).unwrap_or_default();
-        refs.push(f);
+
+    /// 今回使ったエントリだけを書く
+    pub fn save_cache(&mut self, path: &std::path::Path) -> Result<usize, String> {
+        if self.opts.no_cache {
+            return Ok(0);
+        }
+        let mut keys: Vec<Key> = self.used.iter().copied().collect();
+        keys.sort_unstable();
+        let mut entries: Vec<(Key, Vec<u8>)> = vec![];
+        for k in keys {
+            let v = match self.mem.get(&k) {
+                Some(v) => v.clone(),
+                None => match self.disk.get(k) {
+                    Some(v) => v.to_vec(),
+                    None => continue,
+                },
+            };
+            entries.push((k, v));
+        }
+        let refs: Vec<(Key, &[u8])> = entries.iter().map(|(k, v)| (*k, &v[..])).collect();
+        let n = crate::cache2::Cache2::save(path, &refs)?;
+        let used = std::mem::take(&mut self.used);
+        self.mem.retain(|k, _| used.contains(k));
+        Ok(n)
     }
-    Ok(Analysis { src, items, prog, refs })
+
+    fn get(&mut self, k: Key) -> Option<Vec<u8>> {
+        if self.opts.no_cache {
+            return None;
+        }
+        self.used.insert(k);
+        match self.mem.get(&k) {
+            Some(v) => Some(v.clone()),
+            None => self.disk.get(k).map(|v| v.to_vec()),
+        }
+    }
+
+    fn put(&mut self, k: Key, v: Vec<u8>) {
+        if self.opts.no_cache {
+            return;
+        }
+        self.used.insert(k);
+        self.mem.insert(k, v);
+    }
+
+    /// 要約はアイテムのハッシュで引く
+    pub fn analyze(&mut self, src0: &str) -> R<Analysis> {
+        let mut crates = self.ctx.deps.clone();
+        crates.extend(self.ctx.lib.iter().cloned());
+        let mut fix = vec![];
+        let (src, items, user) = with_prelude_in(src0, &crates, &mut fix)?;
+        self.ctx.map.colfix = fix;
+        if let Some(p) = std::env::var_os("CRUSTC_DUMP_SRC") {
+            let _ = std::fs::write(p, &src);
+        }
+        let cid = self.cid;
+        let mut sums: Vec<Summary> = vec![Summary::default(); items.len()];
+        let mut n_parsed = 0;
+        for pass in 0..2 {
+            for (i, it) in items.iter().enumerate() {
+                let header = matches!(it.kind, ItemKind::ImplHeader | ItemKind::TraitHeader);
+                if header != (pass == 0) {
+                    continue;
+                }
+                let mut h = KeyHasher::new();
+                h.add(&cid);
+                h.add(&0u8);
+                h.add(&it.hash);
+                let k = h.finish();
+                if let Some(sm) = self.get(k).and_then(|d| Summary::decode(&d)) {
+                    sums[i] = sm;
+                    continue;
+                }
+                let ow = if pass == 1 { crate::ast_summary::owner_of(it, &sums) } else { None };
+                sums[i] = crate::ast_summary::parse_and_summarize(&src, it, ow.as_ref()).map_err(|e| relocate(e, it))?;
+                n_parsed += 1;
+                let mut b = vec![];
+                sums[i].encode(&mut b);
+                self.put(k, b);
+            }
+        }
+        let mut prog = Program::build_with(&items, &sums, self.ctx.lib.is_none())?;
+        prog.prelude_from = user as u32;
+        prog.overflow_checks = !self.opts.opt;
+        prog.opt = self.opts.opt;
+        resolve_opaque(&mut prog, &src, &items)?;
+        let ol = self.ctx.own_lines as usize;
+        let ext_items: Vec<bool> = items.iter().enumerate().map(|(i, it)| ol > 0 && i < user && it.line > ol).collect();
+        // (ライブラリ: 自分の総称でない関数は全部外に見せる (使う側のクレートが呼ぶ))
+        if self.ctx.lib.is_some() {
+            for id in 0..prog.names.len() {
+                if concrete(&prog, id) && prog.item_of[id].is_some_and(|ii| (ii as usize) < user && !ext_items[ii as usize]) {
+                    prog.sigs[id].export = true;
+                }
+            }
+        }
+        let mut refs = Vec::with_capacity(prog.item_of.len());
+        let mut srefs = Vec::with_capacity(prog.item_of.len());
+        let mut crefs = Vec::with_capacity(prog.item_of.len());
+        for ii in &prog.item_of {
+            let (f, st, c) = ii.map(|ii| prog.refs(&src, &items[ii as usize])).unwrap_or_default();
+            refs.push(f);
+            srefs.push(st);
+            crefs.push(c);
+        }
+        Ok(Analysis { src, items, prog, refs, srefs, crefs, n_parsed, ext_items })
+    }
 }
 
 /// `-> impl Iterator<..>` の戻り値を本体の型推論で決める (front.rs の resolve_opaque と同じ)
@@ -219,63 +465,293 @@ fn concrete(p: &Program, id: usize) -> bool {
     p.item_of[id].is_some() && !p.sigs[id].is_generic() && p.sigs[id].has_body
 }
 
-/// ソースから ELF の .o を作る
+/// ソースから ELF の .o を作る (キャッシュも並列化もしない)
 pub fn build_object(src0: &str, opt: bool) -> R<Vec<u8>> {
-    let a = analyze(src0, opt)?;
-    let mut live = a.prog.reachable(&a.refs);
-    let mut user_live: Vec<u32> = (0..a.prog.names.len()).filter(|&i| live[i] && concrete(&a.prog, i)).map(|i| i as u32).collect();
-    let insts = Mutex::new(Insts::new(&a.prog));
-    let mut blobs: FxMap<u32, Blob> = FxMap::default();
-    let mut wave = user_live.clone();
-    while !wave.is_empty() {
-        for &id in &wave {
-            if blobs.contains_key(&id) {
-                continue;
-            }
-            let body = insts.lock().unwrap().body_of(id);
-            let f = fn_ast(&a, body)?;
-            let ii = a.prog.item_of[body as usize].unwrap() as usize;
-            let it = &a.items[ii];
-            // (acg のエラーはファイルの中の `行:桁:` を持つ。持たないものはアイテムの先頭の行にする)
-            let (b, _) = acg::compile(&a.prog, &insts, id, &f, it.line as u32 - 1)
-                .map_err(|e| if acg::has_loc(&e) { e } else { format!("{}:1: in `{}`: {e}", it.line, a.prog.names[body as usize]) })?;
-            blobs.insert(id, b);
+    let mut s = Session2::new(Options2 { opt, no_cache: true, jobs: 1, ..Default::default() });
+    let a = s.analyze(src0)?;
+    s.compile_object(&a, &mut Report2::default(), None)
+}
+
+/// ソースから実行ファイルを作る (キャッシュも並列化もしない)
+pub fn build(src: &str, output: &std::path::Path, opt: bool, linker: Option<&str>) -> R<()> {
+    let mut s = Session2::new(Options2 { opt, no_cache: true, jobs: 1, linker: linker.map(|l| l.to_string()), ..Default::default() });
+    s.build(src, output).map(|_| ())
+}
+
+/// 子プロセスから受け取るコンパイル結果の並び: (失敗か, 番号, 中身)
+fn read_all(fd: i32) -> Vec<u8> {
+    let mut out = vec![];
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        // SAFETY: buf は buf.len() byte ある
+        let n = unsafe { c_read(fd, buf.as_mut_ptr(), buf.len()) };
+        if n <= 0 {
+            break;
         }
-        wave = std::mem::take(&mut insts.lock().unwrap().pending);
-        wave.retain(|id| !blobs.contains_key(id));
-        let starts: Vec<u32> = {
-            let g = insts.lock().unwrap();
-            wave.iter().map(|&id| g.body_of(id)).collect()
-        };
-        let mut stack: Vec<u32> = starts.iter().flat_map(|&b| a.refs[b as usize].iter().copied()).collect();
-        if starts.iter().any(|&b| matches!(a.prog.names[b as usize].as_str(), "__exr_display" | "__exr_debug")) {
-            stack.extend((0..a.prog.names.len() as u32).filter(|&i| matches!(a.prog.sigs[i as usize].impl_trait.as_deref(), Some("Display" | "Debug"))));
+        out.extend_from_slice(&buf[..n as usize]);
+    }
+    out
+}
+
+fn write_all(fd: i32, mut d: &[u8]) {
+    while !d.is_empty() {
+        // SAFETY: d は d.len() byte ある
+        let n = unsafe { c_write(fd, d.as_ptr(), d.len()) };
+        if n <= 0 {
+            return;
         }
-        while let Some(i) = stack.pop() {
-            if std::mem::replace(&mut live[i as usize], true) {
-                continue;
-            }
-            stack.extend(a.refs[i as usize].iter().copied());
-            if concrete(&a.prog, i as usize) && !blobs.contains_key(&i) {
-                user_live.push(i);
-                wave.push(i);
+        d = &d[n as usize..];
+    }
+}
+
+impl Session2 {
+    /// 関数 id のキャッシュのキー: 本体のハッシュ + 自分と参照先のシグネチャ + 名前で現れる struct (レイアウトごと) + const
+    fn fn_key(&self, a: &Analysis, id: usize) -> Key {
+        let ii = a.prog.item_of[id].unwrap() as usize;
+        let mut h = KeyHasher::new();
+        h.add(&self.cid);
+        h.add(&1u8);
+        h.add(&(self.opts.opt as u8));
+        h.add(&a.items[ii].hash);
+        if a.prog.closures.contains_key(&(id as u32)) {
+            h.add(&a.prog.names[id]);
+        }
+        a.prog.hash_sig(id as u32, &mut h);
+        for &r in &a.refs[id] {
+            a.prog.hash_sig(r, &mut h);
+        }
+        for &st in &a.srefs[id] {
+            h.add(&a.prog.structs[st as usize].deep);
+        }
+        for &c in &a.crefs[id] {
+            let cd = &a.prog.consts[c as usize];
+            h.add(&cd.name);
+            h.add(&a.items[cd.item as usize].hash);
+            a.prog.hash_ty(cd.ty, &mut h);
+        }
+        h.finish()
+    }
+
+    /// 関数かインスタンスのキー (インスタンスは元の関数のキー + 型引数)
+    fn key_of(&self, a: &Analysis, insts: &Mutex<Insts>, id: u32) -> Key {
+        let g = insts.lock().unwrap();
+        let k = self.fn_key(a, g.body_of(id) as usize);
+        match g.get(id) {
+            None => k,
+            Some(inst) => {
+                let mut h = KeyHasher::new();
+                h.add(&k);
+                h.add(&7u8);
+                for &t in &inst.args {
+                    a.prog.hash_ty(t, &mut h);
+                }
+                h.finish()
             }
         }
     }
-    let insts = insts.into_inner().unwrap();
-    emit_object(&a.prog, &insts, &user_live, &blobs)
+
+    /// ids をコンパイルする (jobs > 1 で数が多ければ fork した子プロセスで分けて)。結果は ids と同じ順
+    fn compile_many(&self, a: &Analysis, insts: &Mutex<Insts>, ids: &[u32]) -> R<Vec<Blob>> {
+        let jobs = self.opts.jobs.min(ids.len() / 16).max(1);
+        if jobs <= 1 {
+            let mut out = vec![];
+            for &id in ids {
+                out.push(compile_id(a, insts, id)?);
+            }
+            return Ok(out);
+        }
+        // 子プロセス k は ids[i] (i % jobs == k) をコンパイルし、(番号, 失敗か, 中身) の並びを pipe に書く
+        let mut kids = vec![];
+        for k in 0..jobs {
+            let mut fds = [0i32; 2];
+            // SAFETY: fds は 2 つの int
+            if unsafe { c_pipe(fds.as_mut_ptr()) } != 0 {
+                return Err("pipe failed".into());
+            }
+            // SAFETY: 子はコンパイルして書くだけで _exit する
+            let pid = unsafe { c_fork() };
+            if pid < 0 {
+                return Err("fork failed".into());
+            }
+            if pid == 0 {
+                unsafe { c_close(fds[0]) };
+                let mut buf = vec![];
+                let mut i = k;
+                while i < ids.len() {
+                    crate::cache2::put_uv(&mut buf, i as u64);
+                    match compile_id(a, insts, ids[i]) {
+                        Ok(b) => {
+                            let mut e = vec![];
+                            {
+                                let g = insts.lock().unwrap();
+                                crate::cache2::encode_blob(&b, &a.prog, &*g, &mut e);
+                            }
+                            buf.push(0);
+                            crate::cache2::put_uv(&mut buf, e.len() as u64);
+                            buf.extend_from_slice(&e);
+                        }
+                        Err(m) => {
+                            buf.push(1);
+                            crate::cache2::put_uv(&mut buf, m.len() as u64);
+                            buf.extend_from_slice(m.as_bytes());
+                        }
+                    }
+                    i += jobs;
+                }
+                write_all(fds[1], &buf);
+                unsafe { c_close(fds[1]) };
+                unsafe { c_exit(0) };
+            }
+            unsafe { c_close(fds[1]) };
+            kids.push((pid, fds[0]));
+        }
+        let mut res: Vec<Option<Result<Vec<u8>, String>>> = (0..ids.len()).map(|_| None).collect();
+        for &(pid, fd) in &kids {
+            let d = read_all(fd);
+            unsafe { c_close(fd) };
+            let mut st = 0i32;
+            unsafe { c_waitpid(pid, &mut st, 0) };
+            let mut r = crate::cache2::Rd { d: &d, pos: 0 };
+            while r.pos < d.len() {
+                let (Some(i), Some(fail), Some(n)) = (r.uv(), r.u8(), r.uv()) else { break };
+                let Some(body) = r.take(n as usize) else { break };
+                let v = if fail == 0 { Ok(body.to_vec()) } else { Err(String::from_utf8_lossy(body).into_owned()) };
+                if let Some(slot) = res.get_mut(i as usize) {
+                    *slot = Some(v);
+                }
+            }
+        }
+        // (順に読み戻す: 子が要求したインスタンスはここで要求し直す。失敗は ids の順で最初のもの)
+        let mut out = vec![];
+        for (i, r) in res.into_iter().enumerate() {
+            match r {
+                Some(Ok(d)) => out.push(crate::cache2::decode_blob(&d, &a.prog, insts).ok_or("internal: cannot decode a compiled function")?),
+                Some(Err(m)) => return Err(m),
+                None => {
+                    // (子が落ちた: その関数はここでコンパイルする (エラーが出るならそれが出る))
+                    out.push(compile_id(a, insts, ids[i])?);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// 解析済みのプログラムの .o を作る (キャッシュを引き、なければコンパイルしてキャッシュに入れる)
+    fn compile_object(&mut self, a: &Analysis, rep: &mut Report2, tm: Option<&mut Timer>) -> R<Vec<u8>> {
+        let mut live = a.prog.reachable(&a.refs);
+        let mut user_live: Vec<u32> = (0..a.prog.names.len()).filter(|&i| live[i] && concrete(&a.prog, i) && !a.is_ext(i as u32)).map(|i| i as u32).collect();
+        let insts = Mutex::new(Insts::new(&a.prog));
+        let mut blobs: FxMap<u32, Blob> = FxMap::default();
+        let mut wave = user_live.clone();
+        while !wave.is_empty() {
+            let mut misses = vec![];
+            let mut keys: FxMap<u32, Key> = FxMap::default();
+            for &id in &wave {
+                if blobs.contains_key(&id) || keys.contains_key(&id) {
+                    continue;
+                }
+                let k = self.key_of(a, &insts, id);
+                keys.insert(id, k);
+                // (場所を書き込んだ関数は、アイテムの開始行が変わっていたら使わない)
+                let lb = {
+                    let body = insts.lock().unwrap().body_of(id);
+                    a.prog.item_of[body as usize].map(|i| a.items[i as usize].line as u32 - 1)
+                };
+                let hit = self.get(k).and_then(|d| crate::cache2::decode_blob(&d, &a.prog, &insts)).filter(|b| b.line_base.is_none() || b.line_base == lb);
+                match hit {
+                    Some(b) => {
+                        rep.fns_hit += 1;
+                        blobs.insert(id, b);
+                    }
+                    None => misses.push(id),
+                }
+            }
+            let compiled = self.compile_many(a, &insts, &misses)?;
+            rep.fns_compiled += misses.len();
+            for (&id, b) in misses.iter().zip(compiled) {
+                if !self.opts.no_cache {
+                    let mut e = vec![];
+                    {
+                                let g = insts.lock().unwrap();
+                                crate::cache2::encode_blob(&b, &a.prog, &*g, &mut e);
+                            }
+                    self.put(keys[&id], e);
+                }
+                blobs.insert(id, b);
+            }
+            wave = std::mem::take(&mut insts.lock().unwrap().pending);
+            wave.retain(|id| !blobs.contains_key(id));
+            let starts: Vec<u32> = {
+                let g = insts.lock().unwrap();
+                wave.iter().map(|&id| g.body_of(id)).collect()
+            };
+            let mut stack: Vec<u32> = starts.iter().flat_map(|&b| a.refs[b as usize].iter().copied()).collect();
+            if starts.iter().any(|&b| matches!(a.prog.names[b as usize].as_str(), "__exr_display" | "__exr_debug")) {
+                stack.extend((0..a.prog.names.len() as u32).filter(|&i| matches!(a.prog.sigs[i as usize].impl_trait.as_deref(), Some("Display" | "Debug"))));
+            }
+            while let Some(i) = stack.pop() {
+                if std::mem::replace(&mut live[i as usize], true) {
+                    continue;
+                }
+                if a.is_ext(i) {
+                    continue;
+                }
+                stack.extend(a.refs[i as usize].iter().copied());
+                if concrete(&a.prog, i as usize) && !blobs.contains_key(&i) {
+                    user_live.push(i);
+                    wave.push(i);
+                }
+            }
+        }
+        let insts = insts.into_inner().unwrap();
+        if let Some(tm) = tm {
+            tm.lap("codegen", format!("{} hit / {} compiled ({} generic instances, {} jobs)", rep.fns_hit, rep.fns_compiled, insts.list.len(), self.opts.jobs));
+        }
+        emit_object(a, &self.ctx, &insts, &user_live, &blobs)
+    }
+
+    /// ソースから実行ファイルを作る。前回と同じ .o ならリンクしない
+    pub fn build(&mut self, src: &str, output: &std::path::Path) -> R<Report2> {
+        let t0 = now_ns();
+        let mut tm = Timer { on: self.opts.time, last: t0, start: t0 };
+        let mut rep = Report2::default();
+        let a = self.analyze(src)?;
+        rep.items_parsed = a.n_parsed;
+        tm.lap("front", format!("{} items, {} parsed", a.items.len(), a.n_parsed));
+        let obj = self.compile_object(&a, &mut rep, Some(&mut tm))?;
+        tm.lap("object", format!("{} bytes", obj.len()));
+        rep.object_bytes = obj.len();
+        let obj_path = output.with_extension("o");
+        let same = std::fs::read(&obj_path).is_ok_and(|old| old == obj) && std::fs::read(output).is_ok();
+        if same {
+            tm.lap("link", "skipped (object unchanged)".to_string());
+        } else {
+            std::fs::write(&obj_path, &obj).map_err(|e| e.to_string())?;
+            let used = crate::link::link(self.opts.linker.as_deref(), obj_path.as_path(), output)?;
+            rep.linked = true;
+            tm.lap("link", used);
+        }
+        if self.opts.time {
+            eprintln!("  {:<10} {:>8.2} ms", "total", (now_ns() - tm.start) as f64 / 1e6);
+        }
+        Ok(rep)
+    }
 }
 
-/// ソースから実行ファイルを作る
-pub fn build(src: &str, output: &std::path::Path, opt: bool, linker: Option<&str>) -> R<()> {
-    let obj = build_object(src, opt)?;
-    let obj_path = output.with_extension("o");
-    std::fs::write(&obj_path, &obj).map_err(|e| e.to_string())?;
-    crate::link::link(linker, obj_path.as_path(), output)?;
-    Ok(())
+/// 関数 (インスタンス) 1 つをコンパイルする
+fn compile_id(a: &Analysis, insts: &Mutex<Insts>, id: u32) -> R<Blob> {
+    let body = insts.lock().unwrap().body_of(id);
+    let f = fn_ast(a, body)?;
+    let ii = a.prog.item_of[body as usize].unwrap() as usize;
+    let it = &a.items[ii];
+    // (acg のエラーはファイルの中の `行:桁:` を持つ。持たないものはアイテムの先頭の行にする)
+    let (b, _) = acg::compile(&a.prog, insts, id, &f, it.line as u32 - 1)
+        .map_err(|e| if acg::has_loc(&e) { e } else { format!("{}:1: in `{}`: {e}", it.line, a.prog.names[body as usize]) })?;
+    Ok(b)
 }
 
-fn emit_object(prog: &Program, insts: &Insts, user_live: &[u32], blobs: &FxMap<u32, Blob>) -> R<Vec<u8>> {
+fn emit_object(a: &Analysis, ctx: &CrateCtx, insts: &Insts, user_live: &[u32], blobs: &FxMap<u32, Blob>) -> R<Vec<u8>> {
+    let prog = &a.prog;
     let sym_of = |id: u32| -> &str {
         match insts.get(id) {
             Some(i) => &i.sig.symbol,
@@ -406,7 +882,11 @@ fn emit_object(prog: &Program, insts: &Insts, user_live: &[u32], blobs: &FxMap<u
         datas.push((n.clone(), bytes.to_vec(), vec![], false));
         n
     };
-    let static_name = |ci: u32| format!("_xS{}", prog.consts[ci as usize].name);
+    // (ライブラリの panic の表は `_xT_<名前>` で外に見せる: 実行ファイルの表がそれを指す)
+    let static_name = |ci: u32| match (&ctx.lib, prog.consts[ci as usize].name.as_str()) {
+        (Some(l), "__EXR_TRAP_TABLE") => format!("_xT_{l}"),
+        _ => format!("_xS{}", prog.consts[ci as usize].name),
+    };
     let mut todo: Vec<u32> = vec![];
     for u in &placed {
         for r in &blobs[u].relocs {
@@ -427,6 +907,10 @@ fn emit_object(prog: &Program, insts: &Insts, user_live: &[u32], blobs: &FxMap<u
         let c = &prog.consts[ci as usize];
         if c.name == "__EXR_TRAP_TABLE" {
             trap_table = Some(ci);
+            continue;
+        }
+        // (依存するクレートの static はそちらの .o にある)
+        if a.is_ext_static(ci) {
             continue;
         }
         let dv = crate::ast_consteval::eval_src(prog, &c.expr, c.ty).map_err(|e| format!("in static `{}`: {e}", c.name))?;
@@ -456,7 +940,14 @@ fn emit_object(prog: &Program, insts: &Insts, user_live: &[u32], blobs: &FxMap<u
             }
             datas.push((name, dv.bytes, rs, false));
         }
+        let n0 = datas.len();
         place(dv, static_name(ci), &mut datas, &mut todo, &mut nested, &static_name);
+        // (ライブラリの static は外に見せる)
+        if ctx.lib.is_some() && c.item < a.prog.prelude_from && !a.ext_items[c.item as usize] {
+            if let Some(d) = datas[n0..].iter_mut().find(|d| d.0 == static_name(ci)) {
+                d.3 = true;
+            }
+        }
     }
     // 関数とその再配置
     let mut funcs: Vec<(String, Vec<u8>, Vec<Reloc>, bool)> = vec![];
@@ -475,7 +966,7 @@ fn emit_object(prog: &Program, insts: &Insts, user_live: &[u32], blobs: &FxMap<u
             let n = format!(".Lxv{}", vts.len());
             let mut rs = vec![];
             for (i, &f) in vt.iter().enumerate() {
-                if f != u32::MAX && (reach.contains(&resolve(f)) || prog.sigs.get(f as usize).is_some_and(|s| s.is_extern)) {
+                if f != u32::MAX && (reach.contains(&resolve(f)) || prog.sigs.get(f as usize).is_some_and(|s| s.is_extern) || a.is_ext(f)) {
                     rs.push((8 * i as u32, fname(f), 0));
                 }
             }
@@ -512,8 +1003,12 @@ fn emit_object(prog: &Program, insts: &Insts, user_live: &[u32], blobs: &FxMap<u
         funcs.push((sym_of(uid).to_string(), blob.code.clone(), relocs, global));
     }
     // panic の trap の表 (driver.rs と同じ形式)
-    if let Some(ci) = trap_table {
-        let mut bytes: Vec<u8> = vec![0; 8];
+    if trap_table.is_some() || ctx.lib.is_some() {
+        let tname = match (trap_table, &ctx.lib) {
+            (Some(ci), _) => static_name(ci),
+            (None, l) => format!("_xT_{}", l.clone().unwrap_or_default()),
+        };
+        let mut bytes: Vec<u8> = vec![0; 16];
         let uv = |out: &mut Vec<u8>, mut v: u64| {
             while v >= 0x80 {
                 out.push(v as u8 | 0x80);
@@ -558,6 +1053,23 @@ fn emit_object(prog: &Program, insts: &Insts, user_live: &[u32], blobs: &FxMap<u
                 uv(&mut fbytes, col);
             }
         }
+        // (ファイルの対応: 結合したソースの行 → ファイル)
+        uv(&mut bytes, ctx.map.segs.len() as u64);
+        for &(st, fi, first) in &ctx.map.segs {
+            uv(&mut bytes, st as u64);
+            uv(&mut bytes, first as u64);
+            let n = ctx.map.files.get(fi as usize).map(|s| s.as_str()).unwrap_or("src/main.rs");
+            uv(&mut bytes, n.len() as u64);
+            bytes.extend_from_slice(n.as_bytes());
+        }
+        // (桁のずれ: (行, 桁, ずれ (zigzag)))
+        uv(&mut bytes, ctx.map.colfix.len() as u64);
+        for &(l, c, d) in &ctx.map.colfix {
+            uv(&mut bytes, l as u64);
+            uv(&mut bytes, c as u64);
+            let d = d as i64;
+            uv(&mut bytes, ((d << 1) ^ (d >> 63)) as u64);
+        }
         uv(&mut bytes, msgs.len() as u64);
         for mb in &msgs {
             uv(&mut bytes, mb.len() as u64);
@@ -565,11 +1077,230 @@ fn emit_object(prog: &Program, insts: &Insts, user_live: &[u32], blobs: &FxMap<u
         }
         uv(&mut bytes, nf);
         bytes.extend_from_slice(&fbytes);
-        let rs = match funcs.first() {
+        let mut rs = match funcs.first() {
             Some(f) => vec![(0u32, f.0.clone(), 0i64)],
             None => vec![],
         };
-        datas.push((static_name(ci), bytes, rs, false));
+        // (実行ファイル: 8 byte 目に依存するクレートの表の列 [数, アドレス *])
+        if ctx.lib.is_none() && !ctx.deps.is_empty() {
+            let mut ext = vec![0u8; 8 * (1 + ctx.deps.len())];
+            ext[..8].copy_from_slice(&(ctx.deps.len() as u64).to_le_bytes());
+            let ers: Vec<(u32, String, i64)> = ctx.deps.iter().enumerate().map(|(i, d)| (8 * (i as u32 + 1), format!("_xT_{d}"), 0i64)).collect();
+            datas.push((".Lxext".to_string(), ext, ers, false));
+            rs.push((8, ".Lxext".to_string(), 0));
+        }
+        datas.push((tname, bytes, rs, ctx.lib.is_some()));
     }
     Ok(crate::minclif::write_object_full(&funcs, &datas))
+}
+
+/// ワークスペースの 1 つのクレート
+#[derive(Clone, Debug)]
+pub struct CrateSpec {
+    pub name: String,
+    /// 根のファイル (lib.rs / main.rs)
+    pub root: std::path::PathBuf,
+    /// 表示するパス (panic とエラーの場所)
+    pub display: String,
+    pub lib: bool,
+    /// 直接依存するクレートの名前
+    pub deps: Vec<String>,
+}
+
+/// ワークスペースの説明ファイルを読む。1 行に 1 クレート: `lib <名前> <根のファイル> [依存...]` / `bin <名前> <根のファイル> [依存...]`
+/// (`#` から後ろはコメント。パスは説明ファイルのディレクトリから)
+pub fn read_workspace(path: &std::path::Path) -> R<Vec<CrateSpec>> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+    let mut out: Vec<CrateSpec> = vec![];
+    for (i, line) in text.lines().enumerate() {
+        let line = match line.find('#') {
+            Some(k) => &line[..k],
+            None => line,
+        };
+        let w: Vec<&str> = line.split_whitespace().collect();
+        if w.is_empty() {
+            continue;
+        }
+        if w.len() < 3 || (w[0] != "lib" && w[0] != "bin") {
+            return Err(format!("{}:{}: expected `lib|bin <name> <root> [deps...]`", path.display(), i + 1));
+        }
+        out.push(CrateSpec {
+            name: w[1].to_string(),
+            root: dir.join(w[2]),
+            display: w[2].to_string(),
+            lib: w[0] == "lib",
+            deps: w[3..].iter().map(|s| s.to_string()).collect(),
+        });
+    }
+    Ok(out)
+}
+
+/// ワークスペースのビルドの結果 (クレートごと)
+#[derive(Clone, Debug, Default)]
+pub struct WsReport {
+    pub crates: Vec<(String, Report2)>,
+    /// 書き直した .o の数
+    pub objects_written: usize,
+    pub linked: usize,
+}
+
+/// 依存の順 (依存されるものが先) に並べる
+fn topo(crates: &[CrateSpec]) -> R<Vec<usize>> {
+    let mut order: Vec<usize> = vec![];
+    let mut state = vec![0u8; crates.len()];
+    fn visit(i: usize, crates: &[CrateSpec], state: &mut Vec<u8>, order: &mut Vec<usize>) -> R<()> {
+        if state[i] == 2 {
+            return Ok(());
+        }
+        if state[i] == 1 {
+            return Err(format!("dependency cycle at crate `{}`", crates[i].name));
+        }
+        state[i] = 1;
+        for d in &crates[i].deps {
+            let j = crates.iter().position(|c| &c.name == d).ok_or(format!("crate `{}`: unknown dependency `{d}`", crates[i].name))?;
+            if !crates[j].lib {
+                return Err(format!("crate `{}`: dependency `{d}` is not a lib", crates[i].name));
+            }
+            visit(j, crates, state, order)?;
+        }
+        state[i] = 2;
+        order.push(i);
+        Ok(())
+    }
+    for i in 0..crates.len() {
+        visit(i, crates, &mut state, &mut order)?;
+    }
+    Ok(order)
+}
+
+/// ディレクトリを (親も) 作る (std::fs::create_dir_all の代わり: crustc の std にはない)
+fn mkdir_all(dir: &std::path::Path) -> R<()> {
+    let s = format!("{}", dir.display());
+    let b = s.as_bytes();
+    for i in 1..=b.len() {
+        if i == b.len() || b[i] == b'/' {
+            let p = format!("{}\0", &s[..i]);
+            // SAFETY: NUL で終わる文字列
+            unsafe { c_mkdir(p.as_bytes().as_ptr(), 0o755) };
+        }
+    }
+    if dir.is_dir() { Ok(()) } else { Err(format!("{}: cannot create the directory", dir.display())) }
+}
+
+fn n_lines(s: &str) -> u32 {
+    s.as_bytes().iter().filter(|&&c| c == b'\n').count() as u32
+}
+
+impl Session2 {
+    /// 1 つのクレート (複数のファイル) をビルドする: 根のファイルから `mod x;` を辿る
+    pub fn build_path(&mut self, root: &std::path::Path, display: &str, output: &std::path::Path) -> R<Report2> {
+        let (src, map) = crate::srcmap::load_crate(root, display)?;
+        self.ctx = CrateCtx { map: map.clone(), ..Default::default() };
+        // (1 ファイルなら場所は `行:桁:` のまま (呼ぶ側がファイル名を付ける))
+        let r = self.build(&src, output).map_err(|e| if map.files.len() > 1 { self.ctx.map.relocate_err(&e) } else { e });
+        self.ctx = CrateCtx::default();
+        r
+    }
+
+    /// ワークスペースをビルドする: クレートごとに .o を out_dir に作り (変わらなければ書かない)、
+    /// bin ごとに自分と依存するクレートの .o をリンクする。キャッシュはこの Session2 のものを共有する
+    pub fn build_workspace(&mut self, crates: &[CrateSpec], out_dir: &std::path::Path) -> R<WsReport> {
+        let t0 = now_ns();
+        let order = topo(crates)?;
+        mkdir_all(out_dir)?;
+        // (読んだクレートのソース: 名前 → (`pub mod 名前 { .. }` にしたテキスト, ファイルの対応))
+        let mut loaded: Vec<Option<(String, crate::srcmap::SrcMap)>> = vec![None; crates.len()];
+        for &i in &order {
+            let c = &crates[i];
+            let (text, map) = crate::srcmap::load_crate(c.root.as_path(), &c.display)?;
+            let text = if c.lib { format!("pub mod {} {{ {text}\n}}\n", c.name) } else { text };
+            loaded[i] = Some((text, map));
+        }
+        let mut rep = WsReport::default();
+        let mut changed = vec![false; crates.len()];
+        // (推移的な依存: 依存の順)
+        let all_deps = |i: usize| -> Vec<usize> {
+            let mut seen = vec![false; crates.len()];
+            let mut st: Vec<usize> = vec![i];
+            while let Some(k) = st.pop() {
+                for d in &crates[k].deps {
+                    if let Some(j) = crates.iter().position(|c| &c.name == d) {
+                        if !seen[j] {
+                            seen[j] = true;
+                            st.push(j);
+                        }
+                    }
+                }
+            }
+            order.iter().copied().filter(|&j| seen[j]).collect()
+        };
+        for &i in &order {
+            let c = &crates[i];
+            let deps = all_deps(i);
+            // ソース: 自分 + 依存するクレート (後ろに付ける)
+            let (own, own_map) = loaded[i].clone().unwrap();
+            let mut src = own.clone();
+            let mut map = own_map.clone();
+            src.push('\n');
+            for &j in &deps {
+                let (t, m) = loaded[j].as_ref().unwrap();
+                let at = n_lines(&src) + 1;
+                let f0 = map.files.len() as u32;
+                for &(s, f, first) in &m.segs {
+                    map.segs.push((s + at - 1, f + f0, first));
+                }
+                map.files.extend(m.files.iter().cloned());
+                src.push_str(t);
+                src.push('\n');
+            }
+            self.ctx = CrateCtx {
+                lib: if c.lib { Some(c.name.clone()) } else { None },
+                own_lines: n_lines(&own) + 1,
+                map: map.clone(),
+                deps: deps.iter().map(|&j| crates[j].name.clone()).collect(),
+            };
+            let t1 = now_ns();
+            let mut r = Report2::default();
+            let a = self.analyze(&src).map_err(|e| format!("crate `{}`: {}", c.name, self.ctx.map.relocate_err(&e)))?;
+            r.items_parsed = a.n_parsed;
+            let obj = self.compile_object(&a, &mut r, None).map_err(|e| format!("crate `{}`: {}", c.name, self.ctx.map.relocate_err(&e)))?;
+            r.object_bytes = obj.len();
+            let op = out_dir.join(format!("{}.o", c.name).as_str());
+            if !std::fs::read(op.as_path()).is_ok_and(|old| old == obj) {
+                std::fs::write(op.as_path(), &obj).map_err(|e| format!("{}: {e}", op.display()))?;
+                changed[i] = true;
+                rep.objects_written += 1;
+            }
+            if self.opts.time {
+                eprintln!("  {:<12} {:>8.2} ms  {} fns compiled, {} hit, {} items parsed{}", c.name, (now_ns() - t1) as f64 / 1e6, r.fns_compiled, r.fns_hit, r.items_parsed, if changed[i] { "" } else { " (object unchanged)" });
+            }
+            rep.crates.push((c.name.clone(), r));
+        }
+        for &i in &order {
+            let c = &crates[i];
+            if c.lib {
+                continue;
+            }
+            let deps = all_deps(i);
+            let exe = out_dir.join(c.name.as_str());
+            if !changed[i] && !deps.iter().any(|&j| changed[j]) && exe.exists() {
+                continue;
+            }
+            let t1 = now_ns();
+            let mut objs: Vec<std::path::PathBuf> = vec![out_dir.join(format!("{}.o", c.name).as_str())];
+            objs.extend(deps.iter().map(|&j| out_dir.join(format!("{}.o", crates[j].name).as_str())));
+            let refs: Vec<&std::path::Path> = objs.iter().map(|p| p.as_path()).collect();
+            crate::link::link_many(self.opts.linker.as_deref(), &refs, exe.as_path())?;
+            rep.linked += 1;
+            if self.opts.time {
+                eprintln!("  {:<12} {:>8.2} ms  link {} objects", format!("link {}", c.name), (now_ns() - t1) as f64 / 1e6, objs.len());
+            }
+        }
+        self.ctx = CrateCtx::default();
+        if self.opts.time {
+            eprintln!("  {:<12} {:>8.2} ms", "total", (now_ns() - t0) as f64 / 1e6);
+        }
+        Ok(rep)
+    }
 }

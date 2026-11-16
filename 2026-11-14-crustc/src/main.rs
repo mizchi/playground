@@ -1,6 +1,7 @@
 //! crustc の CLI。
 //!   crustc <input.rs> [-o out] [...]   ビルド
 //!   crustc check <input.rs>            型検査だけ (全診断を表示)
+//!   crustc build <workspace> [-o dir]   ワークスペース (複数のクレート) をビルド (`--features acg`)
 //!   crustc lsp                         LSP サーバ (stdio)
 
 use std::path::PathBuf;
@@ -9,7 +10,7 @@ use crustc::{Options, Session, cache_path};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: crustc <input.rs> [-o out] [-O] [--regalloc=fast|good] [--linker=NAME] [--time] [-j N] [--no-cache]\n       crustc check <input.rs>\n       crustc lsp"
+        "usage: crustc <input.rs> [-o out] [-O] [--regalloc=fast|good] [--linker=NAME] [--time] [-j N] [--no-cache]\n       crustc check <input.rs>\n       crustc build <workspace-file> [-o out-dir] [-O] [-j N] [--time] [--no-cache]\n       crustc lsp"
     );
     std::process::exit(2)
 }
@@ -23,6 +24,10 @@ fn main() {
     match args.peek().map(String::as_str) {
         Some("check") => {
             mode = "check";
+            args.next();
+        }
+        Some("build") => {
+            mode = "workspace";
             args.next();
         }
         Some("lsp") => {
@@ -63,6 +68,33 @@ fn main() {
     if input.as_os_str().is_empty() {
         usage();
     }
+    #[cfg(feature = "acg")]
+    if mode == "workspace" {
+        let crates = match crustc::driver2::read_workspace(&input) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        };
+        let out_dir = if output.as_os_str().is_empty() { input.parent().map(|d| d.join("target")).unwrap_or("target".into()) } else { output.clone() };
+        let opts = crustc::driver2::Options2 { opt: o.opt, jobs: o.jobs, linker: o.linker.clone(), no_cache: o.no_cache, time: o.time };
+        let mut s = crustc::driver2::Session2::new(opts);
+        let cp = out_dir.join("workspace.crcache2");
+        s.load_cache(&cp);
+        match s.build_workspace(&crates, &out_dir) {
+            Ok(_) => {
+                if let Err(e) = s.save_cache(&cp) {
+                    eprintln!("warning: failed to write cache: {e}");
+                }
+                std::process::exit(0)
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     let src = match std::fs::read_to_string(&input) {
         Ok(s) => s,
         Err(e) => {
@@ -84,8 +116,20 @@ fn main() {
     #[cfg(feature = "acg")]
     if std::env::var_os("CRUSTC_DRIVER2").is_some() && mode != "check" {
         let output = if output.as_os_str().is_empty() { input.with_extension("") } else { output.clone() };
-        match crustc::driver2::build(&src, &output, o.opt, o.linker.as_deref()) {
-            Ok(()) => std::process::exit(0),
+        let opts = crustc::driver2::Options2 { opt: o.opt, jobs: o.jobs, linker: o.linker.clone(), no_cache: o.no_cache, time: o.time };
+        let mut s = crustc::driver2::Session2::new(opts);
+        let mut cp = output.as_os_str().to_owned();
+        cp.push(".crcache2");
+        let cp = std::path::PathBuf::from(cp);
+        s.load_cache(&cp);
+        let _ = &src;
+        match s.build_path(&input, "src/main.rs", &output) {
+            Ok(_) => {
+                if let Err(e) = s.save_cache(&cp) {
+                    eprintln!("warning: failed to write cache: {e}");
+                }
+                std::process::exit(0)
+            }
             Err(e) => {
                 eprintln!("error: {}: {e}", input.display());
                 std::process::exit(1);

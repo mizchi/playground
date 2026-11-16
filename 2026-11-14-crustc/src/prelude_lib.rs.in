@@ -5845,7 +5845,7 @@ unsafe extern "C" {
 static mut __EXR_CALLER: u64 = 0;
 
 // panic の trap の表 (中身はリンクの前に driver が入れる。形は emit_object を参照)
-static __EXR_TRAP_TABLE: [u64; 1] = [0];
+static __EXR_TRAP_TABLE: [u64; 3] = [0, 0, 0];
 static mut __EXR_SA: [u64; 19] = [0; 19];
 static __EXR_KIND_MSG: &str = "attempt to add with overflowattempt to subtract with overflowattempt to multiply with overflowattempt to divide by zeroattempt to calculate the remainder with a divisor of zeroexplicit panicattempt to negate with overflowattempt to shift left with overflowattempt to shift right with overflowattempt to divide with overflowattempt to calculate the remainder with overflowexplicit panic";
 static __EXR_KIND_OFF: [u16; 13] = [0, 28, 61, 94, 119, 176, 190, 221, 256, 292, 323, 371, 385];
@@ -5870,10 +5870,40 @@ fn __exr_err_num<G>(n: u64) {
     }
 }
 
-fn __exr_panic_head<G>(line: u64, col: u64) {
-    unsafe {
-        __exr_fflush(core::ptr::null_mut());
+// 表のファイルの対応 (表の 16 byte の後ろ): 区間の数, (結合したソースでの開始行, ファイルでの開始行, 名前の長さ, 名前) *,
+// 桁のずれの数, (行, 桁, ずれ (zigzag)) *
+// 結合したソースの (行, 桁) → (ファイルの名前のポインタ, 長さ, ファイルの中の行, 桁)。区間がなければ src/main.rs
+fn __exr_tab_file(t: *const u64, line: u64, col: u64) -> (*const u8, usize, u64, u64) {
+    let mut p = unsafe { (t as *const u8).add(16) };
+    let n = __exr_tab_uv(&mut p);
+    let mut best: (*const u8, usize, u64) = ("src/main.rs".as_ptr(), 11, line);
+    let mut k = 0;
+    while k < n {
+        let start = __exr_tab_uv(&mut p);
+        let first = __exr_tab_uv(&mut p);
+        let len = __exr_tab_uv(&mut p) as usize;
+        if start <= line {
+            best = (p, len, line - start + first);
+        }
+        p = unsafe { p.add(len) };
+        k += 1;
     }
+    let nf = __exr_tab_uv(&mut p);
+    let mut d: u64 = 0;
+    let mut k = 0;
+    while k < nf {
+        let l = __exr_tab_uv(&mut p);
+        let c = __exr_tab_uv(&mut p);
+        let z = __exr_tab_uv(&mut p);
+        if l == line && c <= col {
+            d = if z & 1 == 0 { z >> 1 } else { (!(z >> 1)).wrapping_add(0) };
+        }
+        k += 1;
+    }
+    (best.0, best.1, best.2, col.wrapping_sub(d))
+}
+
+fn __exr_panic_head<G>(line: u64, col: u64) {
     // (行 0: 呼んだ側の場所)
     let (line, col) = if line == 0 {
         let c = unsafe { __EXR_CALLER };
@@ -5881,7 +5911,19 @@ fn __exr_panic_head<G>(line: u64, col: u64) {
     } else {
         (line, col)
     };
-    __exr_err_str::<()>("\nthread 'main' panicked at src/main.rs:");
+    let (f, n, l, c) = __exr_tab_file(__EXR_TRAP_TABLE.as_ptr(), line, col);
+    __exr_panic_head_at::<()>(f, n, l, c);
+}
+
+fn __exr_panic_head_at<G>(f: *const u8, n: usize, line: u64, col: u64) {
+    unsafe {
+        __exr_fflush(core::ptr::null_mut());
+    }
+    __exr_err_str::<()>("\nthread 'main' panicked at ");
+    unsafe {
+        __exr_write(2, f, n);
+    }
+    __exr_err_str::<()>(":");
     __exr_err_num::<()>(line);
     __exr_err_str::<()>(":");
     __exr_err_num::<()>(col);
@@ -5915,13 +5957,26 @@ fn __exr_tab_uv(p: &mut *const u8) -> u64 {
 // 表 (driver が作る): [.text の先頭のアドレス (8 byte)] の後ろに可変長整数の列
 //   メッセージの数, (長さ, 中身) *, 関数の数, (前の関数からのオフセットの差, 場所の数,
 //   (前の場所からのオフセットの差, 種類 | (メッセージ番号 + 1) << 4, 行の差 (zigzag), 列) *) *
-fn __exr_on_trap(sig: i32, info: *const u64, ctx: *const u8) {
-    let _ = (sig, ctx);
-    let pc = unsafe { *info.add(2) };
-    let t = __EXR_TRAP_TABLE.as_ptr();
+// 表 t で pc を探す: (見つかったか, 種類, メッセージ番号, 行, 列, メッセージの列の先頭)
+fn __exr_trap_search(t: *const u64, pc: u64) -> (bool, u64, u64, u64, u64, *const u8) {
     let base = unsafe { *t };
-    let mut p = unsafe { (t as *const u8).add(8) };
-    let msgs = p;
+    let mut p = unsafe { (t as *const u8).add(16) };
+    let ns = __exr_tab_uv(&mut p);
+    let mut k = 0;
+    while k < ns {
+        let _ = __exr_tab_uv(&mut p);
+        let _ = __exr_tab_uv(&mut p);
+        let n = __exr_tab_uv(&mut p);
+        p = unsafe { p.add(n as usize) };
+        k += 1;
+    }
+    let nfix = __exr_tab_uv(&mut p);
+    let mut k = 0;
+    while k < 3 * nfix {
+        let _ = __exr_tab_uv(&mut p);
+        k += 1;
+    }
+    let m0 = p;
     let nm = __exr_tab_uv(&mut p);
     let mut k = 0;
     while k < nm {
@@ -5929,8 +5984,6 @@ fn __exr_on_trap(sig: i32, info: *const u64, ctx: *const u8) {
         p = unsafe { p.add(n as usize) };
         k += 1;
     }
-    let mut found = false;
-    let (mut kind, mut mi, mut line, mut col) = (0u64, 0u64, 0u64, 0u64);
     let nf = __exr_tab_uv(&mut p);
     let mut fa = base;
     let mut cur_line: u64 = 0;
@@ -5946,16 +5999,40 @@ fn __exr_on_trap(sig: i32, info: *const u64, ctx: *const u8) {
             let z = __exr_tab_uv(&mut p);
             cur_line = cur_line.wrapping_add(if z & 1 == 0 { z >> 1 } else { (!(z >> 1)).wrapping_add(0) });
             let c = __exr_tab_uv(&mut p);
-            if at == pc && !found {
-                found = true;
-                kind = km & 0xF;
-                mi = km >> 4;
-                line = cur_line;
-                col = c;
+            if at == pc {
+                return (true, km & 0xF, km >> 4, cur_line, c, m0);
             }
             j += 1;
         }
         i += 1;
+    }
+    (false, 0, 0, 0, 0, m0)
+}
+
+fn __exr_on_trap(sig: i32, info: *const u64, ctx: *const u8) {
+    let _ = (sig, ctx);
+    let pc = unsafe { *info.add(2) };
+    // (表はクレートごとにある。実行ファイルの表の 8 byte 目は、ほかのクレートの表の列 [数, アドレス *] を指す)
+    let mut ft = __EXR_TRAP_TABLE.as_ptr();
+    let (mut found, mut kind, mut mi, mut line, mut col, mut msgs) = __exr_trap_search(ft, pc);
+    let ext = unsafe { *ft.add(1) } as *const u64;
+    if !found && !ext.is_null() {
+        let n = unsafe { *ext };
+        let mut k = 0;
+        while k < n && !found {
+            let t = unsafe { *ext.add(1 + k as usize) } as *const u64;
+            let r = __exr_trap_search(t, pc);
+            if r.0 {
+                found = true;
+                kind = r.1;
+                mi = r.2;
+                line = r.3;
+                col = r.4;
+                msgs = r.5;
+                ft = t;
+            }
+            k += 1;
+        }
     }
     if !found {
         unsafe {
@@ -5964,7 +6041,8 @@ fn __exr_on_trap(sig: i32, info: *const u64, ctx: *const u8) {
         __exr_err_str::<()>("\nthread 'main' panicked");
         __exr_panic_tail::<()>();
     }
-    __exr_panic_head::<()>(line, col);
+    let (f, n, l, c) = __exr_tab_file(ft, line, col);
+    __exr_panic_head_at::<()>(f, n, l, c);
     if mi != 0 {
         // (mi 番目 (1 始まり) のメッセージ)
         let mut q = msgs;

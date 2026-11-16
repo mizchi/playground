@@ -1417,7 +1417,7 @@ fn emit_object(
     // [関数の数, (関数のアドレス, 個数, (オフセット << 44 | (メッセージ番号 + 1) << 31 | 種類・行・列) * 個数) *,
     //  メッセージの数, (アドレス, 長さ) *]  (1 か所 8 byte。オフセットが 1 MiB を超える場所は載せない)
     if let Some(tid) = trap_table {
-        let mut bytes: Vec<u8> = vec![0; 8];
+        let mut bytes: Vec<u8> = vec![0; 16];
         let uv = |out: &mut Vec<u8>, mut v: u64| {
             while v >= 0x80 {
                 out.push(v as u8 | 0x80);
@@ -1463,6 +1463,9 @@ fn emit_object(
                 uv(&mut funcs, col);
             }
         }
+        // (ファイルの対応と桁のずれ: なし (src/main.rs))
+        uv(&mut bytes, 0);
+        uv(&mut bytes, 0);
         uv(&mut bytes, msgs.len() as u64);
         for mb in &msgs {
             uv(&mut bytes, mb.len() as u64);
