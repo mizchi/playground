@@ -1,0 +1,610 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>六つの小品</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Shippori+Mincho:wght@500;700&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
+<style>
+/* Layout: a record sleeve. Left = track list (the back cover), right = the piano roll of the piece being played and its liner note. */
+:root {
+  --bg: #eceff3; --panel: #f9fafc; --ink: #1a2132; --muted: #5a6478; --line: #cdd3de;
+  --c1: #2f65ad; --c2: #bd2d76; --c3: #8d6210; --c4: #177f73; --c5: #6341c4; --c6: #ad2f38; --c7: #c2410c;
+  --display: "Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", serif;
+  --body: "Zen Kaku Gothic New", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
+  --mono: "DM Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f121a; --panel: #161a25; --ink: #e5e8f0; --muted: #8e97aa; --line: #2a3142;
+  --c1: #7ba9ea; --c2: #f17db6; --c3: #dbad52; --c4: #5fcfbe; --c5: #a990f6; --c6: #f08488; --c7: #ff9457;
+  color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0f121a; --panel: #161a25; --ink: #e5e8f0; --muted: #8e97aa; --line: #2a3142;
+  --c1: #7ba9ea; --c2: #f17db6; --c3: #dbad52; --c4: #5fcfbe; --c5: #a990f6; --c6: #f08488; --c7: #ff9457;
+  color-scheme: dark }
+
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--ink); font: 400 15px/1.75 var(--body);
+  padding-block: 40px 56px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)) }
+.wrap { max-width: 1040px; margin: 0 auto; display: grid; gap: 28px }
+header { display: grid; gap: 6px }
+h1 { font: 700 clamp(34px, 6vw, 52px)/1.15 var(--display); margin: 0; letter-spacing: .04em; text-wrap: balance }
+.lede { color: var(--muted); max-width: 40em; margin: 0 }
+.cols { display: grid; gap: 24px; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); align-items: start }
+@media (max-width: 760px) { .cols { grid-template-columns: minmax(0, 1fr) } .now { order: -1 } }
+
+.list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line) }
+.list li { border-bottom: 1px solid var(--line) }
+.row { all: unset; box-sizing: border-box; cursor: pointer; width: 100%; display: grid;
+  grid-template-columns: 2.2em minmax(0, 1fr) auto; gap: 4px 10px; align-items: baseline; padding: 14px 6px }
+.row:focus-visible, .btn:focus-visible, input:focus-visible { outline: 2px solid var(--c); outline-offset: 2px }
+.row .no { font: 500 13px var(--mono); color: var(--muted) }
+.row .ttl { font: 700 19px/1.4 var(--display); letter-spacing: .03em }
+.row .len { font: 400 13px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums }
+.row .genre { grid-column: 2 / 4; font-size: 13px; color: var(--muted) }
+.row[aria-current="true"] .ttl, .row[aria-current="true"] .no { color: var(--c) }
+.row:hover .ttl { color: var(--c) }
+
+.now { --c: var(--c1); display: grid; gap: 16px; background: var(--panel); border: 1px solid var(--line); padding: 20px }
+.now h2 { font: 700 26px/1.3 var(--display); margin: 0; letter-spacing: .04em; color: var(--c) }
+.meta { display: flex; flex-wrap: wrap; gap: 4px 18px; font: 400 12.5px var(--mono); color: var(--muted); margin: 0; padding: 0; list-style: none }
+canvas { cursor: pointer; display: block; width: 100%; height: 220px; background: var(--bg); border: 1px solid var(--line) }
+.ctl { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center }
+.btn { all: unset; box-sizing: border-box; cursor: pointer; font: 500 13px var(--mono); padding: 8px 14px; border: 1px solid var(--ink); min-width: 3em; text-align: center }
+.btn.main { background: var(--c); border-color: var(--c); color: var(--panel); min-width: 7.5em }
+.btn:hover { border-color: var(--c) }
+.ctl label { display: flex; align-items: center; gap: 8px; font: 400 12.5px var(--mono); color: var(--muted) }
+input[type=range] { accent-color: var(--c); width: 110px }
+input[type=checkbox] { accent-color: var(--c) }
+.note { margin: 0; max-width: 36em }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font: 400 12px var(--mono); color: var(--muted); margin: 0; padding: 0; list-style: none }
+.legend i { display: inline-block; width: 14px; height: 6px; background: var(--c); margin-right: 6px; vertical-align: middle }
+footer { color: var(--muted); font-size: 13px; max-width: 44em }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>六つの小品</h1>
+    <p class="lede">ジャンルの違う六曲と、そのうち「潮汐」と「深夜の首都高」の路線を掛け合わせた長編「環状線」を書き下ろしました。録音データは一切なく、楽譜（音名の文字列）をブラウザのシンセサイザーがその場で演奏します。</p>
+  </header>
+
+  <div class="cols">
+    <ol class="list" id="list"></ol>
+
+    <section class="now" id="now" aria-live="polite">
+      <h2 id="title"></h2>
+      <ul class="meta" id="meta"></ul>
+      <canvas id="roll" aria-label="演奏中の曲のピアノロール"></canvas>
+      <ul class="legend" id="legend"></ul>
+      <div class="ctl">
+        <button class="btn main" id="play" type="button">▶ 再生</button>
+        <button class="btn" id="prev" type="button" aria-label="前の曲">◀◀</button>
+        <button class="btn" id="next" type="button" aria-label="次の曲">▶▶</button>
+        <label><input type="checkbox" id="loop"> ループ</label>
+        <label>音量 <input type="range" id="vol" min="0" max="1" step="0.01" value="0.8"></label>
+      </div>
+      <p class="note" id="note"></p>
+    </section>
+  </div>
+
+  <footer>音が出ないときは、端末の消音スイッチと音量を確認してください。曲が終わると次の曲へ進みます。ピアノロールをクリックすると、その位置から再生します。</footer>
+</div>
+
+<script>
+"use strict";
+/* ───────── 楽譜の書き方 ─────────
+   音符は空白区切り。 c4 = ド、 bb4 = シ♭、 c#5 = ド♯。 `_3` は 3 ステップ分の長さ。
+   `.` は休符、 `c4+e4+g4` は和音、 `|` は小節線（小節の長さは自動で検算する）。 */
+const SEMI = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
+const bars = (...b) => b.join(' | ');
+const rep = (s, n) => Array(n).fill(s).join(' ');
+const rest = n => Array(n).fill('._8').join(' | ');
+const arp = n => rep(n.join(' '), 4);                 // 4 音 × 4 = 16 分音符 1 小節
+const oct = (lo, hi) => rep(`${lo} ${hi}`, 4);        // 8 分のオクターブ・ベース
+const seq = (map, names, f) => bars(...names.split(' ').map(n => f(map[n])));
+
+/* 1. 雨宿り — lo-fi hip hop */
+const lofi = (() => {
+  const ch = v => `${v}_3 ${v}_5`;
+  const A = ['f3+a3+c4+e4', 'f3+a3+b3+e4', 'e3+g3+b3+d4', 'g3+c#4+f4'];
+  const B = ['a3+c4+e4+g4', 'ab3+c4+d4+g4', 'g3+b3+d4+e4', 'g3+b3+c#4+e4'];
+  const bA = 'd2_3 d2 . a2_2 c3 | g2_3 g2 . d3_2 b2 | c2_3 c2 . g2_2 e2 | a2_3 a2 . e2_2 c#3';
+  const bB = 'f2_3 f2 . c3_2 a2 | f2_3 f2 . c3_2 ab2 | e2_3 e2 . b2_2 g2 | a2_3 a2 . g2_2 e2';
+  const m1 = '. . a4 c5 e5_2 d5 c5 | a4_3 . . e4 g4 a4 | b4_2 g4 e4 d4_3 .';
+  return {
+    id: 'lofi', title: '雨宿り', genre: 'Lo-fi Hip Hop', key: 'Dm9 – G13 – Cmaj9 – A7♭13', bpm: 76, swing: .34, lp: 3800, rev: .8, gain: .7,
+    note: '軒先で雨が止むのを待つ時間。跳ねた 16 分のビートに、ローズ風のエレピが 9th と 13th を重ねます。中間部は F → Fm6 と半音だけ沈んで、少し肌寒くなる瞬間を作りました。高域をわざと削って、古いカセットの質感に寄せています。',
+    tracks: [
+      { name: 'メロディ', inst: 'keys', vol: .95, notes: bars(m1, '. . e4 f4 e4 c#4 a3_2',
+          '. . a4 c5 e5_2 g5 e5 | d5_3 . . b4 d5 e5 | g5_2 e5 d5 b4_3 . | . c#5 e5 g5 f5_2 e5_2',
+          'a5_3 g5 e5_2 c5_2 | ab5_3 g5 d5_2 c5_2 | b4_2 d5 e5 g5_3 . | . e5 c#5 a4 g4_2 e4_2',
+          m1, '. . e4 f4 e4_4') },
+      { name: 'エレピ', inst: 'ep', vol: .55, notes: bars(...[...A, ...A, ...B, ...A].map(ch)) },
+      { name: 'ベース', inst: 'sub', vol: 1.2, notes: bars(bA, bA, bB, bA) },
+    ],
+    drums: { kick: 'x.....x...x.....', snare: '....x.......x...', hat: 'x.o.x.o.x.o.x.oo' },
+  };
+})();
+
+/* 2. ピクセルの朝焼け — chiptune */
+const chip = (() => {
+  const C = { C: ['c4', 'e4', 'g4', 'c5'], G: ['b3', 'd4', 'g4', 'b4'], Am: ['a3', 'c4', 'e4', 'a4'],
+    F: ['a3', 'c4', 'f4', 'a4'], Em: ['b3', 'e4', 'g4', 'b4'], E: ['b3', 'e4', 'g#4', 'b4'] };
+  const R = { C: ['c2', 'c3'], G: ['g2', 'g3'], Am: ['a2', 'a3'], F: ['f2', 'f3'], Em: ['e2', 'e3'], E: ['e2', 'e3'] };
+  const pA = 'C C Am Am F G C G', pB = 'F G Em Am F G E E';
+  const lA = 'e5 g5 c6_2 b5 g5 e5 g5 | a5_2 g5_2 e5 d5 c5 d5 | e5 a5 c6_2 b5 a5 e5 a5 | g5_2 e5_2 c5 d5 e5 g5 | a5_3 f5 c6_2 a5_2 | b5_3 g5 d6_2 b5_2 | c6_2 e6_2 d6 c6 b5 c6 | d6_4 . g5 a5 b5';
+  const lB = 'c6_3 a5 f5_2 a5_2 | b5_3 g5 d5_2 g5_2 | g5 e5 b5_2 g5 e5 g5 b5 | a5_4 . e5 a5 c6 | c6_3 a5 f6_2 e6_2 | d6_3 b5 g6_2 f6_2 | e6_2 g#5 b5 e6 g#6_3 | e6_2 d6 b5 g#5 e5 g#5 b5';
+  const form = f => bars(f(pA), f(pA), f(pB), f(pA));
+  return {
+    id: 'chip', title: 'ピクセルの朝焼け', genre: 'Chiptune', key: 'ハ長調', bpm: 156, rev: .25, gain: .68,
+    note: '矩形波 2 声と三角波、ノイズだけ。ファミコン世代の音源と同じ制約で書いた、冒険が始まる朝の曲です。中間部の最後で E メジャーに明るく転び、そこから半音ずれるようにハ長調へ戻ります。',
+    tracks: [
+      { name: 'リード', inst: 'sq', vol: .8, notes: bars(lA, lA, lB, lA) },
+      { name: 'アルペジオ', inst: 'pulse', step: .25, vol: .42, notes: form(p => seq(C, p, arp)) },
+      { name: 'ベース', inst: 'tri', vol: 1.1, notes: form(p => seq(R, p, r => oct(...r))) },
+    ],
+    drums: { kick: 'x...x...x...x...', snare: '....x.......x..o', hat: '..x...x...x...x.' },
+  };
+})();
+
+/* 3. 二声のインヴェンション ニ短調 — baroque */
+const invention = {
+  id: 'inv', title: '二声のインヴェンション', genre: 'Baroque', key: 'ニ短調', bpm: 80, rev: .55, gain: 2.6,
+  note: '1 小節の主題を右手が示し、左手が 1 オクターブ下で追いかけます。片方が 16 分音符で走るあいだ、もう片方は 8 分音符で支える、という役割交換が全体のルールです。ヘ長調、イ短調を経由して主調に戻り、最後の和音だけ長調に変わります（ピカルディの三度）。',
+  tracks: [
+    { name: '右手', inst: 'harpsi', step: .25, vol: .9, notes: bars(
+      'd5 e5 f5 g5 a5_2 d5_2 c#5_2 a5_2 g5 f5 e5 f5',
+      'd5_2 a5_2 f5 e5 f5 d5 e5 g5 e5 c#5 a4_2 c#5_2',
+      'd5 e5 f5 g5 a5 g5 f5 e5 c5 d5 e5 f5 g5 f5 d5 e5',
+      'f5_2 c5_2 a5 g5 a5 f5 g5 bb5 g5 e5 c5_2 e5_2',
+      'c6_3 a5 f5_2 a5_2 d6_3 bb5 g5_2 bb5_2',
+      'e6_3 c#6 a5_2 c#6_2 d6_3 a5 f5_2 a5_2',
+      'a5 b5 c6 d6 e6_2 a5_2 g#5_2 e6_2 d6 c6 b5 c6',
+      'a5 g5 f5 e5 d5 e5 f5 d5 g5 f5 e5 d5 c#5 d5 e5 c#5',
+      'd5 e5 f5 g5 a5_2 d5_2 c#5_2 a5_2 g5 f5 e5 f5',
+      'd5 f5 a5 d6 bb5 g5 e5 g5 f5 e5 d5 f5 e5_3 d5',
+      'd5+f#5+a5_16') },
+    { name: '左手', inst: 'harpsi', step: .25, vol: .8, notes: bars(
+      'd3_4 d4_4 a3_4 a2_4',
+      'd3 e3 f3 g3 a3_2 d3_2 c#3_2 a3_2 g3 f3 e3 f3',
+      'd3_2 f3_2 a3_2 f3_2 e3_2 g3_2 c4_2 bb3_2',
+      'f3 g3 a3 bb3 c4_2 f3_2 e3_2 c4_2 bb3 a3 g3 a3',
+      'f3 a3 c4 a3 f3 a3 c4 a3 g3 bb3 d4 bb3 g3 bb3 d4 bb3',
+      'a3 c#4 e4 c#4 a3 c#4 e4 c#4 d3 f3 a3 f3 d3 f3 a3 f3',
+      'a3_2 e4_2 c4 b3 c4 a3 b3 d4 b3 g#3 e3_2 g#3_2',
+      'a3_2 f3_2 bb3_2 g3_2 a3_2 g3_2 a3_2 a2_2',
+      'd3_2 d4_2 f3_2 d3_2 a2_2 a3_2 c#3_2 a2_2',
+      'd3_4 g3_4 a3_4 a2_4',
+      'd2+d3_16') },
+  ],
+};
+
+/* 4. 潮汐 — minimal / ambient, 7/8 */
+const tide = {
+  id: 'tide', title: '潮汐', genre: 'Minimal / Ambient', key: 'ニ調リディア', bpm: 96, meter: 3.5, rev: 1.5, gain: 1.4,
+  note: '7 音、6 音、11 音という長さの違う 3 つの音型を、同じテンポで延々と繰り返します。周期がずれていくので、同じ素材なのに重なり方が毎回変わります。作曲したのは「ルール」だけで、旋律は干渉から勝手に生まれます。',
+  tracks: [
+    { name: '7 音の型', inst: 'mallet', vol: .8, notes: bars(...Array(24).fill('f#4 a4 b4 e5 c#5 a4 b4')) },
+    { name: '6 音の型', inst: 'mallet', vol: .65, free: true, notes: '._12 ' + rep('d5 . f#5 e5 . a5', 26) },
+    { name: '11 音の型', inst: 'bell', vol: .5, free: true, notes: '._42 ' + rep('g#5_3 . . e5_2 . c#6_2 .', 11) + ' ._5' },
+    { name: 'パッド', inst: 'pad', vol: .4, free: true, notes: 'd3+a3+e4+f#4_42 b2+f#3+c#4+e4_42 e3+b3+e4+f#4_42 d3+a3+c#4+f#4_42' },
+    { name: '低音', inst: 'drone', vol: .9, free: true, notes: 'd2_42 b1_42 e2_42 d2_42' },
+  ],
+};
+
+/* 5. 深夜の首都高 — synthwave */
+const wave = (() => {
+  const P = { F: ['f4', 'a4', 'c5', 'e5'], G: ['g4', 'b4', 'd5', 'g5'], Am: ['a4', 'c5', 'e5', 'a5'],
+    Em: ['e4', 'g4', 'b4', 'e5'], Dm: ['d4', 'f4', 'a4', 'd5'], E: ['e4', 'g#4', 'b4', 'e5'] };
+  const D = { F: 'f3+a3+c4+e4', G: 'g3+b3+d4', Am: 'a3+c4+e4+g4', Em: 'g3+b3+e4', Dm: 'f3+a3+d4', E: 'g#3+b3+e4' };
+  const R = { F: 'f2', G: 'g2', Am: 'a2', Em: 'e2', Dm: 'd2', E: 'e2' };
+  const pA = 'F G Am Em', pB = 'Dm F G E';
+  const form = f => bars(f(pA), f(pA), f(pA), f(pB), f(pA), f(pA));
+  const lA = 'a5_3 c6_3 a5_2 | b5_3 d6_3 b5_2 | c6_2 b5 a5 e5_4 | g5_3 e5_3 b4_2 | a5_3 c6_3 f6_2 | e6_2 d6_2 b5_2 g5_2 | a5_4 c6_2 e6_2 | d6_3 b5_3 g5_2';
+  const lB = 'f6_4 e6_2 d6_2 | c6_4 a5_2 c6_2 | d6_3 b5_3 d6_2 | e6_4 g#5_2 b5_2';
+  return {
+    id: 'wave', title: '深夜の首都高', genre: 'Synthwave', key: 'イ短調', bpm: 104, rev: 1, gain: .72,
+    note: '80 年代のアナログシンセを意識した、夜のドライブ用の曲。16 分で刻むノコギリ波のベースと、3+3+2 で区切るリードの組み合わせが推進力です。最初の 4 小節は伴奏だけで、トンネルを抜けたところで旋律が入ります。',
+    tracks: [
+      { name: 'リード', inst: 'lead', vol: .7, notes: bars(rest(4), lA, lB, lA) },
+      { name: 'アルペジオ', inst: 'pluck', step: .25, vol: .5, notes: form(p => seq(P, p, arp)) },
+      { name: 'パッド', inst: 'pad', vol: .3, notes: form(p => seq(D, p, c => `${c}_8`)) },
+      { name: 'ベース', inst: 'sawbass', step: .25, vol: .85, notes: form(p => seq(R, p, r => rep(r, 16))) },
+    ],
+    drums: { kick: 'x...x...x...x...', snare: '....x.......x...', hat: '..x...x...x...xo' }, drumSend: .35,
+  };
+})();
+
+/* 6. 宵の庭 — 都節音階 */
+const garden = {
+  id: 'niwa', title: '宵の庭', genre: '和風（都節音階）', key: 'D – E♭ – G – A – B♭', bpm: 66, rev: 1.4, gain: .9,
+  note: '箏の調弦でおなじみの都節音階だけで書きました。半音（D–E♭、A–B♭）が陰りを生みます。前半は箏の独奏、5 小節目から尺八風の笛が長い音で重なります。拍は 4 拍子ですが、間（ま）を聴かせるためにあえて音を置かない場所を残しています。',
+  tracks: [
+    { name: '箏', inst: 'koto', vol: .9, notes: bars(
+      'd4 a4 bb4 a4 g4_2 eb4_2', 'd4_2 a3 bb3 d4_4', 'g4 a4 bb4 d5 eb5_2 d5_2', 'bb4 a4 g4 eb4 d4_4',
+      'd5 eb5 d5 bb4 a4_2 g4_2', 'a4 bb4 a4 g4 eb4_2 d4_2', 'd4 g4 a4 d5 eb5 d5 bb4 a4', 'g4_2 eb4_2 d4_4',
+      'd4 a4 bb4 a4 g4_2 eb4_2', 'd4_2 a3 bb3 d4_4', 'g4 a4 bb4 d5 eb5_2 d5_2', 'd4+a4+d5_8') },
+    { name: '笛', inst: 'flute', vol: .55, notes: bars(rest(4),
+      'a5_6 bb5_2', 'a5_4 g5_4', 'd6_6 eb6_2', 'd6_8', 'bb5_3 a5 g5_4', 'eb5_4 d5_4', 'g5_2 a5_2 bb5_4', 'a5_8') },
+    { name: '持続音', inst: 'drone', vol: .7, free: true, notes: rep('d2+a2_16', 6) },
+  ],
+  drums: { taiko: 'x' + '.'.repeat(27) + 'o...' },
+};
+
+/* 7. 環状線 — minimal synthwave（長編） */
+const loopline = (() => {
+  const NB = 84, NAMES = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b'];
+  const shift = (s, n) => s.replace(/[a-g][#b]?\d/g, x => { const m = midi(x) + n; return NAMES[m % 12] + (Math.floor(m / 12) - 1); });
+  // 和音ごとの 7 音の「音の池」。音型は池の何番目を弾くかだけを決めている
+  const POOL = { G: 'g3 d4 f#4 a4 b4 d5 f#5', Bm: 'b3 d4 f#4 a4 b4 d5 e5', D: 'f#3 d4 e4 a4 d5 e5 f#5', A: 'a3 c#4 e4 a4 b4 c#5 e5',
+    Em: 'e3 b3 d4 f#4 g4 b4 d5', Fm: 'f#3 c#4 e4 f#4 a4 c#5 e5' };
+  const PAD = { G: 'b3+d4+f#4+a4', Bm: 'b3+d4+e4+a4', D: 'a3+d4+e4+f#4', A: 'a3+c#4+e4+b4', Asus: 'a3+d4+e4+b4', Em: 'g3+b3+d4+f#4', Fm: 'a3+c#4+e4+f#4' };
+  const ROOT = { G: 'g1', Bm: 'b1', D: 'f#1', A: 'a1' }, SUB = { G: 'g2', Em: 'e2', Fm: 'f#2', A: 'a2' };
+  // 名前の末尾が 2 の和音は全音上（ホ長調側）
+  const of = (map, c) => c.endsWith('2') ? shift(map[c.slice(0, -1)], 2) : map[c];
+  const I = ['G', 'G', 'Bm', 'Bm', 'D', 'D', 'A', 'A'], II = ['Em', 'Em', 'Fm', 'Fm', 'G', 'G', 'A', 'A'], III = I.map(c => c + '2');
+  const CH = [...Array(8).fill('G'), ...I, ...I, ...I, ...I, ...II, ...II, ...III, ...III, ...Array(12).fill('G2')];
+
+  // 音型を曲頭から一度もリセットせずに回し続ける（per = 1 小節のステップ数）
+  const gen = (pat, per, on, sh = 0) => Array.from({ length: NB * per }, (_, s) => {
+    const bar = Math.floor(s / per), i = pat[s % pat.length];
+    return !on(bar) || i == null ? '.' : shift(of(POOL, CH[bar]).split(' ')[i], sh) + (s % pat.length ? '' : '^');
+  });
+  const sheet = (per, parts) => { const b = Array(NB).fill('._' + per);
+    for (const [at, str] of parts) str.split('|').forEach((x, k) => b[at + k] = x.trim());
+    return b.join(' | '); };
+  const pairs = f => CH.map((c, b) => b % 2 ? '' : f(c, b)).join(' | ');
+
+  const th1 = 'f#5_3 a5_3 b5_2 | a5_4 . f#5 e5 f#5 | d5_3 f#5_3 a5_2 | f#5_6 e5 d5 | e5_3 a5_3 d6_2 | c#6_3 b5_3 a5_2 | b5_3 a5_3 e5_2 | e5_4 . c#5 d5 e5';
+  const th2 = 'f#5_3 a5_3 b5_2 | d6_4 . b5 a5 b5 | a5_3 f#5_3 d6_2 | c#6_3 b5_3 a5_2 | f#6_4 e6_2 d6_2 | e6_3 d6_3 a5_2 | b5_3 c#6_3 e6_2 | e6_8';
+  const bell = gen([6, null, null, null, 4, null, null, 5, null, null, null], 8, b => (b >= 16 && b < 24) || (b >= 40 && b < 56) || (b >= 72 && b < 82), 12);
+  bell[83 * 8] = 'e6';
+  const driving = b => (b >= 8 && b < 40) || (b >= 56 && b < 72);
+
+  const dr = (...parts) => parts.map(([pat, n]) => pat.repeat(n)).join('');
+  const hits = list => { const a = Array(NB * 16).fill('.'); for (const [bar, c] of list) a[bar * 16] = c; return a.join(''); };
+  const _ = '.'.repeat(16), K = 'x...x...x...x...', S = '....x.......x...', Sf = '....x.......x.xx';
+  const groove = [[S, 7], [Sf, 1], [S, 7], [Sf, 1]];
+  return {
+    id: 'loop', title: '環状線', genre: 'Minimal Synthwave ・ 長編', key: 'ニ長調 → ホ長調', bpm: 112, rev: 1.1, gain: .68, drumSend: .3,
+    sections: [[0, 'intro'], [8, 'build'], [24, 'theme'], [40, 'bridge'], [56, 'lift'], [72, 'outro']],
+    note: '「潮汐」の位相ずれを「深夜の首都高」のビートに乗せました。左で鳴る 7 音の型と右で鳴る 6 音の型は、曲頭から 84 小節のあいだ一度もリセットされません。4 つ打ちの上で周回がずれ続け、和音が変わるたびに同じ型が別の旋律に聞こえます。終盤は A の和音を軸にして全音上のホ長調へ持ち上がり、最後は解決しない IV の和音のまま、走り出しと同じ 7 音の型だけが残ります。環状線には終点がないので。ヘッドホン推奨です。',
+    tracks: [
+      { name: 'リード', inst: 'hero', vol: .6, delay: .3, alpha: 1, notes: sheet(8, [[24, th1], [32, th2], [56, shift(th1, 2)], [64, shift(th2, 2)],
+          [72, shift('f#5_3 a5_3 b5_2 | a5_8', 2)], [76, shift('f#4_3 a4_3 b4_2 | a4_8', 2)]]) },
+      { name: 'ガラスの旋律', inst: 'glass', vol: .6, delay: .4, alpha: 1,
+        notes: sheet(8, [[48, 'b4_8 | d5_6 e5_2 | c#5_8 | e5_6 f#5_2 | d5_8 | f#5_6 a5_2 | b5_8 | c#6_4 e6_4']]) },
+      { name: '7 音の型（左）', inst: 'pl7', step: .25, vol: .5, pan: -.6, free: true, alpha: .6,
+        notes: gen([1, 3, 4, 6, 5, 3, 4], 16, b => b < 83).join(' '),
+        auto: { cut: [[0, 350], [8, 1200], [24, 5000], [40, 2200], [54, 3000], [56, 8000], [72, 5000], [83, 500]], vol: [[0, 0], [2, 1]] } },
+      { name: '6 音の型（右）', inst: 'pl6', step: .25, vol: .5, pan: .6, free: true, alpha: .42,
+        notes: gen([2, 4, null, 5, 3, 4], 16, b => b >= 4 && b < 81).join(' '),
+        auto: { cut: [[4, 400], [16, 1500], [24, 4500], [40, 2500], [56, 7000], [72, 4000], [81, 400]], vol: [[4, 0], [6, 1]] } },
+      { name: '11 拍の鐘', inst: 'bell', vol: .3, delay: .3, free: true, alpha: .8, notes: bell.join(' ') },
+      { name: 'きらめき', inst: 'spark', step: .25, vol: .2, delay: .25, pan: .2, free: true, alpha: .3,
+        notes: gen([3, 5, 6, 5], 16, b => b >= 56 && b < 72, 12).join(' ') },
+      { name: 'パッド', inst: 'wide', vol: .2, duck: .55, free: true, alpha: .13,
+        notes: pairs(c => c[0] === 'A' ? `${of(PAD, 'Asus' + c.slice(1))}_8 | ${of(PAD, c)}_8` : `${of(PAD, c)}_16`).replace(/\| +\|/g, '|'),
+        auto: { cut: [[0, 300], [8, 500], [24, 1500], [40, 800], [54, 1200], [56, 2600], [72, 1800], [83, 250]] } },
+      { name: 'ベース', inst: 'drive', step: .25, vol: .8, duck: .4, alpha: .3,
+        notes: CH.map((c, b) => { if (!driving(b)) return '._16'; const r = of(ROOT, c), R = shift(r, 12);
+          return [...'rrrRrrRrrrrRrrRr'].map(x => x === 'r' ? r : R).join(' '); }).join(' | '),
+        auto: { cut: [[8, 180], [20, 700], [24, 2500], [56, 3500]] } },
+      { name: '低音', inst: 'sub', vol: 1, free: true, alpha: .2,
+        notes: pairs((c, b) => driving(b) ? '._16' : `${of(SUB, c)}_16`) },
+    ],
+    drums: {
+      kick: dr([_, 8], [K, 32], [_, 8], ['x...............', 4], ['x.......x.......', 2], [K, 2], [K, 16], ['x...............', 1], [_, 11]),
+      snare: dr([_, 16], ...groove, [S, 7], [Sf, 1], [_, 15], ['o...o...o.o.ooxx', 1], ...groove, [_, 12]),
+      hat: dr([_, 16], ['..x...x...x...x.', 8], ['o.x.o.x.o.x.o.xo', 16], [_, 8], ['o...o...o...o...', 4], ['o.o.o.o.o.o.o.o.', 4], ['x.xox.xox.xox.xo', 16], [_, 12]),
+      crash: hits([[8, 'o'], [24, 'x'], [40, 'o'], [56, 'x'], [72, 'x']]),
+      riser: hits([[22, 'x'], [54, 'x']]),
+    },
+  };
+})();
+
+const SONGS = [lofi, chip, invention, tide, wave, garden, loopline];
+
+/* ───────── 楽譜 → イベント列 ───────── */
+const errors = [];
+function midi(s) {
+  const m = /^([a-g])(#|b)?(\d)$/.exec(s);
+  if (!m) throw new Error('bad note: ' + s);
+  return 12 * (+m[3] + 1) + SEMI[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0);
+}
+function compile(song) {
+  const spb = 60 / song.bpm, bpb = song.meter || 4, ev = [];
+  let beats = 0;
+  song.tracks.forEach((tr, k) => {
+    const step = tr.step || .5, per = Math.round(bpb / step);
+    let pos = 0;
+    tr.notes.split('|').forEach((bar, bi) => {
+      let n = 0;
+      for (const tok of bar.trim().split(/\s+/)) {
+        if (!tok) continue;
+        const acc = tok.includes('^'), [body, len] = tok.replace('^', '').split('_'), dur = len ? +len : 1;
+        try {
+          if (body !== '.') for (const p of body.split('+'))
+            ev.push({ b: (pos + n) * step, d: dur * step, m: midi(p), i: tr.inst, v: (tr.vol ?? 1) * (acc ? 1.3 : 1), k });
+        } catch (e) { errors.push(`${song.id}: ${e.message}`); }
+        n += dur;
+      }
+      if (!tr.free && n !== per) errors.push(`${song.id} track ${k} bar ${bi + 1}: ${n}/${per} steps`);
+      pos += n;
+    });
+    beats = Math.max(beats, pos * step);
+  });
+  const nbars = Math.ceil(beats / bpb - 1e-6);
+  for (const [drum, pat] of Object.entries(song.drums || {}))
+    for (let s = 0; s < nbars * bpb * 4; s++) {
+      const c = pat[s % pat.length];
+      if (c !== '.') ev.push({ b: s * .25, drum, v: c === 'x' ? 1 : .5, d: drum === 'riser' ? 8 : 0 });
+    }
+  for (const e of ev) {
+    let b = e.b;
+    if (song.swing && Math.abs(b % .5 - .25) < 1e-6) b += song.swing * .25;
+    e.t = b * spb; e.d = (e.d || 0) * spb;
+  }
+  ev.sort((a, b) => a.t - b.t);
+  const pitched = ev.filter(e => !e.drum);
+  song.ev = ev; song.len = nbars * bpb * spb; song.nbars = nbars;
+  song.lo = Math.min(...pitched.map(e => e.m)); song.hi = Math.max(...pitched.map(e => e.m));
+}
+SONGS.forEach(compile);
+if (errors.length) console.error(errors.join('\n'));
+
+/* ───────── シンセサイザー ─────────
+   osc: [波形, デチューン(cent), 音量, 周波数比]  a/d/s/r: エンベロープ  cut/fenv/fdec: ローパスとその動き
+   vib: [Hz, cent]  send: リバーブ量  ring: 鍵を離しても減衰し切るまで鳴らす（撥弦・打楽器系） */
+const INST = {
+  keys:    { osc: [['triangle', 0, 1, 1], ['sine', 0, .3, 2]], a: .012, d: .7, s: .3, r: .35, cut: 2600, vib: [5, 6], send: .35 },
+  ep:      { osc: [['sine', 0, 1, 1], ['sine', 0, .22, 2], ['triangle', 7, .3, 1]], a: .006, d: 1.4, s: .2, r: .4, cut: 2000, send: .3 },
+  sub:     { osc: [['sine', 0, 1, 1], ['triangle', 0, .25, 1]], a: .01, d: .3, s: .8, r: .1, cut: 500, send: 0 },
+  sq:      { osc: [['square', 0, .5, 1]], a: .002, d: .1, s: .7, r: .05, send: .08 },
+  pulse:   { osc: [['pulse', 0, .5, 1]], a: .002, d: .08, s: .4, r: .03, send: .08 },
+  tri:     { osc: [['triangle', 0, 1, 1]], a: .002, d: .1, s: .9, r: .03, send: 0 },
+  harpsi:  { osc: [['sawtooth', 0, .5, 1], ['pulse', 0, .3, 2]], a: .001, d: .9, s: 0, r: .12, cut: 4500, fenv: 2, fdec: .3, send: .25, ring: true },
+  mallet:  { osc: [['sine', 0, 1, 1], ['sine', 0, .3, 4]], a: .001, d: .55, s: 0, r: .3, send: .5, ring: true },
+  bell:    { osc: [['sine', 0, 1, 1], ['sine', 0, .4, 2.76], ['sine', 0, .18, 5.4]], a: .001, d: 2.6, s: 0, r: 1, send: .7, ring: true },
+  pad:     { osc: [['sawtooth', -9, .4, 1], ['sawtooth', 9, .4, 1]], a: .7, d: 1, s: .8, r: 1.4, cut: 1100, send: .5 },
+  drone:   { osc: [['sine', 0, 1, 1], ['triangle', 4, .25, 1]], a: 1.2, d: 1, s: 1, r: 1.8, send: .4 },
+  sawbass: { osc: [['sawtooth', 0, .6, 1], ['square', 0, .3, .5]], a: .002, d: .15, s: .3, r: .05, cut: 450, fenv: 4, fdec: .12, send: 0 },
+  lead:    { osc: [['sawtooth', -7, .4, 1], ['sawtooth', 7, .4, 1]], a: .02, d: .3, s: .7, r: .25, cut: 3200, vib: [5.5, 9], send: .45 },
+  pluck:   { osc: [['sawtooth', 0, .5, 1]], a: .001, d: .25, s: 0, r: .1, cut: 800, fenv: 5, fdec: .1, send: .3, ring: true },
+  koto:    { osc: [['triangle', 0, .8, 1], ['sawtooth', 0, .3, 1], ['sine', 0, .2, 3]], a: .001, d: 1.5, s: 0, r: .5, cut: 1700, fenv: 4, fdec: .08, send: .45, ring: true },
+  hero:    { osc: [['sawtooth', -11, .33, 1], ['sawtooth', 0, .33, 1], ['sawtooth', 11, .33, 1], ['square', 0, .12, .5]], a: .015, d: .4, s: .75, r: .3, cut: 3600, vib: [5.5, 10], send: .4 },
+  glass:   { osc: [['sine', 0, 1, 1], ['triangle', 0, .3, 2], ['sine', 0, .1, 3]], a: .06, d: .5, s: .7, r: .6, vib: [4.5, 7], send: .6 },
+  pl7:     { osc: [['sawtooth', 0, .45, 1], ['pulse', 0, .2, 1]], a: .001, d: .22, s: 0, r: .1, cut: 1400, fenv: 4, fdec: .09, send: .3, ring: true },
+  pl6:     { osc: [['triangle', 0, .7, 1], ['sawtooth', 5, .25, 1]], a: .001, d: .3, s: 0, r: .1, cut: 2200, fenv: 2.5, fdec: .1, send: .35, ring: true },
+  spark:   { osc: [['pulse', 0, .4, 1]], a: .001, d: .12, s: 0, r: .05, send: .3, ring: true },
+  wide:    { osc: [['sawtooth', -13, .33, 1], ['sawtooth', 0, .3, 1], ['sawtooth', 13, .33, 1]], a: .5, d: 1, s: .85, r: 1.2, send: .5 },
+  drive:   { osc: [['sawtooth', 0, .6, 1], ['square', 6, .35, 1]], a: .002, d: .14, s: .35, r: .04, cut: 420, fenv: 5, fdec: .11, send: 0 },
+  flute:   { osc: [['sine', 0, 1, 1], ['triangle', 0, .22, 1], ['sine', 0, .08, 2]], a: .12, d: .3, s: .85, r: .35, vib: [4.8, 14], send: .6 },
+};
+
+function makeRig(ctx) {
+  const master = ctx.createGain(), comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -14; comp.ratio.value = 4; comp.attack.value = .005; comp.release.value = .2;
+  master.connect(comp).connect(ctx.destination);
+  const sr = ctx.sampleRate, noise = ctx.createBuffer(1, sr, sr), nd = noise.getChannelData(0);
+  for (let i = 0; i < sr; i++) nd[i] = Math.random() * 2 - 1;
+  const ir = ctx.createBuffer(2, sr * 2.6, sr);
+  for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / sr / .55) * .5; }
+  const reverb = ctx.createConvolver(); reverb.buffer = ir; reverb.connect(master);
+  const N = 32, re = new Float32Array(N), im = new Float32Array(N);      // デューティ比 25% のパルス波
+  for (let n = 1; n < N; n++) re[n] = 2 / (n * Math.PI) * Math.sin(n * Math.PI * .25);
+  return { ctx, master, reverb, noise, pulse: ctx.createPeriodicWave(re, im) };
+}
+function makeBus(R, song) {
+  const { ctx } = R, g = song.gain ?? 1, out = ctx.createGain(), dry = ctx.createGain(), wet = ctx.createGain(), dsend = ctx.createGain();
+  out.gain.value = g; wet.gain.value = .22 * (song.rev ?? 1) * g; dsend.gain.value = song.drumSend || 0;
+  if (song.lp) { const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = song.lp; out.connect(f).connect(R.master); }
+  else out.connect(R.master);
+  dry.connect(out); wet.connect(R.reverb); dsend.connect(wet);
+  let delay = null;                                   // 付点 8 分のピンポン・ディレイ
+  if (song.tracks.some(t => t.delay)) {
+    const dL = ctx.createDelay(2), dR = ctx.createDelay(2), lp = ctx.createBiquadFilter(), x = ctx.createGain(), fb = ctx.createGain();
+    const pL = ctx.createStereoPanner(), pR = ctx.createStereoPanner();
+    delay = ctx.createGain(); dL.delayTime.value = dR.delayTime.value = .75 * 60 / song.bpm;
+    lp.type = 'lowpass'; lp.frequency.value = 3000; x.gain.value = .6; fb.gain.value = .6; pL.pan.value = -.7; pR.pan.value = .7;
+    delay.connect(dL); dL.connect(pL).connect(out); dL.connect(lp).connect(x).connect(dR); dR.connect(pR).connect(out); dR.connect(fb).connect(dL);
+  }
+  const duckers = [];
+  const tracks = song.tracks.map(tr => {
+    const inp = ctx.createGain(), autos = [];
+    let node = inp;
+    const add = n => { node.connect(n); node = n; return n; };
+    if (tr.auto?.cut) { const f = add(ctx.createBiquadFilter()); f.type = 'lowpass'; f.Q.value = 1.5; autos.push(['cut', f.frequency, true]); }
+    if (tr.duck) duckers.push([add(ctx.createGain()).gain, tr.duck]);       // キックに合わせて沈む（サイドチェイン）
+    if (tr.auto?.vol) autos.push(['vol', add(ctx.createGain()).gain, false]);
+    if (tr.pan) add(ctx.createStereoPanner()).pan.value = tr.pan;
+    node.connect(dry);
+    const send = tr.send ?? INST[tr.inst].send;
+    if (send) { const s = ctx.createGain(); s.gain.value = send; node.connect(s).connect(wet); }
+    if (tr.delay) { const s = ctx.createGain(); s.gain.value = tr.delay; node.connect(s).connect(delay); }
+    return { tr, inp, autos };
+  });
+  return { out, dry, wet, dsend, tracks, duckers };
+}
+/* フィルターと音量の自動操作を、off 秒の位置から予約する */
+function scheduleAuto(bus, song, t0, off, now) {
+  const barSec = song.len / song.nbars;
+  for (const tb of bus.tracks) for (const [key, param, exp] of tb.autos) {
+    const pts = tb.tr.auto[key].map(([b, v]) => [b * barSec, v]);
+    let v0 = pts[0][1];
+    pts.forEach(([t, v], i) => { if (t > off) return; v0 = v; const n = pts[i + 1];
+      if (n && n[0] > off) { const u = (off - t) / (n[0] - t); v0 = exp ? v * (n[1] / v) ** u : v + (n[1] - v) * u; } });
+    param.setValueAtTime(v0, Math.max(now, t0 + off));
+    for (const [t, v] of pts) if (t > off) exp ? param.exponentialRampToValueAtTime(v, t0 + t) : param.linearRampToValueAtTime(v, t0 + t);
+  }
+}
+function playNote(R, bus, e, t) {
+  const I = INST[e.i], { ctx } = R, f = 440 * 2 ** ((e.m - 69) / 12), peak = e.v * .15;
+  const hold = I.ring ? Math.max(e.d, I.d) : e.d, end = t + hold + I.r * 1.5 + .05;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(peak, t + I.a);
+  g.gain.setTargetAtTime(peak * I.s, t + I.a, I.d / 3);
+  g.gain.setTargetAtTime(0, t + hold, I.r / 3);
+  let dst = g;
+  if (I.cut) { const fl = ctx.createBiquadFilter(); fl.type = 'lowpass';
+    fl.frequency.setValueAtTime(I.cut * (I.fenv || 1), t);
+    if (I.fenv) fl.frequency.setTargetAtTime(I.cut, t, I.fdec / 3);
+    fl.connect(g); dst = fl; }
+  let lg;
+  if (I.vib) { const lfo = ctx.createOscillator(); lg = ctx.createGain(); lfo.frequency.value = I.vib[0];
+    lg.gain.setValueAtTime(0, t); lg.gain.linearRampToValueAtTime(I.vib[1], t + .4);
+    lfo.connect(lg); lfo.start(t); lfo.stop(end); }
+  for (const [type, det, gain, ratio] of I.osc) {
+    const o = ctx.createOscillator(), og = ctx.createGain();
+    if (type === 'pulse') o.setPeriodicWave(R.pulse); else o.type = type;
+    o.frequency.value = f * ratio; o.detune.value = det; og.gain.value = gain;
+    if (lg) lg.connect(o.detune);
+    o.connect(og).connect(dst); o.start(t); o.stop(end);
+  }
+  g.connect(bus.tracks[e.k].inp);
+}
+function playDrum(R, bus, e, t) {
+  const { ctx } = R, v = e.v;
+  const env = (peak, dec) => { const g = ctx.createGain(); g.gain.setValueAtTime(peak, t);
+    g.gain.exponentialRampToValueAtTime(.001, t + dec); g.connect(bus.dry); g.connect(bus.dsend); return g; };
+  const noise = (dec, type, freq) => { const s = ctx.createBufferSource(), f = ctx.createBiquadFilter();
+    s.buffer = R.noise; s.loop = true; f.type = type; f.frequency.value = freq;
+    s.connect(f); s.start(t, Math.random() * .9); s.stop(t + dec + .02); return f; };
+  const tone = (type, f0, f1, ft, dec) => { const o = ctx.createOscillator(); o.type = type;
+    o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + ft);
+    o.start(t); o.stop(t + dec + .02); return o; };
+  if (e.drum === 'kick') tone('sine', 150, 45, .1, .3).connect(env(.8 * v, .3));
+  else if (e.drum === 'snare') { noise(.18, 'bandpass', 1900).connect(env(.5 * v, .18)); tone('triangle', 220, 160, .05, .1).connect(env(.25 * v, .1)); }
+  else if (e.drum === 'hat') noise(.05, 'highpass', 7000).connect(env(.16 * v, .05));
+  else if (e.drum === 'taiko') { const g = env(.8 * v, 1); tone('sine', 95, 48, .25, 1).connect(g);
+    noise(.1, 'lowpass', 500).connect(env(.5 * v, .1)); const s = ctx.createGain(); s.gain.value = .5; g.connect(s).connect(bus.wet); }
+  else if (e.drum === 'crash') { const g = env(.3 * v, 2.2); noise(2.2, 'highpass', 4500).connect(g);
+    const s = ctx.createGain(); s.gain.value = .6; g.connect(s).connect(bus.wet); }
+  else if (e.drum === 'riser') { const f = noise(e.d, 'bandpass', 300), g = ctx.createGain(); f.Q.value = 1.2;
+    f.frequency.setValueAtTime(300, t); f.frequency.exponentialRampToValueAtTime(7000, t + e.d);
+    g.gain.setValueAtTime(.001, t); g.gain.exponentialRampToValueAtTime(.28 * v, t + e.d); g.gain.setTargetAtTime(0, t + e.d, .02);
+    f.connect(g); g.connect(bus.dry); g.connect(bus.wet); }
+  if (e.drum === 'kick') for (const [p, amt] of bus.duckers) { p.setValueAtTime(1 - amt * v, t); p.linearRampToValueAtTime(1, t + .26); }
+}
+const fire = (R, bus, e, t) => e.drum ? playDrum(R, bus, e, t) : playNote(R, bus, e, t);
+
+/* 検証用: 音を鳴らさずに 1 曲まるごとレンダリングして音量を測る */
+async function renderOffline(song) {
+  const sr = 44100, ctx = new OfflineAudioContext(2, Math.ceil(sr * (song.len + 3)), sr);
+  const R = makeRig(ctx), bus = makeBus(R, song);
+  R.master.gain.value = .8; scheduleAuto(bus, song, .05, 0, 0);
+  let idx = 0;                                        // 実再生と同じく 2 秒ぶんずつ予約する
+  const chunk = T => { while (idx < song.ev.length && song.ev[idx].t < T + 2) { const e = song.ev[idx++]; fire(R, bus, e, e.t + .05); } };
+  chunk(0);
+  for (let T = 2; T < song.len; T += 2) ctx.suspend(T).then(() => { chunk(T); ctx.resume(); });
+  const d = (await ctx.startRendering()).getChannelData(0);
+  let peak = 0, sq = 0;
+  for (let i = 0; i < d.length; i++) { const a = Math.abs(d[i]); if (a > peak) peak = a; sq += a * a; }
+  return { id: song.id, sec: +song.len.toFixed(1), events: song.ev.length, peak: +peak.toFixed(3), rms: +Math.sqrt(sq / d.length).toFixed(4) };
+}
+window.__verify = async () => ({ errors, songs: await SONGS.reduce(async (acc, x) => [...await acc, await renderOffline(x)], []) });
+
+/* ───────── プレイヤー ───────── */
+const $ = id => document.getElementById(id);
+const fmt = s => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+let rig = null, cur = 0, play = null;   // play = { bus, t0, idx, lap, timer }
+
+function stop() {
+  if (!play) return;
+  clearInterval(play.timer);
+  const { bus } = play, now = rig.ctx.currentTime;
+  for (const g of [bus.out, bus.wet]) g.gain.setTargetAtTime(0, now, .02);
+  setTimeout(() => { bus.out.disconnect(); bus.wet.disconnect(); }, 400);
+  play = null; $('play').textContent = '▶ 再生';
+}
+function start(off = 0) {
+  if (!rig) { rig = makeRig(new (window.AudioContext || window.webkitAudioContext)()); rig.master.gain.value = +$('vol').value; }
+  rig.ctx.resume(); stop();
+  const song = SONGS[cur], t1 = rig.ctx.currentTime + .12, p = play = { bus: makeBus(rig, song), t0: t1 - off, idx: 0, lap: 0 };
+  scheduleAuto(p.bus, song, p.t0, off, t1);
+  for (const e of song.ev) {                          // 途中から: すでに鳴っているはずの長い音を拾う
+    if (e.t >= off) break; p.idx++;
+    if (!e.drum && e.t + e.d > off + .25) fire(rig, p.bus, { ...e, d: e.t + e.d - off }, t1);
+  }
+  const tick = () => {
+    const now = rig.ctx.currentTime;
+    for (;;) {
+      if (p.idx >= song.ev.length) {
+        if ($('loop').checked) { p.idx = 0; p.lap++; scheduleAuto(p.bus, song, p.t0 + p.lap * song.len, 0, now); continue; }
+        if (now > p.t0 + (p.lap + 1) * song.len + 1.2) { select((cur + 1) % SONGS.length, true); }
+        return;
+      }
+      const e = song.ev[p.idx], t = p.t0 + p.lap * song.len + e.t;
+      if (t > now + .35) return;
+      fire(rig, p.bus, e, Math.max(t, now)); p.idx++;
+    }
+  };
+  p.timer = setInterval(tick, 60); tick();
+  $('play').textContent = '■ 停止';
+}
+
+function select(i, autoplay) {
+  const was = !!play; stop(); cur = i;
+  const s = SONGS[i], c = `var(--c${i + 1})`;
+  $('now').style.setProperty('--c', c);
+  $('title').textContent = s.title;
+  $('note').textContent = s.note;
+  $('meta').innerHTML = [s.genre, s.key, `${s.bpm} BPM`, s.meter ? '7/8 拍子' : '4/4 拍子', `${s.nbars} 小節`, fmt(s.len)]
+    .map(x => `<li>${x}</li>`).join('');
+  $('legend').innerHTML = s.tracks.map((t, k) => `<li><i style="opacity:${t.alpha ?? ALPHA[k]}"></i>${t.name}</li>`).join('')
+    + (s.drums ? '<li><i style="opacity:.3;height:2px"></i>打楽器</li>' : '');
+  document.querySelectorAll('.row').forEach((r, k) => r.setAttribute('aria-current', k === i));
+  drawRoll();
+  if (autoplay || was) start();
+}
+
+/* ピアノロール: 横が時間、縦が音高。再生位置を縦線で示す */
+const ALPHA = [1, .62, .42, .3, .22];
+const cv = $('roll'), g2 = cv.getContext('2d'), base = document.createElement('canvas');
+function drawRoll() {
+  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  for (const c of [cv, base]) { c.width = w * dpr; c.height = h * dpr; }
+  const s = SONGS[cur], g = base.getContext('2d'), css = getComputedStyle($('now'));
+  const col = css.getPropertyValue(`--c${cur + 1}`).trim(), line = css.getPropertyValue('--line').trim();
+  g.scale(dpr, dpr);
+  const top = s.sections ? 20 : 6, dh = s.drums ? 14 : 0, rows = s.hi - s.lo + 1, rh = (h - dh - top - 6) / rows;
+  g.fillStyle = line;
+  for (let b = 0; b <= s.nbars; b += s.nbars > 40 ? 4 : 1) g.fillRect(Math.round(b / s.nbars * (w - 1)), 0, 1, h);
+  g.font = '11px "DM Mono", ui-monospace, monospace';
+  for (const [b, name] of s.sections || []) { const x = Math.round(b / s.nbars * (w - 1));
+    g.fillStyle = css.getPropertyValue('--muted'); g.fillRect(x, 0, 1, h); g.fillText(name, x + 5, 13); }
+  g.fillStyle = col;
+  for (const e of s.ev) {
+    const x = e.t / s.len * w;
+    if (e.drum) { g.globalAlpha = .3 * e.v + .1; g.fillRect(x, h - dh + 2, 1.5, dh - 5); continue; }
+    g.globalAlpha = s.tracks[e.k].alpha ?? ALPHA[e.k];
+    g.fillRect(x, top + (s.hi - e.m) * rh, Math.max(1.5, e.d / s.len * w - 1), Math.max(1.5, rh - .5));
+  }
+  paint();
+}
+function paint() {
+  g2.clearRect(0, 0, cv.width, cv.height); g2.drawImage(base, 0, 0);
+  if (play && rig) {
+    const s = SONGS[cur], pos = (rig.ctx.currentTime - play.t0) / s.len;
+    if (pos >= 0 && (pos <= 1 || $('loop').checked)) {
+      g2.fillStyle = getComputedStyle($('now')).getPropertyValue('--ink');
+      g2.fillRect(Math.round((pos % 1) * (cv.width - 2)), 0, 2, cv.height);
+    }
+  }
+}
+(function loop() { paint(); requestAnimationFrame(loop); })();
+
+$('list').innerHTML = SONGS.map((s, i) =>
+  `<li><button class="row" type="button" style="--c:var(--c${i + 1})"><span class="no">${String(i + 1).padStart(2, '0')}</span><span class="ttl">${s.title}</span><span class="len">${fmt(s.len)}</span><span class="genre">${s.genre}</span></button></li>`).join('');
+document.querySelectorAll('.row').forEach((r, i) => r.addEventListener('click', () => select(i, true)));
+$('play').addEventListener('click', () => play ? stop() : start());
+$('prev').addEventListener('click', () => select((cur + SONGS.length - 1) % SONGS.length));
+$('next').addEventListener('click', () => select((cur + 1) % SONGS.length));
+$('vol').addEventListener('input', e => { if (rig) rig.master.gain.setTargetAtTime(+e.target.value, rig.ctx.currentTime, .02); });
+cv.addEventListener('click', e => { const r = cv.getBoundingClientRect(); start(Math.max(0, (e.clientX - r.left) / r.width) * SONGS[cur].len); });
+addEventListener('resize', drawRoll);
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', drawRoll);
+new MutationObserver(drawRoll).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+select(SONGS.length - 1);
+if (document.fonts) document.fonts.ready.then(drawRoll);
+</script>
