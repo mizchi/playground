@@ -884,7 +884,8 @@ impl Parser {
             let st = self.i;
             let name = self.ident()?;
             let mut seg = Seg { name: name, args: Vec::new(), fn_args: None, text: String::new() };
-            if in_ty && self.is_punct("<") && !self.punct_at(0, "<=") && !self.punct_at(0, "<<") {
+            // (型の中の `<<` は `<` と、修飾されたパスの `<`: `Either<<&L as IntoIterator>::IntoIter, ..>`)
+            if in_ty && self.is_punct("<") && !self.punct_at(0, "<=") {
                 self.i += 1;
                 seg.args = self.generic_args()?;
             } else if self.punct_at(0, "::") && self.punct_at(2, "<") {

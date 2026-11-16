@@ -21,6 +21,8 @@ impl Cx<'_> {
             "windows" => Some(("__exr_slice_windows", false)),
             "chunks" => Some(("__exr_slice_chunks", false)),
             "chunks_exact" => Some(("__exr_slice_chunks_exact", false)),
+            "split_first_chunk" => Some(("__exr_slice_split_first_chunk", false)),
+            "first_chunk" => Some(("__exr_slice_first_chunk", false)),
             "to_vec" => Some(("__exr_slice_to_vec", false)),
             "copy_from_slice" => Some(("__exr_slice_copy_from", true)),
             "clone_from_slice" => Some(("__exr_slice_clone_from", true)),
@@ -181,7 +183,9 @@ impl Cx<'_> {
                 let (base, len, elem) = self.indexable(&*mc_recv)?;
                 let (fat, st) = (self.make_fat_v(base, len), Ty::Ref(m, intern(Ty::Slice(intern(elem)))));
                 let args: Vec<&Expr> = mc_args.iter().collect();
-                return self.call_fn(id, Some((fat, st)), &args, None, None, SP).map(Some);
+                // (`split_first_chunk::<16>()`: turbofish は prelude の関数の型パラメータの先頭から)
+                let tf: Option<&[crate::parse::GArg]> = (!mc_tf.is_empty()).then_some(&mc_tf[..]);
+                return self.call_fn(id, Some((fat, st)), &args, tf, None, SP).map(Some);
             }
         }
         let elem = match rt {

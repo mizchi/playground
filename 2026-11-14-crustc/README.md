@@ -1418,22 +1418,30 @@ rustc (lib を rlib にして `--extern`) と比べる: 出力が rustc -O と�
 - 直したバグ: `&&str` → `&str` の deref の強制変換が fat ポインタを読み込んでいた (値が壊れる)。注釈なしの let で
   型推論の型と実際の型が違うときは強制変換を試し、だめなら実際の型を使う
 
-結果 (2026-11-16、ms。run は実行時間):
+結果 (2026-11-16、ms。run は実行時間。下の最適化の後):
 
 | crate | compiler | cold | noop | edit | run | size | same output |
 |---|---|---:|---:|---:|---:|---:|---|
-| fnv | rustc | 185 |  | 148 | 520 | 4483 KiB |  |
-| fnv | rustc -O | 379 |  | 354 | 42 | 4413 KiB |  |
-| fnv | crustc | 79 | 2 | 19 | 140 | 28 KiB | yes |
-| fnv | crustc -O | 107 | 2 | 28 | 137 | 29 KiB | yes |
-| adler2 | rustc | 176 |  | 104 | 675 | 4424 KiB |  |
-| adler2 | rustc -O | 222 |  | 122 | 12 | 4389 KiB |  |
-| adler2 | crustc | 49 | 2 | 19 | 474 | 17 KiB | yes |
-| adler2 | crustc -O | 77 | 2 | 29 | 478 → 114 | 17 KiB | yes |
-| hex | rustc | 284 |  | 130 | 146 | 4479 KiB |  |
-| hex | rustc -O | 454 |  | 297 | 13 | 4399 KiB |  |
-| hex | crustc | 95 | 2 | 29 | 102 | 56 KiB | yes |
-| hex | crustc -O | 111 | 2 | 39 | 79 | 60 KiB | yes |
+| fnv | rustc | 170 |  | 135 | 495 | 4483 KiB |  |
+| fnv | rustc -O | 348 |  | 312 | 42 | 4413 KiB |  |
+| fnv | crustc | 64 | 2 | 18 | 135 | 26 KiB | yes |
+| fnv | crustc -O | 91 | 2 | 24 | 114 | 27 KiB | yes |
+| adler2 | rustc | 157 |  | 95 | 624 | 4424 KiB |  |
+| adler2 | rustc -O | 220 |  | 138 | 12 | 4389 KiB |  |
+| adler2 | crustc | 52 | 2 | 18 | 262 | 16 KiB | yes |
+| adler2 | crustc -O | 68 | 2 | 22 | 136 | 15 KiB | yes |
+| hex | rustc | 265 |  | 121 | 148 | 4479 KiB |  |
+| hex | rustc -O | 454 |  | 291 | 11 | 4399 KiB |  |
+| hex | crustc | 79 | 2 | 27 | 84 | 52 KiB | yes |
+| hex | crustc -O | 109 | 2 | 32 | 73 | 52 KiB | yes |
+| rustc-hash | rustc | 203 |  | 142 | 468 | 4490 KiB |  |
+| rustc-hash | rustc -O | 352 |  | 300 | 58 | 4408 KiB |  |
+| rustc-hash | crustc | 67 | 2 | 19 | 182 | 29 KiB | yes |
+| rustc-hash | crustc -O | 88 | 2 | 27 | 163 | 27 KiB | yes |
+| cfg-if | rustc | 94 |  | 74 | 388 | 4390 KiB |  |
+| cfg-if | rustc -O | 110 |  | 86 | 58 | 4387 KiB |  |
+| cfg-if | crustc | 28 | 2 | 13 | 183 | 8 KiB | yes |
+| cfg-if | crustc -O | 37 | 2 | 15 | 57 | 8 KiB | yes |
 
 ビルドは rustc より 2〜4 倍速く、編集のビルドは 5〜10 倍速い。実行は rustc -O より遅い (adler2 は 40 倍だった)。
 
@@ -1448,7 +1456,15 @@ adler2 の内側のループ (`U32X4([u32; 4])` の `+=` と `chunks_exact`) を
 
 残り (rustc -O の約 10 倍): `a_vec.0.iter()` でアドレスが本当に漏れる、enum (`Option<&[u8]>`) のコピーが 8 byte ずつ、
 rustc は SIMD にする。
-itoa は未対応 (`MaybeUninit`・関連型・`<T as Tr>::C`)。
+itoa は未対応 (`MaybeUninit`・関連型・`<T as Tr>::C`)。either も未対応 (`Pin` / `Future` / io の各トレイト / `Error` / `fmt::Binary` など)。
+
+rustc-hash・cfg-if のために足したもの:
+- マクロの呼び出しの引数と macro_rules! の中の `#[cfg]` は評価しない (cfg_if! の `if #[cfg(..)] { .. }` を消していた)。
+  代わりにマクロを展開した周ごとに評価する (`#[cfg(p)] $crate::cfg_if! { .. }` を、中を展開する前に)。feature はクレートごと
+- `$t:tt` に入った Joint の記号 (`->` の `-`) の後に空白を入れない (`- >` になっていた)
+- prelude: `BuildHasher` (`hash_one`)・`split_first_chunk::<N>()` / `first_chunk` (turbofish を prelude の関数に渡す)
+- `[T]` の Hash は std の `hash_slice` と同じく整数の列をまとめて `write` する (FxHasher で値が std と一致する)
+- 型の中の `<<` (`Either<<&L as IntoIterator>::IntoIter, ..>`) は `<` と修飾されたパスの `<`
 
 ### 途中で分かったこと
 

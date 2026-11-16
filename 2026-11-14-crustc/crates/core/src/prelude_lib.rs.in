@@ -1119,6 +1119,21 @@ fn __exr_slice_chunks_exact<T>(s: &[T], n: usize) -> ChunksExact<T> {
     ChunksExact { ptr: s.as_ptr(), len: s.len(), n: n, i: 0 }
 }
 
+// (`s.split_first_chunk::<N>()`: turbofish の N が先頭の型パラメータに当たるように N を先に置く)
+fn __exr_slice_split_first_chunk<const N: usize, T>(s: &[T]) -> Option<(&[T; N], &[T])> {
+    if s.len() < N {
+        return None;
+    }
+    unsafe { Some((&*(s.as_ptr() as *const [T; N]), core::slice::from_raw_parts(s.as_ptr().add(N), s.len() - N))) }
+}
+
+fn __exr_slice_first_chunk<const N: usize, T>(s: &[T]) -> Option<&[T; N]> {
+    if s.len() < N {
+        return None;
+    }
+    unsafe { Some(&*(s.as_ptr() as *const [T; N])) }
+}
+
 fn __exr_slice_chunks<T>(s: &[T], n: usize) -> Chunks<T> {
     if n == 0 {
         panic!("chunk size must be non-zero");
@@ -9868,6 +9883,17 @@ pub trait Hash {
     fn hash<H: Hasher>(&self, state: &mut H);
 }
 
+// (HashMap の第 3 引数としては使わない: 組み込みのハッシュで引く)
+pub trait BuildHasher {
+    type Hasher;
+    fn build_hasher(&self) -> Self::Hasher;
+    fn hash_one<T: Hash>(&self, x: T) -> u64 {
+        let mut h = self.build_hasher();
+        x.hash(&mut h);
+        h.finish()
+    }
+}
+
 impl Hash for u8 {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_u8(*self);
@@ -9951,6 +9977,11 @@ impl Hash for String {
 impl<T: Hash> Hash for [T] {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_length_prefix(self.len());
+        // (std の hash_slice と同じく、整数の列はまとめて write する: FxHasher などで値が std と一致する)
+        if __exr_int_kind::<T>() != 0 {
+            state.write(unsafe { core::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * core::mem::size_of::<T>()) });
+            return;
+        }
         let mut i = 0;
         while i < self.len() {
             self[i].hash(state);

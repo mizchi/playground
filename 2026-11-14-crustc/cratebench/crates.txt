@@ -3,3 +3,6 @@ fnv 2015 std
 adler2 2021 std
 hex 2018 std,alloc
 itoa 2021 -
+rustc-hash 2021 std
+cfg-if 2018 -
+# either 2021 std   (未対応: Pin / Future / io の各トレイト / Error / fmt::Binary など)

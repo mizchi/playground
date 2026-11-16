@@ -20,16 +20,17 @@ pub type R<T> = Result<T, String>;
 /// ユーザのソースの後ろに、使われうる prelude のアイテムを付ける (driver::with_prelude と同じ)。
 /// 返り値は (全体のソース, アイテム, ユーザのアイテムの数)
 pub fn with_prelude(src: &str) -> R<(String, Vec<SrcItem>, usize)> {
-    with_prelude_in(src, &[], &mut vec![])
+    with_prelude_in(src, &[], &mut vec![], None)
 }
 
 /// crates: ソースの中のクレートのモジュールの名前 (lexer::rename_module_collisions_in)
 /// fix: モジュールの名前を変えて桁がずれた所 (lexer::rename_module_collisions_fix)
-pub fn with_prelude_in(src: &str, crates: &[String], fix: &mut Vec<(u32, u32, i32)>) -> R<(String, Vec<SrcItem>, usize)> {
+/// cfg: マクロを展開したものの中の `#[cfg(..)]` を評価する設定
+pub fn with_prelude_in(src: &str, crates: &[String], fix: &mut Vec<(u32, u32, i32)>, cfg: Option<&crate::cfg::CfgSet>) -> R<(String, Vec<SrcItem>, usize)> {
     let mut tm = Timer { on: std::env::var_os("CRUSTC_PROF").is_some(), last: now_ns(), start: now_ns() };
     let tl = lexer::expand_thread_local(src);
     let src: &str = tl.as_deref().unwrap_or(src);
-    let expanded = crate::macros::expand(src)?.or(tl.clone());
+    let expanded = crate::macros::expand_cfg(src, cfg)?.or(tl.clone());
     let src: &str = expanded.as_deref().unwrap_or(src);
     tm.lap("macros", String::new());
     if let Some(p) = std::env::var_os("CRUSTC_DUMP_PRE") {
@@ -156,6 +157,8 @@ pub struct CrateCtx {
     pub map: crate::srcmap::SrcMap,
     /// 依存するクレート (推移的に全部。実行ファイルの panic の表がそれらの表を指す)
     pub deps: Vec<String>,
+    /// このクレートの feature (ワークスペース。None なら Options2 の features)
+    pub features: Option<Vec<String>>,
 }
 
 /// ビルドの結果
@@ -344,7 +347,8 @@ impl Session2 {
         let mut crates = self.ctx.deps.clone();
         crates.extend(self.ctx.lib.iter().cloned());
         let mut fix = vec![];
-        let (src, items, user) = with_prelude_in(src0, &crates, &mut fix)?;
+        let cfg = self.opts.cfg_with(self.ctx.features.as_ref().unwrap_or(&self.opts.features));
+        let (src, items, user) = with_prelude_in(src0, &crates, &mut fix, Some(&cfg))?;
         self.ctx.map.colfix = fix;
         let mut tm = Timer { on: std::env::var_os("CRUSTC_PROF").is_some(), last: now_ns(), start: now_ns() };
         if let Some(p) = std::env::var_os("CRUSTC_DUMP_SRC") {
@@ -1530,6 +1534,7 @@ impl Session2 {
             own_lines: n_lines(&own) + 1,
             map: map.clone(),
             deps: deps.iter().map(|&j| crates[j].name.clone()).collect(),
+            features: Some(c.features.clone()),
         };
         let mut r = Report2::default();
         let a = self.analyze(&src).map_err(|e| format!("crate `{}`: {}", c.name, self.ctx.map.relocate_err(&e)))?;

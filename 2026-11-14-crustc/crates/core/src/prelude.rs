@@ -185,7 +185,7 @@ fn gated_trait(h: usize) -> Option<&'static str> {
     it.idents
         .iter()
         .map(|&(a, b)| &PRELUDE[a as usize..b as usize])
-        .find(|w| matches!(*w, "Hasher" | "Hash" | "__BoolThen" | "__AsBytes" | "__PathExt" | "__AsPathStr" | "BufRead" | "Read" | "ExactSizeIterator"))
+        .find(|w| matches!(*w, "Hasher" | "Hash" | "__BoolThen" | "__AsBytes" | "__PathExt" | "__AsPathStr" | "BufRead" | "Read" | "ExactSizeIterator" | "BuildHasher"))
 }
 
 /// 名前が要るときだけ付ける trait の実装 (`impl Read for &[u8]`)
@@ -528,7 +528,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             "cloned", "format", "print", "println", "eprint", "eprintln", "write", "writeln",
             "split", "split_whitespace", "lines", "trim", "starts_with", "ends_with", "contains",
             "clamp", "from_u32", "char", "join", "concat", "drain", "default", "f64", "f32", "i128", "u128", "Iterator", "into", "split_at_mut",
-            "copy_from_slice", "clone_from_slice", "BufRead", "Read", "ExactSizeIterator",
+            "copy_from_slice", "clone_from_slice", "BufRead", "Read", "ExactSizeIterator", "BuildHasher", "split_first_chunk", "first_chunk", "chunks_exact",
         ]);
         // (先頭の 1 byte, 長さ) ごとの候補。prelude の名前が増えても 1 識別子あたりの比較は 0〜1 回
         let mut t: Vec<Vec<&'static str>> = vec![vec![]; 256 * 32];
@@ -769,6 +769,8 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         ("windows", "__exr_slice_windows"),
         ("chunks", "__exr_slice_chunks"),
         ("chunks_exact", "__exr_slice_chunks_exact"),
+        ("split_first_chunk", "__exr_slice_split_first_chunk"),
+        ("first_chunk", "__exr_slice_first_chunk"),
         ("to_vec", "__exr_slice_to_vec"),
         ("copy_from_slice", "__exr_slice_copy_from"),
         ("clone_from_slice", "__exr_slice_clone_from"),

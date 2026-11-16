@@ -193,6 +193,20 @@ pub fn strip(src: &str, c: &CfgSet) -> Option<String> {
             i = close + 1;
             continue;
         }
+        // マクロの呼び出しと macro_rules! の中は見ない (展開してから評価する: cfg_if! の `if #[cfg(..)] { .. }`)
+        if toks[i].0 == 0 && t(i) != b"cfg" && t(i + 1) == b"!" {
+            let g = if t(i + 2) == b"(" || t(i + 2) == b"[" || t(i + 2) == b"{" {
+                Some(i + 2)
+            } else if toks.get(i + 2).is_some_and(|x| x.0 == 0) && t(i + 3) == b"{" {
+                Some(i + 3)
+            } else {
+                None
+            };
+            if let Some(g) = g {
+                i = matching(s, &toks, g) + 1;
+                continue;
+            }
+        }
         // `extern crate x [as y];`
         if t(i) == b"extern" && t(i + 1) == b"crate" && toks.get(i + 2).is_some_and(|x| x.0 == 0) {
             let mut e = i + 3;
@@ -284,6 +298,7 @@ mod tests {
         assert_eq!(run("let a = cfg!(all(unix, target_pointer_width = \"64\"));", &[]), "let a = true ;");
         assert_eq!(run("fn f() { #[cfg(test)] g(); h(); }", &[]), "fn f() { h(); }");
         assert_eq!(run("[1, #[cfg(test)] 2, 3]", &[]), "[1, 3]");
+        assert_eq!(run("m! { if #[cfg(test)] { a } } macro_rules! n { () => { #[cfg(test)] fn f() {} } }", &[]), "m! { if #[cfg(test)] { a } } macro_rules! n { () => { #[cfg(test)] fn f() {} } }");
         assert_eq!(run("#[cfg(feature = \"alloc\")] extern crate alloc; extern crate std as s; fn f() {}", &["alloc"]), "fn f() {}");
     }
 }

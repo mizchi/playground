@@ -9,6 +9,7 @@ pm2 = open("tests/selfhost/mini_pm2.rs").read()
 # (expand は lexer::tokenize を使う。lexer は cache の Key / KeyHasher を使う)
 lexer = open("crates/core/src/lexer.rs").read()
 key = open("crates/core/src/key.rs").read()
+cfg = open("crates/core/src/cfg.rs").read()
 print("""// 自動生成: tests/selfhost/build_macros.py (crustc の crates/core/src/macros.rs をそのまま含む)
 """ + pm2 + """
 mod cache {
@@ -17,6 +18,10 @@ mod cache {
 
 mod lexer {
 """ + lexer + """
+}
+
+mod cfg {
+""" + cfg + """
 }
 
 mod macros {

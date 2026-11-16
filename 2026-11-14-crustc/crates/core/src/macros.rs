@@ -381,7 +381,11 @@ fn transcribe(body: &[Pt], binds: &HashMap<String, Bind>, out: &mut String) -> R
                     if *wrap {
                         out.push(')');
                     }
-                    out.push(' ');
+                    // (`$t:tt` の `-` の後に `>` が続く (`->`): Joint の記号の後には空白を入れない)
+                    let joint = !*wrap && matches!(ts.last(), Some(TokenTree::Punct(p)) if p.spacing() == Spacing::Joint);
+                    if !joint {
+                        out.push(' ');
+                    }
                 }
                 Some(Bind::Many(_)) => return Err(format!("macro variable `${name}` is still repeating here")),
                 // (`$crate` など、束縛されていない `$x` はそのまま)
@@ -515,6 +519,11 @@ fn item_scope(b: &[u8], toks: &[(u8, usize, usize)], close: &[usize], depth: &[u
 /// ソース全体は速い lexer::tokenize で見て、proc_macro2 の字句解析は定義と呼び出しの括弧の中だけにする
 /// (全体を proc_macro2 で読むと、大きなソース (crustc 自身) で遅い)。結果は expand_reference と同じ
 pub fn expand(src: &str) -> Result<Option<String>, String> {
+    expand_cfg(src, None)
+}
+
+/// expand と同じだが、展開した後のソースの `#[cfg(..)]` を周ごとに評価する (`#[cfg(p)] m! { .. }` を展開する前に)
+pub fn expand_cfg(src: &str, cfg: Option<&crate::cfg::CfgSet>) -> Result<Option<String>, String> {
     if !src.contains("macro_rules!") {
         return Ok(None);
     }
@@ -634,6 +643,7 @@ pub fn expand(src: &str) -> Result<Option<String>, String> {
         reps.sort_by_key(|r| std::cmp::Reverse(r.0));
         // (展開したものの中にマクロの名前が無ければ、もう一周しなくてよい)
         let again = reps.iter().any(|r| macros.keys().any(|m| r.2.contains(m.as_str())));
+        let has_cfg = cfg.is_some() && reps.iter().any(|r| r.2.contains("cfg"));
         for (a, e, rep) in reps {
             let nl = text[a..e].bytes().filter(|&c| c == b'\n').count();
             let mut r = rep;
@@ -641,6 +651,11 @@ pub fn expand(src: &str) -> Result<Option<String>, String> {
                 r.push('\n');
             }
             text.replace_range(a..e, &r);
+        }
+        if has_cfg {
+            if let Some(t) = crate::cfg::strip(&text, cfg.unwrap()) {
+                text = t;
+            }
         }
         if !again {
             return Ok(Some(text));
