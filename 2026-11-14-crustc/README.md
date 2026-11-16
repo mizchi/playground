@@ -1131,6 +1131,10 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
 - これを crustc (driver2) でコンパイルしたものが、実際にプログラムをコンパイルして動かせる (crustc が自分自身をコンパイルした)
 - `tests/selfhost_compiler.sh`：rustc 版と crustc 版の 2 つのコンパイラで probe / examples / acg をコンパイルし、.o と実行結果を比べる。
   さらに crustc 版で自分自身をもう一度コンパイルする (2 段目)
+- 結果: **139 個のプログラムすべてで、rustc 版と crustc 版のコンパイラが同じバイト列の .o を出し、実行結果も同じ**。
+  crustc 版のコンパイラで自分自身をコンパイルし直すと、1 段目と同じ .o (約 18 MB) になる (不動点)
+- 比べて見つかったもの: `matches!(tmp, Some(V(x)) if ..)` で束縛が一時値からムーブして二重に drop していた (syn 版にもあった)、
+  acg の i128 の `abs` / 加減算のオーバーフロー検査
 - そこまでに直したこと: モジュールを平らにするときの名前 (`std::path::Path` と同名の定義、`use super::*` で見える use、`&'static`)、
   型推論 (受け手の型が分からない `len`、注釈つきの let、`x.clone()` の整数)、acg の deref の強制変換 (`&&T` → `&T`、`&String` → `&str`)、
   範囲の添字の受け手の自動参照、`matches!` の guard の中のクロージャ、minclif の bitcast の 0 拡張。crustc がまだ扱えない書き方
