@@ -253,13 +253,15 @@ pub struct Session2 {
     disk: crate::cache2::Cache2,
     mem: FxMap<Key, Vec<u8>>,
     used: FxSet<Key>,
+    /// put したキー (ワークスペースの子プロセスが、作ったエントリを親に返す)
+    fresh: Vec<Key>,
     /// 複数のクレートのうちの 1 つをコンパイルするとき
     pub ctx: CrateCtx,
 }
 
 impl Session2 {
     pub fn new(opts: Options2) -> Session2 {
-        Session2 { opts, cid: compiler_id(), disk: crate::cache2::Cache2::empty(), mem: FxMap::default(), used: FxSet::default(), ctx: CrateCtx::default() }
+        Session2 { opts, cid: compiler_id(), disk: crate::cache2::Cache2::empty(), mem: FxMap::default(), used: FxSet::default(), fresh: vec![], ctx: CrateCtx::default() }
     }
 
     pub fn load_cache(&mut self, path: &std::path::Path) {
@@ -327,6 +329,7 @@ impl Session2 {
         }
         self.used.insert(k);
         self.mem.insert(k, v);
+        self.fresh.push(k);
     }
 
     /// 要約はアイテムのハッシュで引く
@@ -1741,6 +1744,7 @@ impl Session2 {
                         unsafe { c_close(fds[0]) };
                         self.opts.jobs = inner;
                         let (i, fp) = (stale[k].0, stale[k].1.clone());
+                        self.fresh.clear();
                         let r = self.build_one(crates, &own_v, &dep_v, i, &all_deps(i), &fp, out_dir);
                         let mut buf = vec![];
                         match r {
@@ -1749,6 +1753,16 @@ impl Session2 {
                                 buf.push(ch as u8);
                                 for v in [rp.fns_compiled as u64, rp.fns_hit as u64, rp.items_parsed as u64, rp.object_bytes as u64, ns] {
                                     crate::cache2::put_uv(&mut buf, v);
+                                }
+                                // (作ったキャッシュのエントリ (要約・関数の機械語) も返す: 後の組のクレートが fork で引き継いで使う。
+                                //  prelude の単相化や依存するクレートのアイテムの要約は、多くのクレートで同じ)
+                                for &k in &self.fresh {
+                                    if let Some(v) = self.mem.get(&k) {
+                                        buf.extend_from_slice(&(k as u64).to_le_bytes());
+                                        buf.extend_from_slice(&((k >> 64) as u64).to_le_bytes());
+                                        crate::cache2::put_uv(&mut buf, v.len() as u64);
+                                        buf.extend_from_slice(v);
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -1781,6 +1795,14 @@ impl Session2 {
                                 *x = r.uv().unwrap_or(0);
                             }
                             let rp = Report2 { fns_compiled: v[0] as usize, fns_hit: v[1] as usize, items_parsed: v[2] as usize, object_bytes: v[3] as usize, linked: false };
+                            while r.pos < d.len() {
+                                let (Some(lo), Some(hi), Some(n)) = (r.u64(), r.u64(), r.uv()) else { break };
+                                let Some(body) = r.take(n as usize) else { break };
+                                let k = (lo as u128) | ((hi as u128) << 64);
+                                if !self.mem.contains_key(&k) {
+                                    self.mem.insert(k, body.to_vec());
+                                }
+                            }
                             Some(Ok((rp, ch, v[4])))
                         }
                         Some(_) => Some(Err(String::from_utf8_lossy(&d[1..]).into_owned())),
