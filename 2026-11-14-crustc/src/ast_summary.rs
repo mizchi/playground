@@ -274,6 +274,24 @@ pub fn parse_fn_bound(s: &str) -> Option<(String, Vec<TySyn>, TySyn)> {
     Some((kind.to_string(), args, ret))
 }
 
+/// 境界 `Iterator<Item = T>` の関連型の束縛 (名前, 型)
+pub fn assoc_bindings(s: &str) -> Vec<(String, TySyn)> {
+    let mut out = Vec::new();
+    let Ok(f) = parse_file(&format!("type __B = dyn {s};")) else { return out };
+    let Some(it) = f.items.first() else { return out };
+    let ItemKind::Type(_, _, _, Some(PTy::Dyn(bs))) = &it.kind else { return out };
+    let Some(Bound::Trait(_, p)) = bs.first() else { return out };
+    let Some(last) = p.segs.last() else { return out };
+    for a in &last.args {
+        if let crate::parse::GArg::Bind(n, t) = a {
+            if let Ok(ts) = tysyn(t, None) {
+                out.push((n.clone(), ts));
+            }
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------- クロージャの持ち上げ
 
 /// パターンの中のすべてのパターン (束縛の名前を集める)
@@ -476,13 +494,19 @@ fn lift_closures(sig_ast: &PSig, body: &Block, fname: &str, sig: &mut SigSyn, se
             self_ty: sig.self_ty.clone(),
             ..Default::default()
         };
-        let by_move = *mv || (ast_closure::moves_capture(c, &caps) && !ast_closure::assigns_capture(c, &caps));
+        let assigns = ast_closure::assigns_capture(c, &caps);
+        let mut moved: Vec<bool> = Vec::new();
+        for n in &caps {
+            moved.push(*mv || (ast_closure::moves_capture(c, &[n.clone()]) && !assigns));
+        }
+        let by_move = *mv || (!moved.is_empty() && moved.iter().all(|&m| m));
         out.push(ClosureSyn {
             name: name,
             generics: generics,
             fields: fields,
             sig: csig,
             by_move: by_move,
+            moved: moved,
             ret_ann: ret_ann,
             n_parent: n_parent,
         });

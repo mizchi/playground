@@ -13,7 +13,8 @@
 #   ast_types: src/types.rs + src/parse.rs + src/ast_types.rs (型の表現・intern と、型の構文 → TySyn。front.rs から分けたもの)
 #   ast_summary: src/ast_summary.rs (front.rs の summarize の移植) + lexer / types / parse / ast_types / ast_closure → 全アイテムの要約
 #   program: src/program.rs (全体の表: シグネチャ・レイアウト・trait 実装) + 要約までのモジュール + prelude
-#            → probe / examples の Program を作り、関数・型 (サイズ・オフセット・深いハッシュ)・impl・const を出す
+#            + ast_consteval / solver / ctors → probe / examples / src の Program を作り、関数・型 (サイズ・オフセット・深いハッシュ)・
+#            impl・const とそのデータ・パスの検索・型推論の単一化の結果を出す
 #   enc:   src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と src/fxhash.rs (FxHasher / FxMap)
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -165,7 +166,7 @@ for opt in "" -O; do
 done
 python3 tests/selfhost/build_program.py > "$out/program_main.rs"
 rustc --edition 2024 -O -Awarnings "$out/program_main.rs" -o "$out/program_rustc" || exit 1
-pin=(examples/*.rs tests/probe/*.rs)
+pin=(examples/*.rs tests/probe/*.rs src/*.rs)
 "$out/program_rustc" "${pin[@]}" > "$out/program.rustc.out"
 for opt in "" -O; do
   if ! target/release/crustc "$out/program_main.rs" -o "$out/program_crustc" $opt; then

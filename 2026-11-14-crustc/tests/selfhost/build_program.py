@@ -18,7 +18,7 @@ parts = [("key", body("src/key.rs")), ("fxhash", body("src/fxhash.rs")), ("lexer
          ("prelude", prelude), ("types", body("src/types.rs")), ("parse", body("src/parse.rs")),
          ("ast_types", body("src/ast_types.rs")), ("ast_closure", body("src/ast_closure.rs")),
          ("ast_summary", body("src/ast_summary.rs")), ("program", body("src/program.rs")),
-         ("ast_consteval", body("src/ast_consteval.rs"))]
+         ("ast_consteval", body("src/ast_consteval.rs")), ("solver", body("src/solver.rs")), ("ctors", body("src/ctors.rs"))]
 out = ["// 自動生成: tests/selfhost/build_program.py (crustc の src/*.rs をそのまま含む)", "mod cache {\n    pub use crate::key::*;\n}\n"]
 for name, src in parts:
     out.append(f"mod {name} {{\n" + src + "}\n")
@@ -30,6 +30,14 @@ use types::Summary;
 fn with_prelude(src0: &str) -> Result<(String, Vec<SrcItem>, usize), String> {
     let s1 = lexer::flatten_modules(src0).unwrap_or(src0.to_string());
     let src = lexer::hoist_nested_items(&s1).unwrap_or(s1);
+    // (ctors.rs: 値として使ったバリアントをクロージャに)
+    let src = match ctors::rewrite_ctor_values(&src) {
+        Some(c) => {
+            println!("ctors: {} -> {} bytes", src.len(), c.len());
+            c
+        }
+        None => src,
+    };
     let mut items = lexer::split(&src)?;
     let user = items.len();
     let extra = prelude::select(&src, &items);
@@ -103,6 +111,26 @@ fn run(path: &str) -> Result<(), String> {
             Err(e) => println!("    error {e}"),
         }
     }
+    // 型推論の単一化器 (solver.rs): ジェネリックな関数を、型引数を i64 にした実引数で呼んだときの戻り値型
+    let env = program::TyEnv::default();
+    let mut solved = 0;
+    for (i, n) in p.names.iter().enumerate() {
+        let sig = &p.sigs[i];
+        if sig.generics.is_empty() {
+            continue;
+        }
+        let targs = vec![types::Ty::I64; sig.generics.len()];
+        let mut sv = solver::Solver::new(&p, &env);
+        let args: Vec<u32> = sig.params.iter().map(|&t| { let t = p.subst(t, &targs); sv.known(t) }).collect();
+        let r = sv.apply(Some(i as u32), args, 0);
+        sv.finish_late_bounds();
+        sv.finish_collects();
+        sv.finish_assocs();
+        let rt = sv.resolve(r);
+        println!("  solve {n} -> {rt:?}");
+        solved += 1;
+    }
+    println!("  {solved} solved");
     // パスの検索 (program.rs の fn_by_p / struct_by_p / variant_by_p): 全関数の本体のパスを引く
     if let Ok(f) = parse::parse_file(&src) {
         let mut n = 0;

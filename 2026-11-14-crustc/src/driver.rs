@@ -837,6 +837,9 @@ pub fn with_prelude<'a>(
     // 関数の中のアイテムはファイルの末尾へ
     let hoisted = lexer::hoist_nested_items(src).or(flat.clone());
     let src: &str = hoisted.as_deref().unwrap_or(src);
+    // 値として使ったタプルのバリアント / タプル struct (`.map(Some)`) はクロージャに
+    let cv = crate::ctors::rewrite_ctor_values(src);
+    let src: &str = cv.as_deref().unwrap_or(src);
     let mut items = lexer::split(src)?;
     cache.user_items = items.len();
     let extra = crate::prelude::select_with(src, &items, cache);
@@ -850,9 +853,10 @@ pub fn with_prelude<'a>(
     if extra.is_empty() {
         // prelude を使わなければソースはそのまま (コピーしない)
         return Ok((
-            match &hoisted {
-                Some(f) => std::borrow::Cow::Owned(f.clone()),
-                None => std::borrow::Cow::Borrowed(orig),
+            match (cv, &hoisted) {
+                (Some(c), _) => std::borrow::Cow::Owned(c),
+                (None, Some(f)) => std::borrow::Cow::Owned(f.clone()),
+                (None, None) => std::borrow::Cow::Borrowed(orig),
             },
             items,
         ));

@@ -344,6 +344,8 @@ pub struct ClosureSyn {
     pub fields: Vec<(String, TySyn)>,
     pub sig: SigSyn,
     pub by_move: bool,
+    /// キャプチャごとに値で持つか (`move` か、本体がそのキャプチャを値として渡す・返す)。残りは参照で持つ
+    pub moved: Vec<bool>,
     /// 戻り値型の注釈 (`|x| -> u8 { .. }`)
     pub ret_ann: Option<TySyn>,
     /// 親の型パラメータの数

@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use crate::codegen::{Blob, BlobReloc, Target};
 use crate::front::{Insts, Program};
 
-const MAGIC: &[u8; 8] = b"CRCC0004";
+const MAGIC: &[u8; 8] = b"CRCC0005";
 
 pub use crate::key::{Key, KeyHasher};
 

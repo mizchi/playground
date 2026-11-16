@@ -270,8 +270,8 @@ impl Worker {
         if let Some(cd) = prog.closures.get(&body_id) {
             if let Some(Ty::Ptr(_, Ty::Struct(sid))) = sig.params.first() {
                 let sd = &prog.structs[*sid as usize];
-                for (n, (_, ft, off)) in cd.captures.iter().zip(&sd.fields) {
-                    match (cd.by_move, ft) {
+                for (i, (n, (_, ft, off))) in cd.captures.iter().zip(&sd.fields).enumerate() {
+                    match (cd.moved.get(i).copied().unwrap_or(false), ft) {
                         (false, Ty::Ptr(_, t)) => caps.push((n.clone(), **t, true, *off)),
                         _ => caps.push((n.clone(), *ft, false, *off)),
                     }
@@ -290,8 +290,10 @@ impl Worker {
             closure_ix.insert(c, k);
             // 参照でキャプチャされる変数はスタックに置く
             if let Some(cd) = prog.closure_by.get(&(root, k)).and_then(|i| prog.closures.get(i)) {
-                if !cd.by_move {
-                    taken.extend(cd.captures.iter().cloned());
+                for (i, n) in cd.captures.iter().enumerate() {
+                    if !cd.moved.get(i).copied().unwrap_or(false) {
+                        taken.insert(n.clone());
+                    }
                 }
             }
         }
@@ -1840,6 +1842,20 @@ impl Cx<'_, '_> {
                         "this variant has fields: use `E::V(..)` or `E::V { .. }`",
                     );
                 }
+                // `None::<u32>`: 型引数を書いたバリアント
+                let expected = expected.or_else(|| {
+                    let args = p.path.segments.iter().rev().find_map(|s| match &s.arguments {
+                        syn::PathArguments::AngleBracketed(ab) => Some(ab),
+                        _ => None,
+                    })?;
+                    let mut ts = vec![];
+                    for a in &args.args {
+                        if let syn::GenericArgument::Type(t) = a {
+                            ts.push(self.prog.parse_ty(t, &self.env).ok()?);
+                        }
+                    }
+                    self.prog.instantiate(self.prog.base_of(sid), ts).ok().map(Ty::Struct)
+                });
                 self.variant_value(sid, vi, &[], expected)
             }
             Expr::Match(m) => self.match_(m, expected),
@@ -2466,7 +2482,7 @@ impl Cx<'_, '_> {
             let Some((loc, t)) = self.lookup(n) else {
                 return err(c.span(), format!("cannot capture `{n}` here"));
             };
-            let ct = if cd.by_move {
+            let ct = if cd.moved.get(i).copied().unwrap_or(false) {
                 t
             } else {
                 Ty::Ptr(true, intern(t))
@@ -2562,8 +2578,8 @@ impl Cx<'_, '_> {
         let st = Ty::Struct(sid);
         let a = self.temp(st);
         let fields = prog.structs[sid as usize].fields.clone();
-        for ((loc, t), (_, ft, off)) in caps.into_iter().zip(fields) {
-            if cd.by_move {
+        for (i, ((loc, t), (_, ft, off))) in caps.into_iter().zip(fields).enumerate() {
+            if cd.moved.get(i).copied().unwrap_or(false) {
                 let p = match loc {
                     Loc::Var(v) => Place::Var(v, t),
                     Loc::Zst => Place::Zst(t),
@@ -3078,6 +3094,25 @@ impl Cx<'_, '_> {
                 let v = self.b.ins().iconst(types::I64, ((l as i64) << 16) | c as i64);
                 let a = self.symbol_addr(NS_STATIC, ci);
                 self.b.ins().store(mf(), v, a, 0);
+            }
+        }
+        // 受け手が `a.as_slice()` (a: 配列) なら `(&a[..])` にして呼び直す (`a.as_slice().len()`)
+        if let Expr::MethodCall(inner) = strip_paren(&mc.receiver) {
+            if inner.args.is_empty() && matches!(inner.method.to_string().as_str(), "as_slice" | "as_mut_slice") {
+                if let Some(Ty::Array(..)) = self.peek(&inner.receiver).map(|t| self.strip_refs(t)) {
+                    let r = &inner.receiver;
+                    let mut m2 = mc.clone();
+                    m2.receiver = Box::new(if inner.method == "as_slice" { syn::parse_quote!((&(#r)[..])) } else { syn::parse_quote!((&mut (#r)[..])) });
+                    return self.method_call(&m2, expected);
+                }
+            }
+        }
+        // `[T; N]::as_slice()` / `as_mut_slice()`: `&a[..]` / `&mut a[..]`
+        if mc.args.is_empty() && matches!(mc.method.to_string().as_str(), "as_slice" | "as_mut_slice") {
+            if let Some(Ty::Array(..)) = self.peek(&mc.receiver).map(|t| self.strip_refs(t)) {
+                let r = &mc.receiver;
+                let e: Expr = if mc.method == "as_slice" { syn::parse_quote!(&(#r)[..]) } else { syn::parse_quote!(&mut (#r)[..]) };
+                return self.expr(&e, expected);
             }
         }
         // `x.hash(state)` (x: タプル / Option で Hash の impl がない): std と同じく要素を順に (Option は判別子 (isize) と中身)

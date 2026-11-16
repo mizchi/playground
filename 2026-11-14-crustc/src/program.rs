@@ -269,6 +269,8 @@ pub struct ClosureDef {
     /// キャプチャの名前 (struct のフィールド順)
     pub captures: Vec<String>,
     pub by_move: bool,
+    /// キャプチャごとに値で持つか (残りは参照で持つ)
+    pub moved: Vec<bool>,
     /// 親の型パラメータの数 (型引数の先頭)
     pub n_parent: usize,
     /// 戻り値の注釈 (親の型パラメータを Param で含みうる)
@@ -777,6 +779,7 @@ impl Program {
                         sid,
                         captures: c.fields.iter().map(|f| f.0.clone()).collect(),
                         by_move: c.by_move,
+                        moved: c.moved.clone(),
                         n_parent: c.n_parent as usize,
                         ret_ann,
                     },
@@ -1885,8 +1888,9 @@ impl Program {
                 (s.size, s.align)
             }
             Ty::Array(e, n) => {
+                // (const ジェネリクスの長さの仮の値 (CONST_LEN_BASE + i) は大きいので折り返す: 使われない)
                 let (s, a) = self.size_align(*e);
-                (s * n, a)
+                (s.wrapping_mul(n), a)
             }
             t if t.is_fat() => (16, 8),
             Ty::Unit | Ty::Never | Ty::Slice(_) | Ty::Str | Ty::Dyn(_) | Ty::Param(_) => (0, 1),

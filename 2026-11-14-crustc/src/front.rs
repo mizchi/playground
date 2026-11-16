@@ -765,13 +765,19 @@ fn lift_closures(
             self_ty: sig.self_ty.clone(),
             ..Default::default()
         };
+        let assigns = closure::assigns_capture(c, &caps);
+        let moved: Vec<bool> = caps
+            .iter()
+            .map(|n| c.capture.is_some() || (closure::moves_capture(c, std::slice::from_ref(n)) && !assigns))
+            .collect();
         out.push(ClosureSyn {
             name,
             generics,
             fields,
             sig: csig,
-            // (`move` がなくても、本体がキャプチャを値として渡す・返すなら値で持つ: rustc と同じく FnOnce)
-            by_move: c.capture.is_some() || (closure::moves_capture(c, &caps) && !closure::assigns_capture(c, &caps)),
+            // (`move` がなくても、本体がキャプチャを値として渡す・返すなら、そのキャプチャは値で持つ: rustc と同じく FnOnce)
+            by_move: by_move_of(&moved, c.capture.is_some()),
+            moved,
             ret_ann,
             n_parent,
         });
@@ -1234,9 +1240,15 @@ crate::enc_struct!(ClosureSyn {
     fields,
     sig,
     by_move,
+    moved,
     ret_ann,
     n_parent,
 });
+
+/// すべてのキャプチャを値で持つか (`move`、または値で使うキャプチャだけのもの)
+pub fn by_move_of(moved: &[bool], kw: bool) -> bool {
+    kw || (!moved.is_empty() && moved.iter().all(|&m| m))
+}
 
 impl Enc for (String, TySyn, String, bool) {
     fn enc(&self, out: &mut Vec<u8>) {

@@ -507,7 +507,7 @@ mod tests {
 /// `#[cfg(test)] mod tests { .. }` はまるごと消す。モジュールのパス (`geo::f`) は名前解決が先頭を読み飛ばす。
 /// モジュールがなければ None
 /// 簡単な字句解析: (種類, 開始, 終了)。0 = 識別子, 1 = 記号 1 文字, 2 = リテラル (コメントは飛ばす)
-fn tokenize(s: &[u8]) -> Vec<(u8, usize, usize)> {
+pub fn tokenize(s: &[u8]) -> Vec<(u8, usize, usize)> {
     let n = s.len();
     // (種類, 開始, 終了): 0 = 識別子, 1 = 記号 1 文字, 2 = リテラル
     let mut toks: Vec<(u8, usize, usize)> = vec![];
