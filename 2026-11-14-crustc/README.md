@@ -1429,13 +1429,25 @@ rustc (lib を rlib にして `--extern`) と比べる: 出力が rustc -O と�
 | adler2 | rustc | 176 |  | 104 | 675 | 4424 KiB |  |
 | adler2 | rustc -O | 222 |  | 122 | 12 | 4389 KiB |  |
 | adler2 | crustc | 49 | 2 | 19 | 474 | 17 KiB | yes |
-| adler2 | crustc -O | 77 | 2 | 29 | 478 | 17 KiB | yes |
+| adler2 | crustc -O | 77 | 2 | 29 | 478 → 114 | 17 KiB | yes |
 | hex | rustc | 284 |  | 130 | 146 | 4479 KiB |  |
 | hex | rustc -O | 454 |  | 297 | 13 | 4399 KiB |  |
 | hex | crustc | 95 | 2 | 29 | 102 | 56 KiB | yes |
 | hex | crustc -O | 111 | 2 | 39 | 79 | 60 KiB | yes |
 
-ビルドは rustc より 2〜4 倍速く、編集のビルドは 5〜10 倍速い。実行は rustc -O より遅い (adler2 は 40 倍: 次に調べる)。
+ビルドは rustc より 2〜4 倍速く、編集のビルドは 5〜10 倍速い。実行は rustc -O より遅い (adler2 は 40 倍だった)。
+
+adler2 の内側のループ (`U32X4([u32; 4])` の `+=` と `chunks_exact`) を見て直したもの (-O の実行 478 → 114 ms、fnv 137 → 112 ms):
+- Cranelift の経路にも SROA: minclif と同じ判定 (`minclif::sroa`。アドレスが load / store にしか使われないスロット) で、
+  スロットの (オフセット, 型) ごとに Cranelift の Variable にする (Cranelift はスタックのスロットを SSA にしない)。
+  `CRUSTC_CLIF_NO_SROA=1` で切る
+- スロットのアドレスを入れた変数 (インライン展開した `&mut self`) も、定義がすべて同じアドレスならそのアドレスとして扱う
+- スカラーの小さい配列 (16 要素まで) のコピーと `[0; N]` の初期化は要素の幅で読み書きする (8 byte ずつだと幅が合わず変数にできない)
+- インライン展開の大きさを構文木の Debug の長さではなくソースのトークンの数 (110 まで) で測る (Debug は位置などで膨らみ、
+  4 文の `add_assign` が 1565 文字になっていた)。`ChunksExact::next` も展開される
+
+残り (rustc -O の約 10 倍): `a_vec.0.iter()` でアドレスが本当に漏れる、enum (`Option<&[u8]>`) のコピーが 8 byte ずつ、
+rustc は SIMD にする。
 itoa は未対応 (`MaybeUninit`・関連型・`<T as Tr>::C`)。
 
 ### 途中で分かったこと

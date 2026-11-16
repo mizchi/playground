@@ -146,6 +146,9 @@ pub struct Emitter {
     save_slots: [i32; 5],
     /// 値ごとの、スロットのアドレス (スロット, オフセット) か
     paddr: Vec<Option<(u32, i32)>>,
+    /// 変数ごとの、これまでの定義がすべて同じスロットのアドレスか (None: まだ定義なし、Some(None): 違う)。
+    /// use_var の値もそのアドレスとして扱う (インライン展開した `&mut self` など)。違う定義が後で来たら sroa が外す
+    var_paddr: Vec<Option<Option<(u32, i32)>>>,
     /// 値ごとの、iconst の定数か
     kval: Vec<Option<i64>>,
 }
@@ -180,7 +183,9 @@ pub struct Track {
     /// 値ごとの、スロットのアドレスとして load / store / iadd_imm に使った回数
     addr_uses: Vec<u32>,
     /// スロットのアドレスからの load / store: (命令, スロット, オフセット, 型, store か)
-    acc: Vec<(u32, u32, i32, Type, bool)>,
+    pub acc: Vec<(u32, u32, i32, Type, bool)>,
+    /// 変数の定義: (変数, 値がスロットのアドレスならそれ)
+    var_defs: Vec<(u32, Option<(u32, i32)>)>,
 }
 
 #[derive(Clone, Default)]
@@ -271,6 +276,7 @@ impl Emitter {
             plan,
             save_slots: [0; 5],
             paddr: vec![],
+            var_paddr: vec![],
             kval: vec![],
         };
         // プロローグ: push rbp; mov rbp, rsp; sub rsp, <frame> (frame は最後に書き込む)
@@ -419,6 +425,7 @@ impl Emitter {
     pub fn declare_var(&mut self, t: Type) -> Variable {
         let off = if t == Type::I128 { self.alloc(16, 16) } else { self.alloc(8, 8) };
         self.vars.push((off, t));
+        self.var_paddr.push(None);
         if let Some(tr) = &mut self.track {
             tr.var_mem_only.push(t == Type::I128);
             tr.varfloat.push(t.is_float());
@@ -427,6 +434,23 @@ impl Emitter {
     }
 
     pub fn def_var(&mut self, var: Variable, v: Value) {
+        let pa = self.paddr[v.0 as usize];
+        let st = self.var_paddr[var.0 as usize];
+        self.var_paddr[var.0 as usize] = match (st, pa) {
+            (None, Some(a)) => Some(Some(a)),
+            (Some(Some(b)), Some(a)) if a == b => Some(Some(a)),
+            _ => Some(None),
+        };
+        if let Some(tr) = &mut self.track {
+            tr.var_defs.push((var.0, pa));
+        }
+        if pa.is_some() {
+            self.addr_use(v);
+        }
+        self.def_var_inner(var, v);
+    }
+
+    fn def_var_inner(&mut self, var: Variable, v: Value) {
         let (off, t) = self.vars[var.0 as usize];
         // (両方レジスタなら直接写す)
         let (lv, lr) = (self.loc(v), self.var_loc(var));
@@ -461,6 +485,14 @@ impl Emitter {
     }
 
     pub fn use_var(&mut self, var: Variable) -> Value {
+        let r = self.use_var_inner(var);
+        if let Some(Some(a)) = self.var_paddr[var.0 as usize] {
+            self.paddr[r.0 as usize] = Some(a);
+        }
+        r
+    }
+
+    fn use_var_inner(&mut self, var: Variable) -> Value {
         let (off, t) = self.vars[var.0 as usize];
         let (lr, ld) = (self.var_loc(var), self.next_loc());
         if lr != MEM && ld != MEM && (lr >= 16) == (ld >= 16) {
@@ -2333,9 +2365,36 @@ pub fn write_object_full(funcs: &[(String, Vec<u8>, Vec<Reloc>, bool)], datas: &
 /// 生存区間は命令の番号の範囲 [最初, 最後]: 1 つの区間 (ブロックを続けて書いた範囲) の中だけで書いて読む値はそのまま、
 /// 区間をまたぐものは区間の入口・出口で生きているか (後ろ向きのデータフロー) を見て、生きている区間の端まで延ばす
 /// paddr: 値ごとのスロットのアドレス、nslots: スロットの数、zero: 入口で 0 にするスロット (変数にしない)
-pub fn plan(tr: &Track, nvals: usize, nvars: usize, paddr: &[Option<(u32, i32)>], nslots: usize, zero: &[u32]) -> Plan {
-    // --- スロットのフィールドを変数にする: アドレスを load / store / iadd_imm にしか使わず、読み書きが重ならず型が同じ
+/// スロットのフィールドを変数にする判定 (SROA): (スロットごとに変数にするか, (スロット, オフセット) → フィールドの番号, フィールドの型)。
+/// アドレスを load / store / iadd_imm にしか使わず、読み書きが重ならず型が同じスロット。clif_backend も使う
+pub fn sroa(tr: &Track, nvals: usize, paddr: &[Option<(u32, i32)>], nslots: usize, zero: &[u32]) -> (Vec<bool>, std::collections::HashMap<(u32, i32), u32>, Vec<Type>) {
     let mut prom = vec![std::env::var_os("MINCLIF_NO_SROA").is_none(); nslots];
+    // (スロットのアドレスを入れた変数: 定義がすべて同じアドレスでなければ、そのスロットは変数にしない)
+    {
+        let mut st: std::collections::HashMap<u32, Option<(u32, i32)>> = std::collections::HashMap::new();
+        let mut bad: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for &(var, pa) in &tr.var_defs {
+            match (st.get(&var), pa) {
+                (_, None) => {
+                    bad.insert(var);
+                }
+                (None, Some(a)) => {
+                    st.insert(var, Some(a));
+                }
+                (Some(&Some(b)), Some(a)) if a == b => {}
+                _ => {
+                    bad.insert(var);
+                }
+            }
+        }
+        for &(var, pa) in &tr.var_defs {
+            if let (true, Some((sl, _))) = (bad.contains(&var), pa) {
+                if (sl as usize) < nslots {
+                    prom[sl as usize] = false;
+                }
+            }
+        }
+    }
     for &z in zero {
         if (z as usize) < nslots {
             prom[z as usize] = false;
@@ -2389,6 +2448,11 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize, paddr: &[Option<(u32, i32)>]
             ftys.push(ftype[k]);
         }
     }
+    (prom, fields, ftys)
+}
+
+pub fn plan(tr: &Track, nvals: usize, nvars: usize, paddr: &[Option<(u32, i32)>], nslots: usize, zero: &[u32]) -> Plan {
+    let (prom, fields, ftys) = sroa(tr, nvals, paddr, nslots, zero);
     let nf = ftys.len();
     // (読み書きの記録にフィールドの読み書きを足す: 命令の順のまま)
     let mut ev: Vec<(u32, u32, bool)> = Vec::with_capacity(tr.ev.len() + tr.acc.len());
@@ -2816,6 +2880,17 @@ impl FunctionBuilder {
         self.dry.current_block()
     }
     /// 解析の記録 (clif_backend が使う)
+    /// 値ごとのスロットのアドレス (sroa に渡すもの) と、値・スロットの数
+    pub fn paddr(&self) -> &[Option<(u32, i32)>] {
+        &self.dry.paddr
+    }
+    pub fn n_values(&self) -> usize {
+        self.dry.values.len()
+    }
+    pub fn n_slots(&self) -> usize {
+        self.dry.slots.len()
+    }
+
     pub fn track(&self) -> Option<&Track> {
         match &self.dry.track {
             Some(t) => Some(&**t),

@@ -29,8 +29,10 @@ pub type ClBackend = fn(&crate::minclif::FunctionBuilder, &[crate::minclif::Stac
 
 type Inferred = (crate::ast_infer::LetTypes, crate::ast_infer::MacroArgs, crate::ast_infer::TextTypes);
 
-/// 本体の構文木の大きさの上限 (Debug の文字列の長さ)
-const MAX_BODY: usize = 1600;
+/// 本体の構文木の大きさの上限 (Debug の文字列の長さ。大きさはふつう driver2 がソースのトークンの数で見る)
+const MAX_BODY: usize = 6000;
+/// アイテムのソースのトークンの数の上限
+pub const MAX_TOKENS: usize = 110;
 /// 1 関数の中で展開する回数の上限
 const MAX_PER_FN: u32 = 400;
 

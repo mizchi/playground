@@ -156,6 +156,36 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
             gvars.insert(id, var);
         }
     }
+    // スタックのスロットのフィールドを Variable にする (SROA: minclif と同じ判定。アドレスが load / store にしか
+    // 使われないスロット)。Cranelift はスタックのスロットを SSA にしないので、struct の値がメモリを往復しなくなる
+    let mut facc: HashMap<u32, Variable> = HashMap::new();
+    if let (Some(tr), true) = (fb.track(), std::env::var_os("CRUSTC_CLIF_NO_SROA").is_none()) {
+        let zs: Vec<u32> = zero.iter().map(|z| z.0).collect();
+        let (prom, fields, ftys) = minclif::sroa(tr, fb.n_values(), fb.paddr(), fb.n_slots(), &zs);
+        if !fields.is_empty() {
+            let fv: Vec<Variable> = ftys
+                .iter()
+                .map(|&t| {
+                    let var = b.declare_var(ty(t));
+                    // (入口で 0: 読む前に書かない経路も決まった値にする)
+                    let z = match t {
+                        Type::F64 => b.ins().f64const(0.0),
+                        Type::F32 => b.ins().f32const(0.0),
+                        t => b.ins().iconst(ty(t), 0),
+                    };
+                    b.def_var(var, z);
+                    var
+                })
+                .collect();
+            for &(op, sl, off, _, _) in &tr.acc {
+                if prom[sl as usize] {
+                    if let Some(&f) = fields.get(&(sl, off)) {
+                        facc.insert(op, fv[f as usize]);
+                    }
+                }
+            }
+        }
+    }
     // (ブロックの引数: Variable にしたものはブロックの始まりで def_var する)
     let mut bparams: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut started: std::collections::HashSet<u32> = std::collections::HashSet::new();
@@ -387,6 +417,14 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
                 let _t0 = v!(x);
                 let r = b.ins().ireduce(ty(*t), _t0);
                 set1(&mut vals, r);
+            }
+            Op::Load(_, _, _) if facc.contains_key(&(i as u32)) => {
+                let r = b.use_var(facc[&(i as u32)]);
+                set1(&mut vals, r);
+            }
+            Op::Store(x, _, _) if facc.contains_key(&(i as u32)) => {
+                let x = v!(x);
+                b.def_var(facc[&(i as u32)], x);
             }
             Op::Load(t, a, off) => {
                 let _t0 = v!(a);

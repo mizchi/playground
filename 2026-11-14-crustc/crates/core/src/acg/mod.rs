@@ -28,7 +28,7 @@ mod p6_match_drop;
 mod p7_fmt_hash_cmp;
 mod p8_misc;
 mod p9_inline;
-pub use p9_inline::{inline_candidate, ClBackend, Inline};
+pub use p9_inline::{inline_candidate, ClBackend, Inline, MAX_TOKENS};
 #[allow(unused_imports)]
 pub use p1_expr::*;
 #[allow(unused_imports)]
@@ -793,6 +793,16 @@ impl Cx<'_> {
                 let fs = sd.fields.clone();
                 for (_, ft, off) in fs {
                     self.copy_at(dst, src, ft, doff + off, soff + off);
+                }
+                return;
+            }
+        }
+        // (スカラーの小さい配列は要素ごと: 要素の幅で読み書きする)
+        if let Ty::Array(e, n) = t {
+            if n <= 16 && !e.is_agg() && !e.is_fat() && clif_ty(*e).is_some() {
+                let (es, _) = self.prog.size_align(*e);
+                for i in 0..n {
+                    self.copy_at(dst, src, *e, doff + i * es, soff + i * es);
                 }
                 return;
             }

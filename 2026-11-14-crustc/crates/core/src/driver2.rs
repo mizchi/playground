@@ -616,13 +616,18 @@ fn inline_bodies(a: &Analysis) -> acg::Inline {
             continue;
         }
         let it = &a.items[ii as usize];
-        if it.end - it.start > 1500 {
+        if it.end - it.start > 4000 {
+            continue;
+        }
+        // (大きさはソースのトークンの数。式の Debug の長さは位置などで膨らむ)
+        let ntok = lexer::tokenize(a.src[it.start..it.end].as_bytes()).len();
+        if ntok > acg::MAX_TOKENS {
             continue;
         }
         if let Ok(f) = fn_ast(a, id as u32) {
             let ok = acg::inline_candidate(&f);
             if std::env::var_os("CRUSTC_INLINE_LOG").is_some() {
-                eprintln!("inline {} {} {}", if ok { "yes" } else { "no " }, format!("{:?}", f.block).len(), p.names[id]);
+                eprintln!("inline {} {ntok} {}", if ok { "yes" } else { "no " }, p.names[id]);
             }
             if ok {
                 inl.bodies.insert(id as u32, f);
