@@ -738,6 +738,17 @@ impl Cx<'_> {
         let prog = self.prog;
         let c = &prog.consts[ci as usize];
         let (t, src) = (c.ty, c.expr.clone());
+        // 整数の const は畳み込む (`u8::MAX.ilog10() as usize + 1` を使うたびに計算しない)。
+        // (評価は i128 で途中の型の切り詰めを見ないので、`!` を含むものと、結果が型の範囲の外のものは実行時に計算する)
+        if t.is_int() && !src.contains('!') {
+            if let Ok(v) = prog.const_int(&c.name, 0) {
+                let (lo, hi) = (crate::program::prim_assoc_const(t, "MIN").unwrap_or(0), crate::program::prim_assoc_const(t, "MAX").unwrap_or(0));
+                let in_range = if t == Ty::U128 { v >= 0 } else { lo <= v && v <= hi };
+                if in_range {
+                    return Ok((Some(self.int_const(t, v)), t));
+                }
+            }
+        }
         let ce: Expr = crate::parse::parse_expr(&src).or_else(|er| err(SP, er))?;
         let ce = self.keep_expr(ce);
         // (行番号は今は出さない: Sp は場所を持たない)

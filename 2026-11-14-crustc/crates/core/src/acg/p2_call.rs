@@ -94,8 +94,20 @@ impl Cx<'_> {
         let recv: &Expr = recv;
         let method = method.as_str();
         if matches!(method, "unwrap" | "expect") {
-            if let (Some(t), Expr::MethodCall(_, m2, _, a2, _)) = (expected, strip_paren(recv)) {
+            if let (Some(t), Expr::MethodCall(r2, m2, _, a2, _)) = (expected, strip_paren(recv)) {
                 if m2 == "try_into" && a2.is_empty() {
+                    // (`999.try_into().expect(..)`: 型に収まる整数リテラルなら定数)
+                    if let (true, Expr::Lit(l, _)) = (t.is_int(), strip_paren(r2)) {
+                        if let Some(Lit::Int(i)) = lit::lit(l) {
+                            if let Some(v) = i.value().filter(|&v| v <= i128::MAX as u128).map(|v| v as i128) {
+                                let lo = crate::program::prim_assoc_const(t, "MIN").unwrap_or(0);
+                                let hi = crate::program::prim_assoc_const(t, "MAX").unwrap_or(0);
+                                if (t == Ty::U128 && v >= 0) || (lo <= v && v <= hi) {
+                                    return Ok((Some(self.int_const(t, v)), t));
+                                }
+                            }
+                        }
+                    }
                     self.try_into_hint = Some(t);
                 }
             }

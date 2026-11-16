@@ -1458,7 +1458,10 @@ adler2 の内側のループ (`U32X4([u32; 4])` の `+=` と `chunks_exact`) を
 rustc は SIMD にする。
 itoa も通る (下)。either は未対応 (`Pin` / `Future` / io の各トレイト / `Error` / `fmt::Binary` など)。
 
-itoa (`| itoa | crustc -O | 80 | 2 | 22 | 440 | 29 KiB | yes |`、rustc -O は 32 ms) のために足したもの:
+itoa (-O の実行 440 → 73 ms、rustc -O は 32 ms) のために足したもの:
+- 整数の const は使う所で畳み込む (`u8::MAX.ilog10() as usize + 1` を使うたびに u128 で計算していた: 実行の 74%)。
+  評価は i128 で途中の切り詰めを見ないので、`!` を含むものと結果が型の範囲の外のものは実行時に計算する
+- `999.try_into().expect(..)` (型に収まる整数リテラル) は定数
 - prelude: `MaybeUninit<T>` (uninit は 0 で埋める)・`hint::unreachable_unchecked`。組み込み: `mem::zeroed`・整数の
   `ilog2` / `ilog10` / `unsigned_abs`・`get_unchecked(_mut)` (添字にする)・スライス → `&mut [T; N]` の `try_into`
   (行き先が型推論にないときは `.unwrap()` の期待型から)
