@@ -8,6 +8,10 @@ autoexamples = false
 # 他の実験と干渉しないよう、このディレクトリ単独のワークスペースにする
 [workspace]
 
+[features]
+# 移植中の syn・Cranelift を使わないコード生成 (src/acg) とドライバ (src/driver2.rs)
+acg = []
+
 [dependencies]
 syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "visit", "clone-impls"] }
 proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }

@@ -45,6 +45,8 @@ pub enum FloatCC {
     LessThanOrEqual,
     GreaterThan,
     GreaterThanOrEqual,
+    /// どちらかが NaN
+    Unordered,
 }
 
 /// 整数の比較
@@ -126,6 +128,9 @@ pub struct FunctionBuilder {
     /// 前方参照のジャンプ: (rel32 を書く位置, 飛び先)
     fixups: Vec<(usize, Block)>,
     entry_params: Vec<Value>,
+    /// trap の場所 (ud2 のオフセット) とコード (Cranelift の TrapCode::user に当たる)
+    traps: Vec<(u32, u8)>,
+    entry_jump: usize,
 }
 
 struct BlockData {
@@ -150,6 +155,8 @@ impl FunctionBuilder {
             relocs: vec![],
             fixups: vec![],
             entry_params: vec![],
+            traps: vec![],
+            entry_jump: 0,
         };
         // プロローグ: push rbp; mov rbp, rsp; sub rsp, <frame> (frame は最後に書き込む)
         b.code.extend_from_slice(&[0x55, 0x48, 0x89, 0xE5, 0x48, 0x81, 0xEC, 0, 0, 0, 0]);
@@ -182,6 +189,9 @@ impl FunctionBuilder {
             }
             b.entry_params.push(v);
         }
+        // (入口で 0 にしたいスロットがあれば finish_zeroing がここから飛ぶ: 普段は次の命令へ飛ぶだけ)
+        b.entry_jump = b.code.len();
+        b.code.extend_from_slice(&[0xE9, 0, 0, 0, 0]);
         b
     }
 
@@ -231,22 +241,32 @@ impl FunctionBuilder {
     }
 
     pub fn declare_var(&mut self, t: Type) -> Variable {
-        let off = self.alloc(8, 8);
+        let off = if t == Type::I128 { self.alloc(16, 16) } else { self.alloc(8, 8) };
         self.vars.push((off, t));
         Variable(self.vars.len() as u32 - 1)
     }
 
     pub fn def_var(&mut self, var: Variable, v: Value) {
+        let (off, t) = self.vars[var.0 as usize];
         self.load_rax(v);
-        let off = self.vars[var.0 as usize].0;
         self.store_rax_at(off);
+        if t == Type::I128 {
+            let o = self.values[v.0 as usize].0;
+            self.load_rax_at(o + 8);
+            self.store_rax_at(off + 8);
+        }
     }
 
     pub fn use_var(&mut self, var: Variable) -> Value {
         let (off, t) = self.vars[var.0 as usize];
-        self.load_rax_at(off);
         let v = self.new_value(t);
+        self.load_rax_at(off);
         self.store_rax(v);
+        if t == Type::I128 {
+            let o = self.values[v.0 as usize].0;
+            self.load_rax_at(off + 8);
+            self.store_rax_at(o + 8);
+        }
         v
     }
 
@@ -558,8 +578,18 @@ impl FunctionBuilder {
         for &a in args {
             self.load_rax(a);
             self.emit(&[0x50]); // push rax
+            if self.value_type(a) == Type::I128 {
+                let o = self.values[a.0 as usize].0;
+                self.load_rax_at(o + 8);
+                self.emit(&[0x50]);
+            }
         }
         for &p in ps.iter().rev().take(args.len()) {
+            if self.value_type(p) == Type::I128 {
+                let o = self.values[p.0 as usize].0;
+                self.emit(&[0x58]);
+                self.store_rax_at(o + 8);
+            }
             self.emit(&[0x58]); // pop rax
             self.store_rax(p);
         }
@@ -654,6 +684,27 @@ impl FunctionBuilder {
             out.push(self.result(t));
         }
         out
+    }
+
+    /// 組み立てを終えて (機械語, 再配置)。zero のスロットの先頭 1 byte を入口で 0 にする
+    pub fn finish_zeroing(mut self, zero: &[StackSlot]) -> (Vec<u8>, Vec<Reloc>) {
+        if !zero.is_empty() {
+            let stub = self.code.len();
+            for s in zero {
+                let off = self.slots[s.0 as usize];
+                self.emit_disp(&[0xC6, 0x85], off); // mov byte [rbp+off], 0
+                self.emit(&[0]);
+            }
+            let back = self.entry_jump + 5;
+            let at = self.code.len();
+            self.emit(&[0xE9]);
+            let rel = back as i32 - (at as i32 + 5);
+            self.emit(&rel.to_le_bytes());
+            let rel = stub as i32 - (self.entry_jump as i32 + 5);
+            let j = self.entry_jump;
+            self.code[j + 1..j + 5].copy_from_slice(&rel.to_le_bytes());
+        }
+        self.finish()
     }
 
     /// 組み立てを終えて (機械語, 再配置)
@@ -833,6 +884,8 @@ impl FunctionBuilder {
             FloatCC::Equal => self.emit(&[0x0F, 0x94, 0xC0, 0x0F, 0x9B, 0xC1, 0x20, 0xC8]),
             // setne al; setp cl; or al, cl
             FloatCC::NotEqual => self.emit(&[0x0F, 0x95, 0xC0, 0x0F, 0x9A, 0xC1, 0x08, 0xC8]),
+            // setp al
+            FloatCC::Unordered => self.emit(&[0x0F, 0x9A, 0xC0]),
         }
         self.emit(&[0x48, 0x0F, 0xB6, 0xC0]);
         self.result(Type::I8)
@@ -1281,6 +1334,28 @@ impl FunctionBuilder {
         self.emit(&[0x48, 0x85, 0xC0]);
         self.emit(&[if on_zero { 0x75 } else { 0x74 }, 0x02, 0x0F, 0x0B]); // jnz/jz +2; ud2
     }
+    /// コードつきの trap (場所を traps() に残す)
+    pub fn trap_code(&mut self, code: u8) {
+        self.traps.push((self.code.len() as u32, code));
+        self.trap();
+    }
+    fn trap_if_code(&mut self, c: Value, on_zero: bool, code: u8) {
+        self.load_rax(c);
+        self.emit(&[0x48, 0x85, 0xC0]);
+        self.emit(&[if on_zero { 0x75 } else { 0x74 }, 0x02]);
+        self.traps.push((self.code.len() as u32, code));
+        self.emit(&[0x0F, 0x0B]);
+    }
+    pub fn trapz_code(&mut self, c: Value, code: u8) {
+        self.trap_if_code(c, true, code)
+    }
+    pub fn trapnz_code(&mut self, c: Value, code: u8) {
+        self.trap_if_code(c, false, code)
+    }
+    /// これまでの trap の (オフセット, コード)
+    pub fn traps(&self) -> Vec<(u32, u8)> {
+        self.traps.clone()
+    }
     pub fn trapz(&mut self, c: Value) {
         self.trap_if(c, true)
     }
@@ -1358,30 +1433,30 @@ pub fn write_object_full(funcs: &[(String, Vec<u8>, Vec<Reloc>, bool)], datas: &
     };
     // (名前, info, shndx, value, size)
     let mut syms: Vec<(u32, u8, u16, u64, u64)> = vec![(0, 0, 0, 0, 0), (0, 3, 1, 0, 0), (0, 3, 2, 0, 0)];
-    let mut index: Vec<(String, u32)> = vec![];
+    let mut index: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     for pass in 0..2 {
         let global = pass == 1;
         for (i, (name, code, _, g)) in funcs.iter().enumerate() {
             if *g == global {
                 let n = add_str(name, &mut strtab);
                 syms.push((n, ((global as u8) << 4) | 2, 1, offs[i] as u64, code.len() as u64));
-                index.push((name.clone(), syms.len() as u32 - 1));
+                index.insert(name.clone(), syms.len() as u32 - 1);
             }
         }
         for (i, (name, bytes, _, g)) in datas.iter().enumerate() {
             if *g == global {
                 let n = add_str(name, &mut strtab);
                 syms.push((n, ((global as u8) << 4) | 1, 2, doffs[i] as u64, bytes.len() as u64));
-                index.push((name.clone(), syms.len() as u32 - 1));
+                index.insert(name.clone(), syms.len() as u32 - 1);
             }
         }
     }
     let first_global = syms.iter().position(|s| s.1 >> 4 == 1).unwrap_or(syms.len()) as u32;
-    let undefined = |name: &str, syms: &mut Vec<(u32, u8, u16, u64, u64)>, index: &mut Vec<(String, u32)>, strtab: &mut Vec<u8>| {
-        if !index.iter().any(|x| x.0 == name) {
+    let undefined = |name: &str, syms: &mut Vec<(u32, u8, u16, u64, u64)>, index: &mut std::collections::HashMap<String, u32>, strtab: &mut Vec<u8>| {
+        if !index.contains_key(name) {
             let n = add_str(name, strtab);
             syms.push((n, 1 << 4, 0, 0, 0));
-            index.push((name.to_string(), syms.len() as u32 - 1));
+            index.insert(name.to_string(), syms.len() as u32 - 1);
         }
     };
     for (_, _, rs, _) in funcs {
@@ -1404,7 +1479,7 @@ pub fn write_object_full(funcs: &[(String, Vec<u8>, Vec<Reloc>, bool)], datas: &
         symtab.extend_from_slice(&value.to_le_bytes());
         symtab.extend_from_slice(&size.to_le_bytes());
     }
-    let sym_of = |name: &str| -> u64 { index.iter().find(|x| x.0 == name).unwrap().1 as u64 };
+    let sym_of = |name: &str| -> u64 { index[name] as u64 };
     let rela_entry = |out: &mut Vec<u8>, off: u64, sym: u64, kind: u64, addend: i64| {
         out.extend_from_slice(&off.to_le_bytes());
         out.extend_from_slice(&((sym << 32) | kind).to_le_bytes());

@@ -2133,7 +2133,7 @@ impl Program {
 }
 
 /// 整数・bool・文字・バイトのリテラル (`0x1F_u8` / `true` / `'a'` / `b'a'`)
-fn lit_int(t: &str) -> Option<i128> {
+pub fn lit_int(t: &str) -> Option<i128> {
     if t == "true" {
         return Some(1);
     }
@@ -2172,7 +2172,7 @@ fn lit_int(t: &str) -> Option<i128> {
     Some(v as i128)
 }
 
-fn char_lit(s: &str) -> Option<char> {
+pub fn char_lit(s: &str) -> Option<char> {
     let mut cs = s.chars();
     let c = cs.next()?;
     if c != '\\' {

@@ -7,6 +7,8 @@ pub mod codegen;
 pub mod consteval;
 pub mod ctors;
 pub mod driver;
+#[cfg(feature = "acg")]
+pub mod driver2;
 pub mod elfz;
 pub mod enc;
 pub mod front;
@@ -24,6 +26,8 @@ pub mod ast_closure;
 pub mod ast_types;
 pub mod ast_summary;
 pub mod ast_consteval;
+#[cfg(feature = "acg")]
+pub mod acg;
 pub mod ast_codegen;
 pub mod ast_infer;
 pub mod prelude;
