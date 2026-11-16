@@ -1,4 +1,4 @@
-//! 最小のバックエンド (src/minclif.rs) で関数を組み立て、ELF の .o にして cc でリンクし、動かして出力を確かめる。
+//! 最小のバックエンド (crates/minclif/src/lib.rs) で関数を組み立て、ELF の .o にして cc でリンクし、動かして出力を確かめる。
 use crustc::minclif::{FunctionBuilder, IntCC, Type, write_object};
 
 /// sum(n) = 0 + 1 + .. + (n - 1) (ブロック引数のループ)

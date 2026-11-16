@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
 # セルフホストの確認: crustc 自身のソースの一部 (外部クレートに依存しないもの) を crustc でコンパイルし、
 # rustc でコンパイルしたものと同じ入力で同じ出力になるかを確かめる。
-#   lexer: src/lexer.rs と src/cache.rs の KeyHasher (SipHash) → crustc 自身のソースを字句解析してアイテムとハッシュを出す
-#   prelude: src/prelude.rs (prelude の項目を名前で選ぶ。lexer / fxhash / KeyHasher と、build.rs が作る表を含む)
+#   lexer: crates/core/src/lexer.rs と crates/legacy/src/cache.rs の KeyHasher (SipHash) → crustc 自身のソースを字句解析してアイテムとハッシュを出す
+#   prelude: crates/core/src/prelude.rs (prelude の項目を名前で選ぶ。lexer / fxhash / KeyHasher と、build.rs が作る表を含む)
 #            → probe / examples をユーザのソースとして、選ばれた prelude の長さとハッシュを出す
-#   link:  src/link.rs (リンカを探して直接起動する) と src/testgen.rs → C の .o をリンクして実行する (std::path / process::Command)
-#   elfz:  src/elfz.rs (.o のセクションの圧縮。zstd の代わりに同じ API の RLE を付ける) → C の .o を圧縮・解凍して中身を比べる
-#   macros: src/macros.rs (macro_rules! の展開と include_str!。proc_macro2 の代わりに tests/selfhost/mini_pm2.rs を付ける)
+#   link:  crates/core/src/link.rs (リンカを探して直接起動する) と crates/core/src/testgen.rs → C の .o をリンクして実行する (std::path / process::Command)
+#   elfz:  crates/legacy/src/elfz.rs (.o のセクションの圧縮。zstd の代わりに同じ API の RLE を付ける) → C の .o を圧縮・解凍して中身を比べる
+#   macros: crates/core/src/macros.rs (macro_rules! の展開と include_str!。proc_macro2 の代わりに tests/selfhost/mini_pm2.rs を付ける)
 #           → probe / examples / src を展開して、結果の長さとハッシュを出す
-#   parse: src/parse.rs (syn を使わない構文解析) → probe / examples / src を解析して節の数とアイテムを出す
-#   ast_closure: src/parse.rs + src/ast_closure.rs (自前の構文木の上のクロージャ解析) → 全関数のクロージャの自由変数
-#   ast_types: src/types.rs + src/parse.rs + src/ast_types.rs (型の表現・intern と、型の構文 → TySyn。front.rs から分けたもの)
-#   ast_summary: src/ast_summary.rs (front.rs の summarize の移植) + lexer / types / parse / ast_types / ast_closure → 全アイテムの要約
-#   program: src/program.rs (全体の表: シグネチャ・レイアウト・trait 実装) + 要約までのモジュール + prelude
+#   parse: crates/core/src/parse.rs (syn を使わない構文解析) → probe / examples / src を解析して節の数とアイテムを出す
+#   ast_closure: crates/core/src/parse.rs + crates/core/src/ast_closure.rs (自前の構文木の上のクロージャ解析) → 全関数のクロージャの自由変数
+#   ast_types: crates/core/src/types.rs + crates/core/src/parse.rs + crates/core/src/ast_types.rs (型の表現・intern と、型の構文 → TySyn。front.rs から分けたもの)
+#   ast_summary: crates/core/src/ast_summary.rs (front.rs の summarize の移植) + lexer / types / parse / ast_types / ast_closure → 全アイテムの要約
+#   program: crates/core/src/program.rs (全体の表: シグネチャ・レイアウト・trait 実装) + 要約までのモジュール + prelude
 #            + ast_consteval / solver / ctors → probe / examples / src の Program を作り、関数・型 (サイズ・オフセット・深いハッシュ)・
 #            impl・const とそのデータ・パスの検索・型推論の単一化の結果を出す
-#   minclif: src/minclif.rs (Cranelift の代わりの最小のバックエンド) → 関数を組み立てた ELF の .o が rustc 版と同じバイト列か。
+#   minclif: crates/minclif/src/lib.rs (Cranelift の代わりの最小のバックエンド) → 関数を組み立てた ELF の .o が rustc 版と同じバイト列か。
 #            crustc 版が書いた .o を C の main とリンクして動かす
-#   enc:   src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と src/fxhash.rs (FxHasher / FxMap)
+#   enc:   crates/core/src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と crates/core/src/fxhash.rs (FxHasher / FxMap)
 set -uo pipefail
 cd "$(dirname "$0")/.."
-# SELFHOST_DRIVER2=1: crustc 側を syn・Cranelift を使わないドライバ (driver2 + acg + minclif) でビルドする
+# SELFHOST_DRIVER2=1: crustc 側を自前のフロントエンド (driver2 + acg) と minclif でビルドする (syn・Cranelift を使わない経路)。
+# なければ最初の syn + Cranelift のドライバ (--legacy)
+cargo build --release -q || exit 1
 if [ -n "${SELFHOST_DRIVER2:-}" ]; then
-  cargo build --release -q --features acg || exit 1
-  crustc_cmd() { CRUSTC_DRIVER2=1 target/release/crustc "$@"; }
+  crustc_cmd() { target/release/crustc --backend=minclif "$@"; }
 else
-  cargo build --release -q || exit 1
-  crustc_cmd() { target/release/crustc "$@"; }
+  crustc_cmd() { target/release/crustc --legacy "$@"; }
 fi
 out=out/selfhost
 mkdir -p "$out"
@@ -36,7 +36,7 @@ rustc --edition 2024 -O -Awarnings "$out/lexer_main.rs" -o "$out/lexer_rustc" ||
 if ! crustc_cmd "$out/lexer_main.rs" -o "$out/lexer_crustc" -O; then
   echo "FAIL lexer (crustc)"; exit 1
 fi
-inputs=(src/*.rs src/prelude_lib.rs.in examples/*.rs tests/probe/*.rs)
+inputs=(crates/*/src/*.rs crates/core/src/prelude_lib.rs.in examples/*.rs tests/probe/*.rs)
 "$out/lexer_rustc" "${inputs[@]}" > "$out/lexer.rustc.out"
 "$out/lexer_crustc" "${inputs[@]}" > "$out/lexer.crustc.out"
 if cmp -s "$out/lexer.rustc.out" "$out/lexer.crustc.out"; then
@@ -104,7 +104,7 @@ for opt in "" -O; do
 done
 python3 tests/selfhost/build_macros.py > "$out/macros_main.rs"
 rustc --edition 2024 -O -Awarnings "$out/macros_main.rs" -o "$out/macros_rustc" || exit 1
-min=(tests/probe/*.rs examples/*.rs src/*.rs)
+min=(tests/probe/*.rs examples/*.rs crates/*/src/*.rs)
 "$out/macros_rustc" "${min[@]}" > "$out/macros.rustc.out"
 for opt in "" -O; do
   if ! crustc_cmd "$out/macros_main.rs" -o "$out/macros_crustc" $opt; then
@@ -175,7 +175,7 @@ for opt in "" -O; do
 done
 python3 tests/selfhost/build_program.py > "$out/program_main.rs"
 rustc --edition 2024 -O -Awarnings "$out/program_main.rs" -o "$out/program_rustc" || exit 1
-pin=(examples/*.rs tests/probe/*.rs src/*.rs)
+pin=(examples/*.rs tests/probe/*.rs crates/*/src/*.rs)
 "$out/program_rustc" "${pin[@]}" > "$out/program.rustc.out"
 for opt in "" -O; do
   if ! crustc_cmd "$out/program_main.rs" -o "$out/program_crustc" $opt; then

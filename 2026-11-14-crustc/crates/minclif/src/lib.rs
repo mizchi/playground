@@ -164,16 +164,17 @@ const FIELD_BASE: u32 = 1 << 29;
 
 /// 解析の記録: 値・変数 (vreg) の読み書きと、区間 (ブロックを続けて書いた範囲) とその行き先
 #[derive(Default)]
+#[doc(hidden)]
 pub struct Track {
     /// (vreg, 命令の番号, 書き込みか)
-    pub(crate) ev: Vec<(u32, u32, bool)>,
+    pub ev: Vec<(u32, u32, bool)>,
     /// スロットとして直接使う (アドレス・幅の違う読み書き) か、整数でない: レジスタに置けない
     mem_only: Vec<bool>,
     var_mem_only: Vec<bool>,
     /// 浮動小数点か (xmm に置く)
     vfloat: Vec<bool>,
     varfloat: Vec<bool>,
-    pub(crate) segs: Vec<Seg>,
+    pub segs: Vec<Seg>,
     /// 関数を呼ぶ命令の番号
     calls: Vec<u32>,
     /// 値ごとの、スロットのアドレスとして load / store / iadd_imm に使った回数
@@ -183,9 +184,9 @@ pub struct Track {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct Seg {
-    pub(crate) block: u32,
-    pub(crate) start: u32,
+pub struct Seg {
+    pub block: u32,
+    pub start: u32,
     end: u32,
     /// jump / brif の飛び先のブロック
     succ: Vec<u32>,
@@ -2676,7 +2677,7 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize, paddr: &[Option<(u32, i32)>]
 
 /// FunctionBuilder の命令 (呼ばれた順に記録し、割り当てを決めてから本番の Emitter でもう一度呼ぶ)
 #[derive(Clone)]
-pub(crate) enum Op {
+pub enum Op {
     CreateBlock,
     AppendBlockParam(Block, Type),
     SwitchToBlock(Block),
@@ -2786,15 +2787,15 @@ pub(crate) enum Op {
 /// 1 関数分の組み立て。命令は記録しながら解析用の Emitter で組み立て (値の番号と型を決める)、
 /// finish で値・変数をレジスタに割り当ててから、本番の Emitter で記録した命令を同じ順にもう一度組み立てる
 pub struct FunctionBuilder {
-    pub(crate) params: Vec<Type>,
-    pub(crate) rets: Vec<Type>,
+    pub params: Vec<Type>,
+    pub rets: Vec<Type>,
     dry: Emitter,
-    pub(crate) ops: Vec<Op>,
+    pub ops: Vec<Op>,
     real: Option<Emitter>,
     /// 入口で 0 にするスロット (finish_zeroing に渡すもの。変数にしない)
-    pub(crate) zero: Vec<u32>,
+    pub zero: Vec<u32>,
     /// 命令ごとの戻り値 (値・ブロック・変数・スロット・関数の番号。clif_backend が使う)
-    pub(crate) res: Vec<Vec<u32>>,
+    pub res: Vec<Vec<u32>>,
 }
 
 impl FunctionBuilder {
@@ -2815,7 +2816,7 @@ impl FunctionBuilder {
         self.dry.current_block()
     }
     /// 解析の記録 (clif_backend が使う)
-    pub(crate) fn track(&self) -> Option<&Track> {
+    pub fn track(&self) -> Option<&Track> {
         match &self.dry.track {
             Some(t) => Some(&**t),
             None => None,

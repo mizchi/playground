@@ -7,25 +7,24 @@ autoexamples = false
 
 # 他の実験と干渉しないよう、このディレクトリ単独のワークスペースにする
 [workspace]
+members = ["crates/minclif", "crates/core", "crates/clif", "crates/legacy"]
 
 [features]
-# 移植中の syn・Cranelift を使わないコード生成 (src/acg) とドライバ (src/driver2.rs)
+# (以前は driver2 を有効にする feature。今は常に入っている: テストの cfg のために残す)
+default = ["acg"]
 acg = []
 
 [dependencies]
-syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "visit", "clone-impls"] }
-proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }
-cranelift-codegen = { version = "0.137", default-features = false, features = ["std", "host-arch", "unwind"] }
-cranelift-frontend = "0.137"
-cranelift-module = "0.137"
-cranelift-object = "0.137"
-cranelift-native = "0.137"
-serde_json = "1"
-quote = { version = "1", default-features = false }
-# .o の .text を SHF_COMPRESSED (zstd) にする (wild は解凍して読む)
-zstd = { version = "0.13", default-features = false }
+crustc-core = { path = "crates/core" }
+crustc-clif = { path = "crates/clif" }
+crustc-legacy = { path = "crates/legacy" }
+minclif = { path = "crates/minclif" }
 
 [dev-dependencies]
+# (テストが syn 版と比べるのに使う)
+syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "visit", "clone-impls"] }
+proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }
+serde_json = "1"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]

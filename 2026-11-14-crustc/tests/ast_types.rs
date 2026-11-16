@@ -1,4 +1,4 @@
-//! 自前の構文木からの型の変換 (src/ast_types.rs) を syn 版 (front::parse_tysyn) と比べる:
+//! 自前の構文木からの型の変換 (crates/core/src/ast_types.rs) を syn 版 (front::parse_tysyn) と比べる:
 //! 全ファイルのアイテムのシグネチャ・フィールド・impl の self 型・別名・const / static の型。
 use crustc::front::{TySyn, parse_tysyn};
 use crustc::parse::{Fields, ItemKind, parse_file};
@@ -110,7 +110,7 @@ fn our_types(items: &[crustc::parse::Item], self_ty: Option<&TySyn>, out: &mut V
 #[test]
 fn types_like_syn() {
     let mut files: Vec<std::path::PathBuf> = vec![];
-    for d in ["tests/probe", "examples", "src"] {
+    for d in ["tests/probe", "examples", "crates/core/src", "crates/legacy/src", "crates/minclif/src", "crates/clif/src"] {
         for e in std::fs::read_dir(d).unwrap() {
             let p = e.unwrap().path();
             if p.extension().is_some_and(|x| x == "rs") {

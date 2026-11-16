@@ -9,7 +9,7 @@ use std::fmt::Write;
 mod lexer;
 
 #[allow(dead_code)]
-mod cache {
+mod key {
     pub type Key = u128;
     pub struct KeyHasher;
     impl KeyHasher {

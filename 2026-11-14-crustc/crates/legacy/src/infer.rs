@@ -4,6 +4,7 @@
 //! 注釈のない let の型を後続の使用箇所から決めるためのパス。型エラーの報告はここでは
 //! 行わず (矛盾は無視)、codegen 側の検査に任せる。結果は「注釈なし let → 型」の表。
 
+use crate::front::ProgramSyn;
 use syn::{BinOp, Expr, Lit, Pat, Stmt, UnOp};
 
 use crate::front::{FnSig, Program, Ty, TyEnv, intern};

@@ -2,6 +2,7 @@
 //! 対応: 整数 / bool / char (定数式)、配列 (列挙・`[x; N]`)、struct / タプル / enum の値、
 //! `b"..."` / `"..."` / `&[..]` / `&e` (別のデータへの参照)、他の const / static への参照。
 
+use crate::front::ProgramSyn;
 use syn::spanned::Spanned;
 use syn::{Expr, Lit};
 

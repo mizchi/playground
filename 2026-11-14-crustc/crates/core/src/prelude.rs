@@ -492,7 +492,7 @@ pub fn select(user_src: &str, user_items: &[SrcItem]) -> String {
 /// LSP / インクリメンタルビルドでは変わっていないアイテムを走査し直さない
 #[derive(Default)]
 pub struct SelectCache {
-    map: crate::fxhash::FxMap<crate::cache::Key, (Vec<&'static str>, bool)>,
+    map: crate::fxhash::FxMap<crate::key::Key, (Vec<&'static str>, bool)>,
     /// 直前の選択でのユーザのアイテムの数 (これより後ろのアイテムは prelude)
     pub user_items: usize,
 }

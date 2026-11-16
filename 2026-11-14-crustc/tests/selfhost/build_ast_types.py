@@ -1,12 +1,12 @@
-"""crustc 自身の src/types.rs (型の表現と intern) / src/parse.rs / src/ast_types.rs (型の構文 → TySyn) を
+"""crustc 自身の crates/core/src/types.rs (型の表現と intern) / crates/core/src/parse.rs / crates/core/src/ast_types.rs (型の構文 → TySyn) を
 1 ファイルのプログラムにまとめる。
 usage: python3 tests/selfhost/build_ast_types.py > out/selfhost/ast_types_main.rs
 main は引数のファイルごとに、アイテムの型を TySyn にして出し、intern した型の性質 (大きさ・整数か) も出す。"""
 
-types = open("src/types.rs").read()
-parse = open("src/parse.rs").read()
-at = open("src/ast_types.rs").read()
-print("""// 自動生成: tests/selfhost/build_ast_types.py (crustc の src/types.rs / parse.rs / ast_types.rs をそのまま含む)
+types = open("crates/core/src/types.rs").read()
+parse = open("crates/core/src/parse.rs").read()
+at = open("crates/core/src/ast_types.rs").read()
+print("""// 自動生成: tests/selfhost/build_ast_types.py (crustc の crates/core/src/types.rs / parse.rs / ast_types.rs をそのまま含む)
 mod types {
 """ + types + """}
 

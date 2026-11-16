@@ -1,4 +1,4 @@
-//! 自前の構文木の上のクロージャ解析 (src/ast_closure.rs) を syn 版 (src/closure.rs) と比べる:
+//! 自前の構文木の上のクロージャ解析 (crates/core/src/ast_closure.rs) を syn 版 (crates/legacy/src/closure.rs) と比べる:
 //! 全ファイルの関数の本体ごとに、クロージャの並び・自由変数・キャプチャを値として使うかが同じか。
 use crustc::parse::{ItemKind, parse_file};
 
@@ -52,7 +52,7 @@ fn our_bodies(items: &[crustc::parse::Item], out: &mut Vec<crustc::parse::Block>
 #[test]
 fn closures_like_syn() {
     let mut files: Vec<std::path::PathBuf> = vec![];
-    for d in ["tests/probe", "examples", "src"] {
+    for d in ["tests/probe", "examples", "crates/core/src", "crates/legacy/src", "crates/minclif/src", "crates/clif/src"] {
         for e in std::fs::read_dir(d).unwrap() {
             let p = e.unwrap().path();
             if p.extension().is_some_and(|x| x == "rs") {

@@ -1,0 +1,11 @@
+[package]
+name = "crustc-clif"
+version = "0.1.0"
+edition = "2024"
+description = "driver2 の Cranelift バックエンド: minclif が記録した命令の列を Cranelift でコンパイルする"
+
+[dependencies]
+minclif = { path = "../minclif" }
+cranelift-codegen = { version = "0.137", default-features = false, features = ["std", "host-arch"] }
+cranelift-frontend = "0.137"
+cranelift-native = "0.137"

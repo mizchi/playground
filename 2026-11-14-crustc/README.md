@@ -1,6 +1,7 @@
 # crustc
 
-自分用の Rust (サブセット) コンパイラ。Rust で書き、バックエンドは Cranelift。
+自分用の Rust (サブセット) コンパイラ。Rust で書き、自前のフロントエンド (lexer / parser / 型推論) と、
+Cranelift (既定) か自前の minclif でコード生成する。crustc 自身で crustc をコンパイルできる (minclif の経路)。
 **インクリメンタルな開発ビルド**に特化して、次の 4 つを小さくすることを狙う。
 
 - 再ビルド時間
@@ -9,6 +10,19 @@
 - 出力バイナリのサイズ
 
 設計の元にした blaze / relax / wild の調査は [NOTES.md](NOTES.md) にまとめた。
+
+### crate の構成 (このディレクトリの Cargo ワークスペース)
+
+| crate | 中身 | 外部の依存 |
+|---|---|---|
+| `crates/minclif` | Cranelift に似た API の小さな x86-64 バックエンド (命令の記録・レジスタ割り当て・スタックの struct のフィールドの変数化・ELF の .o) | なし |
+| `crates/core` (`crustc-core`) | lexer / parse / macros / prelude / ast_* (要約・型推論) / program / acg (コード生成) / driver2 (キャッシュ・fork の並列化・複数クレート・リンク) | proc-macro2 だけ |
+| `crates/clif` (`crustc-clif`) | driver2 の Cranelift バックエンド: minclif が記録した命令の列を Cranelift の IR にしてコンパイルする | cranelift |
+| `crates/legacy` (`crustc-legacy`) | 最初のドライバ (syn で読み、syn の構文木から Cranelift の IR を作る)。`check` / LSP と、比較の基準 | syn・cranelift・zstd |
+| `.` (`crustc`) | CLI と、上のものの再輸出 (テスト・ベンチ) | |
+
+主経路は **driver2 + Cranelift** (`crustc x.rs`)。`--backend=minclif` で minclif、`--legacy` で最初のドライバ。
+セルフホスト (tests/selfhost*.sh) は crustc-core と minclif のソースを 1 ファイルにまとめて crustc でコンパイルする。
 
 ## 現状（2026-11-15、`python3 bench/vs_rustc.py`）
 
@@ -64,6 +78,10 @@ cargo build --release
 ```
 
 ```bash
+./target/release/crustc build tests/workspace/workspace.txt -o out/ws   # 複数クレートのワークスペース (書き方は下の「複数ファイル・複数クレート」)
+```
+
+```bash
 ./target/release/crustc check examples/traits.rs
 ```
 
@@ -77,8 +95,10 @@ LSP サーバ（stdio）。対応は initialize / didOpen / didChange（全文�
 
 | オプション | 意味 |
 |---|---|
-| `-o PATH` | 出力パス。同じ場所に `PATH.o`（`.text` などを zstd で圧縮した ELF。次のビルドの機械語の置き場）、`PATH.crcache`（キャッシュ）、`PATH.link`（リンク行）を置く |
-| `-O` | Cranelift の `speed_and_size` と backtracking regalloc を使う。既定は `none` + `single_pass` |
+| `-o PATH` | 出力パス。同じ場所に `PATH.o`、`PATH.crcache2`（キャッシュ。`--legacy` は `PATH.crcache`）、`PATH.link`（リンク行）を置く |
+| `-O` | 小さい関数のインライン展開と、Cranelift の `speed` + backtracking regalloc (minclif ならレジスタ割り当ての後の命令の形)。オーバーフローの検査をしない |
+| `--backend=cranelift\|minclif` | コード生成 (既定 cranelift。環境変数 `CRUSTC_BACKEND` でも) |
+| `--legacy` | 最初の syn + Cranelift のドライバでビルドする (`CRUSTC_LEGACY=1` でも) |
 | `--linker=wild\|mold\|lld\|bfd\|PATH` | リンカを選ぶ。既定は PATH にある順に wild > mold > ld.lld > ld |
 | `--time` | フェーズごとの時間とピーク RSS を表示する |
 | `-j N` | コード生成のスレッド数。ミスが 32 件未満ならスレッドを立てない |
@@ -638,6 +658,18 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
   - `&dyn Fn(A) -> B` の vtable は、クロージャ本体のインスタンス 1 個だけ。
 
 ## アーキテクチャ
+
+今の主経路 (driver2):
+
+```
+src.rs ──srcmap (mod x; のファイル)──▶ macros (macro_rules!) ──▶ モジュールを平らに ──▶ lexer: アイテム + ハッシュ
+   ──▶ 要約 (キャッシュ、fork で並列) ──▶ Program (シグネチャ・レイアウト) ──▶ 到達する関数
+   ──▶ 関数ごと: キャッシュ? ── miss ──▶ ast_infer (型推論) → acg (自前の構文木から minclif の命令の列。-O で小さい関数を展開)
+                                        → Cranelift (crustc-clif) か minclif (レジスタ割り当て) で機械語 → Blob (fork で並列)
+   ──▶ minclif の ELF 書き出しで .o (panic の場所の表を含む) ──▶ wild でリンク (変わらなければしない)
+```
+
+以下は最初のドライバ (crates/legacy) の図と表 (ファイルは crates/legacy/src と crates/core/src にある):
 
 ```
 src.rs ──lexer(自前)──▶ アイテム列 + 正規化ハッシュ

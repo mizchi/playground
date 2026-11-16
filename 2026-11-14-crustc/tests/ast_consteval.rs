@@ -1,4 +1,4 @@
-//! 自前の構文木の上の定数評価 (src/ast_consteval.rs) を syn 版 (consteval::eval) と比べる:
+//! 自前の構文木の上の定数評価 (crates/core/src/ast_consteval.rs) を syn 版 (consteval::eval) と比べる:
 //! probe / examples の全 const / static の初期値で、バイト列・配置・リロケーションが同じか。
 use crustc::ast_consteval as ac;
 use crustc::consteval as sc;

@@ -1,14 +1,14 @@
-"""crustc 自身の src/lexer.rs (と cache.rs の KeyHasher) を 1 ファイルのプログラムにまとめる。
+"""crustc 自身の crates/core/src/lexer.rs (と cache.rs の KeyHasher) を 1 ファイルのプログラムにまとめる。
 usage: python3 tests/selfhost/build_lexer.py > out/selfhost/lexer_main.rs
 main は引数のファイルを split / hoist_nested_items / flatten_modules に通し、アイテムの種類・位置・ハッシュを出す。"""
 import re
 
-lexer = open("src/lexer.rs").read()
-cache = open("src/key.rs").read()
+lexer = open("crates/core/src/lexer.rs").read()
+cache = open("crates/core/src/key.rs").read()
 a = cache.index("pub type Key = u128;")
 b = len(cache)
 hasher = cache[a:b]
-print("""// 自動生成: tests/selfhost/build_lexer.py (crustc の src/lexer.rs をそのまま含む)
+print("""// 自動生成: tests/selfhost/build_lexer.py (crustc の crates/core/src/lexer.rs をそのまま含む)
 mod cache {
 use std::hash::{Hash, Hasher};
 """ + hasher + """}
@@ -34,3 +34,5 @@ fn main() {
     }
 }
 """)
+# (lexer は crate::key を使う: cache と同じもの)
+print("mod key {\n    pub use crate::cache::*;\n}")

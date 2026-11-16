@@ -15,6 +15,7 @@
 //! 参照するだけなので、呼び出し先の「本体」が変わっても Blob は再利用できる
 //! (blaze の template と同じ発想。キャッシュキーにはシグネチャしか入れない)。
 
+use crate::front::ProgramSyn;
 use std::collections::{HashMap, HashSet};
 
 use cranelift_codegen::control::ControlPlane;

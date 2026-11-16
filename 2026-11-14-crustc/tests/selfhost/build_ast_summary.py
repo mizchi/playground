@@ -1,4 +1,4 @@
-"""crustc 自身の src/ast_summary.rs (アイテムの要約。front.rs の summarize の移植) を、lexer / types / parse /
+"""crustc 自身の crates/core/src/ast_summary.rs (アイテムの要約。front.rs の summarize の移植) を、lexer / types / parse /
 ast_types / ast_closure と一緒に 1 ファイルのプログラムにまとめる。
 usage: python3 tests/selfhost/build_ast_summary.py > out/selfhost/ast_summary_main.rs
 main は引数のファイルごとに、モジュールを平らにし入れ子のアイテムを外に出してから字句解析し、全アイテムの要約を出す。"""
@@ -6,12 +6,12 @@ main は引数のファイルごとに、モジュールを平らにし入れ子
 def body(p):
     return open(p).read()
 
-cache = open("src/key.rs").read()
+cache = open("crates/core/src/key.rs").read()
 a = cache.index("pub type Key = u128;")
 b = len(cache)
 hasher = cache[a:b]
-parts = [("types", "src/types.rs"), ("parse", "src/parse.rs"), ("ast_types", "src/ast_types.rs"),
-         ("ast_closure", "src/ast_closure.rs"), ("ast_summary", "src/ast_summary.rs"), ("lexer", "src/lexer.rs")]
+parts = [("types", "crates/core/src/types.rs"), ("parse", "crates/core/src/parse.rs"), ("ast_types", "crates/core/src/ast_types.rs"),
+         ("ast_closure", "crates/core/src/ast_closure.rs"), ("ast_summary", "crates/core/src/ast_summary.rs"), ("lexer", "crates/core/src/lexer.rs")]
 out = ["// 自動生成: tests/selfhost/build_ast_summary.py (crustc の src/*.rs をそのまま含む)",
        "mod cache {\nuse std::hash::{Hash, Hasher};\n" + hasher + "}\n"]
 for name, path in parts:
@@ -59,3 +59,5 @@ fn main() {
 }
 """)
 print("\n".join(out))
+# (lexer は crate::key を使う: cache と同じもの)
+print("mod key {\n    pub use crate::cache::*;\n}")

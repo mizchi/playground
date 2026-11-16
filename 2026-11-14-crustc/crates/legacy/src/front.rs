@@ -856,8 +856,20 @@ fn lift_closures(
     Ok(())
 }
 
-impl Program {
-    pub fn eval_int(&self, e: &syn::Expr, depth: u32) -> R<i128> {
+/// syn の構文木を引く Program のメソッド (Program は crustc-core にあるので trait にする)
+pub trait ProgramSyn {
+    fn eval_int(&self, e: &syn::Expr, depth: u32) -> R<i128>;
+    fn resolve_opaque(&mut self, src: &str, items: &[SrcItem]) -> R<()>;
+    fn parse_ty(&self, t: &syn::Type, env: &TyEnv) -> R<Ty>;
+    fn strip_mods(&self, p: &syn::Path) -> Option<syn::Path>;
+    fn prim_method_call(&self, c: &syn::ExprCall, self_sid: Option<u32>) -> Option<syn::Expr>;
+    fn variant_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<(u32, usize)>;
+    fn struct_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32>;
+    fn fn_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32>;
+}
+
+impl ProgramSyn for Program {
+    fn eval_int(&self, e: &syn::Expr, depth: u32) -> R<i128> {
         use syn::{BinOp, Expr, Lit, UnOp};
         Ok(match e {
             Expr::Lit(l) => match &l.lit {
@@ -913,7 +925,7 @@ impl Program {
     /// ジェネリックな struct / enum に型引数を入れる。型引数がすべて具体型ならレイアウトも決める。
     /// 同じ (定義, 型引数) には同じ id を返す
     /// `-> impl Iterator<..>` の戻り値を本体の型推論で決める (呼び出し先も同じ形なら数回まわす)
-    pub fn resolve_opaque(&mut self, src: &str, items: &[SrcItem]) -> R<()> {
+    fn resolve_opaque(&mut self, src: &str, items: &[SrcItem]) -> R<()> {
         if self.opaque.is_empty() {
             return Ok(());
         }
@@ -951,7 +963,7 @@ impl Program {
     }
 
     /// 関数本体の中の型を解決する (`Self` と型パラメータは env から)
-    pub fn parse_ty(&self, t: &syn::Type, env: &TyEnv) -> R<Ty> {
+    fn parse_ty(&self, t: &syn::Type, env: &TyEnv) -> R<Ty> {
         let ts = parse_tysyn(t, Some(&TySyn::Named("Self".into())))?;
         self.resolve_env(&ts, env).or_else(|e| err(t.span(), e))
     }
@@ -959,7 +971,7 @@ impl Program {
     /// 型名として書かれたパス (`S` / `Self`) → struct id
     /// モジュールのパスの先頭 (`crate::` / `self::` / `super::` / 小文字のモジュール名) を外す。
     /// モジュールは平らにしてあるので、アイテムは最後の名前で引ける (`geo::inner::k` → `k`、`geo::P::new` → `P::new`)
-    pub fn strip_mods(&self, p: &syn::Path) -> Option<syn::Path> {
+    fn strip_mods(&self, p: &syn::Path) -> Option<syn::Path> {
         let mut k = 0;
         let n = p.segments.len();
         while k + 1 < n {
@@ -986,7 +998,7 @@ impl Program {
 
     /// `i32::pow(2, 10)` / `u64::count_ones(x)` / `f64::abs(x)`: プリミティブのメソッドを関数の形で呼んだもの。
     /// 関数として見つからなければ、メソッド呼び出し `(2i32).pow(10)` に書き換える
-    pub fn prim_method_call(&self, c: &syn::ExprCall, self_sid: Option<u32>) -> Option<syn::Expr> {
+    fn prim_method_call(&self, c: &syn::ExprCall, self_sid: Option<u32>) -> Option<syn::Expr> {
         let syn::Expr::Path(p) = &*c.func else { return None };
         if c.args.is_empty() || p.qself.is_some() {
             return None;
@@ -1073,15 +1085,15 @@ impl Program {
 
 
 
-    pub fn variant_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<(u32, usize)> {
+    fn variant_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<(u32, usize)> {
         self.variant_by_p(&ppath(p), self_sid)
     }
 
-    pub fn struct_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
+    fn struct_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
         self.struct_by_p(&ppath(p), self_sid)
     }
 
-    pub fn fn_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
+    fn fn_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
         self.fn_by_p(&ppath(p), self_sid)
     }
 }

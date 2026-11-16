@@ -1,10 +1,10 @@
-"""crustc 自身の src/parse.rs と src/ast_closure.rs (自前の構文木の上のクロージャ解析) を 1 ファイルのプログラムにまとめる。
+"""crustc 自身の crates/core/src/parse.rs と crates/core/src/ast_closure.rs (自前の構文木の上のクロージャ解析) を 1 ファイルのプログラムにまとめる。
 usage: python3 tests/selfhost/build_ast_closure.py > out/selfhost/ast_closure_main.rs
 main は引数のファイルごとに、関数の本体のクロージャの自由変数とキャプチャを値として使うかを出す。"""
 
-parse = open("src/parse.rs").read()
-clo = open("src/ast_closure.rs").read()
-print("""// 自動生成: tests/selfhost/build_ast_closure.py (crustc の src/parse.rs と src/ast_closure.rs をそのまま含む)
+parse = open("crates/core/src/parse.rs").read()
+clo = open("crates/core/src/ast_closure.rs").read()
+print("""// 自動生成: tests/selfhost/build_ast_closure.py (crustc の crates/core/src/parse.rs と crates/core/src/ast_closure.rs をそのまま含む)
 mod parse {
 """ + parse + """}
 

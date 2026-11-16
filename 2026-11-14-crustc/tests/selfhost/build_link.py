@@ -1,11 +1,11 @@
-"""crustc 自身の src/link.rs (リンカを探して直接起動する) と src/testgen.rs (ベンチ用のプログラム生成器) を
+"""crustc 自身の crates/core/src/link.rs (リンカを探して直接起動する) と crates/core/src/testgen.rs (ベンチ用のプログラム生成器) を
 1 ファイルのプログラムにまとめる。
 usage: python3 tests/selfhost/build_link.py > out/selfhost/link_main.rs
 main は <obj> <out> を受け取り、link::link でリンクして実行し、その出力と testgen の生成結果のハッシュを出す。"""
 
-link = open("src/link.rs").read()
-testgen = open("src/testgen.rs").read()
-print("""// 自動生成: tests/selfhost/build_link.py (crustc の src/link.rs と src/testgen.rs をそのまま含む)
+link = open("crates/core/src/link.rs").read()
+testgen = open("crates/core/src/testgen.rs").read()
+print("""// 自動生成: tests/selfhost/build_link.py (crustc の crates/core/src/link.rs と crates/core/src/testgen.rs をそのまま含む)
 mod link {
 """ + link + """}
 

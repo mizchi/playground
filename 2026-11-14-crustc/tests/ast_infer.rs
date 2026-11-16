@@ -1,4 +1,4 @@
-//! 自前の構文木の上の型推論 (src/ast_infer.rs) を syn 版 (infer::infer) と比べる:
+//! 自前の構文木の上の型推論 (crates/core/src/ast_infer.rs) を syn 版 (infer::infer) と比べる:
 //! probe / examples のユーザの (ジェネリックでない) 関数で、let 文の型を前順に並べたものが同じか。
 use crustc::front::{self, Program, Summary, TyEnv};
 use crustc::lexer::ItemKind;
@@ -15,7 +15,7 @@ impl<'ast> Visit<'ast> for Locals {
 #[test]
 fn infer_like_syn() {
     let mut files: Vec<std::path::PathBuf> = vec![];
-    for d in ["tests/probe", "examples", "src"] {
+    for d in ["tests/probe", "examples", "crates/core/src", "crates/legacy/src", "crates/minclif/src", "crates/clif/src"] {
         for e in std::fs::read_dir(d).unwrap() {
             let p = e.unwrap().path();
             if p.extension().is_some_and(|x| x == "rs") {

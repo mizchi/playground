@@ -1,11 +1,11 @@
-"""crustc 自身の src/elfz.rs (.o の機械語のセクションを SHF_COMPRESSED にする) を 1 ファイルのプログラムにまとめる。
+"""crustc 自身の crates/legacy/src/elfz.rs (.o の機械語のセクションを SHF_COMPRESSED にする) を 1 ファイルのプログラムにまとめる。
 zstd クレートは使えないので、同じ API の小さな代わり (0 の並びだけを縮める RLE) を `mod zstd` として付ける
 (rustc 版も同じ代わりを使うので、出力は比べられる)。
 usage: python3 tests/selfhost/build_elfz.py > out/selfhost/elfz_main.rs
 main は引数の .o ごとに、セクション・圧縮後の大きさ・解凍して元に戻るか・関数のシンボルを出す。"""
 
-elfz = open("src/elfz.rs").read()
-print("""// 自動生成: tests/selfhost/build_elfz.py (crustc の src/elfz.rs をそのまま含む)
+elfz = open("crates/legacy/src/elfz.rs").read()
+print("""// 自動生成: tests/selfhost/build_elfz.py (crustc の crates/legacy/src/elfz.rs をそのまま含む)
 mod zstd {
     pub mod bulk {
         // 0 の並び (4 以上) を [0, 長さ (varint)] に、それ以外の 0 は [0, 0] にする

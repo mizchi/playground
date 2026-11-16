@@ -1,45 +1,11 @@
 //! crustc: インクリメンタル開発ビルド特化の小さな Rust (サブセット) コンパイラ。
-//! CLI (`src/main.rs`)・LSP (`lsp`)・ベンチ (`benches/`) はすべて [`Session`] を通る。
+//! 中身は crates/ の crate に分かれている (このクレートは CLI と、それらの再輸出):
+//! - `minclif`: Cranelift に似た API の小さな x86-64 バックエンド (外部 crate なし)
+//! - `crustc-core`: フロントエンド・acg・driver2 (syn・Cranelift なし。crustc 自身でコンパイルできる)
+//! - `crustc-clif`: driver2 の Cranelift バックエンド (既定)
+//! - `crustc-legacy`: 最初の syn + Cranelift のドライバ (check / LSP と比較の基準)
 
-pub mod cache;
-pub mod closure;
-pub mod codegen;
-pub mod consteval;
-pub mod ctors;
-pub mod driver;
-#[cfg(feature = "acg")]
-pub mod driver2;
-#[cfg(feature = "acg")]
-pub mod cache2;
-#[cfg(feature = "acg")]
-pub mod srcmap;
-#[cfg(feature = "acg")]
-pub mod clif_backend;
-pub mod elfz;
-pub mod enc;
-pub mod front;
-pub mod fxhash;
-pub mod key;
-pub mod infer;
-pub mod solver;
-pub mod lexer;
-pub mod link;
-pub mod lsp;
-pub mod macros;
-pub mod minclif;
-pub mod parse;
-pub mod ast_closure;
-pub mod ast_types;
-pub mod ast_summary;
-pub mod ast_consteval;
-#[cfg(feature = "acg")]
-pub mod acg;
-pub mod ast_infer;
-pub mod prelude;
-pub mod program;
-#[doc(hidden)]
-pub mod testgen;
-pub mod types;
-pub mod types_enc;
-
-pub use driver::{BuildReport, Diagnostic, Options, Session, cache_path};
+pub use crustc_core::*;
+pub use crustc_clif as clif_backend;
+pub use crustc_legacy::{cache, closure, codegen, consteval, driver, elfz, front, infer, lsp};
+pub use crustc_legacy::{BuildReport, Diagnostic, Options, Session, cache_path};

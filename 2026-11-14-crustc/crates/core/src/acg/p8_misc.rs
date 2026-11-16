@@ -982,8 +982,3 @@ impl Cx<'_> {
     }
 }
 
-/// (`-1` の式全体のアドレス: 型推論はリテラルでなく単項演算の式を記録していることがある)
-/// 自前の構文木では単項演算のノードは式そのもの (`Expr::Unary`) なので、式のアドレスを返す
-pub(crate) fn e_addr_of_unary(u: &Expr) -> usize {
-    u as *const Expr as usize
-}

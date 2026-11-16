@@ -7,12 +7,13 @@
 # 1 段目と同じ .o になるか (不動点) も確かめる。
 set -uo pipefail
 cd "$(dirname "$0")/.."
-cargo build --release -q --features acg || exit 1
+cargo build --release -q || exit 1
 out=out/selfhost
 mkdir -p "$out/cc/r" "$out/cc/c"
 python3 tests/selfhost/build_compiler.py > "$out/compiler_main.rs"
 rustc --edition 2024 -O -Awarnings "$out/compiler_main.rs" -o "$out/compiler_rustc" || exit 1
-if ! CRUSTC_DRIVER2=1 target/release/crustc "$out/compiler_main.rs" -o "$out/compiler_crustc" -O; then
+# (1 段目は minclif: できたコンパイラ (中も minclif) が自分自身をコンパイルした結果と同じになるはず)
+if ! target/release/crustc --backend=minclif "$out/compiler_main.rs" -o "$out/compiler_crustc" -O; then
   echo "FAIL compiler (crustc)"; exit 1
 fi
 same=0; diff_o=0; diff_run=0; fail=0
@@ -50,5 +51,15 @@ if "$out/compiler_crustc" "$out/compiler_main.rs" -o "$out/compiler_crustc2" -O;
   fi
 else
   echo "FAIL stage 2 (compiler_crustc could not compile itself)"; fail=1
+fi
+# Cranelift のバックエンドでビルドしたコンパイラも同じ .o を出すか
+if target/release/crustc "$out/compiler_main.rs" -o "$out/compiler_clif" -O && "$out/compiler_clif" "$out/compiler_main.rs" -o "$out/compiler_clif2" -O; then
+  if cmp -s "$out/compiler_crustc.o" "$out/compiler_clif2.o"; then
+    echo "ok   the Cranelift-built compiler produces the same .o"
+  else
+    echo "DIFF the Cranelift-built compiler: .o differs"; fail=1
+  fi
+else
+  echo "FAIL the Cranelift-built compiler"; fail=1
 fi
 exit $fail

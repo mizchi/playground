@@ -4,7 +4,7 @@
 //! ビルドでは syn を使わず、この lexer だけで「どのアイテムが変わったか」を判定する。
 //! 空白とコメントはハッシュに入らないので、整形やコメント編集では何も再コンパイルされない。
 
-use crate::cache::{Key, KeyHasher};
+use crate::key::{Key, KeyHasher};
 
 /// モジュールの名前の付け替えの表用の速いハッシュ (fxhash.rs と同じ方式。lexer は単独でもコンパイルされるので自前で持つ)
 #[derive(Default, Clone, Copy)]

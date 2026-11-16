@@ -1,8 +1,9 @@
 //! crustc の CLI。
-//!   crustc <input.rs> [-o out] [...]   ビルド
-//!   crustc check <input.rs>            型検査だけ (全診断を表示)
-//!   crustc build <workspace> [-o dir]   ワークスペース (複数のクレート) をビルド (`--features acg`)
-//!   crustc lsp                         LSP サーバ (stdio)
+//!   crustc <input.rs> [-o out] [...]   ビルド (driver2: 自前のフロントエンド + Cranelift。`--backend=minclif` で minclif)
+//!   crustc build <workspace> [-o dir]   ワークスペース (複数のクレート) をビルド
+//!   crustc check <input.rs>            型検査だけ (全診断を表示。今は最初の syn 版のドライバ)
+//!   crustc lsp                         LSP サーバ (stdio。同上)
+//! `--legacy` (か CRUSTC_LEGACY=1) で最初の syn + Cranelift のドライバでビルドする (比較用)
 
 use std::path::PathBuf;
 
@@ -10,7 +11,7 @@ use crustc::{Options, Session, cache_path};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: crustc <input.rs> [-o out] [-O] [--regalloc=fast|good] [--linker=NAME] [--time] [-j N] [--no-cache]\n       crustc check <input.rs>\n       crustc build <workspace-file> [-o out-dir] [-O] [-j N] [--time] [--no-cache]\n       crustc lsp"
+        "usage: crustc <input.rs> [-o out] [-O] [--backend=cranelift|minclif] [--legacy] [--regalloc=fast|good] [--linker=NAME] [--time] [-j N] [--no-cache]\n       crustc check <input.rs>\n       crustc build <workspace-file> [-o out-dir] [-O] [-j N] [--time] [--no-cache]\n       crustc lsp"
     );
     std::process::exit(2)
 }
@@ -21,6 +22,9 @@ fn main() {
     let mut input = PathBuf::new();
     let mut output = PathBuf::new();
     let mut mode = "build";
+    // (バックエンド: 既定は Cranelift。CRUSTC_BACKEND=minclif / --backend=minclif で minclif)
+    let mut backend = std::env::var("CRUSTC_BACKEND").unwrap_or_else(|_| "cranelift".to_string());
+    let mut legacy = std::env::var_os("CRUSTC_LEGACY").is_some();
     match args.peek().map(String::as_str) {
         Some("check") => {
             mode = "check";
@@ -50,6 +54,8 @@ fn main() {
                 o.opt = true;
                 o.fast_regalloc = false;
             }
+            "--legacy" => legacy = true,
+            s if s.starts_with("--backend=") => backend = s["--backend=".len()..].to_string(),
             "--regalloc=fast" => o.fast_regalloc = true,
             "--regalloc=good" => o.fast_regalloc = false,
             "--time" => o.time = true,
@@ -79,8 +85,11 @@ fn main() {
         };
         let out_dir = if output.as_os_str().is_empty() { input.parent().map(|d| d.join("target")).unwrap_or("target".into()) } else { output.clone() };
         let mut opts = crustc::driver2::Options2 { opt: o.opt, jobs: o.jobs, linker: o.linker.clone(), no_cache: o.no_cache, time: o.time, backend: None };
-        if std::env::var("CRUSTC_BACKEND").is_ok_and(|b| b == "cranelift") {
+        if backend == "cranelift" {
             opts.backend = Some(crustc::clif_backend::compile);
+        } else if backend != "minclif" {
+            eprintln!("error: unknown backend `{backend}` (cranelift / minclif)");
+            std::process::exit(2);
         }
         let mut s = crustc::driver2::Session2::new(opts);
         // (キャッシュはクレートごとに out_dir/<名前>.crcache2)
@@ -111,12 +120,14 @@ fn main() {
     };
     // (CRUSTC_DRIVER2=1: syn・Cranelift を使わないドライバでビルドする。`--features acg` のときだけ)
     #[cfg(feature = "acg")]
-    if std::env::var_os("CRUSTC_DRIVER2").is_some() && mode != "check" {
+    if !legacy && mode != "check" {
         let output = if output.as_os_str().is_empty() { input.with_extension("") } else { output.clone() };
         let mut opts = crustc::driver2::Options2 { opt: o.opt, jobs: o.jobs, linker: o.linker.clone(), no_cache: o.no_cache, time: o.time, backend: None };
-        // (CRUSTC_BACKEND=cranelift: minclif の代わりに Cranelift で機械語を作る)
-        if std::env::var("CRUSTC_BACKEND").is_ok_and(|b| b == "cranelift") {
+        if backend == "cranelift" {
             opts.backend = Some(crustc::clif_backend::compile);
+        } else if backend != "minclif" {
+            eprintln!("error: unknown backend `{backend}` (cranelift / minclif)");
+            std::process::exit(2);
         }
         let mut s = crustc::driver2::Session2::new(opts);
         let mut cp = output.as_os_str().to_owned();

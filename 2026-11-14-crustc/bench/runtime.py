@@ -5,14 +5,15 @@ import os, shutil, statistics, subprocess, sys, time
 
 CRUSTC = os.path.abspath("target/release/crustc")
 W = os.path.abspath("out/runtime")
-# (driver2: syn・Cranelift を使わない経路。`env` で CRUSTC_DRIVER2 などを渡す。MINCLIF_NO_REGALLOC はレジスタ割り当てなし)
+# (既定は driver2 (自前のフロントエンド) + Cranelift。--backend=minclif で minclif、--legacy で最初の syn 版のドライバ。
+#  MINCLIF_NO_REGALLOC は minclif のレジスタ割り当てなし)
 CONFIGS = [
-    ("crustc", lambda s, o: [CRUSTC, s, "-o", o, "--no-cache"]),
-    ("crustc -O", lambda s, o: [CRUSTC, s, "-o", o, "-O", "--no-cache"]),
-    ("driver2 -O (割り当てなし)", lambda s, o: ["env", "CRUSTC_DRIVER2=1", "MINCLIF_NO_REGALLOC=1", CRUSTC, s, "-o", o, "-O", "--no-cache"]),
-    ("driver2 -O", lambda s, o: ["env", "CRUSTC_DRIVER2=1", CRUSTC, s, "-o", o, "-O", "--no-cache"]),
-    ("driver2 + Cranelift", lambda s, o: ["env", "CRUSTC_DRIVER2=1", "CRUSTC_BACKEND=cranelift", CRUSTC, s, "-o", o, "--no-cache"]),
-    ("driver2 + Cranelift -O", lambda s, o: ["env", "CRUSTC_DRIVER2=1", "CRUSTC_BACKEND=cranelift", CRUSTC, s, "-o", o, "-O", "--no-cache"]),
+    ("legacy (syn)", lambda s, o: [CRUSTC, s, "-o", o, "--legacy", "--no-cache"]),
+    ("legacy (syn) -O", lambda s, o: [CRUSTC, s, "-o", o, "--legacy", "-O", "--no-cache"]),
+    ("minclif -O (割り当てなし)", lambda s, o: ["env", "MINCLIF_NO_REGALLOC=1", CRUSTC, s, "-o", o, "--backend=minclif", "-O", "--no-cache"]),
+    ("minclif -O", lambda s, o: [CRUSTC, s, "-o", o, "--backend=minclif", "-O", "--no-cache"]),
+    ("crustc (Cranelift)", lambda s, o: [CRUSTC, s, "-o", o, "--no-cache"]),
+    ("crustc -O (Cranelift)", lambda s, o: [CRUSTC, s, "-o", o, "-O", "--no-cache"]),
     ("rustc (debug)", lambda s, o: ["rustc", "--edition", "2021", "-Awarnings", s, "-o", o]),
     ("rustc -O", lambda s, o: ["rustc", "--edition", "2021", "-Awarnings", "-O", s, "-o", o]),
 ]

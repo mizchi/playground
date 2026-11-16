@@ -1,4 +1,4 @@
-//! 自前の構文木からのアイテムの要約 (src/ast_summary.rs) を syn 版 (front::parse_and_summarize) と比べる:
+//! 自前の構文木からのアイテムの要約 (crates/core/src/ast_summary.rs) を syn 版 (front::parse_and_summarize) と比べる:
 //! driver と同じ前処理 (マクロ展開・モジュールを平らに・入れ子のアイテムを外へ) の後の全アイテムで、要約が同じか。
 use crustc::front::{self, Summary};
 use crustc::lexer::{self, ItemKind};
@@ -12,7 +12,7 @@ fn prep(src: &str) -> String {
 #[test]
 fn summaries_like_syn() {
     let mut files: Vec<std::path::PathBuf> = vec![];
-    for d in ["tests/probe", "examples", "src"] {
+    for d in ["tests/probe", "examples", "crates/core/src", "crates/legacy/src", "crates/minclif/src", "crates/clif/src"] {
         for e in std::fs::read_dir(d).unwrap() {
             let p = e.unwrap().path();
             if p.extension().is_some_and(|x| x == "rs") {

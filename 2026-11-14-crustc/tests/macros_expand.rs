@@ -16,7 +16,7 @@ fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 #[test]
 fn fast_expand_matches_reference() {
     let mut files = vec![];
-    for d in ["tests", "examples", "src", "out/selfhost"] {
+    for d in ["tests", "examples", "crates", "out/selfhost"] {
         rs_files(std::path::Path::new(d), &mut files);
     }
     let mut n = 0;

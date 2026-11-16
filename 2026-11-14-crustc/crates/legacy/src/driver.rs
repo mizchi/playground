@@ -8,6 +8,7 @@
 //! の 2 層。CLI はビルドの最後に、今回使ったエントリだけをファイルへ書き戻す。LSP はメモリだけを使い、
 //! 毎回の check の後に、今回使わなかったエントリを捨てる (メモリ使用量はコード量で抑えられる)。
 
+use crate::front::ProgramSyn;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

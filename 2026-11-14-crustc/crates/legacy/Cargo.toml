@@ -1,0 +1,18 @@
+[package]
+name = "crustc-legacy"
+version = "0.1.0"
+edition = "2024"
+description = "最初の crustc のドライバ (syn で読み、Cranelift でコード生成する)。check / LSP と、driver2 の比較の基準に使う"
+
+[dependencies]
+crustc-core = { path = "../core" }
+syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "visit", "clone-impls"] }
+proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }
+cranelift-codegen = { version = "0.137", default-features = false, features = ["std", "host-arch", "unwind"] }
+cranelift-frontend = "0.137"
+cranelift-module = "0.137"
+cranelift-object = "0.137"
+cranelift-native = "0.137"
+serde_json = "1"
+quote = { version = "1", default-features = false }
+zstd = { version = "0.13", default-features = false }

@@ -159,6 +159,8 @@ pub struct Report2 {
     pub linked: bool,
 }
 
+// (read / write は std と同じ名前の libc の関数。ポインタを *mut u8 で受ける: crustc でもコンパイルできるように)
+#[allow(suspicious_runtime_symbol_definitions)]
 unsafe extern "C" {
     #[link_name = "sysconf"]
     fn c_sysconf(name: i32) -> i64;

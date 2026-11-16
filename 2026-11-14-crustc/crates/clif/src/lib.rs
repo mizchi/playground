@@ -17,7 +17,7 @@ use cranelift_codegen::isa::{CallConv, OwnedTargetIsa};
 use cranelift_codegen::{Context, RelocTarget, binemit::Reloc as CReloc, settings, settings::Configurable};
 use cranelift_frontend::{FunctionBuilder as CBuilder, FunctionBuilderContext, Variable};
 
-use crate::minclif::{FloatCC, FunctionBuilder, IntCC, Op, Reloc, StackSlot, Type};
+use minclif::{FloatCC, FunctionBuilder, IntCC, Op, Reloc, StackSlot, Type};
 
 /// Cranelift の ISA (opt: -O なら speed、fast_ra: single_pass のレジスタ割り当て)
 pub fn make_isa(opt: bool, fast_ra: bool) -> OwnedTargetIsa {
@@ -152,7 +152,7 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
         let mut ids: Vec<u32> = multi.into_iter().collect();
         ids.sort_unstable();
         for id in ids {
-            let var = b.declare_var(ty(fb.value_type(crate::minclif::Value(id))));
+            let var = b.declare_var(ty(fb.value_type(minclif::Value(id))));
             gvars.insert(id, var);
         }
     }
@@ -177,7 +177,7 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
             out
         }};
     }
-    let mut name_of = |n: &str, names: &mut Vec<String>| -> u32 {
+    let name_of = |n: &str, names: &mut Vec<String>| -> u32 {
         match names.iter().position(|x| x == n) {
             Some(i) => i as u32,
             None => {
@@ -193,7 +193,7 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
             op,
             Op::CreateBlock | Op::AppendBlockParam(..) | Op::SwitchToBlock(_) | Op::DeclareVar(_) | Op::CreateStackSlot(..) | Op::ImportFunction(_)
         );
-        let mut set1 = |vals: &mut HashMap<u32, ir::Value>, v: ir::Value| {
+        let set1 = |vals: &mut HashMap<u32, ir::Value>, v: ir::Value| {
             vals.insert(res[0], v);
         };
         match op {
@@ -289,7 +289,7 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
             }
             Op::IaddImm(x, k) => {
                 let _t0 = v!(x);
-                let r = b.ins().iadd_imm(_t0, *k);
+                let r = b.ins().iadd_imm_s(_t0, *k);
                 set1(&mut vals, r);
             }
             Op::Udiv(x, y) => {
@@ -352,7 +352,7 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
             }
             Op::IcmpImm(c, x, k) => {
                 let _t0 = v!(x);
-                let r = b.ins().icmp_imm(icc(*c), _t0, *k);
+                let r = b.ins().icmp_imm_s(icc(*c), _t0, *k);
                 set1(&mut vals, r);
             }
             Op::Select(c, x, y) => {
