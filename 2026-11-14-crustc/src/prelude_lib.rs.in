@@ -9649,24 +9649,27 @@ fn __exr_str_trim<G>(s: &str) -> &str {
     __exr_sub::<()>(unsafe { s.as_ptr().add(a) }, e - a)
 }
 
+unsafe extern "C" {
+    #[link_name = "memmem"]
+    fn __exr_memmem(h: *const u8, hl: usize, n: *const u8, nl: usize) -> *const u8;
+}
+
+// (libc の memmem: 長い文字列を何度も探すプログラム (crustc 自身) で、1 byte ずつ比べるより何倍も速い)
 fn __exr_str_find<G>(s: &str, t: &str) -> Option<usize> {
     let a = s.as_bytes();
     let b = t.as_bytes();
     if b.len() > a.len() {
         return None;
     }
-    let mut i = 0;
-    while i + b.len() <= a.len() {
-        let mut j = 0;
-        while j < b.len() && a[i + j] == b[j] {
-            j += 1;
-        }
-        if j == b.len() {
-            return Some(i);
-        }
-        i += 1;
+    if b.is_empty() {
+        return Some(0);
     }
-    None
+    let p = unsafe { __exr_memmem(a.as_ptr(), a.len(), b.as_ptr(), b.len()) };
+    if p.is_null() {
+        None
+    } else {
+        Some(p as usize - a.as_ptr() as usize)
+    }
 }
 
 fn __exr_str_starts_with<G>(s: &str, t: &str) -> bool {

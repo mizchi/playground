@@ -403,8 +403,191 @@ fn transcribe(body: &[Pt], binds: &HashMap<String, Bind>, out: &mut String) -> R
     Ok(())
 }
 
-/// ソースの中の macro_rules! を展開する。なければ None
+/// 規則の並び `(matcher) => {transcriber}; ..` (macro_rules! の `{ .. }` の中身のテキスト)
+fn parse_rules(inner: &str) -> Result<Vec<Rule>, String> {
+    let ts = TokenStream::from_str(inner).map_err(|e| format!("1:1: {e}"))?;
+    let body: Vec<TokenTree> = ts.into_iter().collect();
+    let mut rules = vec![];
+    let mut j = 0;
+    while j < body.len() {
+        let TokenTree::Group(m) = &body[j] else { j += 1; continue };
+        let Some(TokenTree::Group(t)) = body.get(j + 3) else { break };
+        rules.push(Rule { pat: parse_pt(m.stream(), true), body: parse_pt(t.stream(), false) });
+        j += 4;
+        if let Some(TokenTree::Punct(p)) = body.get(j) {
+            if p.as_char() == ';' {
+                j += 1;
+            }
+        }
+    }
+    Ok(rules)
+}
+
+/// lexer::tokenize のトークン列で、開き括弧ごとの閉じ括弧の番号 (開きでなければ usize::MAX) と、トークンごとの括弧の深さ
+fn brackets(s: &[u8], toks: &[(u8, usize, usize)]) -> (Vec<usize>, Vec<u32>) {
+    let mut close = vec![usize::MAX; toks.len()];
+    let mut depth = vec![0u32; toks.len()];
+    let mut st: Vec<usize> = vec![];
+    for (k, t) in toks.iter().enumerate() {
+        depth[k] = st.len() as u32;
+        if t.0 != 1 {
+            continue;
+        }
+        match s[t.1] {
+            b'(' | b'[' | b'{' => st.push(k),
+            b')' | b']' | b'}' => {
+                if let Some(o) = st.pop() {
+                    close[o] = k;
+                }
+                depth[k] = st.len() as u32;
+            }
+            _ => {}
+        }
+    }
+    (close, depth)
+}
+
+/// ソースの中の macro_rules! を展開する。なければ None。
+/// ソース全体は速い lexer::tokenize で見て、proc_macro2 の字句解析は定義と呼び出しの括弧の中だけにする
+/// (全体を proc_macro2 で読むと、大きなソース (crustc 自身) で遅い)。結果は expand_reference と同じ
 pub fn expand(src: &str) -> Result<Option<String>, String> {
+    if !src.contains("macro_rules!") {
+        return Ok(None);
+    }
+    let mut text = src.to_string();
+    let mut macros: HashMap<String, Vec<Rule>> = HashMap::new();
+    // 1. 定義を集めて消す (関数の本体や `mod m { .. }` の中の定義も)
+    {
+        let b = text.as_bytes();
+        let toks = crate::lexer::tokenize(b);
+        let (close, _) = brackets(b, &toks);
+        let tk = |k: usize| -> &[u8] { &b[toks[k].1..toks[k].2] };
+        let sym = |k: usize, c: u8| k < toks.len() && toks[k].0 == 1 && b[toks[k].1] == c;
+        let mut cut: Vec<(usize, usize)> = vec![];
+        let mut i = 0;
+        while i + 3 < toks.len() {
+            let is_def = toks[i].0 == 0 && tk(i) == b"macro_rules" && sym(i + 1, b'!') && toks[i + 2].0 == 0 && close[i + 3] != usize::MAX;
+            if !is_def {
+                i += 1;
+                continue;
+            }
+            let ge = close[i + 3];
+            let name = String::from_utf8_lossy(tk(i + 2)).into_owned();
+            let rules = parse_rules(&text[toks[i + 3].2..toks[ge].1])?;
+            macros.insert(name, rules);
+            // `#[macro_export]` などの属性も消す
+            let mut st = toks[i].1;
+            if i >= 2 && sym(i - 1, b']') {
+                let mut o = i - 1;
+                while o > 0 && close[o - 1] != i - 1 {
+                    o -= 1;
+                }
+                if o >= 2 && sym(o - 1, b'[') && sym(o - 2, b'#') {
+                    st = toks[o - 2].1;
+                }
+            }
+            let mut en = toks[ge].2;
+            if sym(ge + 1, b';') {
+                en = toks[ge + 1].2;
+            }
+            cut.push((st, en));
+            i = ge + 1;
+        }
+        let mut bb = text.clone().into_bytes();
+        for (a, e) in cut {
+            for x in &mut bb[a..e] {
+                if *x != b'\n' {
+                    *x = b' ';
+                }
+            }
+        }
+        text = String::from_utf8(bb).map_err(|e| e.to_string())?;
+    }
+    if macros.is_empty() {
+        return Ok(Some(text));
+    }
+    // 2. 呼び出しを展開する (いちばん外側の呼び出しだけ。展開したものの中の呼び出しは次の周)
+    for _round in 0..64 {
+        let b = text.as_bytes();
+        let toks = crate::lexer::tokenize(b);
+        let (close, depth) = brackets(b, &toks);
+        let tk = |k: usize| -> &[u8] { &b[toks[k].1..toks[k].2] };
+        let sym = |k: usize, c: u8| k < toks.len() && toks[k].0 == 1 && b[toks[k].1] == c;
+        let mut reps: Vec<(usize, usize, String)> = vec![];
+        let mut i = 0;
+        while i + 2 < toks.len() {
+            let rules = if toks[i].0 == 0 && sym(i + 1, b'!') && close[i + 2] != usize::MAX {
+                macros.get(std::str::from_utf8(tk(i)).unwrap_or(""))
+            } else {
+                None
+            };
+            let Some(rules) = rules else {
+                i += 1;
+                continue;
+            };
+            let ge = close[i + 2];
+            let ts = TokenStream::from_str(&text[toks[i + 2].2..toks[ge].1]).map_err(|e| format!("1:1: {e}"))?;
+            let args: Vec<TokenTree> = ts.into_iter().collect();
+            let mut done = false;
+            for r in rules {
+                let mut binds = HashMap::new();
+                if match_pat(&r.pat, &args, &mut binds) {
+                    let mut body = String::new();
+                    transcribe(&r.body, &binds, &mut body)?;
+                    // 式の位置は `({ .. })`、トップレベルはアイテムとしてそのまま
+                    let top = depth[i] == 0;
+                    let rep = if top { body } else { format!("({{ {body} }})") };
+                    // (`crate::m!(..)` / `self::m!(..)`: 前のパスも消す)
+                    let mut a = toks[i].1;
+                    let mut k = i;
+                    while k >= 3 && toks[k - 3].0 == 0 && sym(k - 2, b':') && sym(k - 1, b':') {
+                        a = toks[k - 3].1;
+                        k -= 3;
+                    }
+                    // (トップレベルの `name!(..);` の `;` も取る)
+                    let mut e = toks[ge].2;
+                    if top && sym(ge + 1, b';') {
+                        e = toks[ge + 1].2;
+                    }
+                    reps.push((a, e, rep));
+                    done = true;
+                    break;
+                }
+            }
+            if !done {
+                let at = toks[i].1;
+                let line = b[..at].iter().filter(|&&c| c == b'\n').count() + 1;
+                let ls = b[..at].iter().rposition(|&c| c == b'\n').map(|k| k + 1).unwrap_or(0);
+                let col = text[ls..at].chars().count();
+                return Err(format!("{line}:{}: no rules of `{}!` matched this call", col + 1, String::from_utf8_lossy(tk(i))));
+            }
+            i = ge + 1;
+        }
+        if reps.is_empty() {
+            return Ok(Some(text));
+        }
+        // 後ろから置き換える (1 行に収めるので、置き換えた範囲の改行は残す)
+        reps.sort_by_key(|r| std::cmp::Reverse(r.0));
+        // (展開したものの中にマクロの名前が無ければ、もう一周しなくてよい)
+        let again = reps.iter().any(|r| macros.keys().any(|m| r.2.contains(m.as_str())));
+        for (a, e, rep) in reps {
+            let nl = text[a..e].bytes().filter(|&c| c == b'\n').count();
+            let mut r = rep;
+            for _ in 0..nl {
+                r.push('\n');
+            }
+            text.replace_range(a..e, &r);
+        }
+        if !again {
+            return Ok(Some(text));
+        }
+    }
+    Err("1:1: macro expansion is too deep (recursion limit 64)".into())
+}
+
+/// 前の版の expand (ソース全体を proc_macro2 で読む)。expand と結果が同じかを確かめるため
+#[doc(hidden)]
+pub fn expand_reference(src: &str) -> Result<Option<String>, String> {
     if !src.contains("macro_rules!") {
         return Ok(None);
     }
@@ -414,7 +597,7 @@ pub fn expand(src: &str) -> Result<Option<String>, String> {
     {
         let ts = TokenStream::from_str(&text).map_err(|e| format!("1:1: {e}"))?;
         let mut cut: Vec<(usize, usize)> = vec![];
-        fn collect(ts: TokenStream, macros: &mut HashMap<String, Vec<Rule>>, cut: &mut Vec<(usize, usize)>) {
+        fn collect(ts: TokenStream, text: &str, macros: &mut HashMap<String, Vec<Rule>>, cut: &mut Vec<(usize, usize)>) {
             let toks: Vec<TokenTree> = ts.into_iter().collect();
             let mut i = 0;
             while i < toks.len() {
@@ -422,8 +605,13 @@ pub fn expand(src: &str) -> Result<Option<String>, String> {
                     && matches!(&toks[i], TokenTree::Ident(x) if x == "macro_rules")
                     && matches!(&toks[i + 1], TokenTree::Punct(p) if p.as_char() == '!');
                 if !is_def {
+                    // (中に macro_rules の無い括弧は辿らない)
                     if let TokenTree::Group(g) = &toks[i] {
-                        collect(g.stream(), macros, cut);
+                        let r = g.span().byte_range();
+                        let inner = if r.start <= r.end && r.end <= text.len() { &text[r.start..r.end] } else { "" };
+                        if inner.is_empty() || inner.contains("macro_rules") {
+                            collect(g.stream(), text, macros, cut);
+                        }
                     }
                     i += 1;
                     continue;
@@ -467,7 +655,7 @@ pub fn expand(src: &str) -> Result<Option<String>, String> {
                 i += 4;
             }
         }
-        collect(ts, &mut macros, &mut cut);
+        collect(ts, &text, &mut macros, &mut cut);
         let mut b = text.into_bytes();
         for (a, e) in cut {
             for x in &mut b[a..e] {
@@ -485,12 +673,14 @@ pub fn expand(src: &str) -> Result<Option<String>, String> {
     for _round in 0..64 {
         let ts = TokenStream::from_str(&text).map_err(|e| format!("1:1: {e}"))?;
         let mut reps: Vec<(usize, usize, String)> = vec![];
-        find_calls(ts, &macros, 0, &mut reps)?;
+        find_calls(ts, &macros, &text, 0, &mut reps)?;
         if reps.is_empty() {
             return Ok(Some(text));
         }
         // 後ろから置き換える (1 行に収めるので、置き換えた範囲の改行は残す)
         reps.sort_by_key(|r| std::cmp::Reverse(r.0));
+        // (展開したものの中にマクロの名前が無ければ、もう一周しなくてよい)
+        let again = reps.iter().any(|r| macros.keys().any(|m| r.2.contains(m.as_str())));
         for (a, e, rep) in reps {
             let nl = text[a..e].bytes().filter(|&c| c == b'\n').count();
             let mut r = rep;
@@ -498,6 +688,9 @@ pub fn expand(src: &str) -> Result<Option<String>, String> {
                 r.push('\n');
             }
             text.replace_range(a..e, &r);
+        }
+        if !again {
+            return Ok(Some(text));
         }
     }
     Err("1:1: macro expansion is too deep (recursion limit 64)".into())
@@ -507,6 +700,7 @@ pub fn expand(src: &str) -> Result<Option<String>, String> {
 fn find_calls(
     ts: TokenStream,
     macros: &HashMap<String, Vec<Rule>>,
+    text: &str,
     depth: usize,
     out: &mut Vec<(usize, usize, String)>,
 ) -> Result<(), String> {
@@ -564,8 +758,13 @@ fn find_calls(
                 }
             }
         }
+        // (中にマクロの名前が無い括弧は辿らない: 括弧ごとに中身を写すと、深く入れ子になったソースで遅い)
         if let TokenTree::Group(g) = &toks[i] {
-            find_calls(g.stream(), macros, depth + 1, out)?;
+            let r = g.span().byte_range();
+            let inner = if r.start <= r.end && r.end <= text.len() { &text[r.start..r.end] } else { "" };
+            if inner.is_empty() || macros.keys().any(|m| inner.contains(m.as_str())) {
+                find_calls(g.stream(), macros, text, depth + 1, out)?;
+            }
         }
         i += 1;
     }

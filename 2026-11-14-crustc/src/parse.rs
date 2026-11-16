@@ -30,14 +30,18 @@ pub struct Tok {
 }
 
 fn is_ident_start(c: char) -> bool {
-    c == '_' || c.is_alphabetic()
+    if c.is_ascii() {
+        return c == '_' || c.is_ascii_alphabetic();
+    }
+    c.is_alphabetic()
 }
 
 fn is_ident_cont(c: char) -> bool {
-    c == '_' || c.is_alphanumeric()
+    if c.is_ascii() {
+        return c == '_' || c.is_ascii_alphanumeric();
+    }
+    c.is_alphanumeric()
 }
-
-const PUNCTS: &str = "+-*/%^!&|=<>@.,;:#$?~\\";
 
 pub fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
     let b = src.as_bytes();
@@ -58,13 +62,13 @@ pub fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
             i += 1;
             continue;
         }
-        if src[i..].starts_with("//") {
+        if c == b'/' && src[i..].starts_with("//") {
             while i < b.len() && b[i] != b'\n' {
                 i += 1;
             }
             continue;
         }
-        if src[i..].starts_with("/*") {
+        if c == b'/' && src[i..].starts_with("/*") {
             let mut depth = 0;
             while i < b.len() {
                 if src[i..].starts_with("/*") {
@@ -93,11 +97,16 @@ pub fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
             cpos = line_start;
             ccol = 0;
         }
-        ccol += b[cpos..i].iter().filter(|&&x| (x & 0xC0) != 0x80).count() as u32;
-        cpos = i;
+        while cpos < i {
+            if (b[cpos] & 0xC0) != 0x80 {
+                ccol += 1;
+            }
+            cpos += 1;
+        }
         let col = ccol;
         let tline = line;
-        let ch = src[i..].chars().next().unwrap();
+        // (ASCII はバイトのまま。文字にするのは ASCII でないときだけ)
+        let ch = if c < 0x80 { c as char } else { src[i..].chars().next().unwrap() };
         let kind;
         if c == b'"' || ((c == b'b' || c == b'c') && b.get(i + 1) == Some(&b'"')) {
             if c != b'"' {
@@ -200,10 +209,18 @@ pub fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
             }
             kind = TokKind::Lit;
         } else if is_ident_start(ch) {
-            if src[i..].starts_with("r#") {
+            if c == b'r' && b.get(i + 1) == Some(&b'#') {
                 i += 2;
             }
             while i < b.len() {
+                let d0 = b[i];
+                if d0 < 0x80 {
+                    if d0.is_ascii_alphanumeric() || d0 == b'_' {
+                        i += 1;
+                        continue;
+                    }
+                    break;
+                }
                 let d = src[i..].chars().next().unwrap();
                 if !is_ident_cont(d) {
                     break;
@@ -217,16 +234,21 @@ pub fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
         } else if c == b')' || c == b']' || c == b'}' {
             i += 1;
             kind = TokKind::Close;
-        } else if PUNCTS.contains(ch) {
+        } else if c < 0x80 && is_punct_byte(c) {
             i += 1;
             kind = TokKind::Punct;
         } else {
             return Err(format!("{tline}:{}: unexpected character {ch:?}", col + 1));
         }
-        let joint = kind == TokKind::Punct && i < b.len() && PUNCTS.as_bytes().contains(&b[i]);
+        let joint = kind == TokKind::Punct && i < b.len() && is_punct_byte(b[i]);
         out.push(Tok { kind: kind, text: src[start..i].to_string(), joint: joint, line: tline, col: col, lo: start as u32 });
     }
     Ok(out)
+}
+
+/// 記号の文字 (`+-*/%^!&|=<>@.,;:#$?~\`) か
+fn is_punct_byte(c: u8) -> bool {
+    matches!(c, b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'!' | b'&' | b'|' | b'=' | b'<' | b'>' | b'@' | b'.' | b',' | b';' | b':' | b'#' | b'$' | b'?' | b'~' | b'\\')
 }
 
 fn raw_follows(b: &[u8], mut i: usize) -> bool {
@@ -577,15 +599,19 @@ impl Parser {
     }
     /// 位置 k から複数文字の記号 s (`::` / `->` / `>>=` など) が続くか
     fn punct_at(&self, k: usize, s: &str) -> bool {
-        let n = s.len();
-        for (j, ch) in s.chars().enumerate() {
+        // (記号は ASCII: バイトで比べる。演算子の優先順位ごとに何度も呼ばれる)
+        let sb = s.as_bytes();
+        let n = sb.len();
+        let mut j = 0;
+        while j < n {
             let Some(t) = self.tok(k + j) else { return false };
-            if t.kind != TokKind::Punct || !t.text.starts_with(ch) {
+            if t.kind != TokKind::Punct || t.text.as_bytes().first() != Some(&sb[j]) {
                 return false;
             }
             if j + 1 < n && !t.joint {
                 return false;
             }
+            j += 1;
         }
         true
     }
@@ -1258,6 +1284,9 @@ impl Parser {
     fn assign_expr(&mut self, ss: bool) -> R<Expr> {
         let start = self.pos();
         let l = self.range_expr(ss)?;
+        if !self.tok(0).is_some_and(|t| t.kind == TokKind::Punct) {
+            return Ok(l);
+        }
         if self.is_punct("=") && !self.punct_at(0, "==") && !self.punct_at(0, "=>") {
             self.i += 1;
             let r = self.assign_expr(ss)?;
@@ -1306,6 +1335,11 @@ impl Parser {
 
     /// 今の位置の二項演算子 (無ければ None)
     fn bin_op(&self) -> Option<String> {
+        // (記号でなければ演算子でない: 式の後ろはたいてい `)` / `,` / `;` / 識別子)
+        let t0 = self.tok(0)?;
+        if t0.kind != TokKind::Punct {
+            return None;
+        }
         for op in ["||", "&&", "==", "!=", "<=", ">=", "<<", ">>"] {
             if self.punct_at(0, op) {
                 // (`<<=` / `>>=` は代入)

@@ -6,8 +6,19 @@ main は引数のファイルごとに macros::expand を呼び、展開した�
 
 macros = open("src/macros.rs").read()
 pm2 = open("tests/selfhost/mini_pm2.rs").read()
+# (expand は lexer::tokenize を使う。lexer は cache の Key / KeyHasher を使う)
+lexer = open("src/lexer.rs").read()
+key = open("src/key.rs").read()
 print("""// 自動生成: tests/selfhost/build_macros.py (crustc の src/macros.rs をそのまま含む)
 """ + pm2 + """
+mod cache {
+""" + key + """
+}
+
+mod lexer {
+""" + lexer + """
+}
+
 mod macros {
 """ + macros + """
 use crate::proc_macro2;

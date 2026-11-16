@@ -176,7 +176,10 @@ pub mod proc_macro2 {
         }
     }
 
-    const PUNCT: &str = "+-*/%^!&|=<>@.,;:#$?~'\\";
+    /// 記号の文字 (`+-*/%^!&|=<>@.,;:#$?~'\`)
+    fn is_punct(c: u8) -> bool {
+        matches!(c, b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'!' | b'&' | b'|' | b'=' | b'<' | b'>' | b'@' | b'.' | b',' | b';' | b':' | b'#' | b'$' | b'?' | b'~' | b'\'' | b'\\')
+    }
 
     struct Lexer<'a> {
         b: &'a [u8],
@@ -184,15 +187,29 @@ pub mod proc_macro2 {
         i: usize,
         line: usize,
         line_start: usize,
+        /// 桁を数え足すための (行頭, 数えた位置, そこまでの文字数)
+        cc: (usize, usize, usize),
     }
 
     impl<'a> Lexer<'a> {
         fn span(&self, lo: usize, line: usize, col: usize) -> Span {
             Span { lo: lo, hi: self.i, line: line, column: col }
         }
-        fn col(&self, at: usize) -> usize {
-            // (UTF-8 の続きのバイトを数えない: chars().count() と同じ)
-            self.b[self.line_start..at].iter().filter(|&&x| (x & 0xC0) != 0x80).count()
+        fn col(&mut self, at: usize) -> usize {
+            // (UTF-8 の続きのバイトを数えない: chars().count() と同じ。前に数えた所から数え足す)
+            if self.cc.0 != self.line_start || at < self.cc.1 {
+                self.cc = (self.line_start, self.line_start, 0);
+            }
+            let mut n = self.cc.2;
+            let mut k = self.cc.1;
+            while k < at {
+                if (self.b[k] & 0xC0) != 0x80 {
+                    n += 1;
+                }
+                k += 1;
+            }
+            self.cc = (self.line_start, at, n);
+            n
         }
         fn bump(&mut self) {
             if self.b[self.i] == b'\n' {
@@ -206,11 +223,11 @@ pub mod proc_macro2 {
                 let c = self.b[self.i];
                 if c.is_ascii_whitespace() {
                     self.bump();
-                } else if self.s[self.i..].starts_with("//") {
+                } else if c == b'/' && self.s[self.i..].starts_with("//") {
                     while self.i < self.b.len() && self.b[self.i] != b'\n' {
                         self.bump();
                     }
-                } else if self.s[self.i..].starts_with("/*") {
+                } else if c == b'/' && self.s[self.i..].starts_with("/*") {
                     let mut depth = 0;
                     loop {
                         if self.i >= self.b.len() {
@@ -247,7 +264,19 @@ pub mod proc_macro2 {
             self.s[self.i..].chars().next().unwrap()
         }
         fn ident_end(&self, from: usize) -> usize {
+            // (ASCII はバイトで見る)
             let mut j = from;
+            while j < self.b.len() {
+                let c = self.b[j];
+                if c.is_ascii_alphanumeric() || c == b'_' {
+                    j += 1;
+                } else if c < 0x80 {
+                    return j;
+                } else {
+                    break;
+                }
+            }
+            let from = j;
             for c in self.s[from..].chars() {
                 if !Lexer::is_ident_cont(c) {
                     break;
@@ -413,7 +442,7 @@ pub mod proc_macro2 {
                         self.suffix();
                         toks.push(self.lit(lo, line, col));
                     }
-                    _ if Lexer::is_ident_start(self.cur()) => {
+                    _ if c.is_ascii_alphabetic() || c == b'_' || (c >= 0x80 && Lexer::is_ident_start(self.cur())) => {
                         // (生識別子 r#match)
                         let start = if self.s[self.i..].starts_with("r#") { self.i + 2 } else { self.i };
                         let j = self.ident_end(start);
@@ -422,12 +451,12 @@ pub mod proc_macro2 {
                         toks.push(TokenTree::Ident(Ident { name: name, span: self.span(lo, line, col) }));
                     }
                     _ => {
-                        let ch = self.cur();
-                        if !PUNCT.contains(ch) {
+                        let ch = if c < 0x80 { c as char } else { self.cur() };
+                        if !(c < 0x80 && is_punct(c)) {
                             return Err(LexError { msg: format!("unexpected character {ch:?}") });
                         }
                         self.bump();
-                        let joint = self.i < self.b.len() && PUNCT.contains(self.cur()) && self.b[self.i] != b'\'';
+                        let joint = self.i < self.b.len() && is_punct(self.b[self.i]) && self.b[self.i] != b'\'';
                         let sp = if joint { Spacing::Joint } else { Spacing::Alone };
                         toks.push(TokenTree::Punct(Punct { ch: ch, spacing: sp, span: self.span(lo, line, col) }));
                     }
@@ -444,7 +473,7 @@ pub mod proc_macro2 {
             TokenStream { toks: Vec::new() }
         }
         pub fn from_str(s: &str) -> Result<TokenStream, LexError> {
-            let mut lx = Lexer { b: s.as_bytes(), s: s, i: 0, line: 1, line_start: 0 };
+            let mut lx = Lexer { b: s.as_bytes(), s: s, i: 0, line: 1, line_start: 0, cc: (0, 0, 0) };
             lx.stream(None)
         }
         pub fn is_empty(&self) -> bool {

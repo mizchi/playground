@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use crate::fxhash::FxMap;
+use crate::fxhash::{FxMap, FxSet};
 use crate::lexer::SrcItem;
 use crate::types::*;
 use crate::key::{Key, KeyHasher};
@@ -2034,6 +2034,22 @@ impl Program {
     /// キャッシュキーと到達可能性の両方にとって安全側である。
     /// (関数, struct / enum, const / static) の参照。識別子を 1 回だけ走査する
     pub fn refs(&self, src: &str, it: &SrcItem) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+        self.refs_in(src, it, None)
+    }
+
+    /// refs で引く名前 (どれかの表にある名前) の集合。多くの識別子 (変数・キーワード) は 1 回引くだけで済む
+    pub fn ref_names(&self) -> FxSet<&str> {
+        let mut s: FxSet<&str> = FxSet::default();
+        s.extend(self.by_last.keys().map(|k| k.as_str()));
+        s.extend(self.struct_index.keys().map(|k| k.as_str()));
+        s.extend(self.const_index.keys().map(|k| k.as_str()));
+        s.extend(self.const_by_last.keys().map(|k| k.as_str()));
+        s.insert("for");
+        s
+    }
+
+    /// names: ref_names (あれば、そこにない識別子は飛ばす)
+    pub fn refs_in(&self, src: &str, it: &SrcItem, names: Option<&FxSet<&str>>) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
         let mut fns = vec![];
         let mut sts = vec![];
         let mut cs = vec![];
@@ -2041,6 +2057,9 @@ impl Program {
         let has_assoc = !self.const_by_last.is_empty();
         for &(a, b) in &it.idents {
             let s = &src[a as usize..b as usize];
+            if names.is_some_and(|n| !n.contains(s)) {
+                continue;
+            }
             // `for` はイテレータなら名前を書かずに next を呼ぶ
             let s = if s == "for" { "next" } else { s };
             if let Some(ids) = self.by_last.get(s) {

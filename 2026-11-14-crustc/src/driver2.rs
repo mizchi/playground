@@ -38,11 +38,16 @@ pub fn with_prelude_in(src: &str, crates: &[String], fix: &mut Vec<(u32, u32, i3
     let flat = lexer::flatten_modules_fix(src, crates, fix).or(expanded.clone());
     let src: &str = flat.as_deref().unwrap_or(src);
     tm.lap("flatten", String::new());
+    if tm.on {
+        let n = lexer::tokenize(src.as_bytes()).len();
+        tm.lap("(tokenize)", format!("{n} tokens"));
+    }
     let hoisted = lexer::hoist_nested_items(src).or(flat.clone());
     let src: &str = hoisted.as_deref().unwrap_or(src);
+    tm.lap("hoist", String::new());
     let cv = crate::ctors::rewrite_ctor_values(src);
     let src: &str = cv.as_deref().unwrap_or(src);
-    tm.lap("hoist+ctor", String::new());
+    tm.lap("ctor", String::new());
     let mut items = lexer::split(src)?;
     let user = items.len();
     tm.lap("split", String::new());
@@ -303,6 +308,7 @@ impl Session2 {
         let mut fix = vec![];
         let (src, items, user) = with_prelude_in(src0, &crates, &mut fix)?;
         self.ctx.map.colfix = fix;
+        let mut tm = Timer { on: std::env::var_os("CRUSTC_PROF").is_some(), last: now_ns(), start: now_ns() };
         if let Some(p) = std::env::var_os("CRUSTC_DUMP_SRC") {
             let _ = std::fs::write(p, &src);
         }
@@ -310,6 +316,8 @@ impl Session2 {
         let mut sums: Vec<Summary> = vec![Summary::default(); items.len()];
         let mut n_parsed = 0;
         for pass in 0..2 {
+            // (キャッシュにないもの: (番号, キー))
+            let mut miss: Vec<(usize, Key)> = vec![];
             for (i, it) in items.iter().enumerate() {
                 let header = matches!(it.kind, ItemKind::ImplHeader | ItemKind::TraitHeader);
                 if header != (pass == 0) {
@@ -324,15 +332,79 @@ impl Session2 {
                     sums[i] = sm;
                     continue;
                 }
-                let ow = if pass == 1 { crate::ast_summary::owner_of(it, &sums) } else { None };
-                sums[i] = crate::ast_summary::parse_and_summarize(&src, it, ow.as_ref()).map_err(|e| relocate(e, it))?;
+                miss.push((i, k));
+            }
+            // (多ければ fork して分けて作る: 子 k は j % jobs == k のものを作り、直列化して返す)
+            let jobs = self.opts.jobs.min(miss.len() / 32).max(1);
+            let mut got: Vec<Option<Summary>> = vec![None; miss.len()];
+            if jobs > 1 {
+                let mut kids: Vec<(i32, i32)> = vec![];
+                for kk in 0..jobs {
+                    let mut fds = [0i32; 2];
+                    // SAFETY: fds は 2 つの int
+                    if unsafe { c_pipe(fds.as_mut_ptr()) } != 0 {
+                        continue;
+                    }
+                    let pid = unsafe { c_fork() };
+                    if pid == 0 {
+                        unsafe { c_close(fds[0]) };
+                        let mut buf = vec![];
+                        let mut j = kk;
+                        while j < miss.len() {
+                            let it = &items[miss[j].0];
+                            let ow = if pass == 1 { crate::ast_summary::owner_of(it, &sums) } else { None };
+                            // (失敗したものは送らない: 親が作り直してエラーを出す)
+                            if let Ok(sm) = crate::ast_summary::parse_and_summarize(&src, it, ow.as_ref()) {
+                                let mut e = vec![];
+                                sm.encode(&mut e);
+                                crate::cache2::put_uv(&mut buf, j as u64);
+                                crate::cache2::put_uv(&mut buf, e.len() as u64);
+                                buf.extend_from_slice(&e);
+                            }
+                            j += jobs;
+                        }
+                        write_all(fds[1], &buf);
+                        unsafe { c_close(fds[1]) };
+                        unsafe { c_exit(0) };
+                    }
+                    unsafe { c_close(fds[1]) };
+                    if pid < 0 {
+                        unsafe { c_close(fds[0]) };
+                        continue;
+                    }
+                    kids.push((pid, fds[0]));
+                }
+                for (pid, fd) in kids {
+                    let d = read_all(fd);
+                    unsafe { c_close(fd) };
+                    let mut st = 0i32;
+                    unsafe { c_waitpid(pid, &mut st, 0) };
+                    let mut r = crate::cache2::Rd { d: &d, pos: 0 };
+                    while r.pos < d.len() {
+                        let (Some(j), Some(n)) = (r.uv(), r.uv()) else { break };
+                        let Some(body) = r.take(n as usize) else { break };
+                        if let Some(slot) = got.get_mut(j as usize) {
+                            *slot = Summary::decode(body);
+                        }
+                    }
+                }
+            }
+            for (j, &(i, k)) in miss.iter().enumerate() {
+                let it = &items[i];
+                let sm = match got[j].take() {
+                    Some(sm) => sm,
+                    None => {
+                        let ow = if pass == 1 { crate::ast_summary::owner_of(it, &sums) } else { None };
+                        crate::ast_summary::parse_and_summarize(&src, it, ow.as_ref()).map_err(|e| relocate(e, it))?
+                    }
+                };
                 n_parsed += 1;
                 let mut b = vec![];
-                sums[i].encode(&mut b);
+                sm.encode(&mut b);
+                sums[i] = sm;
                 self.put(k, b);
             }
         }
-        let mut tm = Timer { on: std::env::var_os("CRUSTC_PROF").is_some(), last: now_ns(), start: now_ns() };
         tm.lap("summaries", String::new());
         let mut prog = Program::build_with(&items, &sums, self.ctx.lib.is_none())?;
         tm.lap("program", String::new());
@@ -353,8 +425,9 @@ impl Session2 {
         let mut refs = Vec::with_capacity(prog.item_of.len());
         let mut srefs = Vec::with_capacity(prog.item_of.len());
         let mut crefs = Vec::with_capacity(prog.item_of.len());
+        let names = prog.ref_names();
         for ii in &prog.item_of {
-            let (f, st, c) = ii.map(|ii| prog.refs(&src, &items[ii as usize])).unwrap_or_default();
+            let (f, st, c) = ii.map(|ii| prog.refs_in(&src, &items[ii as usize], Some(&names))).unwrap_or_default();
             refs.push(f);
             srefs.push(st);
             crefs.push(c);

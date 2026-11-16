@@ -627,7 +627,8 @@ pub fn hoist_nested_items(src: &str) -> Option<String> {
     let s = src.as_bytes();
     let toks = tokenize(s);
     let tok = |k: usize| -> &[u8] { &s[toks[k].1..toks[k].2] };
-    let is_sym = |k: usize, c: &[u8]| toks[k].0 == 1 && tok(k) == c;
+    // (記号のトークンは 1 byte)
+    let is_sym = |k: usize, c: &[u8]| toks[k].0 == 1 && s[toks[k].1] == c[0];
     // 各位置の波括弧の深さと、関数の本体の深さのスタック
     let mut depth = 0i32;
     let mut fn_bodies: Vec<(i32, usize)> = vec![];
@@ -770,15 +771,26 @@ pub fn hoist_nested_items(src: &str) -> Option<String> {
         }
     }
     if !renames.is_empty() {
+        // (名前を変えるトークン: その関数の本体の中だけを見る。外側の本体が先に来るので、内側のものが後で上書きする)
+        let mut at: Vec<(usize, usize)> = vec![]; // (トークン, renames の番号)
+        for (ri, r) in renames.iter().enumerate() {
+            let mut k = r.0 + 1;
+            while k < r.1 {
+                if toks[k].0 == 0 && &s[toks[k].1..toks[k].2] == r.2.as_slice() {
+                    at.push((k, ri));
+                }
+                k += 1;
+            }
+        }
+        // (同じトークンに複数あれば、元の順で最初のもの (renames.iter().find と同じ))
+        at.sort();
+        at.dedup_by_key(|x| x.0);
         let mut out = Vec::with_capacity(s.len() + 64);
         let mut last = 0;
-        for (k, t) in toks.iter().enumerate() {
-            if t.0 != 0 {
-                continue;
-            }
-            let Some(r) = renames.iter().find(|r| r.0 < k && k < r.1 && &s[t.1..t.2] == r.2.as_slice()) else { continue };
+        for &(k, ri) in &at {
+            let t = toks[k];
             out.extend_from_slice(&s[last..t.1]);
-            out.extend_from_slice(&r.3);
+            out.extend_from_slice(&renames[ri].3);
             last = t.2;
         }
         out.extend_from_slice(&s[last..]);
@@ -983,8 +995,10 @@ pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<
     let mut scope_tab: Vec<usize> = vec![usize::MAX; toks.len()];
     for (i, m) in mods.iter().enumerate() {
         let end = m.2.min(toks.len());
-        for st in scope_tab.iter_mut().take(end).skip(m.1 + 1) {
-            *st = i;
+        let mut k = m.1 + 1;
+        while k < end {
+            scope_tab[k] = i;
+            k += 1;
         }
     }
     let scope_of = |k: usize| -> usize { scope_tab[k] };
@@ -1304,8 +1318,10 @@ pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<
     // (飛ばすトークン (use 文・バリアント名)、定義の名前のトークン、取り込んだ名前の表 (先のものが勝つ))
     let mut skip: Vec<bool> = vec![false; toks.len()];
     for &(a, b) in &use_ranges {
-        for x in skip.iter_mut().take((b + 1).min(toks.len())).skip(a) {
-            *x = true;
+        let mut k = a;
+        while k < (b + 1).min(toks.len()) {
+            skip[k] = true;
+            k += 1;
         }
     }
     for &v in &variant_toks {

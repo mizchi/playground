@@ -1214,6 +1214,37 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
 `parse::tokenize` がトークンごとに行頭から文字を数えていた (長い行で 2 乗。rustc 版は SIMD の `chars().count()` で目立たなかった) ので、
 前のトークンから数え足すようにした。2.4 秒になり、2 段目全体は 36 秒 (rustc 版のコンパイラは 5.6 秒)。
 
+#### セルフホスト版のコンパイラの前半 (front) を速くする
+
+crustc で作ったコンパイラ (`tests/selfhost/build_compiler.py`) で自分自身 (約 3 万 3 千行) をコンパイルするときの前半の時間
+(`CRUSTC_PROF=1 ... --time` の段階ごとの時間。gdb で止めた場所を数えて、多いところから直した):
+
+| 段階 | 最初 | 後 | rustc 版のコンパイラ (後) |
+|---|---:|---:|---:|
+| macros | 9870 ms | 499 ms | 96 ms |
+| flatten (モジュールを平らに) | 2501 | 552 | 51 |
+| hoist + ctor | 613 | 467 | 61 |
+| split | 578 | 287 | 18 |
+| prelude の選択 | 1219 | 74 | 16 |
+| 要約 | 約 2400 | 1054 | 110 |
+| program + refs | 862 | 645 | 72 |
+| **front の合計** | **18159** | **3745** | **439** |
+
+- macros: 自前の proc_macro2 (mini_pm2) の字句解析がトークンごとに行頭から桁を数えていた (前から数え足す)。
+  `find_calls` / 定義集めが括弧ごとに中身を写していた (中にマクロの名前が無い括弧は辿らない)。
+  展開したものにマクロの名前が無ければもう一周しない。さらに、ソース全体は速い `lexer::tokenize` で見て、proc_macro2 で読むのは
+  定義と呼び出しの括弧の中だけにした (`tests/macros_expand.rs` が前の版 `expand_reference` と結果が同じか確かめる)
+- flatten: 表を埋める `iter_mut().take(n).skip(m)` が毎回先頭から辿っていた (添字のループに)
+- prelude の選択: ソース全体の `contains` を 40 回ほど呼ぶ。prelude の `str::find` を libc の `memmem` にした
+  (crustc で作るプログラムすべてで速くなる)
+- split: アイテムのハッシュ (キャッシュのキー) は SipHash を 2 つ使っていた。2 本の掛け算・回転の混ぜ合わせ (`src/key.rs`) にした。
+  呼び出しの区切りに依らない (8 byte ずつ溜める) ので、std と crustc の prelude で Hash の実装が write を呼ぶ区切りが違っても同じ値になる
+- 要約: アイテムごとに独立なので fork して分ける (driver2 の関数のコンパイルと同じ)。構文解析の `punct_at` (演算子の優先順位ごとに
+  何度も呼ぶ) をバイトで比べ、記号でない位置では演算子を探さない。字句解析は ASCII をバイトのまま見る
+- refs: 4 つの表を引く前に、どれかの表にある名前の集合で 1 回だけ引く
+- 残りは生成するコードの質 (小さい関数のインライン展開がない、`Iterator` のアダプタが関数呼び出しになる)。後半の codegen は 15.8 秒
+  (rustc 版 0.95 秒) で、こちらも同じ理由
+
 ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen / program / ast_consteval / solver / ctors / ast_infer / minclif / ast_codegen）と、
 依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。
 残りの front（syn の構文木を引く検索）/ infer（syn 版。自前の構文木の版 ast_infer はある）/ consteval（codegen の定数の昇格）/ closure / codegen / driver / cache は syn と cranelift の上に書かれている。
