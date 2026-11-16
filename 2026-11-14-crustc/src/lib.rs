@@ -18,6 +18,7 @@ pub mod lexer;
 pub mod link;
 pub mod lsp;
 pub mod macros;
+pub mod minclif;
 pub mod parse;
 pub mod ast_closure;
 pub mod ast_types;

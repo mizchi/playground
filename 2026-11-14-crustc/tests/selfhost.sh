@@ -15,6 +15,8 @@
 #   program: src/program.rs (全体の表: シグネチャ・レイアウト・trait 実装) + 要約までのモジュール + prelude
 #            + ast_consteval / solver / ctors → probe / examples / src の Program を作り、関数・型 (サイズ・オフセット・深いハッシュ)・
 #            impl・const とそのデータ・パスの検索・型推論の単一化の結果を出す
+#   minclif: src/minclif.rs (Cranelift の代わりの最小のバックエンド) → 関数を組み立てた ELF の .o が rustc 版と同じバイト列か。
+#            crustc 版が書いた .o を C の main とリンクして動かす
 #   enc:   src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と src/fxhash.rs (FxHasher / FxMap)
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -177,6 +179,21 @@ for opt in "" -O; do
     echo "ok   program $opt ($(wc -l < "$out/program.rustc.out") lines)"
   else
     echo "DIFF program $opt"; diff "$out/program.rustc.out" "$out/program.crustc.out" | head; fail=1
+  fi
+done
+python3 tests/selfhost/build_minclif.py > "$out/minclif_main.rs"
+rustc --edition 2024 -O -Awarnings "$out/minclif_main.rs" -o "$out/minclif_rustc" || exit 1
+"$out/minclif_rustc" "$out/minclif.rustc.o" > /dev/null
+printf '#include <stdio.h>\nlong mc_sum(long);\nint mc_fib(int);\nlong mc_misc(long,long,long,long,long,long,long,long);\nint main(){printf("%%ld %%d %%ld\\n", mc_sum(10), mc_fib(20), mc_misc(1,2,3,4,5,6,7,8));return 0;}\n' > "$out/minclif_c_main.c"
+for opt in "" -O; do
+  if ! target/release/crustc "$out/minclif_main.rs" -o "$out/minclif_crustc" $opt; then
+    echo "FAIL minclif $opt (crustc)"; fail=1; continue
+  fi
+  "$out/minclif_crustc" "$out/minclif.crustc.o" > /dev/null
+  if cmp -s "$out/minclif.rustc.o" "$out/minclif.crustc.o" && cc "$out/minclif_c_main.c" "$out/minclif.crustc.o" -o "$out/minclif_run" && [ "$("$out/minclif_run")" = "45 6765 -1005" ]; then
+    echo "ok   minclif $opt ($(wc -c < "$out/minclif.rustc.o") bytes, runs)"
+  else
+    echo "DIFF minclif $opt"; fail=1
   fi
 done
 python3 tests/selfhost/build_enc.py > "$out/enc_main.rs"

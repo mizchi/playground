@@ -1081,7 +1081,15 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
 - 回避（crustc が未対応のもの）：スコープにない trait のメソッドを候補から外さない（`Solver::deref` を `deref_var` に改名）、
   `std::mem::discriminant`（形の番号の関数にした）
 
-ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen / program / ast_consteval / solver / ctors / ast_infer）と、
+#### セルフホストの第 16 段階: Cranelift の代わりのバックエンドの土台
+
+- `src/minclif.rs`：Cranelift の FunctionBuilder に寄せた API（ブロック・ブロック引数・変数・スタックスロット・整数の命令・比較・select・
+  読み書き・呼び出し (System V、7 個目以降はスタック)・return）で x86-64 の機械語を直接出し、ELF の再配置可能オブジェクトを書く最小のバックエンド。
+  値はすべてフレームのスロットに置く単純な生成。`tests/minclif.rs` がループ・再帰・8 引数の関数を組み立てて cc でリンクして動かす。
+  crustc でコンパイルした版も同じバイト列の .o を書き、それをリンクして動く（tests/selfhost.sh の minclif）
+- まだ整数 (I8〜I64) だけ。codegen が使う浮動小数点・i128・オーバーフロー検査・間接呼び出し・データの再配置などは今後
+
+ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen / program / ast_consteval / solver / ctors / ast_infer / minclif）と、
 依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。
 残りの front（syn の構文木を引く検索）/ infer（syn 版。自前の構文木の版 ast_infer はある）/ consteval（codegen の定数の昇格）/ closure / codegen / driver / cache は syn と cranelift の上に書かれている。
 syn の代わりは src/parse.rs（自前の構文木）を土台にして front から順に移す。cranelift の代わり (自前のコード生成) はその後。
