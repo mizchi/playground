@@ -132,6 +132,14 @@ fn next_lit(pat: &[Pt], k: usize, follow: Option<&TokenTree>) -> Option<TokenTre
     follow.cloned()
 }
 
+/// 式の中でオペランドにならない (後ろに続きがある) キーワード
+fn is_expr_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "as" | "async" | "box" | "break" | "const" | "continue" | "crate" | "dyn" | "else" | "for" | "if" | "impl" | "in" | "let" | "loop" | "match" | "move" | "mut" | "ref" | "return" | "static" | "unsafe" | "while" | "where" | "yield"
+    )
+}
+
 /// 1 つの断片を取る。取った数 (と、式として包むか)
 fn take_frag(toks: &[TokenTree], kind: &str, stop: Option<&TokenTree>) -> Option<(usize, bool)> {
     match kind {
@@ -159,11 +167,28 @@ fn take_frag(toks: &[TokenTree], kind: &str, stop: Option<&TokenTree>) -> Option
         _ => {
             // expr / ty / pat / path / stmt / item: 次の区切りまで (グループの中は見ない)
             let mut n = 0;
+            // (式: オペランドの後にオペランドが続いたら式は終わっている: `$($len:expr)+` の `1 2 3`)
+            let mut after_operand = false;
             while n < toks.len() {
                 if let Some(s) = stop {
                     if same_tok(&toks[n], s) {
                         break;
                     }
+                }
+                if kind == "expr" {
+                    let operand_start = match &toks[n] {
+                        TokenTree::Literal(_) => true,
+                        TokenTree::Ident(i) => !is_expr_keyword(&i.to_string()),
+                        _ => false,
+                    };
+                    if after_operand && operand_start {
+                        break;
+                    }
+                    after_operand = match &toks[n] {
+                        TokenTree::Literal(_) | TokenTree::Group(_) => true,
+                        TokenTree::Ident(i) => !is_expr_keyword(&i.to_string()),
+                        _ => false,
+                    };
                 }
                 // 式は `;` で、型は `,` で必ず終わる
                 if let TokenTree::Punct(p) = &toks[n] {
@@ -187,7 +212,8 @@ fn take_frag(toks: &[TokenTree], kind: &str, stop: Option<&TokenTree>) -> Option
             if n == 0 {
                 return None;
             }
-            Some((n, kind == "expr"))
+            // (1 つのトークン (リテラル・名前・括弧) なら包まない: `[u8; $len]` の長さ)
+            Some((n, kind == "expr" && n > 1))
         }
     }
 }
@@ -447,6 +473,44 @@ fn brackets(s: &[u8], toks: &[(u8, usize, usize)]) -> (Vec<usize>, Vec<u32>) {
     (close, depth)
 }
 
+/// トークン i を直接包む括弧が `mod m {` / `impl .. {` / `trait .. {` の中括弧か (アイテムが並ぶ所)
+fn item_scope(b: &[u8], toks: &[(u8, usize, usize)], close: &[usize], depth: &[u32], i: usize) -> bool {
+    let tk = |k: usize| -> &[u8] { &b[toks[k].1..toks[k].2] };
+    let mut o = i;
+    loop {
+        if o == 0 {
+            return false;
+        }
+        o -= 1;
+        if close[o] != usize::MAX && close[o] > i && depth[o] + 1 == depth[i] {
+            break;
+        }
+    }
+    if tk(o) != b"{" {
+        return false;
+    }
+    let mut k = o;
+    let mut n = 0;
+    while k > 0 && n < 256 {
+        k -= 1;
+        n += 1;
+        let t = tk(k);
+        if toks[k].0 == 1 && (t == b";" || t == b"{" || t == b"}") {
+            return false;
+        }
+        if toks[k].0 == 0 && (t == b"mod" || t == b"impl" || t == b"trait") {
+            return true;
+        }
+        if toks[k].0 == 0 && (t == b"fn" || t == b"struct" || t == b"enum" || t == b"union" || t == b"let") {
+            return false;
+        }
+        if toks[k].0 == 1 && t == b"=" {
+            return false;
+        }
+    }
+    false
+}
+
 /// ソースの中の macro_rules! を展開する。なければ None。
 /// ソース全体は速い lexer::tokenize で見て、proc_macro2 の字句解析は定義と呼び出しの括弧の中だけにする
 /// (全体を proc_macro2 で読むと、大きなソース (crustc 自身) で遅い)。結果は expand_reference と同じ
@@ -534,8 +598,8 @@ pub fn expand(src: &str) -> Result<Option<String>, String> {
                 if match_pat(&r.pat, &args, &mut binds) {
                     let mut body = String::new();
                     transcribe(&r.body, &binds, &mut body)?;
-                    // 式の位置は `({ .. })`、トップレベルはアイテムとしてそのまま
-                    let top = depth[i] == 0;
+                    // 式の位置は `({ .. })`、トップレベルと `mod` / `impl` / `trait` の中はアイテムとしてそのまま
+                    let top = depth[i] == 0 || item_scope(b, &toks, &close, &depth, i);
                     let rep = if top { body } else { format!("({{ {body} }})") };
                     // (`crate::m!(..)` / `self::m!(..)`: 前のパスも消す)
                     let mut a = toks[i].1;

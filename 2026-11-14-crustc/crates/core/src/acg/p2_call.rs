@@ -93,6 +93,13 @@ impl Cx<'_> {
         }
         let recv: &Expr = recv;
         let method = method.as_str();
+        // `x.as_ref()` (AsRef: 文字列・Vec・配列・スライス): 先を期待型か、関数の境界 `T: AsRef<X>` で決める
+        if method == "as_ref" && margs.is_empty() {
+            if let Some(ne) = self.as_ref_rewrite(recv, expected) {
+                let ne = self.keep_expr(ne);
+                return self.expr(ne, expected);
+            }
+        }
         let tf: Option<&[GArg]> = (!gargs.is_empty()).then_some(&gargs[..]);
         // `x.unwrap()` / `x.expect(..)`: panic の場所 (メソッド名の位置) を先に書いておく (#[track_caller] 相当)
         if matches!(method, "unwrap" | "expect" | "unwrap_err" | "expect_err") && self.prog.panic_handler.is_none() {
@@ -419,14 +426,14 @@ impl Cx<'_> {
         }
         // (str / スライスへの trait 実装は、組み込みのメソッドより先に: `"x".hash(&mut h)`)
         if self.peek(recv).is_some_and(|t| matches!(self.strip_refs(t), Ty::Str | Ty::Slice(_) | Ty::Array(..))) {
-            if let Some(r) = self.prim_trait_method(e)? {
+            if let Some(r) = self.prim_trait_method(e, expected)? {
                 return Ok(r);
             }
         }
         if let Some(r) = self.builtin_method(e)? {
             return Ok(r);
         }
-        if let Some(r) = self.prim_trait_method(e)? {
+        if let Some(r) = self.prim_trait_method(e, expected)? {
             return Ok(r);
         }
         // (メソッドがなく、Deref の先が構造体でない (`PathBuf` → str): `recv.deref().m(..)` にして str などのメソッドを探す)
@@ -532,8 +539,77 @@ impl Cx<'_> {
         self.call_fn(id, Some((recv_v, recv_ty)), &args, tf, expected, SP)
     }
 
+    /// 組み込みの AsRef (`s.as_ref()` → `s.as_bytes()` / `&s[..]`)。受け手が as_ref を持つ構造体 (Option など) なら None
+    pub(crate) fn as_ref_rewrite(&self, recv: &Expr, expected: Option<Ty>) -> Option<Expr> {
+        let (target, is_string, seq) = self.as_ref_target(recv, expected)?;
+        let r = paren(recv.clone());
+        Some(if target == "str" {
+            if is_string { mcall(r, "as_str", vec![]) } else { Expr::Ref(false, Box::new(Expr::Index(Box::new(r), Box::new(Expr::Range(None, None, false)), Default::default()))) }
+        } else if !seq {
+            mcall(r, "as_bytes", vec![])
+        } else {
+            Expr::Ref(false, Box::new(Expr::Index(Box::new(r), Box::new(Expr::Range(None, None, false)), Default::default())))
+        })
+    }
+
+    /// 組み込みの AsRef の結果の型
+    pub(crate) fn as_ref_ty(&self, recv: &Expr, expected: Option<Ty>) -> Option<Ty> {
+        let (target, _, seq) = self.as_ref_target(recv, expected)?;
+        if target == "str" {
+            return Some(Ty::Ref(false, intern(Ty::Str)));
+        }
+        if !seq {
+            return Some(Ty::Ref(false, intern(Ty::Slice(intern(Ty::U8)))));
+        }
+        let elem = match self.strip_refs(self.peek(recv)?) {
+            Ty::Array(e, _) | Ty::Slice(e) => *e,
+            Ty::Struct(sid) => self.vec_fields(sid)?.2,
+            _ => return None,
+        };
+        Some(Ty::Ref(false, intern(Ty::Slice(intern(elem)))))
+    }
+
+    /// (先 ("str" / "[u8]" / "[T]"), 受け手が String か, 受け手が Vec・配列・スライスか)
+    fn as_ref_target(&self, recv: &Expr, expected: Option<Ty>) -> Option<(String, bool, bool)> {
+        let t = self.peek(recv)?;
+        let base = self.strip_refs(t);
+        let is_string = matches!(base, Ty::Struct(sid) if self.prog.structs[self.prog.base_of(sid) as usize].name == "String");
+        let seq = matches!(base, Ty::Array(..) | Ty::Slice(_))
+            || matches!(base, Ty::Struct(sid) if self.prog.structs[self.prog.base_of(sid) as usize].name == "Vec");
+        if !(base == Ty::Str || is_string || seq) {
+            return None;
+        }
+        // 先: "str" か "[..]"
+        let mut target: Option<String> = match expected {
+            Some(Ty::Ref(_, Ty::Str)) => Some("str".into()),
+            Some(Ty::Ref(_, Ty::Slice(e))) if **e == Ty::U8 => Some("[u8]".into()),
+            Some(Ty::Ref(_, Ty::Slice(_))) => Some("[T]".into()),
+            _ => None,
+        };
+        if target.is_none() {
+            let sig = &self.prog.sigs[self.root as usize];
+            let mut cands: Vec<(Option<Ty>, String)> = vec![];
+            for (pn, bs) in &sig.generics {
+                for b in bs {
+                    let b: String = b.chars().filter(|c| !c.is_whitespace()).collect();
+                    if let Some(x) = b.strip_prefix("AsRef<").and_then(|x| x.strip_suffix('>')) {
+                        let pt = self.env.params.iter().find(|(n, _)| n == pn).map(|p| p.1);
+                        cands.push((pt, x.to_string()));
+                    }
+                }
+            }
+            target = cands
+                .iter()
+                .find(|(pt, _)| pt.is_some_and(|p| p == t || self.strip_refs(p) == base))
+                .or(if cands.len() == 1 { cands.first() } else { None })
+                .map(|c| c.1.clone());
+        }
+        let target = target.unwrap_or_else(|| if seq { "[T]".into() } else { "str".into() });
+        Some((target, is_string, seq))
+    }
+
     /// プリミティブ型への trait 実装のメソッド (`impl Tr for u32` の `x.m()`)
-    pub(crate) fn prim_trait_method(&mut self, e: &Expr) -> R<Option<V>> {
+    pub(crate) fn prim_trait_method(&mut self, e: &Expr, expected: Option<Ty>) -> R<Option<V>> {
         let Expr::MethodCall(recv, method, gargs, margs, _) = e else { unreachable!() };
         let recv: &Expr = recv;
         let tf: Option<&[GArg]> = (!gargs.is_empty()).then_some(&gargs[..]);
@@ -542,6 +618,20 @@ impl Cx<'_> {
         let Some(mut t) = self.peek(recv).or(lit_int.then_some(Ty::I32)) else {
             return Ok(None);
         };
+        // `impl Tr for &[T]` のメソッド (`__slice::__ref_m`、self は &[T]): 受け手の型が &[T] のとき
+        if let Ty::Ref(false, Ty::Slice(_)) = t {
+            let f = format!("__slice::__ref_{method}");
+            if let Some(&id) = self.prog.index.get(&f) {
+                let a0 = match self.prog.sigs[id as usize].params.first() {
+                    Some(Ty::Ref(m, Ty::Ref(..))) => Expr::Ref(*m, Box::new(recv.clone())),
+                    _ => recv.clone(),
+                };
+                let mut args = vec![a0];
+                args.extend(margs.iter().cloned());
+                let c = Expr::Call(Box::new(path_expr(&f)), args);
+                return self.expr(&c, expected).map(Some);
+            }
+        }
         while let Ty::Ref(_, i) = t {
             t = *i;
         }
@@ -574,7 +664,7 @@ impl Cx<'_> {
                 vt = Ty::Ref(false, intern(vt));
             }
             let args: Vec<&Expr> = margs.iter().collect();
-            return self.call_fn(id, Some((v, vt)), &args, tf, None, SP).map(Some);
+            return self.call_fn(id, Some((v, vt)), &args, tf, expected, SP).map(Some);
         }
         if !(t.is_int() || matches!(t, Ty::Bool | Ty::Char)) {
             return Ok(None);
@@ -599,7 +689,7 @@ impl Cx<'_> {
             _ => (v, t),
         };
         let args: Vec<&Expr> = margs.iter().collect();
-        self.call_fn(id, Some((recv_v, recv_ty)), &args, tf, None, SP).map(Some)
+        self.call_fn(id, Some((recv_v, recv_ty)), &args, tf, expected, SP).map(Some)
     }
 
     /// 型引数を解いて、呼ぶべき関数 (インスタンス / trait 実装) とそのシグネチャを決める

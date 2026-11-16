@@ -10,7 +10,7 @@ use crustc::driver2::{Options2, Session2};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: crustc <input.rs> [-o out] [-O] [--backend=cranelift|minclif] [--linker=NAME] [--time] [-j N] [--no-cache]\n       crustc build <workspace-file> [-o out-dir] [-O] [--backend=..] [-j N] [--time] [--no-cache]\n       crustc check <input.rs>\n       crustc lsp"
+        "usage: crustc <input.rs> [-o out] [-O] [--backend=cranelift|minclif] [--linker=NAME] [--features=a,b] [--time] [-j N] [--no-cache]\n       crustc build <workspace-file> [-o out-dir] [-O] [--backend=..] [-j N] [--time] [--no-cache]\n       crustc check <input.rs>\n       crustc lsp"
     );
     std::process::exit(2)
 }
@@ -57,6 +57,7 @@ fn main() {
             "-j" => o.jobs = args.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
             s if s.starts_with("--backend=") => backend = s["--backend=".len()..].to_string(),
             s if s.starts_with("--linker=") => o.linker = Some(s["--linker=".len()..].into()),
+            s if s.starts_with("--features=") => o.features.extend(s["--features=".len()..].split(',').filter(|f| !f.is_empty()).map(|f| f.to_string())),
             s if s.starts_with('-') => usage(),
             s => input = s.into(),
         }
@@ -83,7 +84,7 @@ fn main() {
     }
     if mode == "check" {
         // (`mod x;` のファイルも読む。診断の行は結合したソースのもの: 1 ファイルならそのまま)
-        let (src, _) = crustc::srcmap::load_crate(&input, "src/main.rs").unwrap_or_else(|e| die(e));
+        let (src, _) = crustc::srcmap::load_crate(&input, "src/main.rs", &o.cfg_with(&o.features)).unwrap_or_else(|e| die(e));
         let diags = Session2::new(Options2 { no_cache: true, jobs: 1, ..o }).check(&src);
         for d in &diags {
             eprintln!("error: {}:{}:{}: {}", input.display(), d.line, d.col, d.msg);

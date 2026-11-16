@@ -185,7 +185,20 @@ fn gated_trait(h: usize) -> Option<&'static str> {
     it.idents
         .iter()
         .map(|&(a, b)| &PRELUDE[a as usize..b as usize])
-        .find(|w| matches!(*w, "Hasher" | "Hash" | "__BoolThen" | "__AsBytes" | "__PathExt" | "__AsPathStr"))
+        .find(|w| matches!(*w, "Hasher" | "Hash" | "__BoolThen" | "__AsBytes" | "__PathExt" | "__AsPathStr" | "BufRead" | "Read" | "ExactSizeIterator"))
+}
+
+/// 名前が要るときだけ付ける trait の実装 (`impl Read for &[u8]`)
+fn gated_impl(h: usize) -> Option<&'static str> {
+    let it = &items()[h].0;
+    if !matches!(it.kind, ItemKind::ImplHeader) {
+        return None;
+    }
+    let ws: Vec<&'static str> = it.idents.iter().map(|&(a, b)| &PRELUDE[a as usize..b as usize]).collect();
+    match ws.as_slice() {
+        ["impl", t, "for", ..] if matches!(*t, "Read" | "BufRead") => Some(t),
+        _ => None,
+    }
 }
 
 /// ユーザが手で impl している (`impl Ord for S` / `impl<T> Add for W<T>`) trait の名前 (最後のセグメント)
@@ -458,7 +471,7 @@ fn owner(h: usize) -> Option<&'static str> {
                     .find_map(|w| match w {
                         "Vec" | "String" | "HashMap" | "Reverse" | "BinaryHeap" | "SplitStr" | "RSplitStr" | "FlattenRef" | "MatchIndices" | "CharIndices"
                         | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" | "Rev" | "StepBy" | "Peekable"
-                        | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks"
+                        | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks" | "ChunksExact" | "Iter" | "IterMut"
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
                         | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "OnceLock" | "Mutex" | "MutexGuard" | "RangeFrom" | "TryFromIntError" | "TryFromSliceError" | "Stdin" | "StdinLock" | "StdinLines" | "Stdout" | "StdoutLock"
                         | "BufWriter" | "IoError" | "__DynError" | "Args" | "DefaultHasher" | "VarError"
@@ -515,7 +528,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             "cloned", "format", "print", "println", "eprint", "eprintln", "write", "writeln",
             "split", "split_whitespace", "lines", "trim", "starts_with", "ends_with", "contains",
             "clamp", "from_u32", "char", "join", "concat", "drain", "default", "f64", "f32", "i128", "u128", "Iterator", "into", "split_at_mut",
-            "copy_from_slice", "clone_from_slice",
+            "copy_from_slice", "clone_from_slice", "BufRead", "Read", "ExactSizeIterator",
         ]);
         // (先頭の 1 byte, 長さ) ごとの候補。prelude の名前が増えても 1 識別子あたりの比較は 0〜1 回
         let mut t: Vec<Vec<&'static str>> = vec![vec![]; 256 * 32];
@@ -755,6 +768,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     for (m, f) in [
         ("windows", "__exr_slice_windows"),
         ("chunks", "__exr_slice_chunks"),
+        ("chunks_exact", "__exr_slice_chunks_exact"),
         ("to_vec", "__exr_slice_to_vec"),
         ("copy_from_slice", "__exr_slice_copy_from"),
         ("clone_from_slice", "__exr_slice_clone_from"),
@@ -1096,6 +1110,14 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
                 }
                 // (Hash / Hasher などの宣言は、その trait の名前が要るときだけ: `fn write` などの名前では引かない)
                 if let Some(tn) = gated_trait(h as usize) {
+                    if !need.contains(tn) {
+                        continue;
+                    }
+                }
+            }
+            // (`impl Read for &[u8]` などの実装も、その trait の名前が要るときだけ)
+            if let ItemKind::ImplMember(h) = it.kind {
+                if let Some(tn) = gated_impl(h as usize) {
                     if !need.contains(tn) {
                         continue;
                     }

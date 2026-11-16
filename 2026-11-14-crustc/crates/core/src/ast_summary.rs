@@ -84,12 +84,11 @@ pub fn bound_names(bs: &[Bound]) -> R<Vec<String>> {
             Bound::Trait(true, _) => {}
             Bound::Trait(false, p) => {
                 let last = p.segs.last().ok_or("empty bound")?;
-                if last.fn_args.is_some() || (p.segs.len() == 1 && !last.args.is_empty()) {
+                // (`iter::FromIterator<char>` はモジュールの部分を飛ばす)
+                if last.fn_args.is_some() || !last.args.is_empty() {
                     v.push(last.text.clone());
-                } else if last.args.is_empty() {
-                    v.push(last.name.clone());
                 } else {
-                    return err("unsupported trait bound");
+                    v.push(last.name.clone());
                 }
             }
             Bound::Lifetime(_) => {}

@@ -11,6 +11,7 @@ pub mod ast_infer;
 pub mod ast_summary;
 pub mod ast_types;
 pub mod cache2;
+pub mod cfg;
 pub mod ctors;
 pub mod driver2;
 pub mod enc;

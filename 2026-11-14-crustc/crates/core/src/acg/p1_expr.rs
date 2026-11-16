@@ -648,7 +648,8 @@ impl Cx<'_> {
             Expr::Cast(x, ty) => {
                 let to = self.parse_ty(ty)?;
                 // `&x as &dyn Trait` は期待型つきの評価 (強制変換) と同じ
-                if let Ty::Ref(_, Ty::Dyn(_)) = to {
+                // (`&mut a as &mut [u8]` (a: 配列) も強制変換)
+                if let Ty::Ref(_, Ty::Dyn(_) | Ty::Slice(_)) = to {
                     let (v, t) = self.expr(x, Some(to))?;
                     self.same(SP, t, to)?;
                     return Ok((v, t));

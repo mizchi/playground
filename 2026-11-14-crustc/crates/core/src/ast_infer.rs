@@ -1087,7 +1087,28 @@ impl Inf<'_> {
                     _ => None,
                 };
                 match base {
-                    Some(b) if matches!(self.prog.structs[b as usize].name.as_str(), "Option" | "Result") => self.adt_view(v, b)[0],
+                    // (戻り値の型がまだ決まっていない (クロージャ): `Ok(a? + b?)` の Result のエラー型は `?` のものとする)
+                    Some(b) if self.prog.structs[b as usize].name == "Result" => {
+                        let vars = self.adt_view(v, b);
+                        let ret0 = self.ret;
+                        let r = self.find(ret0);
+                        let unknown = match self.shape[r as usize] {
+                            None => true,
+                            Some(Shape::Adt(rb, st, len)) if rb == b => {
+                                let e = self.adt_vars_of(st, len)[1];
+                                let fe = self.find(e);
+                                self.shape[fe as usize].is_none()
+                            }
+                            _ => false,
+                        };
+                        if unknown {
+                            let ret = self.ret;
+                            let rv = self.adt_view(ret, b);
+                            self.unify(rv[1], vars[1]);
+                        }
+                        vars[0]
+                    }
+                    Some(b) if self.prog.structs[b as usize].name == "Option" => self.adt_view(v, b)[0],
                     _ => self.var(),
                 }
             }

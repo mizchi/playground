@@ -1397,6 +1397,47 @@ syn の代わりは src/parse.rs（自前の構文木）を土台にして front
   同じ Session で続けてビルドすると全関数をコンパイルし直していた。ベンチの `build/edit_1fn` の assert で見つかった
 - タプル構造体のパターンのフィールドの数のエラーに場所 (パスの位置) を付けた
 
+#### 実在の小さなクレートをビルドする (`cratebench/`)
+
+crates.io の小さなクレートのソースをそのまま `cratebench/vendor/` に置き (ライセンスも同梱)、それを使う app
+(`cratebench/apps/<名前>/main.rs`) と一緒にワークスペースとしてビルドする。`python3 cratebench/run.py [名前..]` が
+rustc (lib を rlib にして `--extern`) と比べる: 出力が rustc -O と同じか、ビルド時間 (cold / noop / app の 1 か所の編集)・
+実行時間・サイズ。対象は `cratebench/crates.txt` (名前・edition・feature)。
+
+足したもの:
+- `#[cfg(..)]` / `#[cfg_attr(..)]` / `cfg!(..)` の評価 (`crates/core/src/cfg.rs`。feature はワークスペースの `features=a,b`
+  か `--features=`。x86-64 Linux の値・`debug_assertions` は -O でなければ真)。`extern crate x;` は消す
+- アイテム位置のマクロ呼び出しを `mod` / `impl` / `trait` の中でも展開する。`$x:expr` が式の終わりで止まる (`$($len:expr)+`)
+- 定数式: impl の関連 const (`i128::MAX_STR_LEN`)・`u128::MAX.ilog10()` などの整数のメソッド。`const _: () = ..;` は読み飛ばす
+- prelude: `chunks_exact` (`remainder`)・`Read` / `BufRead` (`&[u8]` の実装)・`ExactSizeIterator`・`slice::Iter::len`
+- `impl Tr for &[u8]` のメソッドと境界・組み込みの `AsRef<str>` / `AsRef<[T]>` (`as_ref()` の先は期待型か関数の境界から)・
+  `FromIterator` の境界・ブランケット impl の中のクロージャ・`&mut [u8; N] as &mut [u8]`・`&u8 >> 4`
+- クロージャの中の `?`: 戻り値の Result のエラー型を `?` のものにする
+- 同じ名前の impl が配列の長さごとに並ぶとき (`impl FromHex for [u8; 1]` .. `[u8; 4096]`) は self の型が合うものを選ぶ
+- 型別名の名前がクレートの接頭辞で小文字始まり (`fnv__FnvHashMap`) でも、モジュールとして読み飛ばさない
+- 直したバグ: `&&str` → `&str` の deref の強制変換が fat ポインタを読み込んでいた (値が壊れる)。注釈なしの let で
+  型推論の型と実際の型が違うときは強制変換を試し、だめなら実際の型を使う
+
+結果 (2026-11-16、ms。run は実行時間):
+
+| crate | compiler | cold | noop | edit | run | size | same output |
+|---|---|---:|---:|---:|---:|---:|---|
+| fnv | rustc | 185 |  | 148 | 520 | 4483 KiB |  |
+| fnv | rustc -O | 379 |  | 354 | 42 | 4413 KiB |  |
+| fnv | crustc | 79 | 2 | 19 | 140 | 28 KiB | yes |
+| fnv | crustc -O | 107 | 2 | 28 | 137 | 29 KiB | yes |
+| adler2 | rustc | 176 |  | 104 | 675 | 4424 KiB |  |
+| adler2 | rustc -O | 222 |  | 122 | 12 | 4389 KiB |  |
+| adler2 | crustc | 49 | 2 | 19 | 474 | 17 KiB | yes |
+| adler2 | crustc -O | 77 | 2 | 29 | 478 | 17 KiB | yes |
+| hex | rustc | 284 |  | 130 | 146 | 4479 KiB |  |
+| hex | rustc -O | 454 |  | 297 | 13 | 4399 KiB |  |
+| hex | crustc | 95 | 2 | 29 | 102 | 56 KiB | yes |
+| hex | crustc -O | 111 | 2 | 39 | 79 | 60 KiB | yes |
+
+ビルドは rustc より 2〜4 倍速く、編集のビルドは 5〜10 倍速い。実行は rustc -O より遅い (adler2 は 40 倍: 次に調べる)。
+itoa は未対応 (`MaybeUninit`・関連型・`<T as Tr>::C`)。
+
 ### 途中で分かったこと
 
 - **cold 時に要約用の syn AST を全部保持していたため、5000 関数で RSS が 162MB になっていた**。

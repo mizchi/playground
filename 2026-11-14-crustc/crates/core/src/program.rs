@@ -227,6 +227,8 @@ pub struct Program {
     pub const_by_last: FxMap<String, Vec<u32>>,
     /// プリミティブ型への trait 実装 (型, trait)
     pub prim_impls: HashSet<(Ty, String)>,
+    /// `&[T]` に実装された trait (`impl BufRead for &[u8]`)
+    pub ref_slice_traits: HashSet<String>,
     /// クロージャの fn id → 定義
     pub closures: FxMap<u32, ClosureDef>,
     /// (親の関数 id, 前順の番号) → クロージャの fn id
@@ -459,6 +461,7 @@ impl Program {
             const_index: FxMap::default(),
             const_by_last: FxMap::default(),
             prim_impls: HashSet::new(),
+            ref_slice_traits: HashSet::new(),
             closures: FxMap::default(),
             closure_by: FxMap::default(),
             closure_of_struct: FxMap::default(),
@@ -490,6 +493,10 @@ impl Program {
                 .map(|(n, t, e)| (n, t, e, None))
                 .chain(sm.statics.iter().map(|(n, t, e, m)| (n, t, e, Some(*m))));
             for (n, _, e, stat) in cs {
+                // (`const _: () = { assert!(..) };` はコンパイル時の検査だけ: 読み飛ばす)
+                if n == "_" || n.ends_with("::_") || n.ends_with("___") && n.len() > 3 && n[..n.len() - 1].ends_with("__") {
+                    continue;
+                }
                 if p.const_index.contains_key(n) {
                     return Err(format!(
                         "{}:1: duplicate definition of `{n}`",
@@ -709,8 +716,9 @@ impl Program {
                     }).as_ref() {
                         Some(&sid) => Some(sid),
                         // ブランケット impl (`impl<T: Display> Describe for T`): どの型のメソッドとしても探す
-                        None if ss.generics.iter().any(|g| &g.0 == n) && ss.has_self => {
-                            blanket = true;
+                        // (その中のクロージャを持ち上げた関数は self を持たない: メソッドとしては探さない)
+                        None if ss.generics.iter().any(|g| &g.0 == n) => {
+                            blanket = ss.has_self;
                             p.blanket_selfs.insert(n.clone());
                             None
                         }
@@ -819,6 +827,10 @@ impl Program {
             };
             // (右辺の型を持つ比較の impl と、配列・スライスへの impl は、`==` が関数を直接選ぶので数えない)
             if tr.starts_with("PartialEq<") || tr.starts_with("PartialOrd<") || sn == "__array" || sn == "__slice" {
+                // (`impl BufRead for &[u8]`: 境界を満たすかのために覚える)
+                if sn == "__slice" && matches!(sm.impl_self_ty, Some(TySyn::Ref(false, _))) && !tr.contains('<') {
+                    p.ref_slice_traits.insert(tr.clone());
+                }
                 continue;
             }
             if !p.traits.contains_key(tr) {
@@ -940,6 +952,36 @@ impl Program {
         if tr == CONST_GENERIC {
             return matches!(t, Ty::Array(Ty::Unit, _));
         }
+        // 組み込みの AsRef<str> / AsRef<[T]> (文字列・Vec・配列・スライスとその参照)
+        if tr.starts_with("AsRef") && tr.contains('<') {
+            let inner: String = tr["AsRef".len()..].chars().filter(|c| !c.is_whitespace()).collect();
+            let mut b = t;
+            while let Ty::Ref(_, i) = b {
+                b = *i;
+            }
+            let name = match b {
+                Ty::Struct(sid) => self.structs[self.base_of(sid) as usize].name.as_str(),
+                _ => "",
+            };
+            let text = b == Ty::Str || name == "String";
+            let seq = matches!(b, Ty::Array(..) | Ty::Slice(_)) || name == "Vec";
+            if (text && (inner == "<str>" || inner == "<[u8]>")) || (seq && inner.starts_with("<[")) {
+                return true;
+            }
+            if let Ty::Struct(sid) = b {
+                return self.impls.contains(&(self.base_of(sid), "AsRef".to_string()));
+            }
+            return false;
+        }
+        // collect の先 (組み込み): String / Vec / HashMap など
+        if tr.starts_with("FromIterator") {
+            if let Ty::Struct(sid) = t {
+                let n = self.structs[self.base_of(sid) as usize].name.as_str();
+                if matches!(n, "String" | "Vec" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "VecDeque" | "BinaryHeap" | "Option" | "Result") {
+                    return true;
+                }
+            }
+        }
         // `Iterator<Item = T>` は trait の名前で見る (関連型の制約は呼び出し側で解く)
         if let Some(i) = tr.find('<') {
             if parse_fn_bound(tr).is_none() {
@@ -1013,6 +1055,7 @@ impl Program {
                 Some((_, ps, _)) => ps.len() == f.params.len(),
                 None => matches!(tr, "Fn" | "FnMut" | "FnOnce" | "Copy" | "Clone" | "Sized" | "PartialEq" | "Eq"),
             },
+            Ty::Ref(false, Ty::Slice(_)) if self.ref_slice_traits.contains(tr) => true,
             // 組み込み型: マーカー trait と比較・既定値など (core が実装しているもの)
             Ty::Ref(true, _) => tr == "Sized",
             Ty::Box(_) => matches!(tr, "Sized" | "Drop"),
@@ -1059,6 +1102,19 @@ impl Program {
             _ => None,
         };
         if let Some(&id) = base.and_then(|g| self.index.get(&format!("{g}::{name}"))) {
+            // (`impl Tr for [u8; 1]`, `.. for [u8; 2]` ..: 同じ名前の impl が並ぶなら self の型が合うもの)
+            if let Some(ids) = self.overloads.get(&self.names[id as usize]) {
+                let fit = |i: u32| match self.sigs[i as usize].self_ty {
+                    Some(st) => {
+                        let mut sol = vec![None; self.sigs[i as usize].generics.len()];
+                        self.match_ty(st, t, &mut sol)
+                    }
+                    None => false,
+                };
+                if let Some(&i) = ids.iter().find(|&&i| fit(i)) {
+                    return Some(i);
+                }
+            }
             return Some(id);
         }
         let mut found = None;
@@ -1292,8 +1348,40 @@ impl Program {
                 self.const_int(&p.segs[0].name, depth)?
             }
             Expr::Path(None, p) if p.segs.len() == 2 => {
+                // (impl の関連 const: `i128::MAX_STR_LEN`)
+                let full = format!("{}::{}", p.segs[0].name, p.segs[1].name);
+                if self.const_index.contains_key(&full) {
+                    return self.const_int(&full, depth);
+                }
                 let t = Ty::prim(&p.segs[0].name).ok_or("unsupported path in constant")?;
                 prim_assoc_const(t, &p.segs[1].name).ok_or("unsupported constant")?
+            }
+            // 整数のメソッド (`u128::MAX.ilog10()`)。u128 の値はビット列で持つので、受け手が符号なしの型の
+            // 関連 const なら符号なしとして見る
+            Expr::MethodCall(recv, m, _, args, _) => {
+                let v = self.eval_const(recv, depth)?;
+                let unsigned = matches!(&**recv, Expr::Path(None, p) if p.segs.len() == 2 && Ty::prim(&p.segs[0].name).is_some_and(|t| !t.signed()));
+                let u = v as u128;
+                let a: Vec<i128> = args.iter().map(|x| self.eval_const(x, depth)).collect::<R<Vec<i128>>>()?;
+                match (m.as_str(), a.as_slice()) {
+                    ("ilog10", []) if unsigned || v > 0 => {
+                        let mut n = if unsigned { u } else { v as u128 };
+                        let mut k = 0;
+                        while n >= 10 {
+                            n /= 10;
+                            k += 1;
+                        }
+                        k
+                    }
+                    ("ilog2", []) if unsigned || v > 0 => (127 - (if unsigned { u } else { v as u128 }).leading_zeros()) as i128,
+                    ("count_ones", []) => u.count_ones() as i128,
+                    ("trailing_zeros", []) => u.trailing_zeros() as i128,
+                    ("pow", [e]) => v.checked_pow(*e as u32).ok_or("overflow in constant")?,
+                    ("min", [b]) => v.min(*b),
+                    ("max", [b]) => v.max(*b),
+                    ("abs", []) => v.abs(),
+                    _ => return Err(format!("unsupported method `{m}` in constant")),
+                }
             }
             _ => return Err("unsupported expression in constant".into()),
         })
@@ -2306,6 +2394,7 @@ impl Program {
                     && !matches!(s, "std" | "core" | "alloc" | "str" | "char" | "bool")
                     && Ty::prim(s).is_none()
                     && !self.struct_index.contains_key(s)
+                    && !self.aliases.contains_key(s)
                     && !p.segs[k].args);
             if !module {
                 break;

@@ -233,6 +233,21 @@ impl Cx<'_> {
                 }
             }
         }
+        // (シフトは左右の型が違ってよい: `&u8 >> 4` / `x << &n`)
+        if is_shift {
+            if let Ty::Ref(_, i) = lt {
+                if i.is_int() {
+                    l = self.b.ins().load(clif_ty(*i).unwrap(), mf(), l, 0);
+                    lt = *i;
+                }
+            }
+            if let Ty::Ref(_, i) = rt {
+                if i.is_int() {
+                    r = self.b.ins().load(clif_ty(*i).unwrap(), mf(), r, 0);
+                    rt = *i;
+                }
+            }
+        }
         let str_ref = Ty::Ref(false, intern(Ty::Str));
         if matches!(op, "==" | "!=") && lt != rt {
             // (`&String == &str` / `&&str == &str` も: 参照を外してから)

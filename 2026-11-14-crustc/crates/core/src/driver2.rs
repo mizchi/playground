@@ -126,11 +126,20 @@ pub struct Options2 {
     pub time: bool,
     /// minclif の代わりのバックエンド (Cranelift: crate::clif_backend::compile)
     pub backend: Option<acg::ClBackend>,
+    /// `#[cfg(feature = "..")]` で真になる feature (1 つのクレートのビルド。ワークスペースはクレートごとに CrateSpec が持つ)
+    pub features: Vec<String>,
 }
 
 impl Default for Options2 {
     fn default() -> Self {
-        Options2 { opt: false, jobs: cpu_count(), linker: None, no_cache: false, time: false, backend: None }
+        Options2 { opt: false, jobs: cpu_count(), linker: None, no_cache: false, time: false, backend: None, features: vec![] }
+    }
+}
+
+impl Options2 {
+    /// cfg の述語の設定 (features は与えたもの)
+    pub fn cfg_with(&self, features: &[String]) -> crate::cfg::CfgSet {
+        crate::cfg::CfgSet { features: features.to_vec(), debug_assertions: !self.opt }
     }
 }
 
@@ -319,6 +328,19 @@ impl Session2 {
 
     /// 要約はアイテムのハッシュで引く
     pub fn analyze(&mut self, src0: &str) -> R<Analysis> {
+        // (ファイルから読んだもの (load_crate) は読むときに cfg を評価してある)
+        let stripped;
+        let src0 = if self.ctx.map.inputs.is_empty() {
+            match crate::cfg::strip(src0, &self.opts.cfg_with(&self.opts.features)) {
+                Some(t) => {
+                    stripped = t;
+                    stripped.as_str()
+                }
+                None => src0,
+            }
+        } else {
+            src0
+        };
         let mut crates = self.ctx.deps.clone();
         crates.extend(self.ctx.lib.iter().cloned());
         let mut fix = vec![];
@@ -1289,9 +1311,12 @@ pub struct CrateSpec {
     pub lib: bool,
     /// 直接依存するクレートの名前
     pub deps: Vec<String>,
+    /// 有効な feature (`features=a,b`)
+    pub features: Vec<String>,
 }
 
 /// ワークスペースの説明ファイルを読む。1 行に 1 クレート: `lib <名前> <根のファイル> [依存...]` / `bin <名前> <根のファイル> [依存...]`
+/// (依存の代わりに `features=a,b` で feature を有効にする)
 /// (`#` から後ろはコメント。パスは説明ファイルのディレクトリから)
 pub fn read_workspace(path: &std::path::Path) -> R<Vec<CrateSpec>> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1314,7 +1339,14 @@ pub fn read_workspace(path: &std::path::Path) -> R<Vec<CrateSpec>> {
             root: dir.join(w[2]),
             display: w[2].to_string(),
             lib: w[0] == "lib",
-            deps: w[3..].iter().map(|s| s.to_string()).collect(),
+            deps: w[3..].iter().filter(|s| !s.starts_with("features=")).map(|s| s.to_string()).collect(),
+            features: w[3..]
+                .iter()
+                .filter_map(|s| s.strip_prefix("features="))
+                .flat_map(|s| s.split(','))
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
         });
     }
     Ok(out)
@@ -1446,7 +1478,7 @@ fn n_lines(s: &str) -> u32 {
 impl Session2 {
     /// 1 つのクレート (複数のファイル) をビルドする: 根のファイルから `mod x;` を辿る
     pub fn build_path(&mut self, root: &std::path::Path, display: &str, output: &std::path::Path) -> R<Report2> {
-        let (src, map) = crate::srcmap::load_crate(root, display)?;
+        let (src, map) = crate::srcmap::load_crate(root, display, &self.opts.cfg_with(&self.opts.features))?;
         self.ctx = CrateCtx { map: map.clone(), ..Default::default() };
         // (1 ファイルなら場所は `行:桁:` のまま (呼ぶ側がファイル名を付ける))
         let r = self.build(&src, output).map_err(|e| if map.files.len() > 1 { self.ctx.map.relocate_err(&e) } else { e });
@@ -1522,7 +1554,7 @@ impl Session2 {
         let mut loaded: Vec<Option<(String, crate::srcmap::SrcMap)>> = vec![None; crates.len()];
         for &i in &order {
             let c = &crates[i];
-            let (text, map) = crate::srcmap::load_crate(c.root.as_path(), &c.display)?;
+            let (text, map) = crate::srcmap::load_crate(c.root.as_path(), &c.display, &self.opts.cfg_with(&c.features))?;
             let text = if c.lib { format!("pub mod {} {{ {text}\n}}\n", c.name) } else { text };
             loaded[i] = Some((text, map));
         }

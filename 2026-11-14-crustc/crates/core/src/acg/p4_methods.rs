@@ -20,6 +20,7 @@ impl Cx<'_> {
             "binary_search_by_key" => Some(("__exr_slice_bsearch_by_key", false)),
             "windows" => Some(("__exr_slice_windows", false)),
             "chunks" => Some(("__exr_slice_chunks", false)),
+            "chunks_exact" => Some(("__exr_slice_chunks_exact", false)),
             "to_vec" => Some(("__exr_slice_to_vec", false)),
             "copy_from_slice" => Some(("__exr_slice_copy_from", true)),
             "clone_from_slice" => Some(("__exr_slice_clone_from", true)),

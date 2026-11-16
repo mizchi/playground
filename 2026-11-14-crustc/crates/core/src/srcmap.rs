@@ -77,20 +77,25 @@ fn line_count(s: &str) -> u32 {
 }
 
 /// クレートの根のファイル (main.rs / lib.rs) を読み、`mod x;` を展開する。display は根の表示名 (`src/main.rs` など)
-pub fn load_crate(root: &Path, display: &str) -> Result<(String, SrcMap), String> {
+pub fn load_crate(root: &Path, display: &str, cfg: &crate::cfg::CfgSet) -> Result<(String, SrcMap), String> {
     let mut map = SrcMap::default();
     let dir = root.parent().map(|d| d.to_path_buf()).unwrap_or_default();
     let disp_dir = match display.rfind('/') {
         Some(i) => display[..i].to_string(),
         None => String::new(),
     };
-    let text = load_file(root, display, dir.as_path(), &disp_dir, 1, &mut map)?;
+    let text = load_file(root, display, dir.as_path(), &disp_dir, 1, &mut map, cfg)?;
     Ok((text, map))
 }
 
 /// ファイル path を読んで展開する。mod_dir は子のモジュールのファイルを探すディレクトリ。start は結合したソースでの開始行
-fn load_file(path: &Path, display: &str, mod_dir: &Path, disp_dir: &str, start: u32, map: &mut SrcMap) -> Result<String, String> {
+fn load_file(path: &Path, display: &str, mod_dir: &Path, disp_dir: &str, start: u32, map: &mut SrcMap, cfg: &crate::cfg::CfgSet) -> Result<String, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // (cfg を先に評価する: 偽の `#[cfg(..)] mod x;` のファイルは読まない)
+    let src = match crate::cfg::strip(&src, cfg) {
+        Some(t) => t,
+        None => src,
+    };
     map.inputs.push(path.to_path_buf());
     let src = match crate::macros::expand_includes(&src, path.parent().unwrap_or(Path::new("."))) {
         Ok(Some(s)) => s,
@@ -118,7 +123,7 @@ fn load_file(path: &Path, display: &str, mod_dir: &Path, disp_dir: &str, start: 
         };
         text.push_str(&format!("pub mod {name} {{\n"));
         let at = start + line_count(&text);
-        let body = load_file(p.as_path(), &disp, sub.as_path(), &sub_disp, at, map)?;
+        let body = load_file(p.as_path(), &disp, sub.as_path(), &sub_disp, at, map, cfg)?;
         text.push_str(&body);
         text.push_str("\n}\n");
         // (`}` の行は、元のファイルの最後の行の続きにしておく)

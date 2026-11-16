@@ -1,0 +1,5 @@
+# 名前 edition features (lib は vendor/<名前>/src/lib.rs、app は apps/<名前>/main.rs)
+fnv 2015 std
+adler2 2021 std
+hex 2018 std,alloc
+itoa 2021 -

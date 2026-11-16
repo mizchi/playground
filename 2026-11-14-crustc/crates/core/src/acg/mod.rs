@@ -733,6 +733,9 @@ impl Cx<'_> {
         if got == want || got == Ty::Never {
             Ok(())
         } else {
+            if std::env::var_os("ACG_PANIC_ERR").is_some() {
+                panic!("mismatched types");
+            }
             Err(self.at(span, format!("mismatched types: expected `{}`, found `{}`", self.prog.tn(want), self.prog.tn(got))))
         }
     }
@@ -1024,7 +1027,8 @@ impl Cx<'_> {
             if t == want || t.is_fat() {
                 break;
             }
-            v = Some(self.b.ins().load(PTR, mf(), val, 0));
+            // (`&&str` の値は `&str` (fat) の置き場所のアドレスで、`&str` の表現と同じ: 読まない)
+            v = Some(if inner.is_fat() { val } else { self.b.ins().load(PTR, mf(), val, 0) });
             t = *inner;
         }
         // (`&String` を `&str` に)
@@ -1165,12 +1169,22 @@ impl Cx<'_> {
                         self.bind(name, ty, v);
                         continue;
                     };
-                    let (v, t) = self.expr(init, ann.or(hint))?;
+                    let (mut v, mut t) = self.expr(init, ann.or(hint))?;
                     if t == Ty::Never {
                         diverged = true;
                         continue;
                     }
-                    let ann = ann.filter(|&a| !has_hole(self.prog, a));
+                    let mut ann = ann.filter(|&a| !has_hole(self.prog, a));
+                    // (型推論の結果 (注釈なし) と違う: `&&str` → `&str` は deref の強制変換、それでも違えば実際の型)
+                    if let Some(a) = ann.filter(|&a| a != t) {
+                        let (v2, t2) = self.deref_coerce(v, t, a);
+                        if t2 == a {
+                            v = v2;
+                            t = t2;
+                        } else if ann_ty.is_none() {
+                            ann = None;
+                        }
+                    }
                     let ty = ann.unwrap_or(t);
                     self.same(SP, t, ty).map_err(|m| self.at(expr_start(init), m))?;
                     self.bind(name, ty, v);
@@ -1227,6 +1241,14 @@ impl Cx<'_> {
 
     /// コード生成せずに型だけ推測する (整数リテラルの型決定用)。
     pub fn peek(&self, e: &Expr) -> Option<Ty> {
+        // (組み込みの AsRef: 型推論の結果より先に)
+        if let Expr::MethodCall(r, m, _, a, _) = e {
+            if m == "as_ref" && a.is_empty() {
+                if let Some(t) = self.as_ref_ty(r, None) {
+                    return Some(t);
+                }
+            }
+        }
         if let Some(&t) = self.lets.get(&(e as *const Expr as usize)) {
             return Some(t);
         }
