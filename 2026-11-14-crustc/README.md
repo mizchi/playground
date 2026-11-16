@@ -1148,7 +1148,7 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
   (`parse_expr_at` / `ast_closure::macro_args_at`) ので、`println!` の引数の中の `unwrap()` なども元の位置になる
 - acg の `loc()` がこの位置を使う: 添字の範囲外 (Vec は `[`、配列は式の先頭)・オーバーフロー・0 除算・`unwrap` / `expect` (メソッド名)・
   `panic!` / `assert!` / `dbg!` (マクロの先頭) の場所が rustc と同じになった。`tests/panic_loc.rs` が rustc と比べる
-- `tests/driver2.rs` は stderr (panic のメッセージ) も比べるようにした (139 中 138 が一致。残りは前からの未対応のメソッド)
+- `tests/driver2.rs` は stderr (panic のメッセージ) も比べるようにした (139 すべて一致)。`matches!` の引数は型推論とコード生成が同じ構文木 (`ast_closure::matches_parts`) を使う
 - `dbg!` の桁は syn 版が引数の位置を出していた (rustc はマクロの位置)。syn 版も直した
 - 移植の初めに作った ast_codegen.rs (v1) は acg が置き換えたので消した (tests/ast_codegen.rs は driver2 で tests/acg を試す)
 
