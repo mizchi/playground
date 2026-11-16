@@ -613,7 +613,27 @@ fn inline_bodies(a: &Analysis) -> acg::Inline {
     for id in 0..p.names.len() {
         let Some(ii) = p.item_of[id] else { continue };
         // (依存するクレートの関数は展開しない: 本体はインターフェースのハッシュに入らないので、変わっても気付けない)
-        if a.ext_items.get(ii as usize).copied().unwrap_or(false) || !p.sigs[id].has_body || p.sigs[id].is_extern || p.closures.contains_key(&(id as u32)) {
+        if a.ext_items.get(ii as usize).copied().unwrap_or(false) || !p.sigs[id].has_body || p.sigs[id].is_extern {
+            continue;
+        }
+        // (クロージャの本体: 大きさは本体の構文木で見る (アイテムは囲む関数のもの))
+        if p.closures.contains_key(&(id as u32)) {
+            if std::env::var_os("CRUSTC_NO_INLINE_CLOSURE").is_some() {
+                continue;
+            }
+            if let Ok(f) = fn_ast(a, id as u32) {
+                let ok = acg::inline_candidate(&f) && format!("{:?}", f.block).len() <= 2400;
+                if std::env::var_os("CRUSTC_INLINE_LOG").is_some() {
+                    eprintln!("inline {} closure {}", if ok { "yes" } else { "no " }, p.names[id]);
+                }
+                if ok {
+                    inl.bodies.insert(id as u32, f);
+                    let it = &a.items[ii as usize];
+                    if ii < p.prelude_from {
+                        inl.user_lines.insert(id as u32, it.line as u32 - 1);
+                    }
+                }
+            }
             continue;
         }
         if special.contains(&p.names[id].as_str()) {

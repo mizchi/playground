@@ -61,12 +61,33 @@ impl<'p> Cx<'p> {
         if body_id == self.root {
             return Ok(None);
         }
+        // クロージャの本体: キャプチャ (名前, 変数の型, by-ref か, オフセット) は `__env` のフィールド (compile と同じ)
+        let mut caps: Vec<(String, Ty, bool, u32)> = vec![];
+        let (root, base_k) = match self.prog.closures.get(&body_id) {
+            Some(cd) => {
+                if let Some(Ty::Ptr(_, Ty::Struct(sid))) = sig.params.first() {
+                    let sd = &self.prog.structs[*sid as usize];
+                    for (i, (n, (_, ft, off))) in cd.captures.iter().zip(&sd.fields).enumerate() {
+                        match (cd.moved.get(i).copied().unwrap_or(false), ft) {
+                            (false, Ty::Ptr(_, t)) => caps.push((n.clone(), **t, true, *off)),
+                            _ => caps.push((n.clone(), *ft, false, *off)),
+                        }
+                    }
+                }
+                (cd.parent, cd.k + 1)
+            }
+            None => (body_id, 0),
+        };
+        if root == self.root && base_k > 0 {
+            return Ok(None);
+        }
+        let extra: Vec<(String, Ty)> = caps.iter().map(|c| (c.0.clone(), c.1)).collect();
         let cached = self.inl.inferred.lock().unwrap().get(&target).cloned();
         let (lets, margs, texts) = match cached {
             Some(x) => x,
             None => {
                 let ((lets, _, _), margs, texts) =
-                    crate::ast_infer::infer_ctx_margs(self.prog, f.sig.recv.is_some(), &f.sig.params, &f.block, sig, &env, &[], Some(sig.ret), Some((body_id, 0)));
+                    crate::ast_infer::infer_ctx_margs(self.prog, f.sig.recv.is_some(), &f.sig.params, &f.block, sig, &env, &extra, Some(sig.ret), Some((root, base_k)));
                 self.inl.inferred.lock().unwrap().insert(target, (lets.clone(), margs.clone(), texts.clone()));
                 (lets, margs, texts)
             }
@@ -98,8 +119,8 @@ impl<'p> Cx<'p> {
         let s_lets = std::mem::replace(&mut self.lets, lets);
         let s_taken = std::mem::replace(&mut self.addr_taken, addr_taken(&f.block));
         let s_env = std::mem::replace(&mut self.env, env);
-        let s_caps = std::mem::take(&mut self.caps);
-        let s_root = std::mem::replace(&mut self.root, body_id);
+        let s_caps = std::mem::replace(&mut self.caps, caps);
+        let s_root = std::mem::replace(&mut self.root, root);
         let s_cix = std::mem::take(&mut self.closure_ix);
         let s_hint = self.closure_hint.take();
         let s_seg = self.seg_self.take();
@@ -182,6 +203,19 @@ impl<'p> Cx<'p> {
                 self.own_local(Loc::Ptr(v), ty);
             } else {
                 self.bind(name, ty, Some(v));
+            }
+        }
+        // (クロージャ: キャプチャを `__env` のフィールドとして見せる)
+        if !self.caps.is_empty() {
+            let env = match self.lookup("__env") {
+                Some((l, _)) => self.loc_value(l),
+                None => None,
+            };
+            let env = env.ok_or("closure without environment (inline)")?;
+            for (n, t, by_ref, off) in self.caps.clone() {
+                let a = if by_ref { self.b.ins().load(PTR, mf(), env, off as i32) } else { self.addr_plus(env, off as i32) };
+                let loc = if clif_ty(t).is_none() && !t.is_agg() { Loc::Zst } else { Loc::Ptr(a) };
+                self.scopes.last_mut().unwrap().push((n, loc, t));
             }
         }
         let (v, t) = self.block(&f.block, Some(self.ret))?;
