@@ -34,6 +34,7 @@ fn is_builtin_scalar_method(n: &str) -> bool {
             | "overflowing_mul"
             | "rem_euclid"
             | "div_euclid"
+            | "next_multiple_of"
             | "next_power_of_two"
             | "isqrt"
             | "try_into"
@@ -1656,7 +1657,9 @@ impl Inf<'_> {
             }
             Expr::Macro(m) if is_fmt_macro(&m.mac) => {
                 self.fmt_width_vars(&m.mac);
-                self.var()
+                // (`print!` 系は ())
+                let unit = m.mac.path.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(), "print" | "println" | "eprint" | "eprintln"));
+                if unit { self.known(Ty::Unit) } else { self.var() }
             }
             // `vec![a, b]` / `vec![x; n]`: Vec<要素の型>
             Expr::Macro(m)
@@ -2497,7 +2500,44 @@ impl Inf<'_> {
                 if callee.is_none() && n == "clone" && mc.args.is_empty() && sid.is_some() {
                     return rv;
                 }
-                let args: Vec<u32> = mc.args.iter().map(|a| self.expr(a)).collect();
+                let mut args: Vec<u32> = mc.args.iter().map(|a| self.expr(a)).collect();
+                // `it.zip(&v)` / `it.chain([x])`: Vec / スライス / 配列の引数は codegen が `.iter()` / `.into_iter()` にする。
+                // 型もそのイテレータのものにする (しないと要素の型が決まらず、`x == "s"` で &String を &str と取り違える)
+                if matches!(n.as_str(), "zip" | "chain") && args.len() == 1 {
+                    let mut base = self.resolve(args[0]);
+                    let is_ref = matches!(base, Some(Ty::Ref(..)));
+                    while let Some(Ty::Ref(_, i)) = base {
+                        if matches!(i, Ty::Slice(_)) {
+                            break;
+                        }
+                        base = Some(*i);
+                    }
+                    let vec_id = self.prog.struct_index.get("Vec").copied();
+                    let seq = match base {
+                        Some(Ty::Ref(_, Ty::Slice(_))) | Some(Ty::Array(..)) => true,
+                        Some(Ty::Struct(sid)) => Some(self.prog.base_of(sid)) == vec_id,
+                        _ => false,
+                    };
+                    let syntactic_array = matches!(&mc.args[0], Expr::Array(_) | Expr::Repeat(_));
+                    if seq || syntactic_array {
+                        let a = &mc.args[0];
+                        let e: Expr = match (is_ref, a) {
+                            (true, Expr::Reference(r)) => {
+                                let inner = &r.expr;
+                                syn::parse_quote!((#inner).iter())
+                            }
+                            (true, _) => syn::parse_quote!((#a).iter()),
+                            _ => syn::parse_quote!((#a).into_iter()),
+                        };
+                        self.no_record += 1;
+                        let ki = self.keep.len();
+                        self.keep.push(vec![e]);
+                        let x: *const Expr = &self.keep[ki][0];
+                        let v = self.expr(unsafe { &*x });
+                        self.no_record -= 1;
+                        args[0] = v;
+                    }
+                }
                 // `&dyn Trait` のメソッド: trait の宣言のシグネチャ
                 let mut dt = self.resolve(rv);
                 while let Some(Ty::Ref(_, i)) = dt {
@@ -2766,7 +2806,7 @@ impl Inf<'_> {
                 }
                 rv
             }
-            "rem_euclid" | "div_euclid" => {
+            "rem_euclid" | "div_euclid" | "next_multiple_of" => {
                 for a in args {
                     self.unify(a, rv);
                 }

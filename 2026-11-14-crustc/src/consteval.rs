@@ -241,6 +241,8 @@ fn write(prog: &Program, e: &Expr, ty: Ty, v: &mut DataVal, off: u32, depth: u32
                     set_tag(v, vi_of(&p.path)?);
                     Ok(())
                 }
+                // unit struct (`static K: Key = Key;`): 中身はない
+                Expr::Path(_) if !sd.is_enum && sd.fields.is_empty() => Ok(()),
                 _ => err(e.span(), "unsupported struct / enum constant"),
             }
         }

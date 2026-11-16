@@ -2978,6 +2978,9 @@ impl<T: Copy + Ord> Iterator for RangeFrom<T> {
 }
 
 impl<T: Copy + Ord> Range<T> {
+    pub fn contains(&self, x: &T) -> bool {
+        self.start <= *x && *x < self.end
+    }
     pub fn next_back(&mut self) -> Option<T> {
         if self.start < self.end {
             self.end = self.end - 1;
@@ -2995,6 +2998,9 @@ pub struct RangeInclusive<T> {
 }
 
 impl<T: Copy + Ord> RangeInclusive<T> {
+    pub fn contains(&self, x: &T) -> bool {
+        self.start <= *x && *x <= self.end
+    }
     pub fn next_back(&mut self) -> Option<T> {
         if self.done || self.start > self.end {
             return None;

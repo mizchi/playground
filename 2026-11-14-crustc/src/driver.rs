@@ -828,7 +828,9 @@ fn with_prelude<'a>(
 ) -> Result<(std::borrow::Cow<'a, str>, Vec<SrcItem>), String> {
     let orig = src;
     // `macro_rules!` を展開し (展開は 1 行に収めて後ろの行番号を変えない)、`mod m { .. }` は平らにする
-    let expanded = crate::macros::expand(src)?;
+    let tl = lexer::expand_thread_local(src);
+    let src: &str = tl.as_deref().unwrap_or(src);
+    let expanded = crate::macros::expand(src)?.or(tl.clone());
     let src: &str = expanded.as_deref().unwrap_or(src);
     let flat = lexer::flatten_modules(src).or(expanded.clone());
     let src: &str = flat.as_deref().unwrap_or(src);

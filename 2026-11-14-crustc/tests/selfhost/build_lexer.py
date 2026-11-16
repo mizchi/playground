@@ -4,9 +4,9 @@ main は引数のファイルを split / hoist_nested_items / flatten_modules �
 import re
 
 lexer = open("src/lexer.rs").read()
-cache = open("src/cache.rs").read()
+cache = open("src/key.rs").read()
 a = cache.index("pub type Key = u128;")
-b = cache.index("/// キャッシュファイル")
+b = len(cache)
 hasher = cache[a:b]
 print("""// 自動生成: tests/selfhost/build_lexer.py (crustc の src/lexer.rs をそのまま含む)
 mod cache {

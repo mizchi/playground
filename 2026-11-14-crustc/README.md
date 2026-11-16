@@ -134,6 +134,7 @@ tests/selfhost.sh
 - `src/ast_closure.rs`（自前の構文木の上のクロージャ解析。closure.rs の移植）：全ファイルの関数のクロージャの自由変数と「値でキャプチャするか」が rustc 版と一致する。
 - `src/types.rs` + `src/ast_types.rs`（front.rs から分けた型の表現・intern と、自前の構文木の型 → TySyn）：全ファイルの型の変換結果と intern が rustc 版と一致する。
 - `src/ast_summary.rs`（アイテムの要約。front.rs の summarize / parse_sig / クロージャの持ち上げの移植）：全ファイルの全アイテムの要約が rustc 版と一致する。
+- `src/program.rs`（全体の表。front.rs から syn に依存しない部分を分けたもの：関数シグネチャ・struct / enum の定義とレイアウト・インスタンス化・trait 実装・const の評価）：要約までのモジュールと prelude を合わせた約 1 万 1 千行のプログラムで、probe / examples の 135 ファイルの Program を作り、関数・型（サイズ・フィールドのオフセット・128 bit の深いハッシュ）・impl・const の 3 万行の出力が rustc 版と一致する（-O でも）。
 - `src/enc.rs`（キャッシュの直列化。`enc_struct!` マクロと trait の静的呼び出し `T::dec(r)`）と `src/fxhash.rs`（FxHasher / `FxMap`）：構造体・Vec・Option・タプルを符号化して戻し、バイト列とハッシュが rustc 版と一致する（-O でも）。
 
 環境変数：`CRUSTC_DUMP_PRELUDE=1` は付けた prelude を stderr に出す。`CRUSTC_NO_STRIP=1` は出力のシンボルを残す（callgrind などで関数名を見るため）。
@@ -1019,9 +1020,26 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
 - 修正：`let nn = ..; if let Some(nn) = nn { v.push(nn) }`（match 対象と同じ名前の束縛でムーブ）で外側の変数をムーブ済みにせず、二重に解放していた
 - `if` / ブロックの式の型を `peek` で引く（`if c { "a" } else { "b" }.to_string()`）
 
-ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen）と、
+#### セルフホストの第 11 段階: Program の表を syn から分ける
+
+- `src/program.rs`：front.rs の `Program` / `FnSig` / `StructDef` / `AdtTable` / `Insts` と、`build`（要約 → 表）・レイアウト・
+  インスタンス化・`implements`・`resolve_with` などを移した。syn の構文木を引く検索（`fn_by_path` / `variant_by_path` / `eval_int` など）は
+  front.rs の別の `impl Program` に残る。const の評価（配列の長さ）は自前の構文解析（`parse::parse_expr`）で行う
+- `src/key.rs`：キャッシュキーの `KeyHasher` を cache.rs から分けた（cache.rs は codegen に依存するため）
+- 足したもの：`thread_local!`（遅延初期化する `static mut` と `with` を持つ unit struct に展開）、unit struct の static、
+  モジュールの中の static のパス（`m::S`）、`use crate::m::*` で取り込んだ名前の改名、`&T` → `*const T`、
+  `&mut v[i]`（`Vec<Box<T>>`）→ `&mut T`、MutexGuard など Deref の型の `*g` / `g[i]`、`Range::contains`、`next_multiple_of`、
+  u128 / i128 の掛け算のオーバーフロー検査（Cranelift に `umul_overflow.i128` がないので 64 bit ずつ組み立てる）、
+  タプル・Option の `Hash::hash`（std と同じ順に書き込むので DefaultHasher の値も一致する）、`it.chain([(&a, &b)])`、
+  `&&u32 == &&u32`、`print!` 系の型 ()
+- 修正：
+  - HashMap のキーの Vec を（要素でなく）バッファのアドレスでハッシュしていた（`HashMap<(u32, Vec<Ty>), u32>` が引けない）
+  - `*b`（b: Box）から中身をムーブしても b を drop して中身を二重に解放していた
+  - `it.zip(slice)` の要素の型を推論せず、`sn == "__array"` で `&String` を `&str` と取り違えていた（推論でも `.iter()` にする）
+
+ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen / program）と、
 依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。
-残りの front / infer / consteval / closure / codegen / driver / cache は syn と cranelift の上に書かれている。
+残りの front（syn の構文木を引く検索）/ infer / consteval / closure / codegen / driver / cache は syn と cranelift の上に書かれている。
 syn の代わりは src/parse.rs（自前の構文木）を土台にして front から順に移す。cranelift の代わり (自前のコード生成) はその後。
 
 ### 途中で分かったこと

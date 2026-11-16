@@ -12,9 +12,9 @@ items = max(glob.glob("target/release/build/crustc-*/out/prelude_items.rs"), key
 prelude = (open("src/prelude.rs").read()
     .replace('include_str!("prelude_lib.rs.in")', 'include_str!("../../src/prelude_lib.rs.in")')
     .replace('include!(concat!(env!("OUT_DIR"), "/prelude_items.rs"));', open(items).read()))
-cache = open("src/cache.rs").read()
+cache = open("src/key.rs").read()
 a = cache.index("pub type Key = u128;")
-b = cache.index("/// キャッシュファイル")
+b = len(cache)
 hasher = cache[a:b]
 print("""// 自動生成: tests/selfhost/build_prelude.py (crustc の src/prelude.rs をそのまま含む)
 mod cache {

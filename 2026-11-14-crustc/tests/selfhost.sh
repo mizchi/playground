@@ -12,6 +12,8 @@
 #   ast_closure: src/parse.rs + src/ast_closure.rs (自前の構文木の上のクロージャ解析) → 全関数のクロージャの自由変数
 #   ast_types: src/types.rs + src/parse.rs + src/ast_types.rs (型の表現・intern と、型の構文 → TySyn。front.rs から分けたもの)
 #   ast_summary: src/ast_summary.rs (front.rs の summarize の移植) + lexer / types / parse / ast_types / ast_closure → 全アイテムの要約
+#   program: src/program.rs (全体の表: シグネチャ・レイアウト・trait 実装) + 要約までのモジュール + prelude
+#            → probe / examples の Program を作り、関数・型 (サイズ・オフセット・深いハッシュ)・impl・const を出す
 #   enc:   src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と src/fxhash.rs (FxHasher / FxMap)
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -159,6 +161,21 @@ for opt in "" -O; do
     echo "ok   ast_summary $opt ($(wc -l < "$out/ast_summary.rustc.out") lines)"
   else
     echo "DIFF ast_summary $opt"; diff "$out/ast_summary.rustc.out" "$out/ast_summary.crustc.out" | head; fail=1
+  fi
+done
+python3 tests/selfhost/build_program.py > "$out/program_main.rs"
+rustc --edition 2024 -O -Awarnings "$out/program_main.rs" -o "$out/program_rustc" || exit 1
+pin=(examples/*.rs tests/probe/*.rs)
+"$out/program_rustc" "${pin[@]}" > "$out/program.rustc.out"
+for opt in "" -O; do
+  if ! target/release/crustc "$out/program_main.rs" -o "$out/program_crustc" $opt; then
+    echo "FAIL program $opt (crustc)"; fail=1; continue
+  fi
+  "$out/program_crustc" "${pin[@]}" > "$out/program.crustc.out"
+  if cmp -s "$out/program.rustc.out" "$out/program.crustc.out"; then
+    echo "ok   program $opt ($(wc -l < "$out/program.rustc.out") lines)"
+  else
+    echo "DIFF program $opt"; diff "$out/program.rustc.out" "$out/program.crustc.out" | head; fail=1
   fi
 done
 python3 tests/selfhost/build_enc.py > "$out/enc_main.rs"

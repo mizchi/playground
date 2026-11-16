@@ -9,7 +9,6 @@
 //! - 読み込み時はファイル全体を 1 回 read し、index だけ作る。値のデコードはヒット時のみ。
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use std::sync::Mutex;
@@ -19,27 +18,7 @@ use crate::front::{Insts, Program};
 
 const MAGIC: &[u8; 8] = b"CRCC0004";
 
-pub type Key = u128;
-
-pub struct KeyHasher(std::hash::DefaultHasher, std::hash::DefaultHasher);
-
-impl KeyHasher {
-    pub fn new() -> Self {
-        // DefaultHasher::new() は固定鍵の SipHash で、同じ std なら決定的。
-        // std のバージョン差はコンパイラ ID (実行ファイル自体) をキーに含めることで吸収する。
-        let a = std::hash::DefaultHasher::new();
-        let mut b = std::hash::DefaultHasher::new();
-        0xa5a5_u16.hash(&mut b);
-        KeyHasher(a, b)
-    }
-    pub fn add<T: Hash + ?Sized>(&mut self, v: &T) {
-        v.hash(&mut self.0);
-        v.hash(&mut self.1);
-    }
-    pub fn finish(&self) -> Key {
-        ((self.0.finish() as u128) << 64) | self.1.finish() as u128
-    }
-}
+pub use crate::key::{Key, KeyHasher};
 
 /// キャッシュファイル: MAGIC の後ろは zstd で圧縮した本体。本体は
 /// [前回のオブジェクトのハッシュ (16 byte), エントリの数 (可変長), (キーの下位 64 bit, 長さ (可変長), 中身) *]。

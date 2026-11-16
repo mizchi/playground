@@ -6,9 +6,9 @@ main は引数のファイルごとに、モジュールを平らにし入れ子
 def body(p):
     return open(p).read()
 
-cache = body("src/cache.rs")
+cache = open("src/key.rs").read()
 a = cache.index("pub type Key = u128;")
-b = cache.index("/// キャッシュファイル")
+b = len(cache)
 hasher = cache[a:b]
 parts = [("types", "src/types.rs"), ("parse", "src/parse.rs"), ("ast_types", "src/ast_types.rs"),
          ("ast_closure", "src/ast_closure.rs"), ("ast_summary", "src/ast_summary.rs"), ("lexer", "src/lexer.rs")]

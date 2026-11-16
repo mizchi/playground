@@ -10,6 +10,7 @@ pub mod elfz;
 pub mod enc;
 pub mod front;
 pub mod fxhash;
+pub mod key;
 pub mod infer;
 pub mod lexer;
 pub mod link;
@@ -20,6 +21,7 @@ pub mod ast_closure;
 pub mod ast_types;
 pub mod ast_summary;
 pub mod prelude;
+pub mod program;
 #[doc(hidden)]
 pub mod testgen;
 pub mod types;

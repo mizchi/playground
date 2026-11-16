@@ -762,6 +762,128 @@ pub fn hoist_nested_items(src: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// `thread_local! { static N: T = init; }` を、遅延初期化する `static mut` と `N.with(|v| ..)` を持つ unit struct にする
+/// (crustc の生成するプログラムはスレッドを作らないので、スレッドごとの値は 1 つでよい)。
+/// 展開は 1 行に収め、後ろの行番号は変えない
+pub fn expand_thread_local(src: &str) -> Option<String> {
+    if !src.contains("thread_local") {
+        return None;
+    }
+    let s = src.as_bytes();
+    let toks = tokenize(s);
+    let is_sym = |k: usize, c: u8| k < toks.len() && toks[k].0 == 1 && s[toks[k].1] == c && toks[k].2 == toks[k].1 + 1;
+    let text = |a: usize, b: usize| -> String { String::from_utf8_lossy(&s[toks[a].1..toks[b - 1].2]).into_owned() };
+    let mut out = String::new();
+    let mut last = 0;
+    let mut k = 0;
+    while k < toks.len() {
+        let is_tl = toks[k].0 == 0 && &s[toks[k].1..toks[k].2] == b"thread_local".as_slice() && is_sym(k + 1, b'!');
+        if !is_tl || !(is_sym(k + 2, b'{') || is_sym(k + 2, b'(')) {
+            k += 1;
+            continue;
+        }
+        // 閉じ括弧
+        let mut d = 0i32;
+        let mut e = k + 2;
+        while e < toks.len() {
+            if is_sym(e, b'{') || is_sym(e, b'(') || is_sym(e, b'[') {
+                d += 1;
+            } else if is_sym(e, b'}') || is_sym(e, b')') || is_sym(e, b']') {
+                d -= 1;
+                if d == 0 {
+                    break;
+                }
+            }
+            e += 1;
+        }
+        if e >= toks.len() {
+            return None;
+        }
+        let mut end = toks[e].2;
+        if is_sym(e + 1, b';') {
+            end = toks[e + 1].2;
+        }
+        let mut expanded = String::new();
+        let mut j = k + 3;
+        while j < e {
+            // [属性] [pub(..)] static NAME: TYPE = [const] INIT;
+            while is_sym(j, b'#') {
+                let mut d = 0i32;
+                j += 1;
+                while j < e {
+                    if is_sym(j, b'[') {
+                        d += 1;
+                    } else if is_sym(j, b']') {
+                        d -= 1;
+                        if d == 0 {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+            }
+            let mut vis = String::new();
+            let v0 = j;
+            while j < e && !(toks[j].0 == 0 && &s[toks[j].1..toks[j].2] == b"static".as_slice()) {
+                j += 1;
+            }
+            if j > v0 {
+                vis = text(v0, j);
+            }
+            if j + 2 >= e || !is_sym(j + 2, b':') {
+                return None;
+            }
+            let name = text(j + 1, j + 2);
+            let t0 = j + 3;
+            let mut t1 = t0;
+            while t1 < e && !is_sym(t1, b'=') {
+                t1 += 1;
+            }
+            let ty = text(t0, t1);
+            let mut i0 = t1 + 1;
+            if i0 < e && toks[i0].0 == 0 && &s[toks[i0].1..toks[i0].2] == b"const".as_slice() {
+                i0 += 1;
+            }
+            let mut i1 = i0;
+            let mut d = 0i32;
+            while i1 < e {
+                if is_sym(i1, b'{') || is_sym(i1, b'(') || is_sym(i1, b'[') {
+                    d += 1;
+                } else if is_sym(i1, b'}') || is_sym(i1, b')') || is_sym(i1, b']') {
+                    d -= 1;
+                } else if d == 0 && is_sym(i1, b';') {
+                    break;
+                }
+                i1 += 1;
+            }
+            if i1 == i0 {
+                return None;
+            }
+            let init = text(i0, i1);
+            expanded.push_str(&format!(
+                "#[allow(non_camel_case_types)] {vis} struct {name}__Key; static mut {name}__slot: Option<{ty}> = None; \
+                 {vis} static {name}: {name}__Key = {name}__Key; impl {name}__Key {{ #[allow(static_mut_refs)] {vis} fn with<R, F: FnOnce(&{ty}) -> R>(&'static self, f: F) -> R \
+                 {{ unsafe {{ if {name}__slot.is_none() {{ {name}__slot = Some({init}); }} f({name}__slot.as_ref().unwrap()) }} }} }} "
+            ));
+            j = i1 + 1;
+        }
+        let a = toks[k].1;
+        out.push_str(&src[last..a]);
+        out.push_str(expanded.replace('\n', " ").as_str());
+        for _ in 0..s[a..end].iter().filter(|&&c| c == b'\n').count() {
+            out.push('\n');
+        }
+        last = end;
+        k = if is_sym(e + 1, b';') { e + 2 } else { e + 1 };
+    }
+    if last == 0 {
+        return None;
+    }
+    out.push_str(&src[last..]);
+    Some(out)
+}
+
 /// モジュールの中の名前を平らにしてもぶつからないようにする: 2 つ以上のスコープ (モジュール・ルート) で定義される名前は、
 /// モジュールの中の定義を `m__Name` (入れ子なら `a__b__Name`) に変え、参照も直す:
 /// - そのモジュールの中の裸の名前、`use crate::m::{Name, X as Y}` で取り込んだ名前 (別名も)
@@ -914,6 +1036,8 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
     // use 文で取り込んだ名前: (スコープ, 使う名前) → 新しい名前。use 文のトークン範囲は書き換えない
     let mut imports: Vec<(usize, Vec<u8>, Vec<u8>)> = vec![];
     let mut use_ranges: Vec<(usize, usize)> = vec![];
+    // `use crate::m::*;` で取り込んだモジュール: (スコープ, モジュール)
+    let mut globs: Vec<(usize, usize)> = vec![];
     let mut k = 0;
     while k < toks.len() {
         if !is_id(k, b"use") {
@@ -967,7 +1091,10 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
                 } else if t == b"}" {
                     return j + 1;
                 } else {
-                    // `,` / `*`
+                    // `,` / `*` (`use m::*`: 名前の代わりに `*` を記録する)
+                    if t == b"*" {
+                        out.push((path.clone(), b"*".to_vec()));
+                    }
                     if t != b"," {
                         path = prefix.clone();
                     }
@@ -982,6 +1109,12 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
         let mut items = vec![];
         walk(&toks, s, k + 1, e, vec![], &mut items);
         for (path, local) in items {
+            if local.as_slice() == b"*" {
+                if let Some(m) = resolve_mod(sc, &path) {
+                    globs.push((sc, m));
+                }
+                continue;
+            }
             if path.len() < 2 {
                 continue;
             }
@@ -1082,7 +1215,9 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
         let is_def = defs.iter().any(|d| d.2 == k);
         if !next_colon || is_def {
             let n = tok(k);
-            let nn = renamed_in(sc, n).or_else(|| imports.iter().find(|i| i.0 == sc && i.1.as_slice() == n).map(|i| i.2.clone()));
+            let nn = renamed_in(sc, n)
+                .or_else(|| imports.iter().find(|i| i.0 == sc && i.1.as_slice() == n).map(|i| i.2.clone()))
+                .or_else(|| globs.iter().filter(|g| g.0 == sc).find_map(|g| renamed_in(g.1, n)));
             if let Some(nn) = nn {
                 repl.push((k, k, nn));
             }

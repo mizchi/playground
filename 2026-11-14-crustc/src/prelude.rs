@@ -585,6 +585,11 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     if need.is_empty() && user_src.contains("no_std") {
         return String::new();
     }
+    // (`a.zip(&v)` / `a.chain([x])`: 引数の Vec / 配列は codegen が `.iter()` / `.into_iter()` にする)
+    if need.contains("zip") || need.contains("chain") {
+        need.insert("into_iter");
+        need.insert("iter");
+    }
     // 書式化のマクロ: Formatter と書き出しの関数一式 (codegen が名前を書かずに呼ぶ)
     if ["format", "print", "println", "eprint", "eprintln", "write", "writeln", "fmt", "Formatter"]
         .iter()

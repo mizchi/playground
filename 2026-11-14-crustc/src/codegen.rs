@@ -1366,7 +1366,7 @@ impl Cx<'_, '_> {
                         "is_power_of_two" | "is_positive" | "is_negative" | "is_nan" | "is_finite"
                         | "is_infinite" | "is_sign_negative" | "is_sign_positive" => Some(Ty::Bool),
                         "pow" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "wrapping_neg" | "saturating_add"
-                        | "saturating_sub" | "abs" | "min" | "max" | "rem_euclid" | "div_euclid"
+                        | "saturating_sub" | "abs" | "min" | "max" | "rem_euclid" | "div_euclid" | "next_multiple_of"
                         | "next_power_of_two" | "rotate_left" | "rotate_right" | "swap_bytes" | "signum"
                         | "wrapping_pow" | "saturating_pow" | "isqrt" | "sqrt" | "floor" | "ceil" | "round"
                         | "trunc" | "powi" | "powf" | "exp" | "ln" | "sin" | "cos" | "tan" | "clamp" => Some(t),
@@ -1549,6 +1549,9 @@ impl Cx<'_, '_> {
                 }
             }
             Expr::Path(p) => {
+                if let Some(q) = self.static_path(p) {
+                    return self.place(&Expr::Path(q));
+                }
                 let Some(id) = p.path.get_ident() else {
                     return err(p.span(), "unsupported path");
                 };
@@ -1605,6 +1608,10 @@ impl Cx<'_, '_> {
                 }
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
+                // `*g` (g: MutexGuard など Deref を実装した型): `*g.deref_mut()` / `*g.deref()`
+                if let Some(d) = self.user_deref(&u.expr) {
+                    return self.place(&d);
+                }
                 // `*b` は b をムーブしない
                 let (v, t) = self.read_no_move(&u.expr)?;
                 match (v, t) {
@@ -1729,6 +1736,12 @@ impl Cx<'_, '_> {
     /// 式を評価し、期待型への暗黙の変換 (`&[T; N]` → `&[T]`) をする
     fn expr(&mut self, e: &Expr, expected: Option<Ty>) -> R<V> {
         let (v, t) = self.expr_inner(e, expected)?;
+        // `&T` / `&mut T` → `*const T` / `*mut T`
+        if let (Some(want @ Ty::Ptr(m2, pe)), Ty::Ref(m1, re)) = (expected, t) {
+            if pe == re && (m1 || !m2) {
+                return Ok((v, want));
+            }
+        }
         if let (Some(want @ Ty::Ref(m2, Ty::Slice(we))), Some(v), Ty::Ref(m1, Ty::Array(ge, n))) =
             (expected, v, t)
         {
@@ -1894,6 +1907,11 @@ impl Cx<'_, '_> {
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
                 let p = self.place(e)?;
+                // `*b` (b: Box<T>、T は drop が要る): 中身のムーブ。b は drop しない
+                let boxed = matches!(self.peek(&u.expr), Some(Ty::Box(_)));
+                if boxed && self.needs_drop(p.ty()) {
+                    self.mark_moved(e);
+                }
                 Ok(self.read(p))
             }
             Expr::Unary(u) => self.unary(u, expected),
@@ -2244,6 +2262,11 @@ impl Cx<'_, '_> {
         };
         if is_place_expr(&r.expr) && !fn_item && !not_var(inner) {
             return match self.place(&r.expr)? {
+                // `&mut v[i]` (v: Vec<Box<T>>) を `&mut T` の位置に: Box の中身を指す (deref の強制変換)
+                Place::Mem(a, o, Ty::Box(x)) if matches!(expected, Some(Ty::Ref(_, e)) if *e == *x) && !x.is_fat() => {
+                    let p = self.b.ins().load(PTR, mf(), a, o as i32);
+                    Ok((Some(p), Ty::Ref(m, x)))
+                }
                 Place::Mem(a, o, t) => Ok((Some(self.addr_plus(a, o)), Ty::Ref(m, intern(t)))),
                 Place::Zst(t) => {
                     let a = self.temp(t);
@@ -3050,6 +3073,39 @@ impl Cx<'_, '_> {
                 self.b.ins().store(mf(), v, a, 0);
             }
         }
+        // `x.hash(state)` (x: タプル / Option で Hash の impl がない): std と同じく要素を順に (Option は判別子 (isize) と中身)
+        if mc.method == "hash" && mc.args.len() == 1 {
+            if let Some(Ty::Struct(sid)) = self.peek(&mc.receiver).map(|t| self.strip_refs(t)) {
+                let (r, st) = (&mc.receiver, &mc.args[0]);
+                // (参照ならそのまま使う: ローカル変数の参照を新たに取らない)
+                let rv: Expr = if matches!(self.peek(r), Some(Ty::Ref(..))) { syn::parse_quote!(#r) } else { syn::parse_quote!(&(#r)) };
+                let r = &rv;
+                if self.prog.method(sid, "hash").is_none() {
+                    if self.prog.is_tuple(sid) {
+                        let idx = (0..self.prog.structs[sid as usize].fields.len()).map(syn::Index::from);
+                        let e: Expr = syn::parse_quote!({
+                            let __hs = #st;
+                            let __hv = #r;
+                            #( (__hv.#idx).hash(&mut *__hs); )*
+                        });
+                        return self.expr(&e, expected);
+                    }
+                    if self.prog.structs[self.prog.base_of(sid) as usize].name == "Option" {
+                        let e: Expr = syn::parse_quote!({
+                            let __hs = #st;
+                            match #r {
+                                None => (0isize).hash(&mut *__hs),
+                                Some(__hx) => {
+                                    (1isize).hash(&mut *__hs);
+                                    (*__hx).hash(&mut *__hs)
+                                }
+                            }
+                        });
+                        return self.expr(&e, expected);
+                    }
+                }
+            }
+        }
         // `o.flatten()` (Option<Option<T>>): `o.unwrap_or(None)`
         if mc.method == "flatten" && mc.args.is_empty() {
             if let Some(Ty::Struct(sid)) = self.peek(&mc.receiver) {
@@ -3746,6 +3802,10 @@ impl Cx<'_, '_> {
                 let iter_bound = sig0.generics.get(g as usize).is_some_and(|gg| gg.1.iter().any(|b| b.starts_with("Iterator")));
                 if !iter_bound {
                     return None;
+                }
+                // (型の記録がない配列リテラル `[(&a, &b)]` も配列として)
+                if self.peek(a).is_none() && matches!(strip_paren(a), Expr::Array(_) | Expr::Repeat(_)) {
+                    return Some(syn::parse_quote!((#a).into_iter()));
                 }
                 let t = self.peek(a)?;
                 if self.is_iterator_ty(t) {
@@ -4533,6 +4593,23 @@ impl Cx<'_, '_> {
                 return Ok((Some(e), Ty::Bool));
             }
         }
+        // `&&u32 == &&u32` / `&x < &y`: 参照を辿ってスカラーを比べる
+        let (mut l, mut r) = (l, r);
+        if is_cmp(&b.op) && lt == rt {
+            let mut base = lt;
+            while let Ty::Ref(_, i) = base {
+                base = *i;
+            }
+            if base != lt && !base.is_agg() && !base.is_fat() && (base.is_int() || base.is_float() || matches!(base, Ty::Bool | Ty::Char)) {
+                while let Ty::Ref(_, i) = lt {
+                    let ct = if matches!(i, Ty::Ref(..)) { PTR } else { clif_ty(*i).unwrap() };
+                    l = self.b.ins().load(ct, mf(), l, 0);
+                    r = self.b.ins().load(ct, mf(), r, 0);
+                    lt = *i;
+                }
+                rt = lt;
+            }
+        }
         if is_cmp(&b.op) {
             self.same(b.right.span(), rt, lt)?;
             // 集約型の == / != : 手書きの eq があればそれ、なければ構造的に比べる (derive(PartialEq) 相当)
@@ -4988,15 +5065,8 @@ impl Cx<'_, '_> {
                 Sub(_) => 1,
                 _ => 2,
             };
-            if lt.bits() < 128 {
-                let (v, of) = match (kind, s) {
-                    (0, true) => self.b.ins().sadd_overflow(l, r),
-                    (0, false) => self.b.ins().uadd_overflow(l, r),
-                    (1, true) => self.b.ins().ssub_overflow(l, r),
-                    (1, false) => self.b.ins().usub_overflow(l, r),
-                    (_, true) => self.b.ins().smul_overflow(l, r),
-                    (_, false) => self.b.ins().umul_overflow(l, r),
-                };
+            if lt.bits() < 128 || kind == 2 {
+                let (v, of) = self.arith_ovf(kind as u8, s, l, r, lt);
                 self.ovf_panic(of, kind, b.span());
                 return Ok(v);
             }
@@ -5300,8 +5370,99 @@ impl Cx<'_, '_> {
         self.b.ins().iadd(base, off)
     }
 
+    /// 足し算 (kind 0)・引き算 (1)・掛け算 (2) の (結果, あふれたか)。128 bit は Cranelift の *_overflow がないので組み立てる
+    fn arith_ovf(&mut self, kind: u8, s: bool, l: Value, r: Value, t: Ty) -> (Value, Value) {
+        if t.bits() < 128 {
+            let ins = self.b.ins();
+            return match (kind, s) {
+                (0, true) => ins.sadd_overflow(l, r),
+                (0, false) => ins.uadd_overflow(l, r),
+                (1, true) => ins.ssub_overflow(l, r),
+                (1, false) => ins.usub_overflow(l, r),
+                (_, true) => ins.smul_overflow(l, r),
+                (_, false) => ins.umul_overflow(l, r),
+            };
+        }
+        if kind < 2 {
+            let v = if kind == 0 { self.b.ins().iadd(l, r) } else { self.b.ins().isub(l, r) };
+            let of = if !s {
+                if kind == 0 {
+                    self.b.ins().icmp(IntCC::UnsignedLessThan, v, l)
+                } else {
+                    self.b.ins().icmp(IntCC::UnsignedLessThan, l, r)
+                }
+            } else {
+                let x = if kind == 0 { self.b.ins().bxor(l, v) } else { self.b.ins().bxor(l, r) };
+                let y = if kind == 0 { self.b.ins().bxor(r, v) } else { self.b.ins().bxor(l, v) };
+                let m = self.b.ins().band(x, y);
+                let z = self.int_const(t, 0);
+                self.b.ins().icmp(IntCC::SignedLessThan, m, z)
+            };
+            return (v, of);
+        }
+        // 掛け算: 絶対値の積を 64 bit の半分ずつで調べる
+        let zero = self.int_const(t, 0);
+        let (ua, ub, neg) = if s {
+            let an = self.b.ins().icmp(IntCC::SignedLessThan, l, zero);
+            let bn = self.b.ins().icmp(IntCC::SignedLessThan, r, zero);
+            let la = self.b.ins().ineg(l);
+            let ra = self.b.ins().ineg(r);
+            let ua = self.b.ins().select(an, la, l);
+            let ub = self.b.ins().select(bn, ra, r);
+            (ua, ub, Some(self.b.ins().bxor(an, bn)))
+        } else {
+            (l, r, None)
+        };
+        let (al, ah) = self.b.ins().isplit(ua);
+        let (bl, bh) = self.b.ins().isplit(ub);
+        let ah_nz = self.b.ins().icmp_imm_u(IntCC::NotEqual, ah, 0);
+        let bh_nz = self.b.ins().icmp_imm_u(IntCC::NotEqual, bh, 0);
+        let both = self.b.ins().band(ah_nz, bh_nz);
+        let (c1, o1) = self.b.ins().umul_overflow(ah, bl);
+        let (c2, o2) = self.b.ins().umul_overflow(al, bh);
+        let (cross, o3) = self.b.ins().uadd_overflow(c1, c2);
+        let hi = self.b.ins().umulhi(al, bl);
+        let (_, o4) = self.b.ins().uadd_overflow(cross, hi);
+        let mut of = self.b.ins().bor(both, o1);
+        of = self.b.ins().bor(of, o2);
+        of = self.b.ins().bor(of, o3);
+        of = self.b.ins().bor(of, o4);
+        let mag = self.b.ins().imul(ua, ub);
+        let v = self.b.ins().imul(l, r);
+        if let Some(neg) = neg {
+            // |積| は負なら 2^127 まで、正なら 2^127 - 1 まで
+            let max = self.int_const(t, i128::MAX);
+            let over_pos = self.b.ins().icmp(IntCC::UnsignedGreaterThan, mag, max);
+            let one = self.int_const(t, 1);
+            let max1 = self.b.ins().iadd(max, one);
+            let over_neg = self.b.ins().icmp(IntCC::UnsignedGreaterThan, mag, max1);
+            let over = self.b.ins().select(neg, over_neg, over_pos);
+            of = self.b.ins().bor(of, over);
+        }
+        (v, of)
+    }
+
+    /// e が Deref を実装した (Vec・Box・String でない) struct の値なら、`*e.deref_mut()` (なければ `*e.deref()`)
+    fn user_deref(&self, e: &Expr) -> Option<Expr> {
+        let Ty::Struct(sid) = self.peek(e)? else { return None };
+        if self.vec_fields(sid).is_some() {
+            return None;
+        }
+        let m = if self.prog.method(sid, "deref_mut").is_some() { "deref_mut" } else { "deref" };
+        let did = self.prog.method(sid, m)?;
+        if !matches!(self.prog.sigs[did as usize].ret, Ty::Ref(_, i) if !i.is_fat() && !matches!(i, Ty::Str | Ty::Slice(_) | Ty::Dyn(_))) {
+            return None;
+        }
+        let m = syn::Ident::new(m, proc_macro2::Span::call_site());
+        Some(syn::parse_quote!(*(#e).#m()))
+    }
+
     /// 添字アクセスの対象 (配列 / スライス / それらへの参照) の (先頭アドレス, 長さ, 要素型)
     fn indexable(&mut self, e: &Expr) -> R<(Value, Value, Ty)> {
+        // (`g[i]` (g: MutexGuard<Vec<T>> など): `(*g)[i]`)
+        if let Some(d) = self.user_deref(e) {
+            return self.indexable(&d);
+        }
         // (-O: ループの前で読んでおいたもの)
         if !self.hoisted.is_empty() {
             use quote::ToTokens;
@@ -6226,6 +6387,7 @@ impl Cx<'_, '_> {
             "overflowing_mul",
             "rem_euclid",
             "div_euclid",
+            "next_multiple_of",
             "next_power_of_two",
             "isqrt",
             "try_into",
@@ -6528,12 +6690,9 @@ impl Cx<'_, '_> {
             "checked_add" | "checked_sub" | "checked_mul" | "checked_div" | "checked_rem" => {
                 let b = arg(self, 0, t)?;
                 let (v, of) = match name.as_str() {
-                    "checked_add" if s => self.b.ins().sadd_overflow(a, b),
-                    "checked_add" => self.b.ins().uadd_overflow(a, b),
-                    "checked_sub" if s => self.b.ins().ssub_overflow(a, b),
-                    "checked_sub" => self.b.ins().usub_overflow(a, b),
-                    "checked_mul" if s => self.b.ins().smul_overflow(a, b),
-                    "checked_mul" => self.b.ins().umul_overflow(a, b),
+                    "checked_add" => self.arith_ovf(0, s, a, b, t),
+                    "checked_sub" => self.arith_ovf(1, s, a, b, t),
+                    "checked_mul" => self.arith_ovf(2, s, a, b, t),
                     _ => {
                         // 0 除算 (と符号付きの MIN / -1) は None。安全な除数に差し替えてから割る
                         let zero = self.b.ins().icmp_imm_u(IntCC::Equal, b, 0);
@@ -6570,14 +6729,20 @@ impl Cx<'_, '_> {
             "overflowing_add" | "overflowing_sub" | "overflowing_mul" => {
                 let b = arg(self, 0, t)?;
                 let (v, of) = match name.as_str() {
-                    "overflowing_add" if s => self.b.ins().sadd_overflow(a, b),
-                    "overflowing_add" => self.b.ins().uadd_overflow(a, b),
-                    "overflowing_sub" if s => self.b.ins().ssub_overflow(a, b),
-                    "overflowing_sub" => self.b.ins().usub_overflow(a, b),
-                    _ if s => self.b.ins().smul_overflow(a, b),
-                    _ => self.b.ins().umul_overflow(a, b),
+                    "overflowing_add" => self.arith_ovf(0, s, a, b, t),
+                    "overflowing_sub" => self.arith_ovf(1, s, a, b, t),
+                    _ => self.arith_ovf(2, s, a, b, t),
                 };
                 self.pair_with_bool(v, t, of)?
+            }
+            // `a.next_multiple_of(b)` (符号なし): a % b == 0 なら a、でなければ a + (b - a % b)
+            "next_multiple_of" if !s => {
+                let b = arg(self, 0, t)?;
+                let r = self.b.ins().urem(a, b);
+                let d = self.b.ins().isub(b, r);
+                let up = self.b.ins().iadd(a, d);
+                let z = self.b.ins().icmp_imm_u(IntCC::Equal, r, 0);
+                (Some(self.b.ins().select(z, a, up)), t)
             }
             "rem_euclid" | "div_euclid" => {
                 let b = arg(self, 0, t)?;
@@ -8351,7 +8516,23 @@ impl Cx<'_, '_> {
             });
             return self.expr(&e, _expected);
         }
+        // `m::S` (モジュールの中の static): モジュールの部分を外す
+        if let Some(q) = self.static_path(p) {
+            return self.expr(&Expr::Path(q), _expected);
+        }
         err(p.span(), "cannot find value (unsupported path)")
+    }
+
+    /// `m::S` / `crate::m::S` がモジュールの中の static なら、モジュールを外したパス
+    fn static_path(&self, p: &syn::ExprPath) -> Option<syn::ExprPath> {
+        if p.qself.is_some() || p.path.segments.len() < 2 {
+            return None;
+        }
+        let q = self.prog.strip_mods(&p.path)?;
+        let id = q.get_ident()?.to_string();
+        let ci = *self.prog.const_index.get(&id)?;
+        self.prog.consts[ci as usize].stat?;
+        Some(syn::ExprPath { attrs: vec![], qself: None, path: q })
     }
 
     /// 1 セグメントのパスが (ローカル変数でない) const なら、その index
@@ -9552,6 +9733,11 @@ impl Cx<'_, '_> {
                 Expr::Field(f) => {
                     via_field = true;
                     e = &f.base
+                }
+                // `*b` (b: Box<T>) から中身をムーブした: b も drop しない (Box の領域はリークする)
+                Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
+                    via_field = true;
+                    e = &u.expr
                 }
                 Expr::Path(p) => {
                     let Some(id) = p.path.get_ident() else { return };
@@ -10820,6 +11006,35 @@ impl Cx<'_, '_> {
                         .deref_to_slice(x, sid, false)
                         .ok_or("internal: bad String")?;
                     return Ok(self.call_named("__exr_hash_bytes", vec![Ty::Unit], &[(fat, u8s)], span)?.0.unwrap());
+                }
+                // Vec は長さと要素で (バッファのアドレスでなく)
+                if let Some((po, lo, et)) = self.vec_fields(sid) {
+                    let (es, _) = self.prog.size_align(et);
+                    let p = self.b.ins().load(PTR, mf(), x, po as i32);
+                    let n = self.b.ins().load(types::I64, mf(), x, lo as i32);
+                    let z = self.b.ins().iconst(types::I64, 0);
+                    let h0 = self.mix(z, n);
+                    let (i, h) = (self.b.declare_var(types::I64), self.b.declare_var(types::I64));
+                    self.b.def_var(i, z);
+                    self.b.def_var(h, h0);
+                    let (head, body, done) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+                    self.b.ins().jump(head, &[]);
+                    self.b.switch_to_block(head);
+                    let iv = self.b.use_var(i);
+                    let more = self.b.ins().icmp(IntCC::UnsignedLessThan, iv, n);
+                    self.b.ins().brif(more, body, &[], done, &[]);
+                    self.b.switch_to_block(body);
+                    let off = self.b.ins().imul_imm_s(iv, es as i64);
+                    let a = self.b.ins().iadd(p, off);
+                    let v = self.hash_call(a, et)?;
+                    let hv = self.b.use_var(h);
+                    let h2 = self.mix(hv, v);
+                    self.b.def_var(h, h2);
+                    let i2 = self.b.ins().iadd_imm_s(iv, 1);
+                    self.b.def_var(i, i2);
+                    self.b.ins().jump(head, &[]);
+                    self.b.switch_to_block(done);
+                    return Ok(self.b.use_var(h));
                 }
                 let is_enum = sd.is_enum;
                 let tag_ty = sd.tag;
