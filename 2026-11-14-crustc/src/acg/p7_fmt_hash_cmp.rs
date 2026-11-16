@@ -297,7 +297,7 @@ impl Cx<'_> {
         };
         let newline = matches!(name, "println" | "eprintln" | "writeln");
         let fmt_s = match args.first() {
-            Some(Expr::Lit(t)) if matches!(lit::lit(t), Some(Lit::Str(_))) => match lit::lit(t) {
+            Some(Expr::Lit(t, _)) if matches!(lit::lit(t), Some(Lit::Str(_))) => match lit::lit(t) {
                 Some(Lit::Str(s)) => s,
                 _ => unreachable!(),
             },
@@ -583,7 +583,7 @@ impl Cx<'_> {
     pub(crate) fn to_string_value(&mut self, recv: &Expr, span: Sp) -> R<V> {
         // (`format!("{}", recv)` の引数を作る: recv はそのまま (型の表を引けるように) 渡す)
         let _ = span;
-        let fmt = self.keep_expr(Expr::Lit("\"{}\"".to_string()));
+        let fmt = self.keep_expr(Expr::Lit("\"{}\"".to_string(), crate::parse::Pos::default()));
         self.fmt_macro_args(vec![fmt, recv], "format")
     }
 

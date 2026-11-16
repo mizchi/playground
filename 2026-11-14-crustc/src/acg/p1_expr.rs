@@ -322,12 +322,12 @@ impl Cx<'_> {
         // (syn 版の in_fmt_args のときの pos_key の引き直しは、自前の構文木にはないので省く)
         let expected = match expected {
             Some(t) => Some(t),
-            None if matches!(e, Expr::Lit(_) | Expr::Struct(..) | Expr::Call(..)) => self.peek(e),
+            None if matches!(e, Expr::Lit(_, _) | Expr::Struct(..) | Expr::Call(..)) => self.peek(e),
             None if matches!(e, Expr::Path(..)) => self.lets.get(&(e as *const Expr as usize)).copied(),
             None => None,
         };
         match e {
-            Expr::Lit(l) => self.lit(l, expected),
+            Expr::Lit(l, _) => self.lit(l, expected),
             Expr::Paren(p) => self.expr(p, expected),
             Expr::Block(label, _, b) => {
                 if let Some(l) = label {
@@ -619,7 +619,7 @@ impl Cx<'_> {
                         if t == Ty::Never {
                             return Ok((None, Ty::Never));
                         }
-                        self.same(SP, t, ret)?;
+                        self.same(expr_start(e), t, ret)?;
                         v
                     }
                     None => {
@@ -654,7 +654,7 @@ impl Cx<'_> {
                     return Ok((v, t));
                 }
                 let hint = self.peek(x).or(match &**x {
-                    Expr::Lit(l) if matches!(lit::lit(l), Some(Lit::Float(_))) => Some(Ty::F64),
+                    Expr::Lit(l, _) if matches!(lit::lit(l), Some(Lit::Float(_))) => Some(Ty::F64),
                     _ => Some(Ty::I32),
                 });
                 let (v, from) = self.expr(x, hint)?;

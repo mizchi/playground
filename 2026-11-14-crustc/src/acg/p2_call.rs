@@ -39,7 +39,7 @@ fn simple_texts(xs: &[Expr]) -> Option<String> {
 
 fn simple_text(e: &Expr) -> Option<String> {
     Some(match e {
-        Expr::Lit(t) => t.clone(),
+        Expr::Lit(t, _) => t.clone(),
         Expr::Path(None, p) => crate::parse::path_text(p),
         Expr::Unary(op, x, _) => format!("{op}{}", simple_text(x)?),
         Expr::Ref(m, x) => format!("&{}{}", if *m { "mut " } else { "" }, simple_text(x)?),
@@ -538,7 +538,7 @@ impl Cx<'_> {
         let recv: &Expr = recv;
         let tf: Option<&[GArg]> = (!gargs.is_empty()).then_some(&gargs[..]);
         // (接尾辞のない整数リテラル `5.d()` は i32)
-        let lit_int = matches!(strip_paren(recv), Expr::Lit(t) if matches!(lit::lit(t), Some(Lit::Int(i)) if i.suffix().is_empty()));
+        let lit_int = matches!(strip_paren(recv), Expr::Lit(t, _) if matches!(lit::lit(t), Some(Lit::Int(i)) if i.suffix().is_empty()));
         let Some(mut t) = self.peek(recv).or(lit_int.then_some(Ty::I32)) else {
             return Ok(None);
         };
@@ -919,7 +919,7 @@ impl Cx<'_> {
                 Some(v) => v,
                 None => self.b.ins().iconst(types::I8, 0),
             };
-            vals.push((v, t, SP));
+            vals.push((v, t, expr_start(a)));
         }
         let arg_tys: Vec<Ty> = vals.iter().map(|v| v.1).collect();
         // 引数の型から改めて解く。引数に現れない型パラメータ (クロージャの戻り値など) は sol から
@@ -1217,7 +1217,7 @@ impl Cx<'_> {
         let a0 = args.next()?;
         let rest: Vec<Expr> = args.cloned().collect();
         // (リテラルは型を付ける: `i32::pow(2, 10)` の 2 は i32)
-        let recv = if matches!(a0, Expr::Lit(_)) { paren(Expr::Cast(Box::new(a0.clone()), ty_named(ty))) } else { paren(a0.clone()) };
+        let recv = if matches!(a0, Expr::Lit(_, _)) { paren(Expr::Cast(Box::new(a0.clone()), ty_named(ty))) } else { paren(a0.clone()) };
         Some(Expr::MethodCall(Box::new(recv), ms.to_string(), vec![], rest, crate::parse::Span::default()))
     }
 }

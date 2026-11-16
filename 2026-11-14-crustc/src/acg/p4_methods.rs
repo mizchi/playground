@@ -71,7 +71,7 @@ impl Cx<'_> {
                         v.unwrap()
                     }
                     None => {
-                        let e: Expr = Expr::Lit("\"\"".to_string());
+                        let e: Expr = Expr::Lit("\"\"".to_string(), crate::parse::Pos::default());
                         self.expr(&e, Some(sref))?.0.unwrap()
                     }
                 };
@@ -85,10 +85,10 @@ impl Cx<'_> {
                     let r = &*mc_recv;
                     let lo: Expr = match rg_start {
                         Some(e) => (**e).clone(),
-                        None => Expr::Lit("0usize".to_string()),
+                        None => Expr::Lit("0usize".to_string(), crate::parse::Pos::default()),
                     };
                     let hi: Expr = match (rg_end, *rg_closed) {
-                        (Some(e), true) => Expr::Binary("+".to_string(), Box::new(Expr::Paren(e.clone())), Box::new(Expr::Lit("1".to_string())), crate::parse::Span::default()),
+                        (Some(e), true) => Expr::Binary("+".to_string(), Box::new(Expr::Paren(e.clone())), Box::new(Expr::Lit("1".to_string(), crate::parse::Pos::default())), crate::parse::Span::default()),
                         (Some(e), _) => (**e).clone(),
                         (None, _) => mcall(Expr::Paren(Box::new(r.clone())), "len", vec![]),
                     };

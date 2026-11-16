@@ -375,7 +375,7 @@ fn addr_taken(b: &crate::parse::Block) -> HashSet<String> {
                         for e in &es {
                             match e {
                                 Expr::Ref(_, x) => visit(x, out),
-                                Expr::Path(..) | Expr::Lit(_) => {}
+                                Expr::Path(..) | Expr::Lit(_, _) => {}
                                 e => visit(e, out),
                             }
                         }
@@ -412,6 +412,7 @@ pub fn expr_start(e: &Expr) -> Sp {
         Expr::Call(x, _) | Expr::Cast(x, _) | Expr::Try(x) | Expr::Paren(x) | Expr::Assign(x, _) => expr_start(x),
         Expr::Range(Some(x), _, _) => expr_start(x),
         Expr::Path(_, p) | Expr::Struct(p, _, _) => p.pos,
+        Expr::Lit(_, p) => *p,
         _ => SP,
     }
 }
@@ -576,7 +577,7 @@ pub enum Indirect {
 /// 静的データに昇格できる定数式か
 pub fn is_promotable(cx: &Cx, e: &Expr) -> bool {
     match e {
-        Expr::Lit(l) => !matches!(lit::lit(l), Some(Lit::Str(_) | Lit::ByteStr(_))),
+        Expr::Lit(l, _) => !matches!(lit::lit(l), Some(Lit::Str(_) | Lit::ByteStr(_))),
         Expr::Paren(p) => is_promotable(cx, p),
         Expr::Unary(op, x, _) => op == "-" && is_promotable(cx, x),
         Expr::Struct(_, fs, rest) => rest.is_none() && fs.iter().all(|f| is_promotable(cx, &f.1)),
@@ -652,7 +653,7 @@ pub fn const_lit_pat(prog: &Program, p: &Pat) -> Option<Pat> {
         return None;
     }
     match crate::parse::parse_expr(&c.expr).ok()? {
-        e @ Expr::Lit(_) => Some(Pat::Lit(Box::new(e))),
+        e @ Expr::Lit(_, _) => Some(Pat::Lit(Box::new(e))),
         _ => None,
     }
 }
@@ -694,7 +695,7 @@ impl Cx<'_> {
         if got == want || got == Ty::Never {
             Ok(())
         } else {
-            err(span, format!("mismatched types: expected `{}`, found `{}`", self.prog.tn(want), self.prog.tn(got)))
+            Err(self.at(span, format!("mismatched types: expected `{}`, found `{}`", self.prog.tn(want), self.prog.tn(got))))
         }
     }
 
@@ -888,7 +889,12 @@ impl Cx<'_> {
             self.b.ins().trap(TrapCode::unwrap_user(1));
             return Ok(());
         }
-        self.same(SP, t, self.ret)?;
+        // (エラーの場所は末尾の式 (なければ関数の先頭))
+        let tail = match f.block.stmts.last() {
+            Some(Stmt::Expr(e, false)) => err_pos(e),
+            _ => SP,
+        };
+        self.same(tail, t, self.ret)?;
         self.drop_for_exit(0, 0);
         self.emit_return(v);
         Ok(())
@@ -1045,7 +1051,7 @@ impl Cx<'_> {
                             Expr::Ref(_, x) => strip_paren(x),
                             e => e,
                         };
-                        !matches!(e, Expr::Lit(t) if matches!(lit::lit(t), Some(Lit::Str(_))))
+                        !matches!(e, Expr::Lit(t, _) if matches!(lit::lit(t), Some(Lit::Str(_))))
                     };
                     let other = match name.as_str() {
                         "__exr_r" => Some("__exr_l"),
@@ -1176,7 +1182,7 @@ impl Cx<'_> {
                 let sd = &self.prog.structs[sid as usize];
                 sd.variants.iter().find(|v| v.name == "Some" || v.name == "Ok").and_then(|v| v.fields.first()).map(|f| f.1)
             }
-            Expr::Lit(l) => match lit::lit(l)? {
+            Expr::Lit(l, _) => match lit::lit(l)? {
                 Lit::Int(i) if i.suffix() == "f32" => Some(Ty::F32),
                 Lit::Int(i) if i.suffix() == "f64" => Some(Ty::F64),
                 Lit::Float(f) => Some(if f.suffix() == "f32" { Ty::F32 } else { Ty::F64 }),

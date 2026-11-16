@@ -8,7 +8,7 @@ use lit::Lit;
 /// 式がこの種類のリテラルか
 fn lit_kind<F: Fn(&Lit) -> bool>(e: &Expr, f: F) -> bool {
     match e {
-        Expr::Lit(t) => match lit::lit(t) {
+        Expr::Lit(t, _) => match lit::lit(t) {
             Some(l) => f(&l),
             None => false,
         },
@@ -244,7 +244,7 @@ impl Cx<'_> {
     /// パターンの判定値 (リテラル / 範囲の端) を place の型で作る
     pub(crate) fn pat_const(&mut self, e: &Expr, t: Ty) -> R<Value> {
         // (`i32::MIN..=-1` や const の名前は式として評価する)
-        let Expr::Lit(l) = e else {
+        let Expr::Lit(l, _) = e else {
             let (v, vt) = self.expr(e, Some(t))?;
             self.same(SP, vt, t)?;
             return v.ok_or_else(|| "range pattern bound has no value".to_string());
@@ -353,7 +353,7 @@ impl Cx<'_> {
             }
             // バイト列のパターン (`match w { b"pub" => .. }`、w: &[u8] / &[u8; N]): 長さと中身で比べる
             Pat::Lit(l) if lit_kind(l, |x| matches!(x, Lit::ByteStr(_))) => {
-                let Expr::Lit(text) = &**l else { unreachable!() };
+                let Expr::Lit(text, _) = &**l else { unreachable!() };
                 let Some(Lit::ByteStr(bs)) = lit::lit(text) else { unreachable!() };
                 let mut p = p;
                 // (&&[u8] などは 1 段ずつ外し、&[u8] / &[u8; N] で止める)
@@ -383,7 +383,7 @@ impl Cx<'_> {
             }
             // 文字列のパターン (`match s { "add" => .. }`): &str (と &&str) の中身で比べる
             Pat::Lit(l) if lit_kind(l, |x| matches!(x, Lit::Str(_))) => {
-                let Expr::Lit(text) = &**l else { unreachable!() };
+                let Expr::Lit(text, _) = &**l else { unreachable!() };
                 let sref = Ty::Ref(false, intern(Ty::Str));
                 let mut p = p;
                 while let Ty::Ref(_, i) = p.ty() {
@@ -410,7 +410,7 @@ impl Cx<'_> {
                         let (v, _) = self.read(p);
                         // (負のリテラル `-1` は式として評価する)
                         let (c, ct) = match &**l {
-                            Expr::Lit(text) => self.lit(text, Some(t))?,
+                            Expr::Lit(text, _) => self.lit(text, Some(t))?,
                             e => self.expr(e, Some(t))?,
                         };
                         self.same(SP, ct, t)?;

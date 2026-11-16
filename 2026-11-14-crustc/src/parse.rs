@@ -332,7 +332,7 @@ pub enum Pat {
 
 #[derive(Clone, Debug)]
 pub enum Expr {
-    Lit(String),
+    Lit(String, Pos),
     Path(Option<Box<Ty>>, Path),
     Unary(String, Box<Expr>, Span),
     Binary(String, Box<Expr>, Box<Expr>, Span),
@@ -1087,14 +1087,15 @@ impl Parser {
     fn pat_lit_expr(&mut self) -> R<Expr> {
         let p0 = self.pos();
         if self.eat_punct("-") {
+            let lp = self.pos();
             let t = self.tok(0).ok_or_else(|| self.err("expected a literal"))?.text.clone();
             self.i += 1;
-            return Ok(Expr::Unary("-".to_string(), Box::new(Expr::Lit(t)), Span { start: p0, at: p0 }));
+            return Ok(Expr::Unary("-".to_string(), Box::new(Expr::Lit(t, lp)), Span { start: p0, at: p0 }));
         }
         if self.tok(0).is_some_and(|t| t.kind == TokKind::Lit) {
             let t = self.toks[self.i].text.clone();
             self.i += 1;
-            return Ok(Expr::Lit(t));
+            return Ok(Expr::Lit(t, p0));
         }
         let p = self.path(false)?;
         Ok(Expr::Path(None, p))
@@ -1177,9 +1178,10 @@ impl Parser {
         }
         // (`true` / `false` はリテラルのパターン)
         if (self.is_ident("true") || self.is_ident("false")) && !self.punct_at(1, "::") {
+            let lp = self.pos();
             let t = self.toks[self.i].text.clone();
             self.i += 1;
-            return Ok(Pat::Lit(Box::new(Expr::Lit(t))));
+            return Ok(Pat::Lit(Box::new(Expr::Lit(t, lp))));
         }
         if self.is_ident("ref") || self.is_ident("mut") {
             let r = self.eat_ident("ref");
@@ -1513,8 +1515,9 @@ impl Parser {
         let t = t.clone();
         match t.kind {
             TokKind::Lit => {
+                let lp = self.pos();
                 self.i += 1;
-                return Ok(Expr::Lit(t.text));
+                return Ok(Expr::Lit(t.text, lp));
             }
             TokKind::Lifetime => {
                 let l = self.label();
@@ -1611,8 +1614,9 @@ impl Parser {
         }
         match t.text.as_str() {
             "true" | "false" => {
+                let lp = self.pos();
                 self.i += 1;
-                return Ok(Expr::Lit(t.text));
+                return Ok(Expr::Lit(t.text, lp));
             }
             "if" => {
                 self.i += 1;
@@ -2449,7 +2453,7 @@ impl Counts {
     }
     pub fn expr(&mut self, e: &Expr) {
         match e {
-            Expr::Lit(_) => self.lits += 1,
+            Expr::Lit(_, _) => self.lits += 1,
             Expr::Path(..) => self.paths += 1,
             Expr::Unary(_, x, _) | Expr::Try(x) | Expr::Paren(x) => self.expr(x),
             Expr::Ref(_, x) | Expr::RawRef(_, x) => {

@@ -40,7 +40,7 @@ fn lit_u64(t: &str) -> Option<u64> {
 /// const ジェネリクスの引数 (`Buf<4>` / `Buf<N>` / `Buf<{ 4 }>`): 長さを持つ配列型 `[(); n]`
 pub fn const_arg_syn(e: &Expr) -> R<TySyn> {
     match e {
-        Expr::Lit(t) if t.starts_with(|c: char| c.is_ascii_digit()) => match lit_u64(t) {
+        Expr::Lit(t, _) if t.starts_with(|c: char| c.is_ascii_digit()) => match lit_u64(t) {
             Some(n) => Ok(TySyn::Array(Box::new(TySyn::Prim(Ty::Unit)), ArrLen::Lit(n))),
             None => Err("bad const argument".to_string()),
         },
@@ -105,7 +105,7 @@ pub fn tysyn(t: &PTy, self_ty: Option<&TySyn>) -> R<TySyn> {
         PTy::Slice(i) => TySyn::Slice(Box::new(tysyn(i, self_ty)?)),
         PTy::Array(e, n) => {
             let len = match &**n {
-                Expr::Lit(t) if t.starts_with(|c: char| c.is_ascii_digit()) => match lit_u64(t) {
+                Expr::Lit(t, _) if t.starts_with(|c: char| c.is_ascii_digit()) => match lit_u64(t) {
                     Some(v) => ArrLen::Lit(v),
                     None => return Err("bad array length".to_string()),
                 },

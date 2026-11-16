@@ -511,7 +511,7 @@ impl Inf<'_> {
         let mut xs: Vec<*const Expr> = vec![];
         for a in &self.keep[ki] {
             match a {
-                Expr::Lit(t) if t.starts_with('"') || t.starts_with("r\"") || t.starts_with("r#") => {}
+                Expr::Lit(t, _) if t.starts_with('"') || t.starts_with("r\"") || t.starts_with("r#") => {}
                 Expr::Assign(_, r) => xs.push(&**r as *const Expr),
                 a => xs.push(a as *const Expr),
             }
@@ -677,7 +677,7 @@ impl Inf<'_> {
             return None;
         }
         match crate::parse::parse_expr(&c.expr).ok()? {
-            Expr::Lit(t) => Some(t),
+            Expr::Lit(t, _) => Some(t),
             _ => None,
         }
     }
@@ -719,7 +719,7 @@ impl Inf<'_> {
             Pat::Lit(e) => {
                 let (v, _) = self.auto_deref(v, mode);
                 let e = match &**e {
-                    Expr::Lit(t) => self.lit_var(t),
+                    Expr::Lit(t, _) => self.lit_var(t),
                     e => self.expr(e),
                 };
                 self.unify(v, e);
@@ -886,7 +886,7 @@ impl Inf<'_> {
         }
         if matches!(
             e,
-            Expr::Lit(_)
+            Expr::Lit(_, _)
                 | Expr::Struct(..)
                 | Expr::Call(..)
                 | Expr::MethodCall(..)
@@ -1043,7 +1043,7 @@ impl Inf<'_> {
             return None;
         }
         let recv = match &args[0] {
-            Expr::Lit(_) => Expr::Cast(Box::new(args[0].clone()), Box::new(PTy::Path(None, path1(ty)))),
+            Expr::Lit(_, _) => Expr::Cast(Box::new(args[0].clone()), Box::new(PTy::Path(None, path1(ty)))),
             a => a.clone(),
         };
         Some(mcall(recv, m, args[1..].to_vec()))
@@ -1075,7 +1075,7 @@ impl Inf<'_> {
                 self.mbase = saved;
                 r
             }
-            Expr::Lit(t) => self.lit_var(t),
+            Expr::Lit(t, _) => self.lit_var(t),
             Expr::Paren(x) => self.expr(x),
             Expr::Try(x) => {
                 let v = self.expr(x);
@@ -1112,8 +1112,8 @@ impl Inf<'_> {
             Expr::Repeat(x, n) => {
                 let el = self.expr(x);
                 let n = match &**n {
-                    Expr::Lit(t) if num_suffix(t).1.is_empty() && !num_suffix(t).0 => t.replace('_', "").parse::<u32>().ok(),
-                    Expr::Lit(t) => {
+                    Expr::Lit(t, _) if num_suffix(t).1.is_empty() && !num_suffix(t).0 => t.replace('_', "").parse::<u32>().ok(),
+                    Expr::Lit(t, _) => {
                         let digits: String = t.chars().take_while(|c| c.is_ascii_digit() || *c == '_').filter(|&c| c != '_').collect();
                         digits.parse::<u32>().ok()
                     }

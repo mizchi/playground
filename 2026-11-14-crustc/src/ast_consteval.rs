@@ -147,7 +147,7 @@ fn write(prog: &Program, e: &Expr, ty: Ty, v: &mut DataVal, off: u32, depth: u32
                     }
                     Ok(())
                 }
-                Expr::Lit(t) if *et == Ty::U8 && matches!(str_lit(t), Some((true, _))) => {
+                Expr::Lit(t, _) if *et == Ty::U8 && matches!(str_lit(t), Some((true, _))) => {
                     let (_, bs) = str_lit(t).unwrap();
                     v.bytes[off as usize..off as usize + bs.len()].copy_from_slice(&bs);
                     Ok(())
@@ -158,15 +158,15 @@ fn write(prog: &Program, e: &Expr, ty: Ty, v: &mut DataVal, off: u32, depth: u32
         Ty::Ref(_, inner) => {
             // 参照: 指す先を無名データにする。&[T] / &str は (ポインタ, 長さ)
             let lit = match e {
-                Expr::Lit(t) => str_lit(t),
+                Expr::Lit(t, _) => str_lit(t),
                 _ => None,
             };
             let (target, len) = match (e, *inner, lit) {
-                (Expr::Lit(_), Ty::Str, Some((false, b))) => {
+                (Expr::Lit(_, _), Ty::Str, Some((false, b))) => {
                     let n = b.len();
                     (DRef::Anon(DataVal { bytes: b, align: 1, relocs: vec![] }), Some(n))
                 }
-                (Expr::Lit(_), t, Some((true, b))) => {
+                (Expr::Lit(_, _), t, Some((true, b))) => {
                     let n = b.len();
                     let ok = matches!(t, Ty::Slice(Ty::U8)) || matches!(t, Ty::Array(Ty::U8, m) if m as usize == n);
                     if !ok {

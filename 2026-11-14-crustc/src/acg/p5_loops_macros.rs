@@ -88,7 +88,7 @@ fn tokens_text(src: &str) -> String {
 /// 文字列リテラルの式ならその中身
 fn str_lit(e: &Expr) -> Option<String> {
     match e {
-        Expr::Lit(t) => match lit::lit(t) {
+        Expr::Lit(t, _) => match lit::lit(t) {
             Some(Lit::Str(s)) => Some(s),
             _ => None,
         },
@@ -1093,7 +1093,7 @@ impl Cx<'_> {
                         return err(SP, "internal: cannot build the assert_eq! message");
                     };
                     // (左が数のリテラルで右がそうでなければ、右を先に評価して左の型を右から決める (`assert_eq!(2, n)`))
-                    let num_lit = |e: &Expr| matches!(e, Expr::Lit(t) if matches!(lit::lit(t), Some(Lit::Int(_) | Lit::Float(_))));
+                    let num_lit = |e: &Expr| matches!(e, Expr::Lit(t, _) if matches!(lit::lit(t), Some(Lit::Int(_) | Lit::Float(_))));
                     let lets = if num_lit(a) && !num_lit(b) {
                         vec![let_stmt("__exr_r", Expr::Ref(false, Box::new(paren(b)))), let_stmt("__exr_l", Expr::Ref(false, Box::new(paren(a))))]
                     } else {

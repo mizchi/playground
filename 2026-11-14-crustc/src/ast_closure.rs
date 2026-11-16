@@ -135,7 +135,7 @@ pub fn vec_repeat_parts(g: &str, base: Pos) -> Option<(Expr, Expr)> {
 /// 子の式を順に f に渡す (ブロック・文の中も。アイテムには入らない)
 fn each_child(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     match e {
-        Expr::Lit(_) | Expr::Path(..) | Expr::Continue(_) => {}
+        Expr::Lit(_, _) | Expr::Path(..) | Expr::Continue(_) => {}
         Expr::Unary(_, x, _) | Expr::Try(x) | Expr::Paren(x) | Expr::Ref(_, x) | Expr::RawRef(_, x) | Expr::Field(x, _, _) | Expr::Cast(x, _) => f(x),
         Expr::Binary(_, l, r, _) | Expr::Assign(l, r) | Expr::AssignOp(_, l, r, _) | Expr::Index(l, r, _) | Expr::Repeat(l, r) => {
             f(l);
@@ -451,7 +451,7 @@ impl Free {
                 if let Some(es) = macro_args_at(g, sp.at) {
                     for x in &es {
                         self.expr(x);
-                        if let Expr::Lit(t) = x {
+                        if let Expr::Lit(t, _) = x {
                             if let Some(body) = str_lit_body(t) {
                                 for n in fmt_inline_names(body) {
                                     self.name(&n);

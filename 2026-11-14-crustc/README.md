@@ -1151,6 +1151,10 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
 - `tests/driver2.rs` は stderr (panic のメッセージ) も比べるようにした (139 すべて一致)。`matches!` の引数は型推論とコード生成が同じ構文木 (`ast_closure::matches_parts`) を使う
 - `dbg!` の桁は syn 版が引数の位置を出していた (rustc はマクロの位置)。syn 版も直した
 - 移植の初めに作った ast_codegen.rs (v1) は acg が置き換えたので消した (tests/ast_codegen.rs は driver2 で tests/acg を試す)
+- コンパイルエラーにも場所を付ける: Path / Field / Lit にも位置を持たせ、acg のエラーには「位置を持つ一番内側の式」の
+  `行:桁:` を付ける (メソッド呼び出し・フィールドは名前の位置、let の型の不一致は初期値、引数の型の不一致はその引数、
+  return・末尾の式はその値)。構文エラー・要約のエラーはアイテムの中の行をファイルの行に直す。
+  `tests/compile_errors.rs` が tests/compile_errors/*.rs で syn 版のドライバとメッセージ (場所ごと) が同じか比べる
 
 ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen / program / ast_consteval / solver / ctors / ast_infer / minclif / ast_codegen）と、
 依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。

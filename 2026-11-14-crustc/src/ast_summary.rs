@@ -65,7 +65,7 @@ fn self_of(name: &str, generics: &[String]) -> TySyn {
 
 fn const_int(e: &Expr) -> R<i64> {
     match e {
-        Expr::Lit(t) if t.starts_with(|c: char| c.is_ascii_digit()) => {
+        Expr::Lit(t, _) if t.starts_with(|c: char| c.is_ascii_digit()) => {
             let digits: String = t.chars().filter(|&c| c != '_').take_while(|c| c.is_ascii_digit()).collect();
             digits.parse::<i64>().map_err(|e| e.to_string())
         }
@@ -175,7 +175,7 @@ fn path_compact(p: &Path) -> String {
 
 fn expr_compact(e: &Expr) -> String {
     match e {
-        Expr::Lit(t) => t.clone(),
+        Expr::Lit(t, _) => t.clone(),
         Expr::Path(None, p) => path_compact(p),
         _ => String::new(),
     }
@@ -390,7 +390,7 @@ fn local_ty_syn(b: &Block, n: &str, int_hint: Option<Ty>) -> Option<TySyn> {
             continue;
         }
         found = match init {
-            Some(Expr::Lit(t)) => lit_ty(t, int_hint),
+            Some(Expr::Lit(t, _)) => lit_ty(t, int_hint),
             Some(Expr::Call(f, _)) => match &**f {
                 Expr::Path(None, p) if p.segs.len() == 2 && p.segs[0].name == "String" => Some(TySyn::Named("String".into())),
                 _ => None,

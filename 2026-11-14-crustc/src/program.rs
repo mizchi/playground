@@ -1256,7 +1256,7 @@ impl Program {
     pub fn eval_const(&self, e: &crate::parse::Expr, depth: u32) -> R<i128> {
         use crate::parse::Expr;
         Ok(match e {
-            Expr::Lit(t) => lit_int(t).ok_or("not an integer constant")?,
+            Expr::Lit(t, _) => lit_int(t).ok_or("not an integer constant")?,
             Expr::Paren(x) => self.eval_const(x, depth)?,
             Expr::Cast(x, _) => self.eval_const(x, depth)?,
             Expr::Unary(op, x, _) => {

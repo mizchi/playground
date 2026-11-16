@@ -23,7 +23,7 @@ impl Cx<'_> {
         }
         // 負のリテラル (`-128i8` / `-2147483648`) はその場で値にする (検査で MIN の符号反転にしない)
         if op == "-" {
-            if let Expr::Lit(t) = strip_paren(x) {
+            if let Expr::Lit(t, _) = strip_paren(x) {
                 if let Some(Lit::Int(i)) = lit::lit(t) {
                     let lit_e: &Expr = strip_paren(x);
                     let ty = Ty::from_suffix(i.suffix())
@@ -201,7 +201,7 @@ impl Cx<'_> {
             _ => rhint,
         };
         // (文字列・バイト列のリテラルは自分の型 (`v == b"crate"` の v: Vec<u8> を期待型にしない))
-        let lit_str = matches!(strip_paren(right), Expr::Lit(t) if matches!(lit::lit(t), Some(Lit::ByteStr(_) | Lit::Str(_))));
+        let lit_str = matches!(strip_paren(right), Expr::Lit(t, _) if matches!(lit::lit(t), Some(Lit::ByteStr(_) | Lit::Str(_))));
         let rhint = if lit_str && matches!(self.strip_refs(lt), Ty::Struct(_)) { None } else { rhint.or(Some(lt)) };
         let (r, rt) = self.operand(right, rhint, cmp)?;
         let Some(r) = r else {
@@ -502,8 +502,8 @@ impl Cx<'_> {
         }
         let fits = |t: Ty, e: &Expr| -> bool {
             match strip_paren(e) {
-                Expr::Lit(l) if matches!(lit::lit(l), Some(Lit::Int(_))) => t.is_int(),
-                Expr::Lit(l) if matches!(lit::lit(l), Some(Lit::Float(_))) => t.is_float(),
+                Expr::Lit(l, _) if matches!(lit::lit(l), Some(Lit::Int(_))) => t.is_int(),
+                Expr::Lit(l, _) if matches!(lit::lit(l), Some(Lit::Float(_))) => t.is_float(),
                 Expr::Unary(op, _, _) if op == "-" => t.is_int() || t.is_float(),
                 Expr::Tuple(tp) => matches!(t, Ty::Struct(sid) if self.prog.is_tuple(self.prog.base_of(sid))
                     && self.prog.structs[sid as usize].args.len() == tp.len()),
@@ -850,7 +850,7 @@ impl Cx<'_> {
         };
         let int_of = |e: &Expr| -> Option<i64> {
             match strip_paren(e) {
-                Expr::Lit(l) => match lit::lit(l) {
+                Expr::Lit(l, _) => match lit::lit(l) {
                     Some(Lit::Int(i)) => i.base10_digits().parse().ok(),
                     _ => None,
                 },
@@ -1367,7 +1367,7 @@ impl Cx<'_> {
     /// 配列の長さ (リテラルか const)
     pub(crate) fn array_len(&self, e: &Expr) -> R<u32> {
         match e {
-            Expr::Lit(l) if matches!(lit::lit(l), Some(Lit::Int(_))) => {
+            Expr::Lit(l, _) if matches!(lit::lit(l), Some(Lit::Int(_))) => {
                 let Some(Lit::Int(i)) = lit::lit(l) else { unreachable!() };
                 i.base10_digits().parse::<u32>().or_else(|er| err(SP, er))
             }
