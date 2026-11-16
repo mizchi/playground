@@ -251,6 +251,8 @@ pub struct Seg {
     pub args: Vec<GArg>,
     /// `Fn(A, B) -> C` の形の引数
     pub fn_args: Option<(Vec<Ty>, Option<Box<Ty>>)>,
+    /// このセグメントのトークン列のテキスト (proc_macro2 の表示と同じ空け方: `Iterator < Item = u32 >`)
+    pub text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -596,6 +598,31 @@ impl Parser {
             }
         }
     }
+    /// トークン a..b のテキスト (proc_macro2 の Display と同じ: トークンの間に空白 1 つ、Joint の記号の後ろは詰める、
+    /// 括弧は中身を詰めて囲む)
+    fn tokens_text(&self, a: usize, b: usize) -> String {
+        let mut s = String::new();
+        let mut prev_joint = true;
+        let mut prev_open = false;
+        for k in a..b {
+            let t = &self.toks[k];
+            if t.kind == TokKind::Close {
+                s.push_str(&t.text);
+                prev_joint = false;
+                prev_open = false;
+                continue;
+            }
+            if !s.is_empty() && !prev_joint && !prev_open {
+                s.push(' ');
+            }
+            s.push_str(&t.text);
+            prev_open = t.kind == TokKind::Open;
+            // (記号の Joint は次も記号のとき。ライフタイムは 1 つのトークン)
+            prev_joint = t.kind == TokKind::Punct && t.joint && self.toks.get(k + 1).is_some_and(|n| n.kind == TokKind::Punct);
+        }
+        s
+    }
+
     fn attr(&mut self) -> R<String> {
         self.expect_punct("#")?;
         let inner = self.eat_punct("!");
@@ -675,8 +702,9 @@ impl Parser {
         let global = self.eat_punct("::");
         let mut segs = Vec::new();
         loop {
+            let st = self.i;
             let name = self.ident()?;
-            let mut seg = Seg { name: name, args: Vec::new(), fn_args: None };
+            let mut seg = Seg { name: name, args: Vec::new(), fn_args: None, text: String::new() };
             if in_ty && self.is_punct("<") && !self.punct_at(0, "<=") && !self.punct_at(0, "<<") {
                 self.i += 1;
                 seg.args = self.generic_args()?;
@@ -696,6 +724,7 @@ impl Parser {
                 let ret = if self.eat_punct("->") { Some(Box::new(self.ty_no_bounds()?)) } else { None };
                 seg.fn_args = Some((ps, ret));
             }
+            seg.text = self.tokens_text(st, self.i);
             segs.push(seg);
             if self.punct_at(0, "::") && self.tok(2).is_some_and(|t| t.kind == TokKind::Ident) {
                 self.i += 2;
@@ -843,7 +872,7 @@ impl Parser {
             }
             while self.eat_punct("::") {
                 let n = self.ident()?;
-                path.segs.push(Seg { name: n, args: Vec::new(), fn_args: None });
+                path.segs.push(Seg { name: n, args: Vec::new(), fn_args: None, text: String::new() });
             }
             return Ok(Ty::Path(Some(Box::new(q)), path));
         }
@@ -932,7 +961,7 @@ impl Parser {
             let lo = match p {
                 Pat::Lit(e) => e,
                 Pat::Path(pa) => Box::new(Expr::Path(None, pa)),
-                Pat::Ident(false, false, n, None) => Box::new(Expr::Path(None, Path { global: false, segs: vec![Seg { name: n, args: Vec::new(), fn_args: None }] })),
+                Pat::Ident(false, false, n, None) => Box::new(Expr::Path(None, Path { global: false, segs: vec![Seg { name: n, args: Vec::new(), fn_args: None, text: String::new() }] })),
                 _ => return Err(self.err("bad range pattern")),
             };
             self.i += 3;
@@ -1401,7 +1430,7 @@ impl Parser {
                     }
                     while self.eat_punct("::") {
                         let n = self.ident()?;
-                        let mut seg = Seg { name: n, args: Vec::new(), fn_args: None };
+                        let mut seg = Seg { name: n, args: Vec::new(), fn_args: None, text: String::new() };
                         if self.punct_at(0, "::") && self.punct_at(2, "<") {
                             self.i += 3;
                             seg.args = self.generic_args()?;
@@ -1553,7 +1582,7 @@ impl Parser {
                 if self.eat_punct(":") {
                     fs.push((n, self.expr(true)?));
                 } else {
-                    let e = Expr::Path(None, Path { global: false, segs: vec![Seg { name: n.clone(), args: Vec::new(), fn_args: None }] });
+                    let e = Expr::Path(None, Path { global: false, segs: vec![Seg { name: n.clone(), args: Vec::new(), fn_args: None, text: String::new() }] });
                     fs.push((n, e));
                 }
                 if !self.eat_punct(",") {
@@ -1720,7 +1749,7 @@ impl Parser {
             if let Some(l) = self.lifetime() {
                 self.expect_punct(":")?;
                 let bs = self.bounds()?;
-                g.preds.push((Ty::Path(None, Path { global: false, segs: vec![Seg { name: l, args: Vec::new(), fn_args: None }] }), bs));
+                g.preds.push((Ty::Path(None, Path { global: false, segs: vec![Seg { name: l, args: Vec::new(), fn_args: None, text: String::new() }] }), bs));
             } else {
                 if self.eat_ident("for") {
                     self.expect_punct("<")?;

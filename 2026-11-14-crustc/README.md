@@ -118,7 +118,7 @@ crustc（debug / `-O`）と rustc（`-Cincremental` / `-O`）でビルドし、c
 tests/probe.sh
 ```
 
-よく使う機能の小さいプログラム（`tests/probe/*.rs`、89 本）を rustc と比べ、通った数を出す。
+よく使う機能の小さいプログラム（`tests/probe/*.rs`、90 本）を rustc と比べ、通った数を出す。
 
 ```bash
 tests/selfhost.sh
@@ -132,6 +132,7 @@ tests/selfhost.sh
 - `src/macros.rs`（`macro_rules!` の展開と `include_str!`）：proc_macro2 の代わりに使う分だけの字句解析器（`tests/selfhost/mini_pm2.rs`、トークン木・位置・Spacing）を付けて、probe / examples / src の 147 ファイルを展開し、結果が rustc 版と一致する。
 - `src/parse.rs`（syn を使わない自前の構文解析）：probe / examples / src の 149 ファイル（parse.rs 自身も）を解析し、アイテムと節の数が rustc 版と一致する（-O で rustc 版 0.12 秒に対し 0.33 秒）。
 - `src/ast_closure.rs`（自前の構文木の上のクロージャ解析。closure.rs の移植）：全ファイルの関数のクロージャの自由変数と「値でキャプチャするか」が rustc 版と一致する。
+- `src/types.rs` + `src/ast_types.rs`（front.rs から分けた型の表現・intern と、自前の構文木の型 → TySyn）：全ファイルの型の変換結果と intern が rustc 版と一致する。
 - `src/enc.rs`（キャッシュの直列化。`enc_struct!` マクロと trait の静的呼び出し `T::dec(r)`）と `src/fxhash.rs`（FxHasher / `FxMap`）：構造体・Vec・Option・タプルを符号化して戻し、バイト列とハッシュが rustc 版と一致する（-O でも）。
 
 環境変数：`CRUSTC_DUMP_PRELUDE=1` は付けた prelude を stderr に出す。`CRUSTC_NO_STRIP=1` は出力のシンボルを残す（callgrind などで関数名を見るため）。
@@ -991,6 +992,21 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
 - 修正：型推論で `&Vec<T>` を `&[T]` の引数に渡すと参照どうしを同じ型にしていたので、クロージャがキャプチャした `&Vec<T>` が `&[T]` として扱われた
 - 修正：`matches!(x, p if guard)` の guard の中の変数をキャプチャに数えていなかった
 - `&Box<T>` / `&&T` を `&dyn FnMut(&T)` の引数に渡す（deref の強制変換）
+
+#### セルフホストの第 9 段階: front.rs の型の部分を分ける・モジュールの名前空間
+
+- `src/types.rs`：front.rs から syn に依存しない部分（`Ty` / `TySyn` / `ArrLen` / intern）を分けた（front は `pub use` で見せる）
+- `src/ast_types.rs`：front.rs の `parse_tysyn`（syn の型 → TySyn）を自前の構文木に移植。`tests/ast_types.rs` が全ファイルの 3914 個の型で syn 版と一致することを確かめる
+  （`dyn` の trait は proc_macro2 と同じ空け方のテキストにする）
+- モジュールの名前空間：別々のモジュールで同じ名前（`types::Ty` と `parse::Ty`）を定義したら、平らにする前にモジュールの中の定義を `m__Ty` にし、
+  中の参照・`use crate::m::{Ty as X}`（別名も）・`m::Ty` / `crate::m::Ty` / `super::Ty` のパスを直す（enum のバリアント名・フィールドは変えない）。Debug の表示は元の名前
+- 関数の中の同じ名前の static（`intern` ごとの `static TABLE`）は、外に出す前に関数ごとに名前を変える
+- `std::sync::Mutex`、`Box::leak`、`std::ptr::eq`、`Result::as_ref`、`HashSet<&T>::get(&t)`（`&T` を `&&T` に）、生ポインタのハッシュ、`&&str == &&str`
+- 修正：参照を通して再帰する型（`enum T { R(&'static T) }`）の `==` でコンパイラがスタックを使い切っていた（glue 関数で比べる）
+- 修正：型推論で `&String` を `&str` の引数に渡すと参照どうしを同じ型にしていた（ガードつきの腕で `t.len()` が壊れた値を読んだ）
+- 修正：`v == b"crate"`（v は後で型の決まる `x.to_vec()`）で v をバイト列の型にしていた
+- 修正：`String` の `contains` などの書き換えで作ったノードに型の記録がなく、メソッドが見つからなかった
+- クロージャの変数の呼び出し `tok(k)` の戻り値の型を `peek` で引く
 
 ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen）と、
 依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。

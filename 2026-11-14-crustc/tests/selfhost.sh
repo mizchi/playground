@@ -10,6 +10,7 @@
 #           → probe / examples / src を展開して、結果の長さとハッシュを出す
 #   parse: src/parse.rs (syn を使わない構文解析) → probe / examples / src を解析して節の数とアイテムを出す
 #   ast_closure: src/parse.rs + src/ast_closure.rs (自前の構文木の上のクロージャ解析) → 全関数のクロージャの自由変数
+#   ast_types: src/types.rs + src/parse.rs + src/ast_types.rs (型の表現・intern と、型の構文 → TySyn。front.rs から分けたもの)
 #   enc:   src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と src/fxhash.rs (FxHasher / FxMap)
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -129,6 +130,20 @@ for opt in "" -O; do
     echo "ok   ast_closure $opt ($(grep -c ': .* closures$' "$out/ast_closure.rustc.out") files)"
   else
     echo "DIFF ast_closure $opt"; diff "$out/ast_closure.rustc.out" "$out/ast_closure.crustc.out" | head; fail=1
+  fi
+done
+python3 tests/selfhost/build_ast_types.py > "$out/ast_types_main.rs"
+rustc --edition 2024 -O -Awarnings "$out/ast_types_main.rs" -o "$out/ast_types_rustc" || exit 1
+"$out/ast_types_rustc" "${min[@]}" > "$out/ast_types.rustc.out"
+for opt in "" -O; do
+  if ! target/release/crustc "$out/ast_types_main.rs" -o "$out/ast_types_crustc" $opt; then
+    echo "FAIL ast_types $opt (crustc)"; fail=1; continue
+  fi
+  "$out/ast_types_crustc" "${min[@]}" > "$out/ast_types.crustc.out"
+  if cmp -s "$out/ast_types.rustc.out" "$out/ast_types.crustc.out"; then
+    echo "ok   ast_types $opt ($(wc -l < "$out/ast_types.rustc.out") lines)"
+  else
+    echo "DIFF ast_types $opt"; diff "$out/ast_types.rustc.out" "$out/ast_types.crustc.out" | head; fail=1
   fi
 done
 python3 tests/selfhost/build_enc.py > "$out/enc_main.rs"

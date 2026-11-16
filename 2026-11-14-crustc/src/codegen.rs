@@ -1310,10 +1310,17 @@ impl Cx<'_, '_> {
             Expr::Call(c) if self.prog.prim_method_call(c, self.self_sid).is_some() => {
                 self.peek(&self.prog.prim_method_call(c, self.self_sid)?)
             }
-            Expr::Call(c) => self
-                .callee(&c.func)
-                .map(|(_, s)| s.ret)
-                .filter(|&t| !self.prog.has_param(t)),
+            Expr::Call(c) => match self.callee(&c.func) {
+                Some((_, s)) => Some(s.ret).filter(|&t| !self.prog.has_param(t)),
+                // (クロージャの変数の呼び出し `tok(k)`: クロージャの戻り値の型)
+                None => {
+                    let mut t = self.peek(&c.func)?;
+                    while let Ty::Ref(_, i) = t {
+                        t = *i;
+                    }
+                    self.closure_sig(t).map(|(_, r)| r).filter(|&t| !self.prog.has_param(t))
+                }
+            },
             Expr::Cast(c) => self.prog.parse_ty(&c.ty, &self.env).ok(),
             Expr::Index(ix) if !matches!(&*ix.index, Expr::Range(_)) => {
                 let mut t = self.peek(&ix.expr)?;
@@ -3854,6 +3861,15 @@ impl Cx<'_, '_> {
                     }
                 }
             }
+            // `set.get(&t)` (要素が `&T` の HashSet / HashMap: std の Borrow 相当): `&T` を `&&T` にする
+            if let (Ty::Ref(_, Ty::Ref(wm, wx)), Ty::Ref(tm, tx), Some(val)) = (want, t, v) {
+                if **wx == *tx && !tx.is_fat() && !self.prog.has_param(want) && (!*wm || tm) {
+                    let tmp = self.temp(Ty::Ref(*wm, wx));
+                    self.b.ins().store(mf(), val, tmp, 0);
+                    v = Some(tmp);
+                    t = want;
+                }
+            }
             // (`&Box<T>` も `&T` に)
             while let (Ty::Ref(_, _), Ty::Ref(m, inner @ (Ty::Ref(..) | Ty::Box(_))), Some(val)) =
                 (want, t, v)
@@ -4332,7 +4348,10 @@ impl Cx<'_, '_> {
             Eq(_) | Ne(_) => self.rhs_hint_from_impls(&self.prog.peq.clone(), lt, &b.right).or(rhint),
             _ => rhint,
         };
-        let (r, rt) = self.operand(&b.right, rhint.or(Some(lt)), cmp)?;
+        // (文字列・バイト列のリテラルは自分の型 (`v == b"crate"` の v: Vec<u8> を期待型にしない))
+        let lit_str = matches!(strip_paren(&b.right), Expr::Lit(syn::ExprLit { lit: Lit::ByteStr(_) | Lit::Str(_), .. }));
+        let rhint = if lit_str && matches!(self.strip_refs(lt), Ty::Struct(_)) { None } else { rhint.or(Some(lt)) };
+        let (r, rt) = self.operand(&b.right, rhint, cmp)?;
         let Some(r) = r else {
             return Ok((None, Ty::Never));
         };
@@ -4364,6 +4383,24 @@ impl Cx<'_, '_> {
         }
         let str_ref = Ty::Ref(false, intern(Ty::Str));
         if matches!(b.op, Eq(_) | Ne(_)) && lt != rt {
+            // (`&String == &str` / `&&str == &str` も: 参照を外してから)
+            if let (Ty::Ref(_, Ty::Struct(_) | Ty::Ref(..)), true) = (lt, rt == str_ref) {
+                if let Ty::Ref(_, i) = lt {
+                    // (`&String` の値は String の場所そのもの。`&&T` は 1 段読む。`&&str` は `&str` の表現と同じ)
+                    if matches!(i, Ty::Ref(..)) && !i.is_fat() {
+                        l = self.b.ins().load(PTR, mf(), l, 0);
+                    }
+                    lt = *i;
+                }
+            } else if let (true, Ty::Ref(_, Ty::Struct(_) | Ty::Ref(..))) = (lt == str_ref, rt) {
+                if let Ty::Ref(_, i) = rt {
+                    // (`&String` の値は String の場所そのもの。`&&T` は 1 段読む。`&&str` は `&str` の表現と同じ)
+                    if matches!(i, Ty::Ref(..)) && !i.is_fat() {
+                        r = self.b.ins().load(PTR, mf(), r, 0);
+                    }
+                    rt = *i;
+                }
+            }
             if let (Ty::Struct(sid), true) = (lt, rt == str_ref) {
                 if let Some((f, ft)) = self.deref_to_slice(l, sid, false) {
                     (l, lt) = (f, ft);
@@ -4440,6 +4477,19 @@ impl Cx<'_, '_> {
             };
             return Ok((Some(self.b.ins().icmp_imm_s(cc, c, 0)), Ty::Bool));
         }
+        // (`v == b"crate"` / `&v == b"x"` (v: Vec<u8>): 参照を外して `Vec<T> == [T; N]` に。値の表現は同じ (場所のアドレス))
+        if matches!(b.op, Eq(_) | Ne(_)) && lt != rt {
+            let is_vec = |this: &Self, t: Ty| matches!(t, Ty::Struct(sid) if this.vec_fields(sid).is_some());
+            let peel = |this: &Self, t: Ty| match t {
+                Ty::Ref(_, i @ (Ty::Array(..) | Ty::Struct(_))) if i.is_agg() && (matches!(i, Ty::Array(..)) || is_vec(this, *i)) => *i,
+                t => t,
+            };
+            let (pl, pr) = (peel(self, lt), peel(self, rt));
+            if (is_vec(self, pl) && matches!(pr, Ty::Array(..))) || (is_vec(self, pr) && matches!(pl, Ty::Array(..))) {
+                lt = pl;
+                rt = pr;
+            }
+        }
         // 型の違う `==` / `!=`: 右辺の型を持つ PartialEq の impl (`impl PartialEq<[T; N]> for Vec<T>` など) を探して eq を呼ぶ
         if matches!(b.op, Eq(_) | Ne(_)) && lt != rt {
             if let Some(e) = self.trait_eq(l, lt, r, rt, b.span())? {
@@ -4448,6 +4498,14 @@ impl Cx<'_, '_> {
             }
         }
         // `&a == &b` (a, b は struct など): 参照を外して中身を比べる
+        // `&&str == &&str` / `&&[T] == &&[T]`: `&&str` の値は `&str` の置き場所 (= `&str` の表現) なので型だけ外す
+        while let (true, Ty::Ref(_, i)) = (lt == rt, lt) {
+            if !i.is_fat() {
+                break;
+            }
+            lt = *i;
+            rt = *i;
+        }
         if matches!(b.op, Eq(_) | Ne(_)) && lt == rt && matches!(lt, Ty::Ref(..)) {
             let (mut l, mut r, mut t) = (l, r, lt);
             while let Ty::Ref(_, i) = t {
@@ -4703,8 +4761,8 @@ impl Cx<'_, '_> {
                 self.b.switch_to_block(done);
                 Ok(res)
             }
-            // (Box の先の struct は glue 関数で: 再帰型をその場で展開しない)
-            Ty::Box(inner @ Ty::Struct(_)) if self.prog.index.contains_key("__exr_eq") => {
+            // (Box・参照の先の struct は glue 関数で: 再帰型 (`enum T { R(&'static T) }`) をその場で展開しない)
+            Ty::Box(inner @ Ty::Struct(_)) | Ty::Ref(_, inner @ Ty::Struct(_)) if self.prog.index.contains_key("__exr_eq") => {
                 let r = Ty::Ref(false, intern(*inner));
                 let (v, _) = self.call_named("__exr_eq", vec![*inner], &[(a, r), (b, r)], span)?;
                 Ok(v.unwrap())
@@ -5620,6 +5678,10 @@ impl Cx<'_, '_> {
         let Some(mut rt) = self.peek(&mc.receiver) else {
             return Ok(None);
         };
+        // (値はサイズ不定の型にならない: `[T]` / `str` と記録されていても実際は参照 (`tok(k).to_vec()`))
+        if matches!(rt, Ty::Slice(_) | Ty::Str) {
+            rt = Ty::Ref(false, intern(rt));
+        }
         while let Ty::Ref(_, i) = rt {
             if rt.is_fat() {
                 break;
@@ -5644,17 +5706,35 @@ impl Cx<'_, '_> {
                 let tf = &mc.turbofish;
                 let e: Expr = syn::parse_quote!((#r).as_str().#m #tf (#args));
                 // (型推論が元の呼び出しに記録した型を、作り直したノードにも写す: `t.parse()` の T)
+                let mut keys: Vec<usize> = vec![];
                 if let Some(&t) = self.lets.get(&(mc as *const syn::ExprMethodCall as usize)) {
                     self.lets.insert(&e as *const Expr as usize, t);
+                    keys.push(&e as *const Expr as usize);
                     if let Expr::MethodCall(nm) = &e {
                         self.lets.insert(nm as *const syn::ExprMethodCall as usize, t);
+                        keys.push(nm as *const syn::ExprMethodCall as usize);
+                    }
+                }
+                // (受け手 `(r).as_str()` は &str、`(r)` は元の受け手の型: 作り直したノードには型推論の記録がない)
+                if let Expr::MethodCall(nm) = &e {
+                    let a = &*nm.receiver as *const Expr as usize;
+                    self.lets.insert(a, Ty::Ref(false, intern(Ty::Str)));
+                    keys.push(a);
+                    if let Expr::MethodCall(inner) = &*nm.receiver {
+                        let b = &*inner.receiver as *const Expr as usize;
+                        self.lets.insert(b, rt);
+                        keys.push(b);
+                        if let Expr::Paren(pp) = &*inner.receiver {
+                            let c = &*pp.expr as *const Expr as usize;
+                            self.lets.insert(c, rt);
+                            keys.push(c);
+                        }
                     }
                 }
                 let r = self.expr(&e, None).map(Some);
                 // (e はここで捨てるので、そのアドレスの記録も消す)
-                self.lets.remove(&(&e as *const Expr as usize));
-                if let Expr::MethodCall(nm) = &e {
-                    self.lets.remove(&(nm as *const syn::ExprMethodCall as usize));
+                for k in keys {
+                    self.lets.remove(&k);
                 }
                 return r;
             }
@@ -7988,8 +8068,18 @@ impl Cx<'_, '_> {
                 return Ok(Some((Some(x), t)));
             }
         }
-        // `Box::new(x)`: ヒープに置いて、所有する `&mut T` として返す (解放はしない)
         let n = p.path.segments.len();
+        // `Box::leak(b)`: Box の指す先をそのまま `&'static mut T` に (解放しない)
+        if name == "leak" && n >= 2 && p.path.segments[n - 2].ident == "Box" && c.args.len() == 1 {
+            let (v, t) = self.expr(&c.args[0], None)?;
+            let Some(v) = v else { return Ok(Some((None, Ty::Never))) };
+            if let Ty::Box(i) = t {
+                // (引数の値は一時値として持たれていないので、drop されない)
+                return Ok(Some((Some(v), Ty::Ref(true, i))));
+            }
+            return err(c.span(), "`Box::leak` needs a Box");
+        }
+        // `Box::new(x)`: ヒープに置いて、所有する `&mut T` として返す (解放はしない)
         if name == "new"
             && n >= 2
             && p.path.segments[n - 2].ident == "Box"
@@ -10569,6 +10659,11 @@ impl Cx<'_, '_> {
         let sd = &self.prog.structs[sid as usize];
         let tuple = self.prog.is_tuple(b);
         let bname = self.prog.structs[b as usize].name.clone();
+        // (モジュールの中の名前 `m__Ty` (ぶつかる名前を平らにしたもの) は元の名前で表示する)
+        let bname = match bname.rfind("__") {
+            Some(i) if i > 0 && !bname.starts_with('_') => bname[i + 2..].to_string(),
+            _ => bname,
+        };
         // (名前, フィールド (名前, 型, オフセット), 名前つきか) の候補。enum なら判別値ごと
         let shapes: Vec<(Option<i64>, String, Vec<(String, Ty, u32)>, bool)> = if sd.is_enum {
             sd.variants
@@ -10750,6 +10845,12 @@ impl Cx<'_, '_> {
                     }
                     h
                 }
+            }
+            // 生ポインタはアドレスで (std と同じ)
+            Ty::Ptr(..) => {
+                let v = self.b.ins().load(PTR, mf(), x, 0);
+                let z = self.b.ins().iconst(types::I64, 0);
+                self.mix(z, v)
             }
             t => return Err(format!("`{}` cannot be used as a hash key", self.prog.tn(t))),
         })

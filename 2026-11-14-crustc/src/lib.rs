@@ -17,8 +17,10 @@ pub mod lsp;
 pub mod macros;
 pub mod parse;
 pub mod ast_closure;
+pub mod ast_types;
 pub mod prelude;
 #[doc(hidden)]
 pub mod testgen;
+pub mod types;
 
 pub use driver::{BuildReport, Diagnostic, Options, Session, cache_path};

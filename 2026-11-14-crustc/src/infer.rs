@@ -376,7 +376,23 @@ impl Inf<'_> {
                 // (要素どうしも型が違ってよい (`Vec<String> == [&str]`): 片方が分からないときだけ決める)
                 self.elem_hint(x, y)
             }
-            _ => self.unify(a, b),
+            _ => {
+                // (片方がまだ分からず、もう片方が配列・スライス (の参照): Vec かもしれないので決めない
+                //  (`v == b"crate"` の v = `x.to_vec()`))
+                let seq_or_ref = |s: &mut Self, v: u32| -> bool {
+                    let v = s.find(v);
+                    let v = match s.shape[v as usize] {
+                        Some(Shape::Ref(_, i)) => s.find(i),
+                        _ => v,
+                    };
+                    matches!(s.shape[v as usize], Some(Shape::Arr(..) | Shape::Slc(_)) | Some(Shape::Known(Ty::Array(..) | Ty::Slice(_))))
+                };
+                let unknown = |s: &Self, v: u32| s.shape[v as usize].is_none() && !s.int_lit[v as usize];
+                if (unknown(self, fa) && seq_or_ref(self, fb)) || (unknown(self, fb) && seq_or_ref(self, fa)) {
+                    return;
+                }
+                self.unify(a, b)
+            }
         }
     }
 
@@ -439,7 +455,20 @@ impl Inf<'_> {
                                 _ => false,
                             }
                         };
-                        let coerce = (slc(self, x) && seqish(self, y)) || (slc(self, y) && seqish(self, x));
+                        // (`&String` を `&str` に渡すのも同じ)
+                        let is_str = |s: &mut Self, v: u32| {
+                            let r = s.find(v);
+                            matches!(s.shape[r as usize], Some(Shape::Known(Ty::Str)))
+                        };
+                        let is_string = |s: &mut Self, v: u32| {
+                            let r = s.find(v);
+                            matches!(s.shape[r as usize], Some(Shape::Known(Ty::Struct(sid)))
+                                if s.prog.structs[sid as usize].base.is_none() && s.prog.structs[sid as usize].name == "String")
+                        };
+                        let coerce = (slc(self, x) && seqish(self, y))
+                            || (slc(self, y) && seqish(self, x))
+                            || (is_str(self, x) && is_string(self, y))
+                            || (is_str(self, y) && is_string(self, x));
                         if !coerce {
                             self.link(a, b);
                         }

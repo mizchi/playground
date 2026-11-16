@@ -599,14 +599,17 @@ pub fn hoist_nested_items(src: &str) -> Option<String> {
     let is_sym = |k: usize, c: &[u8]| toks[k].0 == 1 && tok(k) == c;
     // 各位置の波括弧の深さと、関数の本体の深さのスタック
     let mut depth = 0i32;
-    let mut fn_bodies: Vec<i32> = vec![];
+    let mut fn_bodies: Vec<(i32, usize)> = vec![];
     let mut pending_fn = false;
     let mut moves: Vec<(usize, usize)> = vec![];
+    // 入れ子のアイテムの名前と、それを含む関数の本体 (開き括弧のトークン位置)。閉じた本体の (開き, 閉じ)
+    let mut nested_names: Vec<(Vec<u8>, usize)> = vec![];
+    let mut bodies: Vec<(usize, usize)> = vec![];
     let mut k = 0;
     while k < toks.len() {
         let t = tok(k);
         if toks[k].0 == 0 {
-            let in_body = fn_bodies.last().is_some_and(|&d| depth > d);
+            let in_body = fn_bodies.last().is_some_and(|&(d, _)| depth > d);
             let stmt_start = k == 0 || is_sym(k - 1, b"{") || is_sym(k - 1, b"}") || is_sym(k - 1, b";") || is_sym(k - 1, b"]");
             let item_kw = matches!(t, b"fn" | b"struct" | b"enum" | b"const" | b"use" | b"static");
             // (`const` の後ろに `fn` や `|` (const クロージャ) が来るものは別扱い: `const fn` は fn で見る)
@@ -677,6 +680,10 @@ pub fn hoist_nested_items(src: &str) -> Option<String> {
                     }
                 }
                 moves.push((toks[st].1, toks[e].2));
+                let nk = if matches!(t, b"static") && tok(k + 1) == b"mut" { k + 2 } else { k + 1 };
+                if nk < toks.len() && toks[nk].0 == 0 && t != b"use" {
+                    nested_names.push((tok(nk).to_vec(), fn_bodies.last().unwrap().1));
+                }
                 k = e + 1;
                 continue;
             }
@@ -687,15 +694,16 @@ pub fn hoist_nested_items(src: &str) -> Option<String> {
             match t {
                 b"{" => {
                     if pending_fn {
-                        fn_bodies.push(depth);
+                        fn_bodies.push((depth, k));
                         pending_fn = false;
                     }
                     depth += 1;
                 }
                 b"}" => {
                     depth -= 1;
-                    if fn_bodies.last() == Some(&depth) {
-                        fn_bodies.pop();
+                    if fn_bodies.last().is_some_and(|&(d, _)| d == depth) {
+                        let (_, open) = fn_bodies.pop().unwrap();
+                        bodies.push((open, k));
                     }
                 }
                 // `fn f();` (宣言だけ) は本体なし
@@ -707,6 +715,36 @@ pub fn hoist_nested_items(src: &str) -> Option<String> {
     }
     if moves.is_empty() {
         return None;
+    }
+    // (別々の関数の中の同じ名前のアイテム (`static TABLE`) は、外に出すとぶつかるので、
+    //  その関数の本体の中でだけ `TABLE__h1` などに名前を変えてからやり直す)
+    let mut renames: Vec<(usize, usize, Vec<u8>, Vec<u8>)> = vec![];
+    for (i, (n, b)) in nested_names.iter().enumerate() {
+        let dup = nested_names.iter().enumerate().any(|(j, (m, c))| j != i && m == n && c != b);
+        if !dup {
+            continue;
+        }
+        if let Some(&(open, close)) = bodies.iter().find(|x| x.0 == *b) {
+            let mut nn = n.clone();
+            nn.extend_from_slice(format!("__h{i}").as_bytes());
+            renames.push((open, close, n.clone(), nn));
+        }
+    }
+    if !renames.is_empty() {
+        let mut out = Vec::with_capacity(s.len() + 64);
+        let mut last = 0;
+        for (k, t) in toks.iter().enumerate() {
+            if t.0 != 0 {
+                continue;
+            }
+            let Some(r) = renames.iter().find(|r| r.0 < k && k < r.1 && &s[t.1..t.2] == r.2.as_slice()) else { continue };
+            out.extend_from_slice(&s[last..t.1]);
+            out.extend_from_slice(&r.3);
+            last = t.2;
+        }
+        out.extend_from_slice(&s[last..]);
+        let renamed = String::from_utf8(out).ok()?;
+        return hoist_nested_items(&renamed).or(Some(renamed));
     }
     let mut out = s.to_vec();
     let mut tail = Vec::new();
@@ -724,7 +762,359 @@ pub fn hoist_nested_items(src: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// モジュールの中の名前を平らにしてもぶつからないようにする: 2 つ以上のスコープ (モジュール・ルート) で定義される名前は、
+/// モジュールの中の定義を `m__Name` (入れ子なら `a__b__Name`) に変え、参照も直す:
+/// - そのモジュールの中の裸の名前、`use crate::m::{Name, X as Y}` で取り込んだ名前 (別名も)
+/// - `m::Name` / `crate::m::Name` / `self::Name` / `super::Name` のパス
+/// (フィールド `x.name` / `name: T` / メソッド `.name(..)` は変えない)
+pub fn rename_module_collisions(src: &str) -> Option<String> {
+    if !src.contains("mod") {
+        return None;
+    }
+    let s = src.as_bytes();
+    let toks = tokenize(s);
+    let tok = |k: usize| -> &[u8] { &s[toks[k].1..toks[k].2] };
+    let is_sym = |k: usize, c: u8| toks[k].0 == 1 && s[toks[k].1] == c && toks[k].2 == toks[k].1 + 1;
+    let is_id = |k: usize, w: &[u8]| toks[k].0 == 0 && tok(k) == w;
+    // モジュール: (名前の列 (パス), 開き `{`, 閉じ `}`)
+    let mut mods: Vec<(Vec<Vec<u8>>, usize, usize)> = vec![];
+    let mut stack: Vec<(usize, i32)> = vec![]; // (mods の番号, 開いたときの深さ)
+    let mut depth = 0i32;
+    let mut k = 0;
+    while k < toks.len() {
+        if is_id(k, b"mod") && k + 2 < toks.len() && toks[k + 1].0 == 0 && is_sym(k + 2, b'{') {
+            let mut path = stack.last().map(|&(m, _)| mods[m].0.clone()).unwrap_or_default();
+            path.push(tok(k + 1).to_vec());
+            mods.push((path, k + 2, usize::MAX));
+            stack.push((mods.len() - 1, depth));
+            depth += 1;
+            k += 3;
+            continue;
+        }
+        if is_sym(k, b'{') {
+            depth += 1;
+        } else if is_sym(k, b'}') {
+            depth -= 1;
+            if stack.last().is_some_and(|&(_, d)| d == depth) {
+                let (m, _) = stack.pop().unwrap();
+                mods[m].2 = k;
+            }
+        }
+        k += 1;
+    }
+    if mods.is_empty() {
+        return None;
+    }
+    // トークン k のスコープ (いちばん内側のモジュール。なければ usize::MAX = ルート)
+    let scope_of = |k: usize| -> usize {
+        let mut best = usize::MAX;
+        for (i, m) in mods.iter().enumerate() {
+            if m.1 < k && k < m.2 && (best == usize::MAX || mods[best].1 < m.1) {
+                best = i;
+            }
+        }
+        best
+    };
+    // 各スコープのトップレベルのアイテムの名前 (そのスコープの深さの `fn x` / `struct X` など)
+    let mut defs: Vec<(Vec<u8>, usize, usize)> = vec![]; // (名前, スコープ, 名前のトークン)
+    let mut depth = 0i32;
+    let mut scope_depth: Vec<(usize, i32)> = vec![(usize::MAX, 0)];
+    let mut k = 0;
+    while k < toks.len() {
+        if let Some(m) = mods.iter().position(|m| m.1 == k) {
+            depth += 1;
+            scope_depth.push((m, depth));
+            k += 1;
+            continue;
+        }
+        if is_sym(k, b'{') {
+            depth += 1;
+        } else if is_sym(k, b'}') {
+            if scope_depth.last().is_some_and(|&(m, _)| m != usize::MAX && mods[m].2 == k) {
+                scope_depth.pop();
+            }
+            depth -= 1;
+        } else if toks[k].0 == 0 && scope_depth.last().is_some_and(|&(_, d)| d == depth) {
+            let kw = tok(k);
+            if matches!(kw, b"fn" | b"struct" | b"enum" | b"trait" | b"type" | b"const" | b"static" | b"union") && k + 1 < toks.len() {
+                let nk = if kw == b"static" && is_id(k + 1, b"mut") { k + 2 } else { k + 1 };
+                // (`const fn f` は fn で数える)
+                if nk < toks.len() && toks[nk].0 == 0 && !(kw == b"const" && is_id(nk, b"fn")) && tok(nk) != b"_" {
+                    let sc = scope_depth.last().unwrap().0;
+                    defs.push((tok(nk).to_vec(), sc, nk));
+                }
+            }
+        }
+        k += 1;
+    }
+    let colliding = |n: &[u8]| -> bool {
+        let mut first: Option<usize> = None;
+        for d in &defs {
+            if d.0.as_slice() == n {
+                match first {
+                    None => first = Some(d.1),
+                    Some(f) if f != d.1 => return true,
+                    _ => {}
+                }
+            }
+        }
+        false
+    };
+    let new_name = |m: usize, n: &[u8]| -> Vec<u8> {
+        let mut v = Vec::new();
+        for p in &mods[m].0 {
+            v.extend_from_slice(p);
+            v.extend_from_slice(b"__");
+        }
+        v.extend_from_slice(n);
+        v
+    };
+    // 名前を変える定義: (スコープ, 元の名前) → 新しい名前
+    let mut renamed: Vec<(usize, Vec<u8>, Vec<u8>)> = vec![];
+    for d in &defs {
+        if d.1 != usize::MAX && colliding(&d.0) && !renamed.iter().any(|r| r.0 == d.1 && r.1 == d.0) {
+            renamed.push((d.1, d.0.clone(), new_name(d.1, &d.0)));
+        }
+    }
+    if renamed.is_empty() {
+        return None;
+    }
+    // モジュールのパス (`crate::a::b` / `a::b` / `self` / `super`) → mods の番号
+    let resolve_mod = |from: usize, segs: &[Vec<u8>]| -> Option<usize> {
+        let mut base: Vec<Vec<u8>> = if from == usize::MAX { vec![] } else { mods[from].0.clone() };
+        let mut rest = segs;
+        if rest.first().is_some_and(|x| x.as_slice() == b"crate") {
+            base = vec![];
+            rest = &rest[1..];
+        } else if rest.first().is_some_and(|x| x.as_slice() == b"self") {
+            rest = &rest[1..];
+        } else {
+            while rest.first().is_some_and(|x| x.as_slice() == b"super") {
+                base.pop();
+                rest = &rest[1..];
+            }
+            // (相対パスで見つからなければ crate からとみなす)
+            let mut rel = base.clone();
+            rel.extend(rest.iter().cloned());
+            if let Some(i) = mods.iter().position(|m| m.0 == rel) {
+                return Some(i);
+            }
+            base = vec![];
+        }
+        base.extend(rest.iter().cloned());
+        if base.is_empty() {
+            return Some(usize::MAX);
+        }
+        mods.iter().position(|m| m.0 == base)
+    };
+    let renamed_in = |m: usize, n: &[u8]| -> Option<Vec<u8>> {
+        renamed.iter().find(|r| r.0 == m && r.1.as_slice() == n).map(|r| r.2.clone())
+    };
+    // use 文で取り込んだ名前: (スコープ, 使う名前) → 新しい名前。use 文のトークン範囲は書き換えない
+    let mut imports: Vec<(usize, Vec<u8>, Vec<u8>)> = vec![];
+    let mut use_ranges: Vec<(usize, usize)> = vec![];
+    let mut k = 0;
+    while k < toks.len() {
+        if !is_id(k, b"use") {
+            k += 1;
+            continue;
+        }
+        let sc = scope_of(k);
+        let mut e = k;
+        while e < toks.len() && !is_sym(e, b';') {
+            e += 1;
+        }
+        use_ranges.push((k, e));
+        // 木を辿る: (今の接頭辞, 位置)
+        fn walk(
+            toks: &[(u8, usize, usize)],
+            s: &[u8],
+            mut j: usize,
+            end: usize,
+            prefix: Vec<Vec<u8>>,
+            out: &mut Vec<(Vec<Vec<u8>>, Vec<u8>)>,
+        ) -> usize {
+            let tk = |k: usize| -> &[u8] { &s[toks[k].1..toks[k].2] };
+            let mut path = prefix.clone();
+            while j < end {
+                let t = tk(j);
+                if toks[j].0 == 0 {
+                    if t == b"as" {
+                        // 別名
+                        if j + 1 < end {
+                            let alias = tk(j + 1).to_vec();
+                            out.push((path.clone(), alias));
+                            path = prefix.clone();
+                            j += 2;
+                            continue;
+                        }
+                    }
+                    path.push(t.to_vec());
+                    j += 1;
+                    let next_is_sep = j + 1 < end && tk(j) == b":" && tk(j + 1) == b":";
+                    let next_is_as = j < end && toks[j].0 == 0 && tk(j) == b"as";
+                    if !next_is_sep && !next_is_as {
+                        let last = path.last().cloned().unwrap_or_default();
+                        out.push((path.clone(), last));
+                        path = prefix.clone();
+                    }
+                } else if t == b":" {
+                    j += 1;
+                } else if t == b"{" {
+                    j = walk(toks, s, j + 1, end, path.clone(), out);
+                    path = prefix.clone();
+                } else if t == b"}" {
+                    return j + 1;
+                } else {
+                    // `,` / `*`
+                    if t != b"," {
+                        path = prefix.clone();
+                    }
+                    j += 1;
+                    if t == b"," {
+                        path = prefix.clone();
+                    }
+                }
+            }
+            j
+        }
+        let mut items = vec![];
+        walk(&toks, s, k + 1, e, vec![], &mut items);
+        for (path, local) in items {
+            if path.len() < 2 {
+                continue;
+            }
+            let (mpath, name) = path.split_at(path.len() - 1);
+            if let Some(m) = resolve_mod(sc, mpath) {
+                if let Some(nn) = renamed_in(m, &name[0]) {
+                    imports.push((sc, local, nn));
+                }
+            }
+        }
+        k = e + 1;
+    }
+    // enum のバリアント名の位置 (`enum E { Ty(Ty), A }` の `Ty` / `A`) は名前ではないので変えない
+    let mut variant_toks: Vec<usize> = vec![];
+    let mut k = 0;
+    while k + 1 < toks.len() {
+        if is_id(k, b"enum") && toks[k + 1].0 == 0 {
+            let mut j = k + 2;
+            while j < toks.len() && !is_sym(j, b'{') && !is_sym(j, b';') {
+                j += 1;
+            }
+            if j < toks.len() && is_sym(j, b'{') {
+                let mut d = 0i32;
+                let mut expect = true;
+                let mut m = j;
+                while m < toks.len() {
+                    if is_sym(m, b'{') || is_sym(m, b'(') || is_sym(m, b'[') {
+                        d += 1;
+                    } else if is_sym(m, b'}') || is_sym(m, b')') || is_sym(m, b']') {
+                        d -= 1;
+                        if d == 0 {
+                            break;
+                        }
+                    } else if d == 1 {
+                        if is_sym(m, b',') {
+                            expect = true;
+                        } else if is_sym(m, b'#') {
+                            // 属性はそのまま
+                        } else if expect && toks[m].0 == 0 {
+                            variant_toks.push(m);
+                            expect = false;
+                        }
+                    }
+                    m += 1;
+                }
+            }
+        }
+        k += 1;
+    }
+    // 書き換え
+    let mut repl: Vec<(usize, usize, Vec<u8>)> = vec![]; // (開始トークン, 終了トークン (含む), 新しいテキスト)
+    let mut k = 0;
+    while k < toks.len() {
+        if toks[k].0 != 0 || use_ranges.iter().any(|r| r.0 <= k && k <= r.1) || variant_toks.contains(&k) {
+            k += 1;
+            continue;
+        }
+        let prev_dot = k >= 1 && is_sym(k - 1, b'.');
+        let prev_path = k >= 2 && is_sym(k - 1, b':') && is_sym(k - 2, b':');
+        if prev_dot || prev_path {
+            k += 1;
+            continue;
+        }
+        // パス `a::b::Name` (先頭から)
+        let mut segs: Vec<Vec<u8>> = vec![tok(k).to_vec()];
+        let mut j = k;
+        while j + 3 < toks.len() && is_sym(j + 1, b':') && is_sym(j + 2, b':') && toks[j + 3].0 == 0 {
+            j += 3;
+            segs.push(tok(j).to_vec());
+        }
+        let sc = scope_of(k);
+        if segs.len() >= 2 {
+            // 接頭辞のいちばん長いモジュールから見る
+            let mut done = false;
+            for cut in (1..segs.len()).rev() {
+                if let Some(m) = resolve_mod(sc, &segs[..cut]) {
+                    if m == usize::MAX && !(segs[0].as_slice() == b"crate") {
+                        continue;
+                    }
+                    if let Some(nn) = renamed_in(m, &segs[cut]) {
+                        // segs[..=cut] を新しい名前にする
+                        repl.push((k, k + 3 * cut, nn));
+                        done = true;
+                    }
+                    break;
+                }
+            }
+            if done {
+                k = j + 1;
+                continue;
+            }
+        }
+        // 裸の名前 (フィールドの宣言・初期化 `name: ..` は除く)
+        let next_colon = k + 1 < toks.len() && is_sym(k + 1, b':') && !(k + 2 < toks.len() && is_sym(k + 2, b':'));
+        let is_def = defs.iter().any(|d| d.2 == k);
+        if !next_colon || is_def {
+            let n = tok(k);
+            let nn = renamed_in(sc, n).or_else(|| imports.iter().find(|i| i.0 == sc && i.1.as_slice() == n).map(|i| i.2.clone()));
+            if let Some(nn) = nn {
+                repl.push((k, k, nn));
+            }
+        }
+        k += 1;
+    }
+    if repl.is_empty() {
+        return None;
+    }
+    repl.sort_by_key(|r| r.0);
+    let mut out = Vec::with_capacity(s.len() + repl.len() * 8);
+    let mut last = 0;
+    for (a, b, t) in &repl {
+        let (st, en) = (toks[*a].1, toks[*b].2);
+        if st < last {
+            continue;
+        }
+        out.extend_from_slice(&s[last..st]);
+        out.extend_from_slice(t);
+        last = en;
+    }
+    out.extend_from_slice(&s[last..]);
+    String::from_utf8(out).ok()
+}
+
 pub fn flatten_modules(src: &str) -> Option<String> {
+    let renamed = rename_module_collisions(src);
+    let src: &str = renamed.as_deref().unwrap_or(src);
+    if !src.contains("mod") {
+        return None;
+    }
+    let r = flatten_modules_inner(src);
+    r.or(renamed)
+}
+
+fn flatten_modules_inner(src: &str) -> Option<String> {
     if !src.contains("mod") {
         return None;
     }

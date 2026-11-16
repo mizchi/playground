@@ -375,6 +375,12 @@ impl<T, E> Result<T, E> {
             Err(_) => default,
         }
     }
+    pub fn as_ref(&self) -> Result<&T, &E> {
+        match self {
+            Ok(x) => Ok(x),
+            Err(e) => Err(e),
+        }
+    }
     pub fn ok(self) -> Option<T> {
         match self {
             Ok(v) => Some(v),
@@ -6154,6 +6160,42 @@ impl<T> Debug for RefCell<T> {
 
 pub struct Cell<T> {
     val: T,
+}
+
+// `std::ptr::eq(a, b)`: 同じアドレスか
+pub fn __exr_ptr_eq<T>(a: &T, b: &T) -> bool {
+    a as *const T == b as *const T
+}
+
+// `std::sync::Mutex` (スレッドは 1 本なので、lock は中身を指すだけ)
+pub struct Mutex<T> {
+    val: T,
+}
+
+pub struct MutexGuard<T> {
+    p: *mut T,
+}
+
+impl<T> Mutex<T> {
+    pub const fn new(v: T) -> Mutex<T> {
+        Mutex { val: v }
+    }
+    pub fn lock(&self) -> Result<MutexGuard<T>, ()> {
+        Ok(MutexGuard { p: &self.val as *const T as *mut T })
+    }
+    pub fn into_inner(self) -> Result<T, ()> {
+        Ok(self.val)
+    }
+    pub fn get_mut(&mut self) -> Result<&mut T, ()> {
+        Ok(&mut self.val)
+    }
+}
+
+impl<T> Deref for MutexGuard<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        unsafe { &*self.p }
+    }
 }
 
 // `std::sync::OnceLock` (スレッドは 1 本なので、初期化済みかどうかと値だけ)

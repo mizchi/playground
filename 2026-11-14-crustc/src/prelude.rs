@@ -460,7 +460,7 @@ fn owner(h: usize) -> Option<&'static str> {
                         | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" | "Rev" | "StepBy" | "Peekable"
                         | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks"
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
-                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "OnceLock" | "RangeFrom" | "TryFromIntError" | "TryFromSliceError" | "Stdin" | "StdinLock" | "StdinLines" | "Stdout" | "StdoutLock"
+                        | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "OnceLock" | "Mutex" | "MutexGuard" | "RangeFrom" | "TryFromIntError" | "TryFromSliceError" | "Stdin" | "StdinLock" | "StdinLines" | "Stdout" | "StdoutLock"
                         | "BufWriter" | "IoError" | "__DynError" | "Args" | "DefaultHasher" | "VarError"
                         | "PathBuf" | "__PathExt" | "__AsPathStr" | "Command" | "__ExitStatus" | "Cow" | "__CowStr" => Some(w),
                         // HashMap のイテレータ (HmIter など) は HashMap を使うときだけ
@@ -608,6 +608,9 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     // (イテレータの列は必ず作るもの (iter / into_iter / chars / 範囲 / 自前の impl Iterator) から始まる。
     //  Option::map や自分の型の fold だけでは付けない)
     let producer = ["iter", "iter_mut", "into_iter"].iter().any(|n| need.contains(n));
+    if user_src.contains("ptr::eq") {
+        need.insert("__exr_ptr_eq");
+    }
     if user_src.contains("Cow") {
         need.extend(["Cow", "__CowStr", "Deref", "deref", "into_owned", "to_vec", "__exr_slice_to_vec", "Vec", "String"]);
     }
@@ -786,7 +789,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         }
     }
     // Box を通した再帰型の `==` は glue 関数で (その場で展開すると止まらない)
-    if need.contains("Box") && user_src.contains("PartialEq") {
+    if (need.contains("Box") || user_src.contains("&'")) && user_src.contains("PartialEq") {
         need.insert("__exr_eq");
     }
     if need.contains("BTreeMap") && user_src.contains(".range(") {
@@ -981,8 +984,11 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     if need.contains("PathBuf") {
         op_impls.extend(["Deref", "From", "IntoIterator"]);
     }
-    if need.contains("Cow") {
+    if need.contains("Cow") || need.contains("Mutex") {
         op_impls.push("Deref");
+    }
+    if need.contains("Mutex") {
+        need.extend(["MutexGuard", "Deref", "deref", "Result"]);
     }
     if op_impls.contains(&"IntoIterator") {
         need.extend(["__into_iter_mark", "Iterator", "next", "iter"]);
