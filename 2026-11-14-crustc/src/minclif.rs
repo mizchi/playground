@@ -168,6 +168,7 @@ impl FunctionBuilder {
         // 引数をスロットへ
         const ARG_STORE: [[u8; 3]; 6] = [[0x48, 0x89, 0xBD], [0x48, 0x89, 0xB5], [0x48, 0x89, 0x95], [0x48, 0x89, 0x8D], [0x4C, 0x89, 0x85], [0x4C, 0x89, 0x8D]];
         let (mut ni, mut nf) = (0usize, 0u8);
+        let mut ns = 0i32;
         for (_, &t) in params.iter().enumerate() {
             let v = b.new_value(t);
             let off = b.values[v.0 as usize].0;
@@ -180,17 +181,24 @@ impl FunctionBuilder {
                 b.entry_params.push(v);
                 continue;
             }
-            let i = ni;
-            ni += 1;
-            if i < 6 {
-                b.code.extend_from_slice(&ARG_STORE[i]);
-                b.code.extend_from_slice(&off.to_le_bytes());
+            // (i128 はレジスタ 2 つ (下位, 上位)。2 つ残っていなければ全体をスタックで)
+            let parts = if t == Type::I128 { 2 } else { 1 };
+            if ni + parts <= 6 {
+                for k in 0..parts {
+                    b.code.extend_from_slice(&ARG_STORE[ni + k]);
+                    b.code.extend_from_slice(&(off + 8 * k as i32).to_le_bytes());
+                }
+                ni += parts;
             } else {
-                // 7 個目以降はスタック渡し: [rbp + 16 + 8*(i-6)]
-                let src = 16 + 8 * (i as i32 - 6);
-                b.code.extend_from_slice(&[0x48, 0x8B, 0x85]);
-                b.code.extend_from_slice(&src.to_le_bytes());
-                b.store_rax(v);
+                ni = 6;
+                for k in 0..parts {
+                    // スタック渡し: [rbp + 16 + 8*n]
+                    let src = 16 + 8 * ns;
+                    ns += 1;
+                    b.code.extend_from_slice(&[0x48, 0x8B, 0x85]);
+                    b.code.extend_from_slice(&src.to_le_bytes());
+                    b.store_rax_at(off + 8 * k as i32);
+                }
             }
             b.entry_params.push(v);
         }
@@ -648,6 +656,11 @@ impl FunctionBuilder {
             } else {
                 self.load_rax(v);
             }
+            if self.value_type(v) == Type::I128 {
+                // (上位は rdx)
+                let off = self.values[v.0 as usize].0;
+                self.emit_disp(&[0x48, 0x8B, 0x95], off + 8);
+            }
         }
         if let Some(&v) = vals.get(1) {
             // 2 つ目は rdx
@@ -669,19 +682,28 @@ impl FunctionBuilder {
         const ARG_LOAD: [[u8; 3]; 6] = [[0x48, 0x8B, 0xBD], [0x48, 0x8B, 0xB5], [0x48, 0x8B, 0x95], [0x48, 0x8B, 0x8D], [0x4C, 0x8B, 0x85], [0x4C, 0x8B, 0x8D]];
         let fargs: Vec<Value> = args.iter().copied().filter(|&a| self.value_type(a).is_float()).collect();
         let args: Vec<Value> = args.iter().copied().filter(|&a| !self.value_type(a).is_float()).collect();
-        let args = &args[..];
-        let stack_args: Vec<Value> = args.iter().skip(6).copied().collect();
+        // 8 byte ずつの部分 (スロットのオフセット) をレジスタとスタックに分ける (i128 は 2 つ。2 つ残っていなければ全体をスタック)
+        let mut regs: Vec<i32> = vec![];
+        let mut stack_parts: Vec<i32> = vec![];
+        for &a in &args {
+            let off = self.values[a.0 as usize].0;
+            let parts: Vec<i32> = if self.value_type(a) == Type::I128 { vec![off, off + 8] } else { vec![off] };
+            if regs.len() + parts.len() <= 6 && stack_parts.is_empty() {
+                regs.extend(parts);
+            } else {
+                stack_parts.extend(parts);
+            }
+        }
         // (スタック渡しの引数: rsp を 16 byte に揃えてから逆順に push)
-        let pad = stack_args.len() % 2 == 1;
+        let pad = stack_parts.len() % 2 == 1;
         if pad {
             self.emit(&[0x48, 0x83, 0xEC, 0x08]); // sub rsp, 8
         }
-        for &a in stack_args.iter().rev() {
-            self.load_rax(a);
+        for &o in stack_parts.iter().rev() {
+            self.load_rax_at(o);
             self.emit(&[0x50]);
         }
-        for (i, &a) in args.iter().take(6).enumerate() {
-            let off = self.values[a.0 as usize].0;
+        for (i, &off) in regs.iter().enumerate() {
             self.emit_disp(&ARG_LOAD[i], off);
         }
         for (k, &a) in fargs.iter().enumerate().take(8) {
@@ -694,7 +716,7 @@ impl FunctionBuilder {
         let at = self.code.len() as u32;
         self.emit(&[0, 0, 0, 0]);
         self.relocs.push(Reloc { offset: at, name: self.funcs[f.0 as usize].clone(), kind: 4, addend: -4 });
-        let n = stack_args.len() as i32 + pad as i32;
+        let n = stack_parts.len() as i32 + pad as i32;
         if n > 0 {
             self.emit_disp(&[0x48, 0x81, 0xC4], 8 * n); // add rsp, 8n
         }
@@ -702,6 +724,15 @@ impl FunctionBuilder {
         for (i, &t) in rets.iter().enumerate() {
             if t.is_float() {
                 out.push(self.xmm0_result(t));
+                continue;
+            }
+            if t == Type::I128 {
+                // rax (下位) と rdx (上位)
+                let v = self.new_value(t);
+                let o = self.values[v.0 as usize].0;
+                self.store_rax_at(o);
+                self.emit_disp(&[0x48, 0x89, 0x95], o + 8); // mov [rbp+o+8], rdx
+                out.push(v);
                 continue;
             }
             if i == 1 {

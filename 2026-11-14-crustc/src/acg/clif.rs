@@ -465,29 +465,80 @@ impl Ins<'_> {
     pub fn umulhi(mut self, a: Value, b: Value) -> Value {
         self.m().umulhi(a, b)
     }
-    pub fn clz(mut self, a: Value) -> Value {
-        self.m().clz(a)
+    pub fn clz(self, a: Value) -> Value {
+        let m = &mut self.0.m;
+        if !is128(m, a) {
+            return m.clz(a);
+        }
+        // (上位が 0 なら 64 + 下位の clz)
+        let (lo, hi) = m.isplit(a);
+        let zh = m.icmp_imm(IntCC::Equal, hi, 0);
+        let cl = m.clz(lo);
+        let k = m.iconst(Type::I64, 64);
+        let cl = m.iadd(cl, k);
+        let ch = m.clz(hi);
+        let r = m.select(zh, cl, ch);
+        m.extend128(r, false)
     }
-    pub fn ctz(mut self, a: Value) -> Value {
-        self.m().ctz(a)
+    pub fn ctz(self, a: Value) -> Value {
+        let m = &mut self.0.m;
+        if !is128(m, a) {
+            return m.ctz(a);
+        }
+        let (lo, hi) = m.isplit(a);
+        let zl = m.icmp_imm(IntCC::Equal, lo, 0);
+        let th = m.ctz(hi);
+        let k = m.iconst(Type::I64, 64);
+        let th = m.iadd(th, k);
+        let tl = m.ctz(lo);
+        let r = m.select(zl, th, tl);
+        m.extend128(r, false)
     }
-    pub fn popcnt(mut self, a: Value) -> Value {
-        self.m().popcnt(a)
+    pub fn popcnt(self, a: Value) -> Value {
+        let m = &mut self.0.m;
+        if !is128(m, a) {
+            return m.popcnt(a);
+        }
+        let (lo, hi) = m.isplit(a);
+        let pl = m.popcnt(lo);
+        let ph = m.popcnt(hi);
+        let r = m.iadd(pl, ph);
+        m.extend128(r, false)
     }
     pub fn bswap(mut self, a: Value) -> Value {
         self.m().bswap(a)
     }
-    pub fn smin(mut self, a: Value, b: Value) -> Value {
-        self.m().smin(a, b)
+    pub fn smin(self, a: Value, b: Value) -> Value {
+        let m = &mut self.0.m;
+        if is128(m, a) {
+            let c = m.icmp128(IntCC::SignedLessThan, a, b);
+            return Ins(&mut *self.0).select(c, a, b);
+        }
+        m.smin(a, b)
     }
-    pub fn umin(mut self, a: Value, b: Value) -> Value {
-        self.m().umin(a, b)
+    pub fn umin(self, a: Value, b: Value) -> Value {
+        let m = &mut self.0.m;
+        if is128(m, a) {
+            let c = m.icmp128(IntCC::UnsignedLessThan, a, b);
+            return Ins(&mut *self.0).select(c, a, b);
+        }
+        m.umin(a, b)
     }
-    pub fn smax(mut self, a: Value, b: Value) -> Value {
-        self.m().smax(a, b)
+    pub fn smax(self, a: Value, b: Value) -> Value {
+        let m = &mut self.0.m;
+        if is128(m, a) {
+            let c = m.icmp128(IntCC::SignedGreaterThan, a, b);
+            return Ins(&mut *self.0).select(c, a, b);
+        }
+        m.smax(a, b)
     }
-    pub fn umax(mut self, a: Value, b: Value) -> Value {
-        self.m().umax(a, b)
+    pub fn umax(self, a: Value, b: Value) -> Value {
+        let m = &mut self.0.m;
+        if is128(m, a) {
+            let c = m.icmp128(IntCC::UnsignedGreaterThan, a, b);
+            return Ins(&mut *self.0).select(c, a, b);
+        }
+        m.umax(a, b)
     }
     pub fn iabs(mut self, a: Value) -> Value {
         self.m().iabs(a)
