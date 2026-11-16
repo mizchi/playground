@@ -104,6 +104,8 @@ pub enum Target {
     Data(u32),
     Static(u32),
     Vtable(u32),
+    /// 外部の名前 (libgcc の `__multi3` など)
+    Sym(String),
 }
 
 /// 再配置の名前 (`\x01f12` / `\x01d0` / `\x01s3` / `\x01v1`)
@@ -306,7 +308,7 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
     let (code, relocs) = b.finish_zeroing(&late);
     let mut out = vec![];
     for r in relocs {
-        let Some(target) = target_of(&r.name) else { return Err(format!("internal: unknown symbol {:?}", r.name)) };
+        let target = target_of(&r.name).unwrap_or_else(|| Target::Sym(r.name.clone()));
         let kind = if r.kind == 9 { 5 } else { 4 };
         out.push(BlobReloc { offset: r.offset, kind, addend: r.addend, target });
     }

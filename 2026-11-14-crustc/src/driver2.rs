@@ -332,6 +332,10 @@ fn emit_object(prog: &Program, insts: &Insts, user_live: &[u32], blobs: &FxMap<u
                         key.push(3);
                         key.extend_from_slice(&c.to_le_bytes());
                     }
+                    Target::Sym(ref n) => {
+                        key.push(5);
+                        key.extend_from_slice(n.as_bytes());
+                    }
                     Target::Vtable(k) => {
                         key.push(4);
                         for &f in &b.vtables[k as usize] {
@@ -468,6 +472,7 @@ fn emit_object(prog: &Program, insts: &Insts, user_live: &[u32], blobs: &FxMap<u
                     Target::Data(k) => data_names[k as usize].clone(),
                     Target::Static(c) => static_name(c),
                     Target::Vtable(k) => vt_names[k as usize].clone(),
+                    Target::Sym(ref n) => n.clone(),
                 },
                 kind: if r.kind == 5 { 9 } else { 4 },
                 addend: match r.target {

@@ -131,12 +131,16 @@ pub struct FunctionBuilder {
     /// trap の場所 (ud2 のオフセット) とコード (Cranelift の TrapCode::user に当たる)
     traps: Vec<(u32, u8)>,
     entry_jump: usize,
+    /// 今のブロックが終端命令 (jump / brif / return / trap) で終わったか
+    terminated: bool,
 }
 
 struct BlockData {
     params: Vec<Value>,
     /// コードの位置 (切り替えたとき)
     offset: Option<usize>,
+    /// 終端命令の前に別のブロックへ切り替えたとき、続きへ飛ぶ jmp の rel32 の位置 (戻ってきたら今の位置へ向ける)
+    cont: Option<usize>,
 }
 
 impl FunctionBuilder {
@@ -157,6 +161,7 @@ impl FunctionBuilder {
             entry_params: vec![],
             traps: vec![],
             entry_jump: 0,
+            terminated: false,
         };
         // プロローグ: push rbp; mov rbp, rsp; sub rsp, <frame> (frame は最後に書き込む)
         b.code.extend_from_slice(&[0x55, 0x48, 0x89, 0xE5, 0x48, 0x81, 0xEC, 0, 0, 0, 0]);
@@ -217,7 +222,7 @@ impl FunctionBuilder {
     }
 
     pub fn create_block(&mut self) -> Block {
-        self.blocks.push(BlockData { params: vec![], offset: None });
+        self.blocks.push(BlockData { params: vec![], offset: None, cont: None });
         Block(self.blocks.len() as u32 - 1)
     }
 
@@ -231,9 +236,27 @@ impl FunctionBuilder {
         self.blocks[b.0 as usize].params.clone()
     }
 
+    /// ブロックに切り替える。途中のブロック (終端命令がまだない) から離れるときは続きへの jmp を置き、
+    /// 後でそのブロックに戻ったら (Cranelift と同じく続きを書ける) その jmp を今の位置へ向ける
     pub fn switch_to_block(&mut self, b: Block) {
-        self.blocks[b.0 as usize].offset = Some(self.code.len());
+        if let Some(c) = self.cur {
+            if !self.terminated && c != b {
+                self.emit(&[0xE9]);
+                let at = self.code.len();
+                self.emit(&[0, 0, 0, 0]);
+                self.blocks[c.0 as usize].cont = Some(at);
+            }
+        }
+        let here = self.code.len();
+        let bd = &mut self.blocks[b.0 as usize];
+        if let Some(at) = bd.cont.take() {
+            let rel = here as i32 - (at as i32 + 4);
+            self.code[at..at + 4].copy_from_slice(&rel.to_le_bytes());
+        } else if bd.offset.is_none() {
+            bd.offset = Some(here);
+        }
         self.cur = Some(b);
+        self.terminated = false;
     }
 
     pub fn current_block(&self) -> Option<Block> {
@@ -599,6 +622,7 @@ impl FunctionBuilder {
         self.pass_args(b, args);
         self.emit(&[0xE9]);
         self.rel32_to(b);
+        self.terminated = true;
     }
 
     /// c が 0 でなければ then_b へ、0 なら else_b へ
@@ -632,10 +656,12 @@ impl FunctionBuilder {
         }
         // leave; ret
         self.emit(&[0xC9, 0xC3]);
+        self.terminated = true;
     }
 
     pub fn trap(&mut self) {
         self.emit(&[0x0F, 0x0B]); // ud2
+        self.terminated = true;
     }
 
     /// 関数を呼ぶ (引数は 6 個まではレジスタ、それ以降はスタック)。戻り値は 0〜2 個 (rax, rdx)

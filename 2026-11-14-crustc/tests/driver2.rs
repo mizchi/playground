@@ -45,6 +45,16 @@ fn driver2_like_driver() {
             ok += 1;
         } else {
             bad.push(format!("{name}: output differs (exit {:?} vs {:?})", a.status.code(), b.status.code()));
+            if std::env::var("DRIVER2_FILE").is_ok() {
+                let (x, y) = (String::from_utf8_lossy(&a.stdout), String::from_utf8_lossy(&b.stdout));
+                for (i, (l1, l2)) in x.lines().zip(y.lines()).enumerate() {
+                    if l1 != l2 {
+                        eprintln!("first diff at line {i}:\n  ours: {l1}\n  ref:  {l2}");
+                        break;
+                    }
+                }
+                eprintln!("ours {} lines, ref {} lines; ours stderr: {}", x.lines().count(), y.lines().count(), String::from_utf8_lossy(&a.stderr));
+            }
         }
     }
     eprintln!("{ok} same, {} differ", bad.len());

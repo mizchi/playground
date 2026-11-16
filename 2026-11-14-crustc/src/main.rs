@@ -80,6 +80,18 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // (CRUSTC_DRIVER2=1: syn・Cranelift を使わないドライバでビルドする。`--features acg` のときだけ)
+    #[cfg(feature = "acg")]
+    if std::env::var_os("CRUSTC_DRIVER2").is_some() && mode != "check" {
+        let output = if output.as_os_str().is_empty() { input.with_extension("") } else { output.clone() };
+        match crustc::driver2::build(&src, &output, o.opt, o.linker.as_deref()) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("error: {}: {e}", input.display());
+                std::process::exit(1);
+            }
+        }
+    }
     let mut s = Session::new(o);
     if mode == "check" {
         let diags = s.check(&src);
