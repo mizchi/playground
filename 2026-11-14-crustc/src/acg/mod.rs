@@ -1020,7 +1020,8 @@ impl Cx<'_> {
                     self.bind(name, ty, v);
                     self.extend_temps(t0);
                 }
-                Stmt::Expr(Expr::Macro(p, g), semi) => {
+                // (`;` の付いたマクロの文。末尾の `vec![]` などは式として期待型を渡す)
+                Stmt::Expr(Expr::Macro(p, g), semi) if *semi => {
                     let r = self.macro_(p, g, None)?;
                     if r.1 == Ty::Never {
                         diverged = true;

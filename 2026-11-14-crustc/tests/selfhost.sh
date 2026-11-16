@@ -20,13 +20,20 @@
 #   enc:   src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と src/fxhash.rs (FxHasher / FxMap)
 set -uo pipefail
 cd "$(dirname "$0")/.."
-cargo build --release -q || exit 1
+# SELFHOST_DRIVER2=1: crustc 側を syn・Cranelift を使わないドライバ (driver2 + acg + minclif) でビルドする
+if [ -n "${SELFHOST_DRIVER2:-}" ]; then
+  cargo build --release -q --features acg || exit 1
+  crustc_cmd() { CRUSTC_DRIVER2=1 target/release/crustc "$@"; }
+else
+  cargo build --release -q || exit 1
+  crustc_cmd() { target/release/crustc "$@"; }
+fi
 out=out/selfhost
 mkdir -p "$out"
 fail=0
 python3 tests/selfhost/build_lexer.py > "$out/lexer_main.rs"
 rustc --edition 2024 -O -Awarnings "$out/lexer_main.rs" -o "$out/lexer_rustc" || exit 1
-if ! target/release/crustc "$out/lexer_main.rs" -o "$out/lexer_crustc" -O; then
+if ! crustc_cmd "$out/lexer_main.rs" -o "$out/lexer_crustc" -O; then
   echo "FAIL lexer (crustc)"; exit 1
 fi
 inputs=(src/*.rs src/prelude_lib.rs.in examples/*.rs tests/probe/*.rs)
@@ -42,7 +49,7 @@ rustc --edition 2024 -O -Awarnings "$out/prelude_main.rs" -o "$out/prelude_rustc
 pin=(tests/probe/*.rs examples/*.rs)
 "$out/prelude_rustc" "${pin[@]}" > "$out/prelude.rustc.out"
 for opt in "" -O; do
-  if ! target/release/crustc "$out/prelude_main.rs" -o "$out/prelude_crustc" $opt; then
+  if ! crustc_cmd "$out/prelude_main.rs" -o "$out/prelude_crustc" $opt; then
     echo "FAIL prelude $opt (crustc)"; fail=1; continue
   fi
   "$out/prelude_crustc" "${pin[@]}" > "$out/prelude.crustc.out"
@@ -59,7 +66,7 @@ rustc --edition 2024 -O -Awarnings "$out/link_main.rs" -o "$out/link_rustc" || e
 rm -f "$out/hello_x" "$out/hello_x.link"
 "$out/link_rustc" "$out/hello.o" "$out/hello_x" > "$out/link.rustc.out"
 for opt in "" -O; do
-  if ! target/release/crustc "$out/link_main.rs" -o "$out/link_crustc" $opt; then
+  if ! crustc_cmd "$out/link_main.rs" -o "$out/link_crustc" $opt; then
     echo "FAIL link $opt (crustc)"; fail=1; continue
   fi
   rm -f "$out/hello_x" "$out/hello_x.link"
@@ -85,7 +92,7 @@ cc -O1 -c "$out/many.c" -o "$out/many.o" || exit 1
 rustc --edition 2024 -O -Awarnings "$out/elfz_main.rs" -o "$out/elfz_rustc" || exit 1
 "$out/elfz_rustc" "$out/hello.o" "$out/many.o" > "$out/elfz.rustc.out"
 for opt in "" -O; do
-  if ! target/release/crustc "$out/elfz_main.rs" -o "$out/elfz_crustc" $opt; then
+  if ! crustc_cmd "$out/elfz_main.rs" -o "$out/elfz_crustc" $opt; then
     echo "FAIL elfz $opt (crustc)"; fail=1; continue
   fi
   "$out/elfz_crustc" "$out/hello.o" "$out/many.o" > "$out/elfz.crustc.out"
@@ -100,7 +107,7 @@ rustc --edition 2024 -O -Awarnings "$out/macros_main.rs" -o "$out/macros_rustc" 
 min=(tests/probe/*.rs examples/*.rs src/*.rs)
 "$out/macros_rustc" "${min[@]}" > "$out/macros.rustc.out"
 for opt in "" -O; do
-  if ! target/release/crustc "$out/macros_main.rs" -o "$out/macros_crustc" $opt; then
+  if ! crustc_cmd "$out/macros_main.rs" -o "$out/macros_crustc" $opt; then
     echo "FAIL macros $opt (crustc)"; fail=1; continue
   fi
   "$out/macros_crustc" "${min[@]}" > "$out/macros.crustc.out"
@@ -114,7 +121,7 @@ python3 tests/selfhost/build_parse.py > "$out/parse_main.rs"
 rustc --edition 2024 -O -Awarnings "$out/parse_main.rs" -o "$out/parse_rustc" || exit 1
 "$out/parse_rustc" "${min[@]}" > "$out/parse.rustc.out"
 for opt in "" -O; do
-  if ! target/release/crustc "$out/parse_main.rs" -o "$out/parse_crustc" $opt; then
+  if ! crustc_cmd "$out/parse_main.rs" -o "$out/parse_crustc" $opt; then
     echo "FAIL parse $opt (crustc)"; fail=1; continue
   fi
   "$out/parse_crustc" "${min[@]}" > "$out/parse.crustc.out"
@@ -128,7 +135,7 @@ python3 tests/selfhost/build_ast_closure.py > "$out/ast_closure_main.rs"
 rustc --edition 2024 -O -Awarnings "$out/ast_closure_main.rs" -o "$out/ast_closure_rustc" || exit 1
 "$out/ast_closure_rustc" "${min[@]}" > "$out/ast_closure.rustc.out"
 for opt in "" -O; do
-  if ! target/release/crustc "$out/ast_closure_main.rs" -o "$out/ast_closure_crustc" $opt; then
+  if ! crustc_cmd "$out/ast_closure_main.rs" -o "$out/ast_closure_crustc" $opt; then
     echo "FAIL ast_closure $opt (crustc)"; fail=1; continue
   fi
   "$out/ast_closure_crustc" "${min[@]}" > "$out/ast_closure.crustc.out"
@@ -142,7 +149,7 @@ python3 tests/selfhost/build_ast_types.py > "$out/ast_types_main.rs"
 rustc --edition 2024 -O -Awarnings "$out/ast_types_main.rs" -o "$out/ast_types_rustc" || exit 1
 "$out/ast_types_rustc" "${min[@]}" > "$out/ast_types.rustc.out"
 for opt in "" -O; do
-  if ! target/release/crustc "$out/ast_types_main.rs" -o "$out/ast_types_crustc" $opt; then
+  if ! crustc_cmd "$out/ast_types_main.rs" -o "$out/ast_types_crustc" $opt; then
     echo "FAIL ast_types $opt (crustc)"; fail=1; continue
   fi
   "$out/ast_types_crustc" "${min[@]}" > "$out/ast_types.crustc.out"
@@ -156,7 +163,7 @@ python3 tests/selfhost/build_ast_summary.py > "$out/ast_summary_main.rs"
 rustc --edition 2024 -O -Awarnings "$out/ast_summary_main.rs" -o "$out/ast_summary_rustc" || exit 1
 "$out/ast_summary_rustc" "${min[@]}" > "$out/ast_summary.rustc.out"
 for opt in "" -O; do
-  if ! target/release/crustc "$out/ast_summary_main.rs" -o "$out/ast_summary_crustc" $opt; then
+  if ! crustc_cmd "$out/ast_summary_main.rs" -o "$out/ast_summary_crustc" $opt; then
     echo "FAIL ast_summary $opt (crustc)"; fail=1; continue
   fi
   "$out/ast_summary_crustc" "${min[@]}" > "$out/ast_summary.crustc.out"
@@ -171,7 +178,7 @@ rustc --edition 2024 -O -Awarnings "$out/program_main.rs" -o "$out/program_rustc
 pin=(examples/*.rs tests/probe/*.rs src/*.rs)
 "$out/program_rustc" "${pin[@]}" > "$out/program.rustc.out"
 for opt in "" -O; do
-  if ! target/release/crustc "$out/program_main.rs" -o "$out/program_crustc" $opt; then
+  if ! crustc_cmd "$out/program_main.rs" -o "$out/program_crustc" $opt; then
     echo "FAIL program $opt (crustc)"; fail=1; continue
   fi
   "$out/program_crustc" "${pin[@]}" > "$out/program.crustc.out"
@@ -187,7 +194,7 @@ rustc --edition 2024 -O -Awarnings "$out/minclif_main.rs" -o "$out/minclif_rustc
 printf 'long mc_ext(void);\nint main(){return (int)mc_ext();}\n' > "$out/minclif2_c_main.c"
 printf '#include <stdio.h>\nlong mc_sum(long);\nint mc_fib(int);\nlong mc_misc(long,long,long,long,long,long,long,long);\nint main(){printf("%%ld %%d %%ld\\n", mc_sum(10), mc_fib(20), mc_misc(1,2,3,4,5,6,7,8));return 0;}\n' > "$out/minclif_c_main.c"
 for opt in "" -O; do
-  if ! target/release/crustc "$out/minclif_main.rs" -o "$out/minclif_crustc" $opt; then
+  if ! crustc_cmd "$out/minclif_main.rs" -o "$out/minclif_crustc" $opt; then
     echo "FAIL minclif $opt (crustc)"; fail=1; continue
   fi
   "$out/minclif_crustc" "$out/minclif.crustc.o" "$out/minclif2.crustc.o" > "$out/minclif2.crustc.want"
@@ -203,7 +210,7 @@ done
 python3 tests/selfhost/build_enc.py > "$out/enc_main.rs"
 rustc --edition 2024 -O -Awarnings "$out/enc_main.rs" -o "$out/enc_rustc" || exit 1
 for opt in "" -O; do
-  if ! target/release/crustc "$out/enc_main.rs" -o "$out/enc_crustc" $opt; then
+  if ! crustc_cmd "$out/enc_main.rs" -o "$out/enc_crustc" $opt; then
     echo "FAIL enc $opt (crustc)"; fail=1; continue
   fi
   if cmp -s <("$out/enc_rustc") <("$out/enc_crustc"); then
