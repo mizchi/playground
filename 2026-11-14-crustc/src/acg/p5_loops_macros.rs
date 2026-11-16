@@ -2,7 +2,7 @@ use super::*;
 use std::collections::HashSet;
 
 use super::clif::MemFlagsData;
-use crate::parse::{Block, Expr, GArg, Pat, Path, Stmt, TokKind, tokenize};
+use crate::parse::{Block as PBlock, Expr, GArg, Pat, Path, Stmt, TokKind, tokenize};
 use crate::types::{Ty, intern};
 
 /// 無名データ / static / vtable のシンボルの名前空間 (codegen.rs と同じ番号)
@@ -478,7 +478,7 @@ impl Cx<'_> {
     /// 変わらない: 本体の中で x が `x[..]..` の形 (読むか、要素がスカラーの代入) でしか現れず、
     /// x や i を束縛し直さず、x を含むマクロもクロージャもない。`x[i]` の i の検査は本体の中で (前で比べた値で) 行う
     /// (hoisted の鍵は受け手の式の Debug の文字列 `format!("{e:?}")`)
-    pub(crate) fn hoist_index_bases(&mut self, body: &Block, pat: Option<&Pat>, cond: Option<&Expr>) -> R<()> {
+    pub(crate) fn hoist_index_bases(&mut self, body: &PBlock, pat: Option<&Pat>, cond: Option<&Expr>) -> R<()> {
         struct Scan {
             /// 現れた添字の鎖: (根の名前, 受け手の式の列 (`x`, `x[i]`, ..), 代入の左辺か)
             chains: Vec<(String, Vec<Expr>, bool)>,
@@ -584,7 +584,7 @@ impl Cx<'_> {
                     _ => crate::ast_closure::each_child_pub(e, &mut |c| self.visit_expr(c)),
                 }
             }
-            fn visit_block(&mut self, b: &Block) {
+            fn visit_block(&mut self, b: &PBlock) {
                 for s in &b.stmts {
                     match s {
                         Stmt::Let(p, _, init, els) => {
@@ -975,7 +975,7 @@ impl Cx<'_> {
                 let ex = Expr::Block(
                     None,
                     false,
-                    Block {
+                    PBlock {
                         stmts: vec![
                             let_stmt("__exr_dbg", e.clone()),
                             Stmt::Expr(Expr::Macro(path_of("eprintln"), format!("(\"{{}}{{:#?}}\", {head:?}, __exr_dbg)")), true),
@@ -1098,7 +1098,7 @@ impl Cx<'_> {
                     };
                     let mut stmts = lets;
                     stmts.push(Stmt::Expr(Expr::If(Box::new(Expr::Unary("!".into(), Box::new(Expr::Paren(Box::new(cmp))))), fail, None), false));
-                    let e: &Expr = self.keep_expr(Expr::Block(None, false, Block { stmts }));
+                    let e: &Expr = self.keep_expr(Expr::Block(None, false, PBlock { stmts }));
                     self.expr(e, Some(Ty::Unit))?;
                     return Ok((None, Ty::Unit));
                 }

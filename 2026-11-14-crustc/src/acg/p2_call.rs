@@ -987,8 +987,7 @@ impl Cx<'_> {
     }
 
     /// リテラル (e は `Expr::Lit` 全体)
-    pub(crate) fn lit(&mut self, e: &Expr, expected: Option<Ty>) -> R<V> {
-        let Expr::Lit(text) = e else { return err(SP, "unsupported literal") };
+    pub(crate) fn lit(&mut self, text: &str, expected: Option<Ty>) -> R<V> {
         let Some(l) = lit::lit(text) else { return err(SP, "unsupported literal") };
         match &l {
             // 浮動小数点: `1.5` / `2e3` / `1.0f32` / `1f64` (と、浮動小数点が期待される整数リテラル)

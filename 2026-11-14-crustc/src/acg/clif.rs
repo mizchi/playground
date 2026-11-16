@@ -74,13 +74,15 @@ pub struct FunctionBuilder {
     sigs: Vec<Vec<Type>>,
     results: Vec<Vec<Value>>,
     gvs: Vec<String>,
+    /// iconst で作った値とその定数
+    consts: std::collections::HashMap<u32, i64>,
 }
 
 impl FunctionBuilder {
     pub fn new(sig: &Signature) -> FunctionBuilder {
         let ps = sig.params.iter().map(|p| p.value_type).collect();
         let rs = sig.returns.iter().map(|p| p.value_type).collect();
-        FunctionBuilder { m: M::new(ps, rs), funcs: vec![], sigs: vec![], results: vec![], gvs: vec![] }
+        FunctionBuilder { m: M::new(ps, rs), funcs: vec![], sigs: vec![], results: vec![], gvs: vec![], consts: std::collections::HashMap::new() }
     }
     pub fn ins(&mut self) -> Ins<'_> {
         Ins(self)
@@ -143,6 +145,10 @@ impl FunctionBuilder {
         self.gvs.push(name.to_string());
         GlobalValue(self.gvs.len() as u32 - 1)
     }
+    /// 値が iconst の結果ならその定数
+    pub fn iconst_value(&self, v: Value) -> Option<i64> {
+        self.consts.get(&v.0).copied()
+    }
     pub fn inst_results(&self, i: Inst) -> &[Value] {
         &self.results[i.0 as usize]
     }
@@ -187,7 +193,9 @@ impl Ins<'_> {
             Type::I32 => x as u32 as i64,
             _ => x,
         };
-        m.iconst(t, x)
+        let v = m.iconst(t, x);
+        self.0.consts.insert(v.0, x);
+        v
     }
     pub fn f64const(mut self, x: f64) -> Value {
         self.m().f64const(x)
