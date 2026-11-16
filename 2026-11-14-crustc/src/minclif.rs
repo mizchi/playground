@@ -164,6 +164,9 @@ pub struct Track {
     /// スロットとして直接使う (アドレス・幅の違う読み書き) か、整数でない: レジスタに置けない
     mem_only: Vec<bool>,
     var_mem_only: Vec<bool>,
+    /// 浮動小数点か (xmm に置く)
+    vfloat: Vec<bool>,
+    varfloat: Vec<bool>,
     segs: Vec<Seg>,
     /// 関数を呼ぶ命令の番号
     calls: Vec<u32>,
@@ -192,6 +195,16 @@ pub struct Plan {
 /// mov dst, src (64 bit。レジスタの番号は 0〜15)
 fn mov_rr(dst: u8, src: u8) -> [u8; 3] {
     [0x48 | ((src >> 3) << 2) | (dst >> 3), 0x89, 0xC0 | ((src & 7) << 3) | (dst & 7)]
+}
+
+/// movaps xmm_dst, xmm_src
+fn movaps(dst: u8, src: u8) -> Vec<u8> {
+    let mut o = vec![];
+    if dst >= 8 || src >= 8 {
+        o.push(0x40 | ((dst >> 3) << 2) | (src >> 3));
+    }
+    o.extend_from_slice(&[0x0F, 0x28, 0xC0 | ((dst & 7) << 3) | (src & 7)]);
+    o
 }
 
 /// mov [rbp+d], r / mov r, [rbp+d]
@@ -325,7 +338,8 @@ impl Emitter {
         let off = if t == Type::I128 { self.alloc(16, 16) } else { self.alloc(8, 8) };
         self.values.push((off, t));
         if let Some(tr) = &mut self.track {
-            tr.mem_only.push(t == Type::I128 || t.is_float());
+            tr.mem_only.push(t == Type::I128);
+            tr.vfloat.push(t.is_float());
         }
         Value(self.values.len() as u32 - 1)
     }
@@ -385,17 +399,35 @@ impl Emitter {
         let off = if t == Type::I128 { self.alloc(16, 16) } else { self.alloc(8, 8) };
         self.vars.push((off, t));
         if let Some(tr) = &mut self.track {
-            tr.var_mem_only.push(t == Type::I128 || t.is_float());
+            tr.var_mem_only.push(t == Type::I128);
+            tr.varfloat.push(t.is_float());
         }
         Variable(self.vars.len() as u32 - 1)
     }
 
     pub fn def_var(&mut self, var: Variable, v: Value) {
         let (off, t) = self.vars[var.0 as usize];
+        // (両方レジスタなら直接写す)
+        let (lv, lr) = (self.loc(v), self.var_loc(var));
+        if lv != MEM && lr != MEM && (lv >= 16) == (lr >= 16) {
+            self.ev_use(v.0);
+            self.ev_def(VAR_BASE + var.0);
+            if lv >= 16 {
+                self.emit(&movaps(lr - 16, lv - 16));
+            } else {
+                self.emit(&mov_rr(lr, lv));
+            }
+            self.rax_holds = None;
+            return;
+        }
         self.load_rax(v);
         self.ev_def(VAR_BASE + var.0);
         let l = self.var_loc(var);
-        if l != MEM {
+        if l != MEM && l >= 16 {
+            // movq xmm, rax
+            let k = l - 16;
+            self.emit(&[0x66, 0x48 | ((k >> 3) << 2), 0x0F, 0x6E, 0xC0 | ((k & 7) << 3)]);
+        } else if l != MEM {
             self.emit(&mov_rr(l, 0));
         } else {
             self.store_rax_at(off);
@@ -409,10 +441,24 @@ impl Emitter {
 
     pub fn use_var(&mut self, var: Variable) -> Value {
         let (off, t) = self.vars[var.0 as usize];
+        let (lr, ld) = (self.var_loc(var), self.next_loc());
+        if lr != MEM && ld != MEM && (lr >= 16) == (ld >= 16) {
+            self.ev_use(VAR_BASE + var.0);
+            if lr >= 16 {
+                self.emit(&movaps(ld - 16, lr - 16));
+            } else {
+                self.emit(&mov_rr(ld, lr));
+            }
+            return self.result_in_reg(t);
+        }
         let v = self.new_value(t);
         self.ev_use(VAR_BASE + var.0);
         let l = self.var_loc(var);
-        if l != MEM {
+        if l != MEM && l >= 16 {
+            // movq rax, xmm
+            let k = l - 16;
+            self.emit(&[0x66, 0x48 | ((k >> 3) << 2), 0x0F, 0x7E, 0xC0 | ((k & 7) << 3)]);
+        } else if l != MEM {
             self.emit(&mov_rr(0, l));
         } else {
             self.load_rax_at(off);
@@ -472,6 +518,13 @@ impl Emitter {
     fn load_reg(&mut self, r: u8, v: Value) {
         self.ev_use(v.0);
         let l = self.loc(v);
+        if l != MEM && l >= 16 {
+            // movq r64, xmm (f32 は movd r32, xmm: 上位は 0)
+            let k = l - 16;
+            let w = if self.values[v.0 as usize].1 == Type::F64 { 0x48 } else { 0x40 };
+            self.emit(&[0x66, w | ((k >> 3) << 2) | (r >> 3), 0x0F, 0x7E, 0xC0 | ((k & 7) << 3) | (r & 7)]);
+            return;
+        }
         if l != MEM {
             if l != r {
                 self.emit(&mov_rr(r, l));
@@ -502,6 +555,14 @@ impl Emitter {
     fn store_rax(&mut self, v: Value) {
         self.ev_def(v.0);
         let l = self.loc(v);
+        if l != MEM && l >= 16 {
+            // movq xmm, rax (f32 は movd xmm, eax)
+            let k = l - 16;
+            let w = if self.values[v.0 as usize].1 == Type::F64 { 0x48 } else { 0x40 };
+            self.emit(&[0x66, w | ((k >> 3) << 2), 0x0F, 0x6E, 0xC0 | ((k & 7) << 3)]);
+            self.rax_holds = Some((v.0, self.code.len()));
+            return;
+        }
         if l != MEM {
             self.emit(&mov_rr(l, 0));
         } else {
@@ -930,6 +991,12 @@ impl Emitter {
     /// ブロック引数を渡す (飛び先の引数のスロットへ書く)
     fn pass_args(&mut self, b: Block, args: &[Value]) {
         let ps = self.blocks[b.0 as usize].params.clone();
+        // (1 つだけなら入れ替わりは起きない: そのまま書く)
+        if args.len() == 1 && ps.len() >= 1 && self.value_type(args[0]) != Type::I128 {
+            self.load_rax(args[0]);
+            self.store_rax(ps[0]);
+            return;
+        }
         // (引数どうしが入れ替わる場合に備え、全部読んでから書く: スタックに積む)
         for &a in args {
             self.load_rax(a);
@@ -1096,9 +1163,11 @@ impl Emitter {
         for (k, &a) in fargs.iter().enumerate().take(8) {
             self.xmm_load(k as u8, a);
         }
-        // (可変長引数の関数のための al = xmm で渡した数)
-        self.emit(&[0xB8]);
-        self.emit(&(fargs.len().min(8) as u32).to_le_bytes());
+        // (可変長引数の関数のための al = xmm で渡した数。自分の関数 (`_x..`) は可変長引数でないので要らない)
+        if !self.funcs[f.0 as usize].starts_with("_x") {
+            self.emit(&[0xB8]);
+            self.emit(&(fargs.len().min(8) as u32).to_le_bytes());
+        }
         self.emit(&[0xE8]);
         let at = self.code.len() as u32;
         self.emit(&[0, 0, 0, 0]);
@@ -1180,7 +1249,12 @@ impl Emitter {
         // (レジスタに置いた値はスロットにない: 念のため書いてから。解析で mem_only にしたので普通は起きない)
         let r = self.loc(v);
         let o = self.values[v.0 as usize].0;
-        if r != MEM {
+        if r != MEM && r >= 16 {
+            // movsd [rbp+o], xmm
+            let k = r - 16;
+            self.emit(&[0xF2, 0x40 | ((k >> 3) << 2), 0x0F, 0x11, 0x85 | ((k & 7) << 3)]);
+            self.emit(&o.to_le_bytes());
+        } else if r != MEM {
             self.emit(&mov_mr(r, o, false));
         }
         o
@@ -1242,18 +1316,35 @@ impl Emitter {
     /// xmm0 (reg 0) / xmm1 (reg 1) に読む
     fn xmm_load(&mut self, reg: u8, v: Value) {
         let p = if self.value_type(v) == Type::F32 { 0xF3 } else { 0xF2 };
-        let o = self.off(v);
+        // (xmm に置いた値: movaps xmm_reg, xmm_k)
+        let l = self.loc(v);
+        if l != MEM && l >= 16 {
+            self.ev_use(v.0);
+            let k = l - 16;
+            self.emit(&movaps(reg, k));
+            return;
+        }
+        // (スロットから: レジスタに置けなくする off ではなく、読んだことだけ記録する)
+        self.ev_use(v.0);
+        let o = self.values[v.0 as usize].0;
         self.emit_disp(&[p, 0x0F, 0x10, 0x85 | (reg << 3)], o);
     }
 
     fn xmm0_result(&mut self, t: Type) -> Value {
+        let d = self.next_loc();
+        if d != MEM && d >= 16 {
+            self.emit(&movaps(d - 16, 0));
+            return self.result_in_reg(t);
+        }
         let v = self.new_value(t);
+        self.ev_def(v.0);
         let p = if t == Type::F32 { 0xF3 } else { 0xF2 };
-        let o = self.off(v);
+        let o = self.values[v.0 as usize].0;
         // (スロットの上位を 0 にしてから書く: f32 も 8 byte のスロットで比べられるように)
         self.emit(&[0x31, 0xC0]);
         self.store_rax_at(o);
         self.emit_disp(&[p, 0x0F, 0x11, 0x85], o);
+        self.rax_holds = None;
         v
     }
 
@@ -1277,8 +1368,21 @@ impl Emitter {
         let t = self.value_type(a);
         let p = if t == Type::F32 { 0xF3 } else { 0xF2 };
         self.xmm_load(0, a);
-        let o = self.off(b);
-        self.emit_disp(&[p, 0x0F, opc, 0x85], o);
+        let l = self.loc(b);
+        if l != MEM && l >= 16 {
+            // op xmm0, xmm_k
+            let k = l - 16;
+            self.ev_use(b.0);
+            if k >= 8 {
+                self.emit(&[p, 0x41, 0x0F, opc, 0xC0 | (k & 7)]);
+            } else {
+                self.emit(&[p, 0x0F, opc, 0xC0 | k]);
+            }
+        } else {
+            self.ev_use(b.0);
+            let o = self.values[b.0 as usize].0;
+            self.emit_disp(&[p, 0x0F, opc, 0x85], o);
+        }
         self.xmm0_result(t)
     }
 
@@ -2235,6 +2339,9 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize) -> Plan {
     let mut active: Vec<usize> = vec![];
     let mut free_saved: Vec<u8> = vec![4, 3, 2, 1, 0];
     let mut free_temp: Vec<u8> = vec![9, 8, 7, 6, 5];
+    // (浮動小数点: xmm8〜15。どれも呼び出しで壊れるので、呼び出しを含まない区間だけ。番号は 16 + xmm の番号)
+    let mut free_xmm: Vec<u8> = vec![31, 30, 29, 28, 27, 26, 25, 24];
+    let is_float = |i: usize| -> bool { if i < nvals { tr.vfloat.get(i).copied().unwrap_or(false) } else { tr.varfloat.get(i - nvals).copied().unwrap_or(false) } };
     let mut used = 0u8;
     for &i in &order {
         // (終わったものを外す)
@@ -2242,7 +2349,9 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize) -> Plan {
         while k < active.len() {
             let a = active[k];
             if hi[a] < lo[i] {
-                if loc[a] < 5 {
+                if loc[a] >= 16 {
+                    free_xmm.push(loc[a]);
+                } else if loc[a] < 5 {
                     free_saved.push(loc[a]);
                 } else {
                     free_temp.push(loc[a]);
@@ -2253,6 +2362,15 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize) -> Plan {
             }
         }
         let crosses = has_call(lo[i], hi[i]);
+        if is_float(i) {
+            if !crosses {
+                if let Some(r) = free_xmm.pop() {
+                    loc[i] = r;
+                    active.push(i);
+                }
+            }
+            continue;
+        }
         let got = if crosses { free_saved.pop() } else { free_temp.pop().or_else(|| free_saved.pop()) };
         if let Some(r) = got {
             loc[i] = r;
@@ -2266,7 +2384,7 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize) -> Plan {
         let mut worst: Option<usize> = None;
         for k in 0..active.len() {
             let a = active[k];
-            if crosses && loc[a] >= 5 {
+            if (crosses && loc[a] >= 5) || loc[a] >= 16 {
                 continue;
             }
             let better = match worst {
@@ -2287,7 +2405,15 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize) -> Plan {
         }
     }
     // (番号 → レジスタの番号)
-    let reg = |l: u8| -> u8 { if l == MEM { MEM } else { ALLOC_REGS[l as usize] } };
+    let reg = |l: u8| -> u8 {
+        if l == MEM {
+            MEM
+        } else if l >= 16 {
+            l
+        } else {
+            ALLOC_REGS[l as usize]
+        }
+    };
     Plan { vloc: (0..nvals).map(|i| reg(loc[i])).collect(), varloc: (nvals..n).map(|i| reg(loc[i])).collect(), used }
 }
 
