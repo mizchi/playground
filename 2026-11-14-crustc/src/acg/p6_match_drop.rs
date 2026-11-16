@@ -34,7 +34,7 @@ impl Cx<'_> {
         self.last_scrut = None;
         // `v[..]` / `a[1..]` (サイズ不定の [T] の場所): fat pointer の置き場所を `[T]` 型の place として渡す
         // (スライスパターンだけが受け付け、要素は値で束縛する)
-        if let Expr::Index(_, ix) = strip_paren(e) {
+        if let Expr::Index(_, ix, _) = strip_paren(e) {
             if matches!(&**ix, Expr::Range(..)) {
                 let r = self.keep_expr(Expr::Ref(false, Box::new(e.clone())));
                 let (v, t) = self.expr(r, None)?;
@@ -868,7 +868,7 @@ impl Cx<'_> {
             return self.expr(e, hint);
         }
         // `a[..2] == [1, 2]`: サイズ不定のスライスは参照で比べる (`[T]` の PartialEq の &self)
-        if let Expr::Index(_, ix) = strip_paren(e) {
+        if let Expr::Index(_, ix, _) = strip_paren(e) {
             if matches!(&**ix, Expr::Range(..)) {
                 let r = self.keep_expr(Expr::Ref(false, Box::new(e.clone())));
                 return self.expr(r, None);
@@ -936,7 +936,7 @@ impl Cx<'_> {
             match e {
                 Expr::Paren(p) => e = p,
                 Expr::Field(b, _) => e = b,
-                Expr::Unary(op, x) if op == "*" => e = x,
+                Expr::Unary(op, x, _) if op == "*" => e = x,
                 Expr::Path(_, p) => {
                     let (loc, t) = self.lookup(ident_of(p)?)?;
                     if matches!(t, Ty::Ref(..) | Ty::Ptr(..)) {
@@ -962,7 +962,7 @@ impl Cx<'_> {
                     e = b
                 }
                 // `*b` (b: Box<T>) から中身をムーブした: b も drop しない (Box の領域はリークする)
-                Expr::Unary(op, x) if op == "*" => {
+                Expr::Unary(op, x, _) if op == "*" => {
                     via_field = true;
                     e = x
                 }

@@ -239,6 +239,32 @@ fn skip_suffix(src: &str, mut i: usize) -> usize {
 
 // ---------------------------------------------------------------- 構文木
 
+/// ソース上の位置 (行は 1 始まり、桁は 0 始まりの文字数: proc_macro2 と同じ)
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Pos {
+    pub line: u32,
+    pub col: u32,
+}
+
+impl std::fmt::Debug for Pos {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.line, self.col)
+    }
+}
+
+/// 式の位置: start は式の先頭 (syn の `e.span()`)、at は式ごとの位置 (メソッド名・`[`・演算子・マクロの引数の開き括弧)
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Span {
+    pub start: Pos,
+    pub at: Pos,
+}
+
+impl std::fmt::Debug for Span {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "@{:?}/{:?}", self.start, self.at)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Path {
     pub global: bool,
@@ -306,14 +332,14 @@ pub enum Pat {
 pub enum Expr {
     Lit(String),
     Path(Option<Box<Ty>>, Path),
-    Unary(String, Box<Expr>),
-    Binary(String, Box<Expr>, Box<Expr>),
+    Unary(String, Box<Expr>, Span),
+    Binary(String, Box<Expr>, Box<Expr>, Span),
     Assign(Box<Expr>, Box<Expr>),
-    AssignOp(String, Box<Expr>, Box<Expr>),
+    AssignOp(String, Box<Expr>, Box<Expr>, Span),
     Call(Box<Expr>, Vec<Expr>),
-    MethodCall(Box<Expr>, String, Vec<GArg>, Vec<Expr>),
+    MethodCall(Box<Expr>, String, Vec<GArg>, Vec<Expr>, Span),
     Field(Box<Expr>, String),
-    Index(Box<Expr>, Box<Expr>),
+    Index(Box<Expr>, Box<Expr>, Span),
     Range(Option<Box<Expr>>, Option<Box<Expr>>, bool),
     Ref(bool, Box<Expr>),
     RawRef(bool, Box<Expr>),
@@ -334,7 +360,7 @@ pub enum Expr {
     Array(Vec<Expr>),
     Repeat(Box<Expr>, Box<Expr>),
     Struct(Path, Vec<(String, Expr)>, Option<Box<Expr>>),
-    Macro(Path, String),
+    Macro(Path, String, Span),
     Try(Box<Expr>),
     Paren(Box<Expr>),
 }
@@ -432,6 +458,8 @@ pub struct Parser {
     toks: Vec<Tok>,
     i: usize,
     init_text: String,
+    /// 位置の基準 (マクロの引数を読み直すとき、そのテキストの先頭の位置。0 行目ならずらさない)
+    base: Pos,
 }
 
 type R<T> = Result<T, String>;
@@ -453,7 +481,7 @@ fn bin_prec(op: &str) -> u32 {
 
 pub fn parse_file(src: &str) -> R<File> {
     let toks = tokenize(src)?;
-    let mut p = Parser { toks: toks, i: 0, init_text: String::new() };
+    let mut p = Parser { toks: toks, i: 0, init_text: String::new(), base: Pos::default() };
     let mut attrs = Vec::new();
     while p.is_punct("#") && p.peek_is(1, "!") {
         attrs.push(p.attr()?);
@@ -465,9 +493,28 @@ pub fn parse_file(src: &str) -> R<File> {
     Ok(File { attrs: attrs, items: items })
 }
 
+/// text (base の位置から始まる) の中の byte の位置 off のソース上の位置
+pub fn pos_at(text: &str, off: usize, base: Pos) -> Pos {
+    let before = &text[..off.min(text.len())];
+    let nl = before.matches('\n').count() as u32;
+    if base.line == 0 {
+        return Pos::default();
+    }
+    if nl == 0 {
+        Pos { line: base.line, col: base.col + before.chars().count() as u32 }
+    } else {
+        Pos { line: base.line + nl, col: before.rsplit('\n').next().map(|x| x.chars().count() as u32).unwrap_or(0) }
+    }
+}
+
 pub fn parse_expr(src: &str) -> R<Expr> {
+    parse_expr_at(src, Pos::default())
+}
+
+/// 式を読む。位置は base (src の先頭のソース上の位置) からの位置にする
+pub fn parse_expr_at(src: &str, base: Pos) -> R<Expr> {
     let toks = tokenize(src)?;
-    let mut p = Parser { toks: toks, i: 0, init_text: String::new() };
+    let mut p = Parser { toks: toks, i: 0, init_text: String::new(), base };
     let e = p.expr(true)?;
     if p.i < p.toks.len() {
         return Err(p.err("unexpected token after expression"));
@@ -477,8 +524,12 @@ pub fn parse_expr(src: &str) -> R<Expr> {
 
 /// `pat` / `pat if guard` (matches! の 2 つ目の引数)
 pub fn parse_pat_guard(src: &str) -> Option<(Pat, Option<Expr>)> {
+    parse_pat_guard_at(src, Pos::default())
+}
+
+pub fn parse_pat_guard_at(src: &str, base: Pos) -> Option<(Pat, Option<Expr>)> {
     let toks = tokenize(src).ok()?;
-    let mut p = Parser { toks: toks, i: 0, init_text: String::new() };
+    let mut p = Parser { toks: toks, i: 0, init_text: String::new(), base };
     let pat = p.pat().ok()?;
     let guard = if p.eat_ident("if") { Some(p.expr(true).ok()?) } else { None };
     p.eat_punct(",");
@@ -582,7 +633,83 @@ impl Parser {
             _ => Err(self.err("expected an identifier")),
         }
     }
-    /// 括弧の組 (開きの位置にいる) をテキストにして飛ばす
+    /// 今のトークンの位置 (行・桁は base の分ずらす: マクロの引数を読み直すとき)
+    fn pos(&self) -> Pos {
+        match self.tok(0).or_else(|| self.toks.last()) {
+            Some(t) => self.shift(t.line, t.col),
+            None => self.base,
+        }
+    }
+
+    fn shift(&self, line: u32, col: u32) -> Pos {
+        if self.base.line == 0 {
+            return Pos { line, col };
+        }
+        Pos { line: self.base.line + line - 1, col: if line == 1 { self.base.col + col } else { col } }
+    }
+
+    /// 括弧の組 (開きの位置にいる) を、元の行・桁の配置のままテキストにして飛ばす (式のマクロ用)。
+    /// 開き括弧が先頭: 読み直すとき、位置を開き括弧の位置からずらせば元の位置になる
+    fn group_text_laid_out(&mut self) -> R<String> {
+        let mut depth = 0;
+        let mut s = String::new();
+        let (mut line, mut col) = match self.tok(0) {
+            Some(t) => (t.line, t.col),
+            None => return Err(self.err("unclosed delimiter")),
+        };
+        let mut first = true;
+        loop {
+            let Some(t) = self.tok(0) else { return Err(self.err("unclosed delimiter")) };
+            match t.kind {
+                TokKind::Open => depth += 1,
+                TokKind::Close => depth -= 1,
+                _ => {}
+            }
+            if !first {
+                if t.line > line {
+                    for _ in line..t.line {
+                        s.push('\n');
+                    }
+                    line = t.line;
+                    // (2 行目からは元の桁そのもの: 先頭の行だけ開き括弧からの桁)
+                    for _ in 0..t.col {
+                        s.push(' ');
+                    }
+                    col = t.col;
+                } else {
+                    // (同じ行: 元の桁まで空白で埋める。先頭の行は開き括弧からの差)
+                    let want = t.col;
+                    let mut c = col;
+                    // (元の桁がもう過ぎている (タブなど) なら、くっつかないよう 1 つ空ける)
+                    if c > want {
+                        s.push(' ');
+                        c += 1;
+                    }
+                    while c < want {
+                        s.push(' ');
+                        c += 1;
+                    }
+                    col = c;
+                }
+            }
+            first = false;
+            s.push_str(&t.text);
+            // (複数行のトークン (文字列) の後の行・桁)
+            let nl = t.text.matches('\n').count() as u32;
+            if nl > 0 {
+                line += nl;
+                col = t.text.rsplit('\n').next().map(|x| x.chars().count() as u32).unwrap_or(0);
+            } else {
+                col += t.text.chars().count() as u32;
+            }
+            self.i += 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        Ok(s)
+    }
+
     fn group_text(&mut self) -> R<String> {
         let mut depth = 0;
         let mut s = String::new();
@@ -955,10 +1082,11 @@ impl Parser {
     }
 
     fn pat_lit_expr(&mut self) -> R<Expr> {
+        let p0 = self.pos();
         if self.eat_punct("-") {
             let t = self.tok(0).ok_or_else(|| self.err("expected a literal"))?.text.clone();
             self.i += 1;
-            return Ok(Expr::Unary("-".to_string(), Box::new(Expr::Lit(t))));
+            return Ok(Expr::Unary("-".to_string(), Box::new(Expr::Lit(t)), Span { start: p0, at: p0 }));
         }
         if self.tok(0).is_some_and(|t| t.kind == TokKind::Lit) {
             let t = self.toks[self.i].text.clone();
@@ -1114,6 +1242,7 @@ impl Parser {
     }
 
     fn assign_expr(&mut self, ss: bool) -> R<Expr> {
+        let start = self.pos();
         let l = self.range_expr(ss)?;
         if self.is_punct("=") && !self.punct_at(0, "==") && !self.punct_at(0, "=>") {
             self.i += 1;
@@ -1122,9 +1251,10 @@ impl Parser {
         }
         for op in ["<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|="] {
             if self.punct_at(0, op) {
+                let at = self.pos();
                 self.i += op.len();
                 let r = self.assign_expr(ss)?;
-                return Ok(Expr::AssignOp(op[..op.len() - 1].to_string(), Box::new(l), Box::new(r)));
+                return Ok(Expr::AssignOp(op[..op.len() - 1].to_string(), Box::new(l), Box::new(r), Span { start, at }));
             }
         }
         Ok(l)
@@ -1187,6 +1317,7 @@ impl Parser {
     }
 
     fn bin_expr(&mut self, min: u32, ss: bool) -> R<Expr> {
+        let start = self.pos();
         let mut l = self.cast_expr(ss)?;
         loop {
             let Some(op) = self.bin_op() else { break };
@@ -1197,9 +1328,10 @@ impl Parser {
             if p == 0 {
                 break;
             }
+            let at = self.pos();
             self.i += op.len();
             let r = self.bin_expr(p, ss)?;
-            l = Expr::Binary(op, Box::new(l), Box::new(r));
+            l = Expr::Binary(op, Box::new(l), Box::new(r), Span { start, at });
         }
         Ok(l)
     }
@@ -1216,10 +1348,11 @@ impl Parser {
 
     fn unary_expr(&mut self, ss: bool) -> R<Expr> {
         if self.is_punct("-") || self.is_punct("!") || (self.is_punct("*") && !self.punct_at(0, "*=")) {
+            let p0 = self.pos();
             let op = self.toks[self.i].text.clone();
             self.i += 1;
             let e = self.unary_expr(ss)?;
-            return Ok(Expr::Unary(op, Box::new(e)));
+            return Ok(Expr::Unary(op, Box::new(e), Span { start: p0, at: p0 }));
         }
         if self.is_punct("&") {
             if self.punct_at(0, "&&") {
@@ -1259,11 +1392,12 @@ impl Parser {
     }
 
     fn postfix_expr(&mut self, ss: bool) -> R<Expr> {
+        let start = self.pos();
         let e = self.primary_expr(ss)?;
-        self.postfix_rest(e)
+        self.postfix_rest(e, start)
     }
 
-    fn postfix_rest(&mut self, e: Expr) -> R<Expr> {
+    fn postfix_rest(&mut self, e: Expr, start: Pos) -> R<Expr> {
         let mut e = e;
         loop {
             if self.is_punct("?") {
@@ -1283,6 +1417,7 @@ impl Parser {
                     }
                     continue;
                 }
+                let at = self.pos();
                 let name = self.ident()?;
                 let mut targs = Vec::new();
                 if self.punct_at(0, "::") && self.punct_at(2, "<") {
@@ -1291,7 +1426,7 @@ impl Parser {
                 }
                 if self.is_open("(") {
                     let args = self.call_args()?;
-                    e = Expr::MethodCall(Box::new(e), name, targs, args);
+                    e = Expr::MethodCall(Box::new(e), name, targs, args, Span { start, at });
                 } else {
                     e = Expr::Field(Box::new(e), name);
                 }
@@ -1299,10 +1434,11 @@ impl Parser {
                 let args = self.call_args()?;
                 e = Expr::Call(Box::new(e), args);
             } else if self.is_open("[") {
+                let at = self.pos();
                 self.i += 1;
                 let ix = self.expr(true)?;
                 self.expect_close("]")?;
-                e = Expr::Index(Box::new(e), Box::new(ix));
+                e = Expr::Index(Box::new(e), Box::new(ix), Span { start, at });
             } else {
                 break;
             }
@@ -1489,8 +1625,9 @@ impl Parser {
                     let guard = if self.eat_ident("if") { Some(self.expr(true)?) } else { None };
                     self.expect_punct("=>")?;
                     let body = if self.blocky_start() {
+                        let start = self.pos();
                         let e = self.primary_expr(true)?;
-                        if self.is_punct(".") || self.is_punct("?") { self.postfix_rest(e)? } else { e }
+                        if self.is_punct(".") || self.is_punct("?") { self.postfix_rest(e, start)? } else { e }
                     } else {
                         self.expr(true)?
                     };
@@ -1574,14 +1711,16 @@ impl Parser {
     }
 
     fn path_expr(&mut self, ss: bool) -> R<Expr> {
+        let start = self.pos();
         let p = self.path(false)?;
         if self.is_punct("!") && !self.punct_at(0, "!=") {
             self.i += 1;
             if !self.tok(0).is_some_and(|t| t.kind == TokKind::Open) {
                 return Err(self.err("expected macro arguments"));
             }
-            let g = self.group_text()?;
-            return Ok(Expr::Macro(p, g));
+            let at = self.pos();
+            let g = self.group_text_laid_out()?;
+            return Ok(Expr::Macro(p, g, Span { start, at }));
         }
         if ss && self.is_open("{") && self.struct_lit_follows() {
             self.i += 1;
@@ -1698,12 +1837,13 @@ impl Parser {
         }
         // (`if .. {}` / `match .. {}` / `{ .. }` などで始まる文はそこで終わる: 次の `*p = 1;` を掛け算にしない)
         if self.blocky_start() {
+            let start = self.pos();
             let e = self.primary_expr(true)?;
             if !(self.is_punct(".") || self.is_punct("?")) {
                 let semi = self.eat_punct(";");
                 return Ok(Stmt::Expr(e, semi));
             }
-            let e = self.postfix_rest(e)?;
+            let e = self.postfix_rest(e, start)?;
             let semi = self.eat_punct(";");
             return Ok(Stmt::Expr(e, semi));
         }
@@ -1712,7 +1852,7 @@ impl Parser {
             return Ok(Stmt::Expr(e, true));
         }
         let blocky = matches!(e, Expr::Block(..) | Expr::If(..) | Expr::Match(..) | Expr::Loop(..) | Expr::While(..) | Expr::For(..) | Expr::Const(..));
-        let mac_brace = matches!(&e, Expr::Macro(_, g) if g.starts_with('{'));
+        let mac_brace = matches!(&e, Expr::Macro(_, g, _) if g.starts_with('{'));
         if blocky || mac_brace || self.is_close() {
             return Ok(Stmt::Expr(e, false));
         }
@@ -2307,12 +2447,12 @@ impl Counts {
         match e {
             Expr::Lit(_) => self.lits += 1,
             Expr::Path(..) => self.paths += 1,
-            Expr::Unary(_, x) | Expr::Try(x) | Expr::Paren(x) => self.expr(x),
+            Expr::Unary(_, x, _) | Expr::Try(x) | Expr::Paren(x) => self.expr(x),
             Expr::Ref(_, x) | Expr::RawRef(_, x) => {
                 self.refs += 1;
                 self.expr(x);
             }
-            Expr::Binary(_, l, r) => {
+            Expr::Binary(_, l, r, _) => {
                 self.binaries += 1;
                 self.expr(l);
                 self.expr(r);
@@ -2322,7 +2462,7 @@ impl Counts {
                 self.expr(r);
             }
             // (syn 2 は `a += b` も Binary)
-            Expr::AssignOp(_, l, r) => {
+            Expr::AssignOp(_, l, r, _) => {
                 self.binaries += 1;
                 self.expr(l);
                 self.expr(r);
@@ -2332,7 +2472,7 @@ impl Counts {
                 self.expr(f);
                 self.exprs(a);
             }
-            Expr::MethodCall(r, _, _, a) => {
+            Expr::MethodCall(r, _, _, a, _) => {
                 self.method_calls += 1;
                 self.expr(r);
                 self.exprs(a);
@@ -2341,7 +2481,7 @@ impl Counts {
                 self.fields += 1;
                 self.expr(x);
             }
-            Expr::Index(x, i) => {
+            Expr::Index(x, i, _) => {
                 self.indexes += 1;
                 self.expr(x);
                 self.expr(i);

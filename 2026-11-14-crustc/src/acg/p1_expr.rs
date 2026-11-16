@@ -134,7 +134,7 @@ impl Cx<'_> {
                     None => err(SP, format!("no field `{fname}` on type `{}`", self.prog.structs[sid as usize].name)),
                 }
             }
-            Expr::Unary(op, x) if op == "*" => {
+            Expr::Unary(op, x, _) if op == "*" => {
                 // `*g` (g: MutexGuard など Deref を実装した型): `*g.deref_mut()` / `*g.deref()`
                 if let Some(d) = self.user_deref(x) {
                     let d = self.keep_expr(d);
@@ -149,7 +149,7 @@ impl Cx<'_> {
                 }
             }
             // `map[&k]`: get(&k).unwrap() の指す先
-            Expr::Index(b, k)
+            Expr::Index(b, k, _)
                 if matches!(self.peek(b).map(|t| self.strip_refs(t)),
                     Some(Ty::Struct(sid)) if self.prog.structs[self.prog.base_of(sid) as usize].name == "HashMap") =>
             {
@@ -161,7 +161,7 @@ impl Cx<'_> {
                 }
             }
             // `d[i]` / `m[&k]` (impl Index / IndexMut、VecDeque / BTreeMap): `*x.index_mut(i)` / `*x.index(i)`
-            Expr::Index(b, k)
+            Expr::Index(b, k, _)
                 if matches!(self.peek_or_static(b).map(|t| self.strip_refs(t)),
                     Some(Ty::Struct(sid)) if self.vec_fields(sid).is_none()
                         && (self.prog.method(sid, "index").is_some() || self.prog.method(sid, "index_mut").is_some())) =>
@@ -175,7 +175,8 @@ impl Cx<'_> {
                     _ => err(SP, "`index` must return a reference"),
                 }
             }
-            Expr::Index(b, index) if !matches!(&**index, Expr::Range(..)) => {
+            Expr::Index(b, index, isp) if !matches!(&**index, Expr::Range(..)) => {
+                let isp = *isp;
                 let (base, len, elem) = self.indexable(b)?;
                 let (i, it) = self.expr(index, Some(Ty::Usize))?;
                 let Some(i) = i else {
@@ -196,9 +197,8 @@ impl Cx<'_> {
                 // 範囲外なら panic (rustc と同じく境界検査する)
                 let ok = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
                 // (rustc の場所: Vec など Index の impl を通るものは `[`、配列・スライスは式の先頭)
-                // (場所 (Span) は今は使わないので、どちらも SP)
-                let _via_impl = matches!(self.peek(b).map(|t| self.strip_refs(t)), Some(Ty::Struct(_)));
-                let sp = SP;
+                let via_impl = matches!(self.peek(b).map(|t| self.strip_refs(t)), Some(Ty::Struct(_)));
+                let sp = if via_impl { isp.at } else { isp.start };
                 self.index_check(ok, len, i, sp);
                 let addr = self.elem_addr(base, i, elem);
                 Ok(Place::Mem(addr, 0, elem))
@@ -443,7 +443,7 @@ impl Cx<'_> {
                 }
                 Ok(r)
             }
-            Expr::Unary(op, x) if op == "*" => {
+            Expr::Unary(op, x, _) if op == "*" => {
                 let p = self.place(e)?;
                 // `*b` (b: Box<T>、T は drop が要る): 中身のムーブ。b は drop しない
                 let boxed = matches!(self.peek(x), Some(Ty::Box(_)));
@@ -633,7 +633,7 @@ impl Cx<'_> {
             Expr::Tuple(_) => self.tuple_lit(e, expected),
             Expr::Array(_) => self.array_lit(e, expected),
             Expr::Repeat(..) => self.repeat_lit(e, expected),
-            Expr::Index(_, ix) if matches!(&**ix, Expr::Range(..)) => err(SP, "range indexing needs a reference: `&a[lo..hi]`"),
+            Expr::Index(_, ix, _) if matches!(&**ix, Expr::Range(..)) => err(SP, "range indexing needs a reference: `&a[lo..hi]`"),
             Expr::Index(..) => {
                 let p = self.place(e)?;
                 Ok(self.read(p))
@@ -752,7 +752,14 @@ impl Cx<'_> {
                 }
                 Ok((Some(self.convert(v.unwrap(), from, to)), to))
             }
-            Expr::Macro(p, g) => self.macro_(p, g, expected),
+            Expr::Macro(p, g, sp) => {
+                let saved = std::mem::replace(&mut self.mbase, sp.at);
+                let saved_s = std::mem::replace(&mut self.mstart, sp.start);
+                let r = self.macro_(p, g, expected);
+                self.mbase = saved;
+                self.mstart = saved_s;
+                r
+            }
             Expr::Try(_) => self.try_(e),
             _ => err(SP, "unsupported expression"),
         }
@@ -762,7 +769,7 @@ impl Cx<'_> {
         let Expr::Ref(m, rexpr) = e else { return err(SP, "internal: expected a reference") };
         let m = *m;
         // `&a[lo..hi]` → スライス (fat pointer)
-        if let Expr::Index(b, ix) = &**rexpr {
+        if let Expr::Index(b, ix, _) = &**rexpr {
             if let Expr::Range(..) = &**ix {
                 return self.slice_range(b, ix, m);
             }
@@ -1214,7 +1221,7 @@ impl Cx<'_> {
 
     /// `x.m(..)` (x: `&dyn Trait`)
     pub(crate) fn dyn_method_call(&mut self, fat: Value, tr: &str, mc: &Expr) -> R<V> {
-        let Expr::MethodCall(_, name, _, margs) = mc else { return err(SP, "internal: expected a method call") };
+        let Expr::MethodCall(_, name, _, margs, _) = mc else { return err(SP, "internal: expected a method call") };
         let decls = self.prog.traits.get(tr).cloned().unwrap_or_default();
         let Some(idx) = decls.iter().position(|&d| self.prog.names[d as usize].rsplit("::").next() == Some(name.as_str())) else {
             return err(SP, format!("no method named `{name}` found for `dyn {tr}`"));

@@ -22,7 +22,7 @@ impl Cx<'_> {
     /// `v.extend(arg)` (Vec / BinaryHeap): IntoIterator の代わりに、イテレータでない arg を
     /// `arg.into_iter()` (値) / `arg.iter()` (参照・配列) にする。要素が `&T` なら __extend_ref (T: Copy)
     pub(crate) fn extend_call(&mut self, mc: &Expr, expected: Option<Ty>) -> R<Option<V>> {
-        let Expr::MethodCall(receiver, method, _, margs) = mc else { return Ok(None) };
+        let Expr::MethodCall(receiver, method, _, margs, _) = mc else { return Ok(None) };
         if method != "extend" || margs.len() != 1 {
             return Ok(None);
         }
@@ -275,7 +275,7 @@ impl Cx<'_> {
     /// `recv.name(args)` を prelude の `{prefix}{name}(recv, args)` にする (なければ None)。
     /// 引数の `&str` には char (UTF-8 にする) と `&String` も渡せる
     pub(crate) fn helper_method(&mut self, prefix: &str, name: &str, mc: &Expr, recv: (Value, Ty)) -> R<Option<V>> {
-        let Expr::MethodCall(_, _, turbofish, margs) = mc else { return Ok(None) };
+        let Expr::MethodCall(_, _, turbofish, margs, _) = mc else { return Ok(None) };
         let f = format!("{prefix}{name}");
         let Some(&id) = self.prog.index.get(&f) else { return Ok(None) };
         let sig = self.prog.sigs[id as usize].clone();
@@ -373,7 +373,7 @@ impl Cx<'_> {
 impl Cx<'_> {
     /// `x.clone()` (自分の clone メソッドがない型): 整数などはそのまま読み、ほかは __exr_clone::<T>
     pub(crate) fn clone_call(&mut self, mc: &Expr) -> R<Option<V>> {
-        let Expr::MethodCall(receiver, method, _, margs) = mc else { return Ok(None) };
+        let Expr::MethodCall(receiver, method, _, margs, _) = mc else { return Ok(None) };
         if method != "clone" || !margs.is_empty() {
             return Ok(None);
         }
@@ -741,7 +741,7 @@ impl Cx<'_> {
         let ce: Expr = crate::parse::parse_expr(&src).or_else(|er| err(SP, er))?;
         let ce = self.keep_expr(ce);
         // (行番号は今は出さない: Sp は場所を持たない)
-        let (v, vt) = self.expr(ce, Some(t)).map_err(|e| format!("{}:1: in constant `{}`: {e}", SP, c.name))?;
+        let (v, vt) = self.expr(ce, Some(t)).map_err(|e| format!("{}:1: in constant `{}`: {e}", SP.line, c.name))?;
         self.same(SP, vt, t)?;
         Ok((v, t))
     }
@@ -752,7 +752,7 @@ impl Cx<'_> {
 impl Cx<'_> {
     /// f32 / f64 の組み込みメソッド (命令になるものは命令、ほかは libm)
     pub(crate) fn float_method(&mut self, mc: &Expr, t: Ty) -> R<Option<V>> {
-        let Expr::MethodCall(receiver, method, _, margs) = mc else { return Ok(None) };
+        let Expr::MethodCall(receiver, method, _, margs, _) = mc else { return Ok(None) };
         let name = method.to_string();
         let _ = clif_ty(t);
         let f32 = t == Ty::F32;

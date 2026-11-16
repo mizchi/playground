@@ -41,7 +41,7 @@ fn simple_text(e: &Expr) -> Option<String> {
     Some(match e {
         Expr::Lit(t) => t.clone(),
         Expr::Path(None, p) => crate::parse::path_text(p),
-        Expr::Unary(op, x) => format!("{op}{}", simple_text(x)?),
+        Expr::Unary(op, x, _) => format!("{op}{}", simple_text(x)?),
         Expr::Ref(m, x) => format!("&{}{}", if *m { "mut " } else { "" }, simple_text(x)?),
         Expr::Paren(x) => format!("({})", simple_text(x)?),
         Expr::Field(b, n) => format!("{}.{n}", simple_text(b)?),
@@ -67,7 +67,7 @@ pub(crate) fn vec_of(es: &[Expr]) -> Expr {
             }
         }
     }
-    let m = Expr::Macro(path_of("vec"), format!("[{}]", items.join(", ")));
+    let m = Expr::Macro(path_of("vec"), format!("[{}]", items.join(", ")), crate::parse::Span::default());
     if lets.is_empty() {
         return m;
     }
@@ -79,13 +79,14 @@ impl Cx<'_> {
     /// `recv.m(args)`: レシーバを自動 deref して struct を見つけ、
     /// メソッドの self 型に合わせて自動参照 (`&self` / `&mut self`) かコピー (`self`) で渡す
     pub(crate) fn method_call(&mut self, e: &Expr, expected: Option<Ty>) -> R<V> {
-        let Expr::MethodCall(recv, method, gargs, margs) = e else { unreachable!() };
+        let Expr::MethodCall(recv, method, gargs, margs, msp) = e else { unreachable!() };
+        let msp = *msp;
         // (`v[1..].iter()`: 範囲の添字の受け手は参照にする (自動参照)。文字列は str のメソッドが受ける)
-        if let Expr::Index(b, ix) = strip_paren(recv) {
+        if let Expr::Index(b, ix, _) = strip_paren(recv) {
             let bt = self.peek(b).map(|t| self.strip_refs(t));
             let is_text = bt.is_some_and(|t| t == Ty::Str || matches!(t, Ty::Struct(sid) if self.prog.structs[sid as usize].name == "String"));
             if matches!(&**ix, Expr::Range(..)) && !is_text && method != "try_into" {
-                let ne = Expr::MethodCall(Box::new(Expr::Ref(false, Box::new(strip_paren(recv).clone()))), method.clone(), gargs.clone(), margs.clone());
+                let ne = Expr::MethodCall(Box::new(Expr::Ref(false, Box::new(strip_paren(recv).clone()))), method.clone(), gargs.clone(), margs.clone(), crate::parse::Span::default());
                 let ne = self.keep_expr(ne);
                 return self.method_call(ne, expected);
             }
@@ -96,20 +97,20 @@ impl Cx<'_> {
         // `x.unwrap()` / `x.expect(..)`: panic の場所 (メソッド名の位置) を先に書いておく (#[track_caller] 相当)
         if matches!(method, "unwrap" | "expect" | "unwrap_err" | "expect_err") && self.prog.panic_handler.is_none() {
             if let Some(&ci) = self.prog.const_index.get("__EXR_CALLER") {
-                let (l, c) = self.loc(SP);
+                let (l, c) = self.loc(msp.at);
                 let v = self.b.ins().iconst(types::I64, ((l as i64) << 16) | c as i64);
                 let a = self.static_sym(ci);
                 self.b.ins().store(mf(), v, a, 0);
             }
         }
         // 受け手が `a.as_slice()` (a: 配列) なら `(&a[..])` にして呼び直す (`a.as_slice().len()`)
-        if let Expr::MethodCall(ir, iname, _, iargs) = strip_paren(recv) {
+        if let Expr::MethodCall(ir, iname, _, iargs, _) = strip_paren(recv) {
             if iargs.is_empty() && matches!(iname.as_str(), "as_slice" | "as_mut_slice") {
                 if let Some(Ty::Array(..)) = self.peek(ir).map(|t| self.strip_refs(t)) {
                     let r = (**ir).clone();
-                    let ix = Expr::Index(Box::new(paren(r)), Box::new(full_range()));
+                    let ix = Expr::Index(Box::new(paren(r)), Box::new(full_range()), crate::parse::Span::default());
                     let nr = paren(Expr::Ref(iname != "as_slice", Box::new(ix)));
-                    let m2 = Expr::MethodCall(Box::new(nr), method.to_string(), gargs.clone(), margs.clone());
+                    let m2 = Expr::MethodCall(Box::new(nr), method.to_string(), gargs.clone(), margs.clone(), crate::parse::Span::default());
                     return self.method_call(&m2, expected);
                 }
             }
@@ -117,7 +118,7 @@ impl Cx<'_> {
         // `[T; N]::as_slice()` / `as_mut_slice()`: `&a[..]` / `&mut a[..]`
         if margs.is_empty() && matches!(method, "as_slice" | "as_mut_slice") {
             if let Some(Ty::Array(..)) = self.peek(recv).map(|t| self.strip_refs(t)) {
-                let ix = Expr::Index(Box::new(paren(recv.clone())), Box::new(full_range()));
+                let ix = Expr::Index(Box::new(paren(recv.clone())), Box::new(full_range()), crate::parse::Span::default());
                 let e = Expr::Ref(method != "as_slice", Box::new(ix));
                 return self.expr(&e, expected);
             }
@@ -138,7 +139,7 @@ impl Cx<'_> {
                         let mut stmts = vec![let_stmt("__hs", st.clone()), let_stmt("__hv", rv)];
                         for i in 0..n {
                             let f = paren(Expr::Field(Box::new(path_expr("__hv")), i.to_string()));
-                            let hs = Expr::Ref(true, Box::new(Expr::Unary("*".into(), Box::new(path_expr("__hs")))));
+                            let hs = Expr::Ref(true, Box::new(Expr::Unary("*".into(), Box::new(path_expr("__hs")), crate::parse::Span::default())));
                             stmts.push(Stmt::Expr(mcall(f, "hash", vec![hs]), true));
                         }
                         let e = Expr::Block(None, false, PBlock { stmts });
@@ -206,12 +207,12 @@ impl Cx<'_> {
             && matches!(self.peek(recv).map(|t| self.strip_refs(t)), Some(Ty::Struct(sid)) if self.vec_fields(sid).is_some())
         {
             let r: Expr = if matches!(self.peek(recv), Some(Ty::Ref(..))) {
-                paren(Expr::Unary("*".into(), Box::new(recv.clone())))
+                paren(Expr::Unary("*".into(), Box::new(recv.clone()), crate::parse::Span::default()))
             } else {
                 recv.clone()
             };
-            let ix = Expr::Index(Box::new(paren(r)), Box::new(full_range()));
-            let ne = Expr::MethodCall(Box::new(ix), method.to_string(), vec![], margs.clone());
+            let ix = Expr::Index(Box::new(paren(r)), Box::new(full_range()), crate::parse::Span::default());
+            let ne = Expr::MethodCall(Box::new(ix), method.to_string(), vec![], margs.clone(), crate::parse::Span::default());
             let t0 = self.lets.get(&(e as *const Expr as usize)).copied();
             if let Some(t) = t0 {
                 self.lets.insert(&ne as *const Expr as usize, t);
@@ -223,7 +224,7 @@ impl Cx<'_> {
             return r;
         }
         // `v[a..b].iter()` / `s[1..].len()`: 範囲の添字の受け手は自動で借用する (書き換えるメソッドは &mut)
-        if let Expr::Index(_, ix) = strip_paren(recv) {
+        if let Expr::Index(_, ix, _) = strip_paren(recv) {
             if matches!(&**ix, Expr::Range(..))
                 && !matches!(
                     method,
@@ -235,7 +236,7 @@ impl Cx<'_> {
                     "reverse" | "swap" | "fill" | "rotate_left" | "rotate_right" | "iter_mut" | "copy_from_slice" | "clone_from_slice" | "split_at_mut"
                 );
                 let nr = paren(Expr::Ref(mutating, Box::new(recv.clone())));
-                let ne = Expr::MethodCall(Box::new(nr), method.to_string(), gargs.clone(), margs.clone());
+                let ne = Expr::MethodCall(Box::new(nr), method.to_string(), gargs.clone(), margs.clone(), crate::parse::Span::default());
                 // (型推論が元の呼び出しに記録した型を、作り直したノードにも写す: `s[..4].try_into()`)
                 let t0 = self.lets.get(&(e as *const Expr as usize)).copied();
                 if let Some(t) = t0 {
@@ -309,7 +310,7 @@ impl Cx<'_> {
             };
             let e = match (self.peek(a), elem) {
                 (Some(Ty::Ref(_, i)), Some(el)) if *i == el => {
-                    mcall(paren(recv.clone()), "push", vec![Expr::Unary("*".into(), Box::new(paren(a.clone())))])
+                    mcall(paren(recv.clone()), "push", vec![Expr::Unary("*".into(), Box::new(paren(a.clone())), crate::parse::Span::default())])
                 }
                 _ => mcall(paren(recv.clone()), "push", vec![a.clone()]),
             };
@@ -332,7 +333,7 @@ impl Cx<'_> {
             let a = &margs[0];
             let r = paren(recv.clone());
             let e = match self.peek(a).map(|t| self.strip_refs(t)) {
-                Some(Ty::Char) if matches!(self.peek(a), Some(Ty::Ref(..))) => mcall(r, "push", vec![Expr::Unary("*".into(), Box::new(paren(a.clone())))]),
+                Some(Ty::Char) if matches!(self.peek(a), Some(Ty::Ref(..))) => mcall(r, "push", vec![Expr::Unary("*".into(), Box::new(paren(a.clone())), crate::parse::Span::default())]),
                 Some(Ty::Char) | None => mcall(r, "push", vec![a.clone()]),
                 Some(Ty::Str) => mcall(r, "push_str", vec![a.clone()]),
                 _ => mcall(r, "push_str", vec![mcall(paren(a.clone()), "as_str", vec![])]),
@@ -434,7 +435,7 @@ impl Cx<'_> {
                 if let Some(did) = self.prog.method(sid, "deref") {
                     if matches!(self.prog.sigs[did as usize].ret, Ty::Ref(_, Ty::Str | Ty::Slice(_))) {
                         let d = mcall(paren(recv.clone()), "deref", vec![]);
-                        let e = Expr::MethodCall(Box::new(d), method.to_string(), gargs.clone(), margs.clone());
+                        let e = Expr::MethodCall(Box::new(d), method.to_string(), gargs.clone(), margs.clone(), crate::parse::Span::default());
                         return self.expr(&e, expected);
                     }
                 }
@@ -533,7 +534,7 @@ impl Cx<'_> {
 
     /// プリミティブ型への trait 実装のメソッド (`impl Tr for u32` の `x.m()`)
     pub(crate) fn prim_trait_method(&mut self, e: &Expr) -> R<Option<V>> {
-        let Expr::MethodCall(recv, method, gargs, margs) = e else { unreachable!() };
+        let Expr::MethodCall(recv, method, gargs, margs, _) = e else { unreachable!() };
         let recv: &Expr = recv;
         let tf: Option<&[GArg]> = (!gargs.is_empty()).then_some(&gargs[..]);
         // (接尾辞のない整数リテラル `5.d()` は i32)
@@ -1172,7 +1173,7 @@ impl Cx<'_> {
                             Expr::Ref(_, e) => paren((**e).clone()),
                             _ => paren(a0.clone()),
                         };
-                        return Some(Expr::MethodCall(Box::new(recv), ms, vec![], rest));
+                        return Some(Expr::MethodCall(Box::new(recv), ms, vec![], rest, crate::parse::Span::default()));
                     }
                 }
             }
@@ -1193,7 +1194,7 @@ impl Cx<'_> {
         // `Ord::cmp(&a, &b)` / `PartialOrd::partial_cmp(..)` / `PartialEq::eq(..)`: メソッド呼び出しの形に
         if matches!(ty, "Ord" | "PartialOrd" | "PartialEq" | "Eq") && cargs.len() == 2 {
             let m = &p.segs[1].name;
-            return Some(Expr::MethodCall(Box::new(paren(cargs[0].clone())), m.clone(), vec![], vec![cargs[1].clone()]));
+            return Some(Expr::MethodCall(Box::new(paren(cargs[0].clone())), m.clone(), vec![], vec![cargs[1].clone()], crate::parse::Span::default()));
         }
         let t = Ty::prim(ty)?;
         if t == Ty::Char || t == Ty::Bool {
@@ -1217,6 +1218,6 @@ impl Cx<'_> {
         let rest: Vec<Expr> = args.cloned().collect();
         // (リテラルは型を付ける: `i32::pow(2, 10)` の 2 は i32)
         let recv = if matches!(a0, Expr::Lit(_)) { paren(Expr::Cast(Box::new(a0.clone()), ty_named(ty))) } else { paren(a0.clone()) };
-        Some(Expr::MethodCall(Box::new(recv), ms.to_string(), vec![], rest))
+        Some(Expr::MethodCall(Box::new(recv), ms.to_string(), vec![], rest, crate::parse::Span::default()))
     }
 }

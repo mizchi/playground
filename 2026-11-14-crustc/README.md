@@ -1140,6 +1140,18 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
   範囲の添字の受け手の自動参照、`matches!` の guard の中のクロージャ、minclif の bitcast の 0 拡張。crustc がまだ扱えない書き方
   (分解代入・`collect::<Option<Vec<_>>>`・クロージャから fn ポインタへの変換・`std::f64::consts` の値など) はソースを書き換えた
 
+#### 自前の構文木のソース位置
+
+- `parse::Span { start, at }` を、panic の場所に使う式 (Unary / Binary / AssignOp / MethodCall / Index / Macro) に持たせた。
+  start は式の先頭 (syn の `e.span()`)、at は式ごとの位置 (メソッド名・`[`・演算子・マクロの開き括弧)
+- 式のマクロの引数のテキストは、元の行・桁の配置のまま作る (`group_text_laid_out`)。読み直すときはマクロの位置からずらす
+  (`parse_expr_at` / `ast_closure::macro_args_at`) ので、`println!` の引数の中の `unwrap()` なども元の位置になる
+- acg の `loc()` がこの位置を使う: 添字の範囲外 (Vec は `[`、配列は式の先頭)・オーバーフロー・0 除算・`unwrap` / `expect` (メソッド名)・
+  `panic!` / `assert!` / `dbg!` (マクロの先頭) の場所が rustc と同じになった。`tests/panic_loc.rs` が rustc と比べる
+- `tests/driver2.rs` は stderr (panic のメッセージ) も比べるようにした (139 中 138 が一致。残りは前からの未対応のメソッド)
+- `dbg!` の桁は syn 版が引数の位置を出していた (rustc はマクロの位置)。syn 版も直した
+- 移植の初めに作った ast_codegen.rs (v1) は acg が置き換えたので消した (tests/ast_codegen.rs は driver2 で tests/acg を試す)
+
 ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen / program / ast_consteval / solver / ctors / ast_infer / minclif / ast_codegen）と、
 依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。
 残りの front（syn の構文木を引く検索）/ infer（syn 版。自前の構文木の版 ast_infer はある）/ consteval（codegen の定数の昇格）/ closure / codegen / driver / cache は syn と cranelift の上に書かれている。

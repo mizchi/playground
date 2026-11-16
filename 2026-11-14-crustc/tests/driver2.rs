@@ -41,10 +41,15 @@ fn driver2_like_driver() {
             bad.push(format!("{name}: failed to run"));
             continue;
         };
-        if a.stdout == b.stdout && a.status.code() == b.status.code() {
+        // (panic のメッセージ (場所) も比べる)
+        if a.stdout == b.stdout && a.status.code() == b.status.code() && a.stderr == b.stderr {
             ok += 1;
         } else {
-            bad.push(format!("{name}: output differs (exit {:?} vs {:?})", a.status.code(), b.status.code()));
+            let why = if a.stdout != b.stdout || a.status.code() != b.status.code() { "output" } else { "stderr" };
+            bad.push(format!("{name}: {why} differs (exit {:?} vs {:?})", a.status.code(), b.status.code()));
+            if why == "stderr" && std::env::var("DRIVER2_FILE").is_err() {
+                eprintln!("    ours: {}\n    ref:  {}", String::from_utf8_lossy(&a.stderr).lines().next().unwrap_or(""), String::from_utf8_lossy(&b.stderr).lines().next().unwrap_or(""));
+            }
             if std::env::var("DRIVER2_FILE").is_ok() {
                 let (x, y) = (String::from_utf8_lossy(&a.stdout), String::from_utf8_lossy(&b.stdout));
                 for (i, (l1, l2)) in x.lines().zip(y.lines()).enumerate() {

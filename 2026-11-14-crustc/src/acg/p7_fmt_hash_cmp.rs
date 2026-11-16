@@ -274,7 +274,7 @@ impl Cx<'_> {
         if let Some(args) = self.macro_args_of(g) {
             return self.fmt_macro_args(args, name);
         }
-        let Some(parsed) = crate::ast_closure::macro_args(g) else {
+        let Some(parsed) = crate::ast_closure::macro_args_at(g, self.mbase) else {
             return err(span, format!("`{name}!`: expected comma-separated expressions"));
         };
         // (読み直した引数は関数の間持っておく: アドレスで引く表を使うコードに渡すため)
@@ -1242,7 +1242,7 @@ impl Cx<'_> {
 
     /// `a.cmp(&b)` / `a.partial_cmp(&b)` (手書きの impl がない型: 整数・タプル・derive した型など)
     pub(crate) fn ord_method(&mut self, mc: &Expr) -> R<Option<V>> {
-        let Expr::MethodCall(receiver, method, _, margs) = mc else { return Ok(None) };
+        let Expr::MethodCall(receiver, method, _, margs, _) = mc else { return Ok(None) };
         let name = method.to_string();
         if !matches!(name.as_str(), "cmp" | "partial_cmp") || margs.len() != 1 {
             return Ok(None);

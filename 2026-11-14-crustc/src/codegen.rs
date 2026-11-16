@@ -7933,7 +7933,7 @@ impl Cx<'_, '_> {
                 let Some(e) = args.first() else {
                     return err(mac.span(), "`dbg!()` without arguments is not supported");
                 };
-                let (sl, sc) = self.loc(e.span());
+                let (sl, sc) = self.loc(mac.span());
                 let text = {
                     use quote::ToTokens;
                     e.to_token_stream().to_string()

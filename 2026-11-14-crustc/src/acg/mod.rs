@@ -62,8 +62,9 @@ pub type R<T> = Result<T, String>;
 pub const PTR: Type = types::I64;
 
 /// エラーの場所 (今は使わない)
-pub type Sp = u32;
-pub const SP: Sp = 0;
+/// ソース上の位置 (アイテムの中の行・桁)。分からないところは SP (0 行目)
+pub type Sp = crate::parse::Pos;
+pub const SP: Sp = crate::parse::Pos { line: 0, col: 0 };
 
 pub fn err<T>(_: Sp, msg: impl std::fmt::Display) -> R<T> {
     // (ACG_PANIC_ERR=1: エラーの場所をバックトレースで調べる)
@@ -287,6 +288,8 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
         keep: vec![],
         margs,
         texts,
+        mbase: Default::default(),
+        mstart: Default::default(),
     };
     let r = if prog.index.get(crate::prelude::DROP_GLUE) == Some(&body_id) {
         cx.drop_glue_body(&sig)
@@ -355,7 +358,7 @@ fn addr_taken(b: &crate::parse::Block) -> HashSet<String> {
                     out.insert(n);
                 }
             }
-            Expr::Macro(p, g) => {
+            Expr::Macro(p, g, _) => {
                 let name = p.segs.last().map(|s| s.name.as_str()).unwrap_or("");
                 if matches!(name, "assert_eq" | "assert_ne" | "debug_assert_eq" | "debug_assert_ne") {
                     if let Some(es) = crate::ast_closure::macro_args(g) {
@@ -393,6 +396,16 @@ fn addr_taken(b: &crate::parse::Block) -> HashSet<String> {
     out
 }
 
+/// 式の先頭のソース上の位置 (syn の `e.span()` の始まり)。位置を持つ式か、その一番左の子から。分からなければ SP
+pub fn expr_start(e: &Expr) -> Sp {
+    match e {
+        Expr::Unary(_, _, s) | Expr::Binary(_, _, _, s) | Expr::AssignOp(_, _, _, s) | Expr::MethodCall(_, _, _, _, s) | Expr::Index(_, _, s) | Expr::Macro(_, _, s) => s.start,
+        Expr::Field(x, _) | Expr::Call(x, _) | Expr::Cast(x, _) | Expr::Try(x) | Expr::Paren(x) | Expr::Assign(x, _) => expr_start(x),
+        Expr::Range(Some(x), _, _) => expr_start(x),
+        _ => SP,
+    }
+}
+
 /// 1 つの名前だけのパス (`x`)
 pub fn ident_of(p: &Path) -> Option<&str> {
     if !p.global && p.segs.len() == 1 && p.segs[0].args.is_empty() && p.segs[0].fn_args.is_none() {
@@ -419,7 +432,7 @@ pub fn path_expr(n: &str) -> Expr {
 
 /// メソッド呼び出しの式を作る
 pub fn mcall(recv: Expr, name: &str, args: Vec<Expr>) -> Expr {
-    Expr::MethodCall(Box::new(recv), name.to_string(), vec![], args)
+    Expr::MethodCall(Box::new(recv), name.to_string(), vec![], args, crate::parse::Span::default())
 }
 
 /// 添字の検査を覚えるときの長さ
@@ -531,6 +544,10 @@ pub struct Cx<'p> {
     pub margs: crate::ast_infer::MacroArgs,
     /// 式の形 → 型 (複製した式の型を引く)
     pub texts: crate::ast_infer::TextTypes,
+    /// 今コード生成しているマクロの引数 (開き括弧) のソース上の位置 (引数を読み直すときの位置の基準)
+    pub mbase: crate::parse::Pos,
+    /// 今コード生成しているマクロの先頭 (syn の `mac.span()`: panic! / assert! の場所)
+    pub mstart: crate::parse::Pos,
 }
 
 /// 間接呼び出しの呼び先
@@ -545,7 +562,7 @@ pub fn is_promotable(cx: &Cx, e: &Expr) -> bool {
     match e {
         Expr::Lit(l) => !matches!(lit::lit(l), Some(Lit::Str(_) | Lit::ByteStr(_))),
         Expr::Paren(p) => is_promotable(cx, p),
-        Expr::Unary(op, x) => op == "-" && is_promotable(cx, x),
+        Expr::Unary(op, x, _) => op == "-" && is_promotable(cx, x),
         Expr::Struct(_, fs, rest) => rest.is_none() && fs.iter().all(|f| is_promotable(cx, &f.1)),
         Expr::Tuple(t) => t.iter().all(|x| is_promotable(cx, x)),
         Expr::Array(a) => a.iter().all(|x| is_promotable(cx, x)),
@@ -591,8 +608,8 @@ pub fn is_place_expr(e: &Expr) -> bool {
     match e {
         Expr::Path(None, p) => ident_of(p).is_some(),
         Expr::Field(..) => true,
-        Expr::Index(_, ix) => !matches!(&**ix, Expr::Range(..)),
-        Expr::Unary(op, _) => op == "*",
+        Expr::Index(_, ix, _) => !matches!(&**ix, Expr::Range(..)),
+        Expr::Unary(op, _, _) => op == "*",
         Expr::Paren(p) => is_place_expr(p),
         _ => false,
     }
@@ -1052,8 +1069,13 @@ impl Cx<'_> {
                     self.extend_temps(t0);
                 }
                 // (`;` の付いたマクロの文。末尾の `vec![]` などは式として期待型を渡す)
-                Stmt::Expr(Expr::Macro(p, g), semi) if *semi => {
-                    let r = self.macro_(p, g, None)?;
+                Stmt::Expr(Expr::Macro(p, g, sp), semi) if *semi => {
+                    let saved = std::mem::replace(&mut self.mbase, sp.at);
+                    let saved_s = std::mem::replace(&mut self.mstart, sp.start);
+                    let r = self.macro_(p, g, None);
+                    self.mbase = saved;
+                    self.mstart = saved_s;
+                    let r = r?;
                     if r.1 == Ty::Never {
                         diverged = true;
                     }
@@ -1177,7 +1199,7 @@ impl Cx<'_> {
                 }
             },
             Expr::Cast(_, ty) => self.parse_ty(ty).ok(),
-            Expr::Index(b, ix) if !matches!(&**ix, Expr::Range(..)) => {
+            Expr::Index(b, ix, _) if !matches!(&**ix, Expr::Range(..)) => {
                 let mut t = self.peek(b)?;
                 loop {
                     match t {
@@ -1192,7 +1214,7 @@ impl Cx<'_> {
                 let e = a.iter().find_map(|e| self.peek(e))?;
                 Some(Ty::Array(intern(e), a.len() as u32))
             }
-            Expr::MethodCall(recv, name, _, args) => {
+            Expr::MethodCall(recv, name, _, args, _) => {
                 let mut t = self.peek(recv)?;
                 while let Ty::Ref(_, i) = t {
                     t = *i;
@@ -1236,15 +1258,15 @@ impl Cx<'_> {
                 Some(self.prog.partial_subst(sig.ret, &sol)).filter(|&t| !self.prog.has_param(t))
             }
             Expr::Paren(p) => self.peek(p),
-            Expr::Macro(p, _) if is_ident(p, "format") => self.prog.struct_index.get("String").map(|&s| Ty::Struct(s)),
-            Expr::Unary(op, x) if op == "*" => match self.peek(x)? {
+            Expr::Macro(p, _, _) if is_ident(p, "format") => self.prog.struct_index.get("String").map(|&s| Ty::Struct(s)),
+            Expr::Unary(op, x, _) if op == "*" => match self.peek(x)? {
                 Ty::Ref(_, i) => Some(*i),
                 _ => None,
             },
-            Expr::Unary(_, x) => self.peek(x),
+            Expr::Unary(_, x, _) => self.peek(x),
             // `&v[a..b]`: スライス (文字列なら &str)
-            Expr::Ref(m, x) if matches!(strip_paren(x), Expr::Index(_, ix) if matches!(&**ix, Expr::Range(..))) => {
-                let Expr::Index(b, _) = strip_paren(x) else { unreachable!() };
+            Expr::Ref(m, x) if matches!(strip_paren(x), Expr::Index(_, ix, _) if matches!(&**ix, Expr::Range(..))) => {
+                let Expr::Index(b, _, _) = strip_paren(x) else { unreachable!() };
                 let mut t = self.peek(b)?;
                 while let Ty::Ref(_, i) = t {
                     if t.is_fat() {
@@ -1278,7 +1300,7 @@ impl Cx<'_> {
                 let pp = PPath::of(p);
                 self.prog.struct_by_p(&pp, self.self_sid).or_else(|| self.prog.variant_by_p(&pp, self.self_sid).map(|v| v.0)).map(Ty::Struct)
             }
-            Expr::Binary(op, _, _) if is_cmp(op) || op == "&&" || op == "||" => Some(Ty::Bool),
+            Expr::Binary(op, _, _, _) if is_cmp(op) || op == "&&" || op == "||" => Some(Ty::Bool),
             Expr::If(_, then, _) => match then.stmts.last() {
                 Some(Stmt::Expr(e, false)) => self.peek(e),
                 _ => None,
@@ -1287,8 +1309,8 @@ impl Cx<'_> {
                 Some(Stmt::Expr(e, false)) => self.peek(e),
                 _ => None,
             },
-            Expr::Binary(op, l, _) if op == "<<" || op == ">>" => self.peek(l),
-            Expr::Binary(_, l, r) => self.peek(l).or_else(|| self.peek(r)),
+            Expr::Binary(op, l, _, _) if op == "<<" || op == ">>" => self.peek(l),
+            Expr::Binary(_, l, r, _) => self.peek(l).or_else(|| self.peek(r)),
             _ => None,
         }
     }

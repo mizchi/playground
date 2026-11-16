@@ -69,7 +69,7 @@ fn const_int(e: &Expr) -> R<i64> {
             let digits: String = t.chars().filter(|&c| c != '_').take_while(|c| c.is_ascii_digit()).collect();
             digits.parse::<i64>().map_err(|e| e.to_string())
         }
-        Expr::Unary(op, x) if op == "-" => Ok(-const_int(x)?),
+        Expr::Unary(op, x, _) if op == "-" => Ok(-const_int(x)?),
         Expr::Paren(x) => const_int(x),
         _ => err("only integer literals are supported as discriminants"),
     }
@@ -395,7 +395,7 @@ fn local_ty_syn(b: &Block, n: &str, int_hint: Option<Ty>) -> Option<TySyn> {
                 Expr::Path(None, p) if p.segs.len() == 2 && p.segs[0].name == "String" => Some(TySyn::Named("String".into())),
                 _ => None,
             },
-            Some(Expr::MethodCall(_, m, _, _)) if m == "to_string" => Some(TySyn::Named("String".into())),
+            Some(Expr::MethodCall(_, m, _, _, _)) if m == "to_string" => Some(TySyn::Named("String".into())),
             _ => None,
         };
     }

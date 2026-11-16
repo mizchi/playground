@@ -5,7 +5,7 @@ use crate::parse::GArg;
 impl Cx<'_> {
     /// 配列 / スライスの組み込みメソッド (len / is_empty / get / get_mut / first / last / swap / contains)
     pub(crate) fn builtin_method(&mut self, mc: &Expr) -> R<Option<V>> {
-        let Expr::MethodCall(mc_recv, mc_name, mc_tf, mc_args) = mc else { unreachable!() };
+        let Expr::MethodCall(mc_recv, mc_name, mc_tf, mc_args, _) = mc else { unreachable!() };
         let mc_recv: &Expr = mc_recv;
         let _ = (mc_name, mc_tf, mc_args);
         let name = mc_name.to_string();
@@ -88,7 +88,7 @@ impl Cx<'_> {
                         None => Expr::Lit("0usize".to_string()),
                     };
                     let hi: Expr = match (rg_end, *rg_closed) {
-                        (Some(e), true) => Expr::Binary("+".to_string(), Box::new(Expr::Paren(e.clone())), Box::new(Expr::Lit("1".to_string()))),
+                        (Some(e), true) => Expr::Binary("+".to_string(), Box::new(Expr::Paren(e.clone())), Box::new(Expr::Lit("1".to_string())), crate::parse::Span::default()),
                         (Some(e), _) => (**e).clone(),
                         (None, _) => mcall(Expr::Paren(Box::new(r.clone())), "len", vec![]),
                     };
@@ -98,7 +98,7 @@ impl Cx<'_> {
             }
         }
         // `v[..n].sort()`: 範囲の添字は自動で借用する
-        if let (Some((f, m)), Expr::Index(_, ix_index)) = (slice_fn, strip_paren(&*mc_recv)) {
+        if let (Some((f, m)), Expr::Index(_, ix_index, _)) = (slice_fn, strip_paren(&*mc_recv)) {
             if matches!(&**ix_index, Expr::Range(..)) {
                 let r = &*mc_recv;
                 let e: Expr = if m { Expr::Ref(true, Box::new(r.clone())) } else { Expr::Ref(false, Box::new(r.clone())) };
@@ -139,7 +139,7 @@ impl Cx<'_> {
                     Box::new(mcall(Expr::Paren(Box::new(r.clone())), "as_str", vec![])),
                     mc_name.clone(),
                     mc_tf.clone(),
-                    mc_args.clone(),
+                    mc_args.clone(), crate::parse::Span::default()
                 );
                 // (型推論が元の呼び出しに記録した型を、作り直したノードにも写す: `t.parse()` の T)
                 let mut keys: Vec<usize> = vec![];
@@ -149,11 +149,11 @@ impl Cx<'_> {
                     // (自前の構文木ではメソッド呼び出しのノードは式そのもの)
                 }
                 // (受け手 `(r).as_str()` は &str、`(r)` は元の受け手の型: 作り直したノードには型推論の記録がない)
-                if let Expr::MethodCall(nm_recv, _, _, _) = &e {
+                if let Expr::MethodCall(nm_recv, _, _, _, _) = &e {
                     let a = &**nm_recv as *const Expr as usize;
                     self.lets.insert(a, Ty::Ref(false, intern(Ty::Str)));
                     keys.push(a);
-                    if let Expr::MethodCall(inner_recv, _, _, _) = &**nm_recv {
+                    if let Expr::MethodCall(inner_recv, _, _, _, _) = &**nm_recv {
                         let b = &**inner_recv as *const Expr as usize;
                         self.lets.insert(b, rt);
                         keys.push(b);
@@ -434,7 +434,7 @@ impl Cx<'_> {
 
     /// &str: len / is_empty / as_bytes / as_ptr (表現は &[u8] と同じ)
     pub(crate) fn str_method(&mut self, mc: &Expr) -> R<Option<V>> {
-        let Expr::MethodCall(mc_recv, mc_name, mc_tf, mc_args) = mc else { unreachable!() };
+        let Expr::MethodCall(mc_recv, mc_name, mc_tf, mc_args, _) = mc else { unreachable!() };
         let mc_recv: &Expr = mc_recv;
         let _ = (mc_name, mc_tf, mc_args);
         let (v, mut t) = self.expr(&*mc_recv, None)?;
@@ -570,7 +570,7 @@ impl Cx<'_> {
 
     /// 生ポインタ: add / sub / offset / is_null / read / write / read_volatile / write_volatile / cast
     pub(crate) fn ptr_method(&mut self, mc: &Expr, pt: Ty, elem: Ty) -> R<Option<V>> {
-        let Expr::MethodCall(mc_recv, mc_name, mc_tf, mc_args) = mc else { unreachable!() };
+        let Expr::MethodCall(mc_recv, mc_name, mc_tf, mc_args, _) = mc else { unreachable!() };
         let mc_recv: &Expr = mc_recv;
         let _ = (mc_name, mc_tf, mc_args);
         let (p, _) = self.expr(&*mc_recv, Some(pt))?;
@@ -631,7 +631,7 @@ impl Cx<'_> {
     /// 整数の組み込みメソッド (wrapping_* / checked_* / saturating_* / min / max / abs / pow /
     /// count_ones / leading_zeros / trailing_zeros / is_power_of_two / rotate_* / swap_bytes / signum)
     pub(crate) fn int_method(&mut self, mc: &Expr, t: Ty) -> R<Option<V>> {
-        let Expr::MethodCall(mc_recv, mc_name, mc_tf, mc_args) = mc else { unreachable!() };
+        let Expr::MethodCall(mc_recv, mc_name, mc_tf, mc_args, _) = mc else { unreachable!() };
         let mc_recv: &Expr = mc_recv;
         let _ = (mc_name, mc_tf, mc_args);
         let name = mc_name.to_string();
@@ -762,7 +762,7 @@ impl Cx<'_> {
                 if self.overflow_checks && s {
                     let min = self.int_const(t, crate::program::prim_assoc_const(t, "MIN").unwrap());
                     let bad = self.b.ins().icmp(IntCC::Equal, a, min);
-                    self.ovf_panic(bad, 6, SP);
+                    self.ovf_panic(bad, 6, expr_start(mc));
                 }
                 (Some(self.b.ins().iabs(a)), t)
             }
@@ -909,7 +909,7 @@ impl Cx<'_> {
                     "checked_pow" => self.option_if(v, t, of)?,
                     "overflowing_pow" => self.pair_with_bool(v, t, of)?,
                     "pow" if checked => {
-                        self.ovf_panic(of, 2, SP);
+                        self.ovf_panic(of, 2, expr_start(mc));
                         (Some(v), t)
                     }
                     "saturating_pow" => {

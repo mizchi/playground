@@ -112,7 +112,7 @@ struct HoistScan {
 fn hoist_root(e: &Expr) -> Option<String> {
     match e {
         Expr::Path(_, p) => ident_of(p).map(|i| i.to_string()),
-        Expr::Index(b, _) => hoist_root(b),
+        Expr::Index(b, _, _) => hoist_root(b),
         Expr::Paren(p) => hoist_root(p),
         _ => None,
     }
@@ -123,7 +123,7 @@ fn hoist_chain(e: &Expr, out: &mut Vec<Expr>) -> bool {
             out.push(e.clone());
             true
         }
-        Expr::Index(b, ix) if !matches!(&**ix, Expr::Range(..)) => {
+        Expr::Index(b, ix, _) if !matches!(&**ix, Expr::Range(..)) => {
             if !hoist_chain(b, out) {
                 return false;
             }
@@ -136,14 +136,14 @@ fn hoist_chain(e: &Expr, out: &mut Vec<Expr>) -> bool {
 impl HoistScan {
     fn visit_expr(&mut self, e: &Expr) {
         match e {
-            Expr::Index(_, ix) if !matches!(&**ix, Expr::Range(..)) => {
+            Expr::Index(_, ix, _) if !matches!(&**ix, Expr::Range(..)) => {
                 let mut c = vec![];
                 if hoist_chain(e, &mut c) {
                     c.pop(); // (いちばん外の添字は要素そのもの: 受け手は手前まで)
                     self.chains.push((hoist_root(e).unwrap(), c, false));
                     // 添字の式の中も見る
                     let mut x = e;
-                    while let Expr::Index(b, ix) = x {
+                    while let Expr::Index(b, ix, _) = x {
                         self.visit_expr(ix);
                         x = b;
                     }
@@ -155,7 +155,7 @@ impl HoistScan {
                 self.assign_target(l);
                 self.visit_expr(r);
             }
-            Expr::AssignOp(_, l, r) => {
+            Expr::AssignOp(_, l, r, _) => {
                 self.assign_target(l);
                 self.visit_expr(r);
             }
@@ -165,7 +165,7 @@ impl HoistScan {
                 }
             }
             Expr::Closure(..) => self.bail = true,
-            Expr::Macro(_, g) => self.visit_macro(g),
+            Expr::Macro(_, g, _) => self.visit_macro(g),
             _ => self.walk(e),
         }
     }
@@ -269,7 +269,7 @@ impl HoistScan {
             c.pop();
             self.chains.push((hoist_root(t).unwrap(), c, true));
             let mut x = t;
-            while let Expr::Index(b, ix) = x {
+            while let Expr::Index(b, ix, _) = x {
                 self.visit_expr(ix);
                 x = b;
             }
@@ -295,7 +295,7 @@ impl Cx<'_> {
         let mut adapters = vec![];
         loop {
             match e {
-                Expr::MethodCall(recv, name, _, args)
+                Expr::MethodCall(recv, name, _, args, _)
                     if args.is_empty() && matches!(name.as_str(), "iter" | "iter_mut" | "into_iter" | "copied" | "cloned" | "enumerate" | "rev") =>
                 {
                     adapters.push(name.clone());
@@ -307,7 +307,7 @@ impl Cx<'_> {
         }
         adapters.reverse();
         // (`for x in v[1..].iter()`: 範囲の添字は参照にする (メソッド呼び出しの自動参照))
-        if let Expr::Index(_, ix) = e {
+        if let Expr::Index(_, ix, _) = e {
             if matches!(&**ix, Expr::Range(..)) && !adapters.is_empty() {
                 e = self.keep_expr(Expr::Ref(false, Box::new(e.clone())));
             }
@@ -395,7 +395,7 @@ impl Cx<'_> {
             _ => (None, e),
         };
         // `&a[lo..hi]` は部分スライス (参照ごと評価する)
-        let sub = matches!(base_e, Expr::Index(_, ix) if matches!(&**ix, Expr::Range(..)));
+        let sub = matches!(base_e, Expr::Index(_, ix, _) if matches!(&**ix, Expr::Range(..)));
         let (ptr, len, elem) = self.indexable(if sub { e } else { base_e })?;
         let mut mode = by_ref;
         let base_is_ref = by_ref.is_none() && matches!(self.peek(base_e), Some(Ty::Ref(..)));
@@ -728,7 +728,7 @@ impl Cx<'_> {
                     continue;
                 }
                 // `x[i]`: i はループの前からある、本体で代入も束縛し直しもされない変数
-                let Expr::Index(_, ix) = b else { break };
+                let Expr::Index(_, ix, _) = b else { break };
                 let Expr::Path(_, ip) = &**ix else { break };
                 let Some(iname) = ident_of(ip).map(|i| i.to_string()) else { break };
                 if sc.assigned.contains(&iname) || self.lookup(&iname).is_none() {
@@ -783,8 +783,7 @@ impl Cx<'_> {
     /// (今は Span がない (Sp = 0) ので、行は 0 (+ line_base)・列は 0 (+ 1) として計算する)
     pub(crate) fn loc(&mut self, span: Sp) -> (u32, u32) {
         self.loc_used = true;
-        let (line, column) = (span, 0u32);
-        (line + self.line_base, column + 1)
+        (span.line + self.line_base, span.col + 1)
     }
 
     pub(crate) fn trap_site(&mut self, kind: u8, span: Sp, msg: Option<String>) -> TrapCode {
@@ -843,11 +842,7 @@ impl Cx<'_> {
             Some(Ty::Struct(sid)) => self.vec_fields(sid).map(|f| f.2),
             _ => None,
         };
-        let repeat = (|| -> Option<(Expr, Expr)> {
-            let parts = split_top(strip_delims(g)?, ";")?;
-            let [x, n] = &parts[..] else { return None };
-            Some((crate::parse::parse_expr(x).ok()?, crate::parse::parse_expr(n).ok()?))
-        })();
+        let repeat = crate::ast_closure::vec_repeat_parts(g, self.mbase);
         if let Some((x, n)) = repeat {
             let x: &Expr = self.keep_expr(x);
             let n: &Expr = self.keep_expr(n);
@@ -955,7 +950,7 @@ impl Cx<'_> {
     }
 
     pub(crate) fn macro_args(&self, p: &Path, g: &str) -> R<Vec<Expr>> {
-        match crate::ast_closure::macro_args(g) {
+        match crate::ast_closure::macro_args_at(g, self.mbase) {
             Some(v) => Ok(v),
             None => {
                 let name = p.segs.last().map(|s| s.name.as_str()).unwrap_or("");
@@ -977,7 +972,7 @@ impl Cx<'_> {
                 let Some(e) = args.first() else {
                     return err(SP, "`dbg!()` without arguments is not supported");
                 };
-                let (sl, sc) = self.loc(SP);
+                let (sl, sc) = self.loc(self.mstart);
                 let text = tokens_text(macro_arg_texts(g).first().map(|s| s.as_str()).unwrap_or(""));
                 let head = format!("[src/main.rs:{sl}:{sc}] {} = ", text);
                 let ex = Expr::Block(
@@ -986,7 +981,7 @@ impl Cx<'_> {
                     PBlock {
                         stmts: vec![
                             let_stmt("__exr_dbg", e.clone()),
-                            Stmt::Expr(Expr::Macro(path_of("eprintln"), format!("(\"{{}}{{:#?}}\", {head:?}, __exr_dbg)")), true),
+                            Stmt::Expr(Expr::Macro(path_of("eprintln"), format!("(\"{{}}{{:#?}}\", {head:?}, __exr_dbg)"), crate::parse::Span::default()), true),
                             Stmt::Expr(path_expr("__exr_dbg"), false),
                         ],
                     },
@@ -1022,7 +1017,7 @@ impl Cx<'_> {
                     };
                     if !args.is_empty() && lit.is_none() {
                         if self.prog.index.contains_key("__exr_panic_fmt") {
-                            let e: &Expr = self.keep_expr(Expr::Macro(path_of("format"), g.to_string()));
+                            let e: &Expr = self.keep_expr(Expr::Macro(path_of("format"), g.to_string(), crate::parse::Span::default()));
                             let (s, st) = self.expr(e, None)?;
                             if let Some(s) = s {
                                 let pre = if head.is_empty() { String::new() } else { format!("{head}: ") };
@@ -1030,7 +1025,7 @@ impl Cx<'_> {
                                 let (sl, sc) = if self.caller_loc {
                                     (0, 0)
                                 } else {
-                                    let (l, c) = self.loc(SP);
+                                    let (l, c) = self.loc(self.mstart);
                                     (l as i64, c as i64)
                                 };
                                 let l = self.b.ins().iconst(types::I32, sl);
@@ -1048,7 +1043,7 @@ impl Cx<'_> {
                         (None, "") => "explicit panic".to_string(),
                         (None, h) => h.to_string(),
                     };
-                    let code = self.trap_site(12, SP, Some(msg));
+                    let code = self.trap_site(12, self.mstart, Some(msg));
                     self.b.ins().trap(code);
                     return Ok(self.dead());
                 }
@@ -1068,7 +1063,7 @@ impl Cx<'_> {
                         Some(s) if args.len() == 2 => s,
                         _ => format!("assertion failed: {text}"),
                     };
-                    self.panic_unless_at(cv, 12, SP, Some(msg));
+                    self.panic_unless_at(cv, 12, self.mstart, Some(msg));
                 }
                 Ok((None, Ty::Unit))
             }
@@ -1083,9 +1078,9 @@ impl Cx<'_> {
                 // 書式化が使えれば、rustc と同じく left / right の値 ({:?}) も出す (a と b は 1 回だけ評価する)
                 if self.prog.panic_handler.is_none() && self.prog.index.contains_key("__exr_panic_fmt") {
                     let op = if name.ends_with("_eq") { "==" } else { "!=" };
-                    let (l, c) = if self.caller_loc { (0u32, 0u32) } else { self.loc(SP) };
-                    let deref = |n: &str| Expr::Unary("*".into(), Box::new(path_expr(n)));
-                    let cmp = Expr::Binary(op.to_string(), Box::new(deref("__exr_l")), Box::new(deref("__exr_r")));
+                    let (l, c) = if self.caller_loc { (0u32, 0u32) } else { self.loc(self.mstart) };
+                    let deref = |n: &str| Expr::Unary("*".into(), Box::new(path_expr(n)), crate::parse::Span::default());
+                    let cmp = Expr::Binary(op.to_string(), Box::new(deref("__exr_l")), Box::new(deref("__exr_r")), crate::parse::Span::default());
                     let fail_src = if args.len() > 2 {
                         let fmt = format!("assertion `left {op} right` failed: {{}}\n  left: {{:?}}\n right: {{:?}}");
                         let rest = macro_arg_texts(g)[2..].join(",");
@@ -1105,18 +1100,18 @@ impl Cx<'_> {
                         vec![let_stmt("__exr_l", Expr::Ref(false, Box::new(paren(a)))), let_stmt("__exr_r", Expr::Ref(false, Box::new(paren(b))))]
                     };
                     let mut stmts = lets;
-                    stmts.push(Stmt::Expr(Expr::If(Box::new(Expr::Unary("!".into(), Box::new(Expr::Paren(Box::new(cmp))))), fail, None), false));
+                    stmts.push(Stmt::Expr(Expr::If(Box::new(Expr::Unary("!".into(), Box::new(Expr::Paren(Box::new(cmp))), crate::parse::Span::default())), fail, None), false));
                     let e: &Expr = self.keep_expr(Expr::Block(None, false, PBlock { stmts }));
                     self.expr(e, Some(Ty::Unit))?;
                     return Ok((None, Ty::Unit));
                 }
                 let op = if name.ends_with("_eq") { "==" } else { "!=" };
-                let e: &Expr = self.keep_expr(Expr::Binary(op.to_string(), Box::new(paren(a)), Box::new(paren(b))));
+                let e: &Expr = self.keep_expr(Expr::Binary(op.to_string(), Box::new(paren(a)), Box::new(paren(b)), crate::parse::Span::default()));
                 let (c, ct) = self.expr(e, Some(Ty::Bool))?;
                 self.same(SP, ct, Ty::Bool)?;
                 if let Some(c) = c {
                     let op = if name.ends_with("_eq") { "==" } else { "!=" };
-                    self.panic_unless_at(c, 12, SP, Some(format!("assertion `left {op} right` failed")));
+                    self.panic_unless_at(c, 12, self.mstart, Some(format!("assertion `left {op} right` failed")));
                 }
                 Ok((None, Ty::Unit))
             }

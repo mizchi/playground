@@ -1,4 +1,5 @@
-//! syn・Cranelift を使わない経路 (ast_codegen + minclif) で tests/acg/*.rs をビルドし、rustc でビルドしたものと出力を比べる。
+//! syn・Cranelift を使わない経路 (driver2 + acg + minclif) で tests/acg/*.rs をビルドし、rustc でビルドしたものと出力を比べる。
+#![cfg(feature = "acg")]
 #[test]
 fn acg_like_rustc() {
     let dir = std::env::temp_dir().join(format!("acg_{}", std::process::id()));
@@ -13,7 +14,7 @@ fn acg_like_rustc() {
     for p in &files {
         let name = p.file_stem().unwrap().to_string_lossy().to_string();
         let src = std::fs::read_to_string(p).unwrap();
-        let obj = match crustc::ast_codegen::build_object(&src) {
+        let obj = match crustc::driver2::build_object(&src, false) {
             Ok(o) => o,
             Err(e) => {
                 bad.push(format!("{name}: {e}"));

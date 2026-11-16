@@ -111,7 +111,7 @@ fn diverging_macro(p: &Path) -> bool {
 fn diverges(e: &Expr) -> bool {
     match e {
         Expr::Return(_) | Expr::Break(..) | Expr::Continue(_) => true,
-        Expr::Macro(p, _) => diverging_macro(p),
+        Expr::Macro(p, _, _) => diverging_macro(p),
         _ => false,
     }
 }
@@ -134,7 +134,7 @@ fn seg(name: &str) -> crate::parse::Seg {
 }
 
 fn mcall(recv: Expr, name: &str, args: Vec<Expr>) -> Expr {
-    Expr::MethodCall(Box::new(Expr::Paren(Box::new(recv))), name.to_string(), vec![], args)
+    Expr::MethodCall(Box::new(Expr::Paren(Box::new(recv))), name.to_string(), vec![], args, crate::parse::Span::default())
 }
 
 /// マクロの引数を、トップレベルの区切り (`,` / `;`) で分けたテキスト
@@ -207,6 +207,8 @@ struct Inf<'p> {
     margs: crate::fxhash::FxMap<usize, usize>,
     /// 型を記録した式 (テキストでも引けるようにする)
     exprs: Vec<(*const Expr, u32)>,
+    /// 今見ているマクロの引数 (開き括弧) のソース上の位置: 引数を読み直した式の位置の基準
+    mbase: crate::parse::Pos,
 }
 
 impl<'p> std::ops::Deref for Inf<'p> {
@@ -274,7 +276,7 @@ pub fn infer_ctx_margs(
     root: Option<(u32, u32)>,
 ) -> (Full, MacroArgs, TextTypes) {
     let clo_root = root.map(|(r, base)| (r, base, body as *const Block));
-    let mut s = Inf { s: Solver::new(prog, env), pending: vec![], keep: vec![], turbofish: None, clo_root, clo_keys: None, margs: Default::default(), exprs: vec![] };
+    let mut s = Inf { s: Solver::new(prog, env), pending: vec![], keep: vec![], turbofish: None, clo_root, clo_keys: None, margs: Default::default(), exprs: vec![], mbase: Default::default() };
     s.ret = match ret {
         Some(t) if prog.has_param(t) => s.known_g(t, &mut vec![]),
         Some(t) => s.known(t),
@@ -496,7 +498,7 @@ impl Inf<'_> {
         if let Some(&ki) = self.margs.get(&k) {
             return Some(ki);
         }
-        let args = ast_closure::macro_args(g)?;
+        let args = ast_closure::macro_args_at(g, self.mbase)?;
         let ki = self.keep.len();
         self.keep.push(args);
         self.margs.insert(k, ki);
@@ -816,7 +818,8 @@ impl Inf<'_> {
                 }
                 Stmt::Expr(e, semi) => {
                     // (文の位置の `println!(..);` は syn では Stmt::Macro: 書式の変数だけ見る)
-                    if let Expr::Macro(p, g) = e {
+                    if let Expr::Macro(p, g, sp) = e {
+                        self.mbase = sp.at;
                         if i + 1 == n && diverging_macro(p) {
                             res = Some(self.var());
                             continue;
@@ -1066,7 +1069,12 @@ impl Inf<'_> {
                     None => self.var(),
                 }
             }
-            Expr::Macro(p, g) => self.macro_expr(p, g),
+            Expr::Macro(p, g, sp) => {
+                let saved = std::mem::replace(&mut self.mbase, sp.at);
+                let r = self.macro_expr(p, g);
+                self.mbase = saved;
+                r
+            }
             Expr::Lit(t) => self.lit_var(t),
             Expr::Paren(x) => self.expr(x),
             Expr::Try(x) => {
@@ -1116,7 +1124,7 @@ impl Inf<'_> {
                     None => self.var(),
                 }
             }
-            Expr::Index(base, ix) => self.index(base, ix),
+            Expr::Index(base, ix, _) => self.index(base, ix),
             Expr::For(_, p, it, body) => self.for_loop(p, it, body),
             Expr::Block(_, _, b) => self.block(b),
             Expr::Path(None, p)
@@ -1182,7 +1190,7 @@ impl Inf<'_> {
                     _ => self.var(),
                 },
             },
-            Expr::Unary(op, x) => {
+            Expr::Unary(op, x, _) => {
                 let v = self.expr(x);
                 if op == "*" { self.deref_var(v) } else { v }
             }
@@ -1208,9 +1216,9 @@ impl Inf<'_> {
                     self.var()
                 }
             }
-            Expr::Binary(op, l, r) => self.binary(op, l, r),
+            Expr::Binary(op, l, r, _) => self.binary(op, l, r),
             // (構文木の AssignOp の演算子は `=` を除いたもの: `+=` は "+")
-            Expr::AssignOp(op, l, r) => self.binary(&format!("{op}="), l, r),
+            Expr::AssignOp(op, l, r, _) => self.binary(&format!("{op}="), l, r),
             Expr::Assign(l, r) => {
                 let l = self.expr(l);
                 let r = self.expr(r);
@@ -1270,7 +1278,7 @@ impl Inf<'_> {
             Expr::Continue(_) => self.known(Ty::Never),
             Expr::Call(f, args) => self.call(f, args),
             Expr::Closure(..) => self.closure(e),
-            Expr::MethodCall(recv, name, tf, args) => self.method_call(recv, name, tf, args),
+            Expr::MethodCall(recv, name, tf, args, _) => self.method_call(recv, name, tf, args),
             Expr::Cast(x, t) => {
                 self.expr(x);
                 match self.parse_ty(t) {
@@ -1290,7 +1298,7 @@ impl Inf<'_> {
             return self.known(Ty::Struct(ss));
         }
         if name == "dbg" {
-            let Some(xs) = ast_closure::macro_args(g) else { return self.var() };
+            let Some(xs) = ast_closure::macro_args_at(g, self.mbase) else { return self.var() };
             let Some(x) = xs.into_iter().next() else { return self.var() };
             self.pos_record += 1;
             let v = self.expr_kept(x, false);
@@ -1318,7 +1326,7 @@ impl Inf<'_> {
             let xs: Vec<Expr> = if parts.len() == 2 {
                 crate::parse::parse_expr(&parts[0]).ok().into_iter().collect()
             } else {
-                ast_closure::macro_args(g).unwrap_or_default()
+                ast_closure::macro_args_at(g, self.mbase).unwrap_or_default()
             };
             self.no_record += 1;
             let ki = self.keep.len();
@@ -1389,7 +1397,7 @@ impl Inf<'_> {
         let mut adapters: Vec<String> = vec![];
         loop {
             match e {
-                Expr::MethodCall(r, n, _, a) if a.is_empty() => {
+                Expr::MethodCall(r, n, _, a, _) if a.is_empty() => {
                     adapters.push(n.clone());
                     e = r;
                 }

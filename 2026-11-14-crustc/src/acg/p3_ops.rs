@@ -10,7 +10,7 @@ fn paren(e: &Expr) -> Expr {
 
 impl Cx<'_> {
     pub(crate) fn unary(&mut self, e: &Expr, expected: Option<Ty>) -> R<V> {
-        let Expr::Unary(op, x) = e else { unreachable!() };
+        let Expr::Unary(op, x, _) = e else { unreachable!() };
         let op = op.as_str();
         // `-v` / `!v` (impl Neg / Not): メソッド呼び出し
         if let ("-" | "!", Some(Ty::Struct(sid))) = (op, self.peek(x)) {
@@ -47,7 +47,7 @@ impl Cx<'_> {
                 if self.overflow_checks {
                     let min = self.int_const(t, crate::program::prim_assoc_const(t, "MIN").unwrap());
                     let bad = self.b.ins().icmp(IntCC::Equal, v, min);
-                    self.ovf_panic(bad, 6, SP);
+                    self.ovf_panic(bad, 6, expr_start(e));
                 }
                 Ok((Some(self.b.ins().ineg(v)), t))
             }
@@ -61,8 +61,8 @@ impl Cx<'_> {
     /// `a op b` (Expr::Binary) と複合代入 `a op= b` (Expr::AssignOp)
     pub(crate) fn binary(&mut self, e: &Expr, expected: Option<Ty>) -> R<V> {
         let (op, left, right, assign) = match e {
-            Expr::Binary(op, l, r) => (op.as_str(), &**l, &**r, false),
-            Expr::AssignOp(op, l, r) => (op.as_str(), &**l, &**r, true),
+            Expr::Binary(op, l, r, _) => (op.as_str(), &**l, &**r, false),
+            Expr::AssignOp(op, l, r, _) => (op.as_str(), &**l, &**r, true),
             _ => unreachable!(),
         };
         // 短絡評価
@@ -504,7 +504,7 @@ impl Cx<'_> {
             match strip_paren(e) {
                 Expr::Lit(l) if matches!(lit::lit(l), Some(Lit::Int(_))) => t.is_int(),
                 Expr::Lit(l) if matches!(lit::lit(l), Some(Lit::Float(_))) => t.is_float(),
-                Expr::Unary(op, _) if op == "-" => t.is_int() || t.is_float(),
+                Expr::Unary(op, _, _) if op == "-" => t.is_int() || t.is_float(),
                 Expr::Tuple(tp) => matches!(t, Ty::Struct(sid) if self.prog.is_tuple(self.prog.base_of(sid))
                     && self.prog.structs[sid as usize].args.len() == tp.len()),
                 Expr::Array(a) => matches!(t, Ty::Array(_, n) if n as usize == a.len()),
@@ -727,7 +727,7 @@ impl Cx<'_> {
     }
 
     /// b は演算の式全体 (Binary / AssignOp。span のためだけに受ける)、op は `=` を除いた演算子
-    pub(crate) fn arith(&mut self, _b: &Expr, op: &str, l: Value, lt: Ty, r: Value, rt: Ty) -> R<Value> {
+    pub(crate) fn arith(&mut self, b_expr: &Expr, op: &str, l: Value, lt: Ty, r: Value, rt: Ty) -> R<Value> {
         if matches!(op, "<<" | ">>") {
             if !lt.is_int() || !rt.is_int() {
                 return err(SP, "shift of non-integer");
@@ -735,7 +735,7 @@ impl Cx<'_> {
             if self.overflow_checks && !self.iconst_of(r).is_some_and(|k| (0..lt.bits() as i64).contains(&k)) {
                 // 型の幅以上のシフト (負の量も符号なしで大きい)
                 let bad = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, r, lt.bits() as i64);
-                self.ovf_panic(bad, if op == "<<" { 7 } else { 8 }, SP);
+                self.ovf_panic(bad, if op == "<<" { 7 } else { 8 }, expr_start(b_expr));
             }
             let ins = self.b.ins();
             return Ok(match op {
@@ -784,14 +784,14 @@ impl Cx<'_> {
             let cr = self.iconst_of(r);
             if cr.is_none() || cr == Some(0) {
                 let zero = self.b.ins().icmp_imm_u(IntCC::Equal, r, 0);
-                self.ovf_panic(zero, if rem { 4 } else { 3 }, SP);
+                self.ovf_panic(zero, if rem { 4 } else { 3 }, expr_start(b_expr));
             }
             if s && (cr.is_none() || cr == Some(-1)) {
                 let min = self.int_const(lt, crate::program::prim_assoc_const(lt, "MIN").unwrap());
                 let am = self.b.ins().icmp(IntCC::Equal, l, min);
                 let bm = self.b.ins().icmp_imm_s(IntCC::Equal, r, -1);
                 let both = self.b.ins().band(am, bm);
-                self.ovf_panic(both, if rem { 10 } else { 9 }, SP);
+                self.ovf_panic(both, if rem { 10 } else { 9 }, expr_start(b_expr));
             }
         }
         // 足し算・引き算・掛け算のオーバーフロー
@@ -803,7 +803,7 @@ impl Cx<'_> {
             };
             if lt.bits() < 128 || kind == 2 {
                 let (v, of) = self.arith_ovf(kind as u8, s, l, r, lt);
-                self.ovf_panic(of, kind, SP);
+                self.ovf_panic(of, kind, expr_start(b_expr));
                 return Ok(v);
             }
             // (128 bit: 足し算・引き算は結果の符号と大小で見る。掛け算は検査しない)
@@ -818,7 +818,7 @@ impl Cx<'_> {
                     let z = self.int_const(lt, 0);
                     self.b.ins().icmp(IntCC::SignedLessThan, m, z)
                 };
-                self.ovf_panic(of, kind, SP);
+                self.ovf_panic(of, kind, expr_start(b_expr));
                 return Ok(v);
             }
         }
@@ -858,8 +858,8 @@ impl Cx<'_> {
             }
         };
         match strip_paren(e) {
-            Expr::Unary(op, x) if op == "!" => self.type_cond(x).map(|b| !b),
-            Expr::Binary(op, l, r) => match op.as_str() {
+            Expr::Unary(op, x, _) if op == "!" => self.type_cond(x).map(|b| !b),
+            Expr::Binary(op, l, r, _) => match op.as_str() {
                 "||" => match self.type_cond(l) {
                     Some(true) => Some(true),
                     Some(false) => self.type_cond(r),
@@ -1140,7 +1140,7 @@ impl Cx<'_> {
         match e {
             Expr::Paren(p) => self.static_ty(p),
             Expr::Path(_, p) => self.lookup(ident_of(p)?).map(|(_, t)| t),
-            Expr::Unary(op, x) if op == "*" => match self.static_ty(x)? {
+            Expr::Unary(op, x, _) if op == "*" => match self.static_ty(x)? {
                 Ty::Ref(_, i) | Ty::Box(i) | Ty::Ptr(_, i) => Some(*i),
                 _ => None,
             },
@@ -1174,7 +1174,7 @@ impl Cx<'_> {
         if !matches!(self.prog.sigs[did as usize].ret, Ty::Ref(_, i) if !i.is_fat() && !matches!(i, Ty::Str | Ty::Slice(_) | Ty::Dyn(_))) {
             return None;
         }
-        Some(Expr::Unary("*".into(), Box::new(mcall(paren(e), m, vec![]))))
+        Some(Expr::Unary("*".into(), Box::new(mcall(paren(e), m, vec![])), crate::parse::Span::default()))
     }
 
     /// 添字アクセスの対象 (配列 / スライス / それらへの参照) の (先頭アドレス, 長さ, 要素型)
@@ -1190,7 +1190,11 @@ impl Cx<'_> {
             let key = format!("{e:?}");
             if let Some(&(_, b, l, t, chk)) = self.hoisted.iter().rev().find(|h| h.0 == key) {
                 if let Some((ok, len, i)) = chk {
-                    self.index_check(ok, len, i, SP);
+                    let sp = match e {
+                        Expr::Index(_, _, isp) => isp.at,
+                        _ => expr_start(e),
+                    };
+                    self.index_check(ok, len, i, sp);
                 }
                 return Ok((b, l, t));
             }

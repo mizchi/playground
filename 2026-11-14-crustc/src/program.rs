@@ -1259,7 +1259,7 @@ impl Program {
             Expr::Lit(t) => lit_int(t).ok_or("not an integer constant")?,
             Expr::Paren(x) => self.eval_const(x, depth)?,
             Expr::Cast(x, _) => self.eval_const(x, depth)?,
-            Expr::Unary(op, x) => {
+            Expr::Unary(op, x, _) => {
                 let v = self.eval_const(x, depth)?;
                 match op.as_str() {
                     "-" => -v,
@@ -1267,7 +1267,7 @@ impl Program {
                     _ => return Err("not an integer constant".into()),
                 }
             }
-            Expr::Binary(op, l, r) => {
+            Expr::Binary(op, l, r, _) => {
                 let (l, r) = (self.eval_const(l, depth)?, self.eval_const(r, depth)?);
                 match op.as_str() {
                     "+" => l + r,

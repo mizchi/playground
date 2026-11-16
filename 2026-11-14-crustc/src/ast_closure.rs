@@ -3,21 +3,28 @@
 //! キャプチャを値として使うか。tests/ast_closure.rs が syn 版と同じ結果になることを確かめる。
 //! 外部クレートに依存しないので crustc 自身でもコンパイルできる。
 
-use crate::parse::{Block, Expr, Pat, Stmt, TokKind, parse_expr, tokenize};
+use crate::parse::{Block, Expr, Pat, Pos, Stmt, TokKind, parse_expr, parse_expr_at, pos_at, tokenize};
 
 /// マクロの引数 (`( a , b )` のテキスト) を `,` 区切りの式の列として読む。読めなければ None
 pub fn macro_args(g: &str) -> Option<Vec<Expr>> {
+    macro_args_at(g, Pos::default())
+}
+
+/// macro_args と同じ。base は g (開き括弧) のソース上の位置: 読んだ式の位置を元のソースの位置にする
+pub fn macro_args_at(g: &str, base: Pos) -> Option<Vec<Expr>> {
     let inner = strip_delims(g)?;
+    // (inner は g の 1 文字目 (開き括弧) の次から)
+    let ioff = g.find(inner).unwrap_or(1);
     let mut out = Vec::new();
     if inner.trim().is_empty() {
         return Some(out);
     }
     // (`,` で分けてから式として読む: 括弧の中の `,` は分けない)
-    for part in split_top_commas(inner)? {
+    for (off, part) in split_top_commas_at(inner)? {
         if part.trim().is_empty() {
             continue;
         }
-        out.push(parse_expr(&part).ok()?);
+        out.push(parse_expr_at(&part, pos_at(g, ioff + off, base)).ok()?);
     }
     Some(out)
 }
@@ -30,6 +37,27 @@ fn strip_delims(g: &str) -> Option<&str> {
         return None;
     }
     Some(&t[1..t.len() - 1])
+}
+
+/// split_top_commas と同じで、各部分の s の中の byte の位置も返す
+fn split_top_commas_at(s: &str) -> Option<Vec<(usize, String)>> {
+    let toks = tokenize(s).ok()?;
+    let mut parts = Vec::new();
+    let mut depth = 0;
+    let mut start = 0usize;
+    for t in &toks {
+        match t.kind {
+            TokKind::Open => depth += 1,
+            TokKind::Close => depth -= 1,
+            TokKind::Punct if depth == 0 && t.text == "," => {
+                parts.push((start, s[start..t.lo as usize].to_string()));
+                start = t.lo as usize + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push((start, s[start..].to_string()));
+    Some(parts)
 }
 
 /// トップレベルの `,` で分ける (トークン単位: 文字列・文字の中の `,` は数えない)
@@ -55,11 +83,16 @@ fn split_top_commas(s: &str) -> Option<Vec<String>> {
 
 /// マクロの引数のうちクロージャを含むもの (`|` の記号があるときだけ)。`vec![x; n]` も
 pub fn macro_exprs(g: &str) -> Vec<Expr> {
+    macro_exprs_at(g, Pos::default())
+}
+
+/// macro_exprs と同じ。base は g のソース上の位置
+pub fn macro_exprs_at(g: &str, base: Pos) -> Vec<Expr> {
     let Ok(toks) = tokenize(g) else { return Vec::new() };
     if !toks.iter().any(|t| t.kind == TokKind::Punct && t.text == "|") {
         return Vec::new();
     }
-    if let Some(es) = macro_args(g) {
+    if let Some(es) = macro_args_at(g, base) {
         return es;
     }
     let Some(inner) = strip_delims(g) else { return Vec::new() };
@@ -76,9 +109,19 @@ pub fn macro_exprs(g: &str) -> Vec<Expr> {
             }
         }
     }
-    match parse_expr(&format!("[{inner}]")) {
+    // (`vec![x; n]`: 配列の式として、元の位置で読む)
+    match parse_expr_at(&format!("[{inner}]"), base) {
         Ok(e) => vec![e],
         Err(_) => Vec::new(),
+    }
+}
+
+/// `vec![x; n]` の x と n (macro_exprs_at と同じ読み方: 位置も同じになる)
+pub fn vec_repeat_parts(g: &str, base: Pos) -> Option<(Expr, Expr)> {
+    let inner = strip_delims(g)?;
+    match parse_expr_at(&format!("[{inner}]"), base).ok()? {
+        Expr::Repeat(x, n) => Some((*x, *n)),
+        _ => None,
     }
 }
 
@@ -86,8 +129,8 @@ pub fn macro_exprs(g: &str) -> Vec<Expr> {
 fn each_child(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     match e {
         Expr::Lit(_) | Expr::Path(..) | Expr::Continue(_) => {}
-        Expr::Unary(_, x) | Expr::Try(x) | Expr::Paren(x) | Expr::Ref(_, x) | Expr::RawRef(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => f(x),
-        Expr::Binary(_, l, r) | Expr::Assign(l, r) | Expr::AssignOp(_, l, r) | Expr::Index(l, r) | Expr::Repeat(l, r) => {
+        Expr::Unary(_, x, _) | Expr::Try(x) | Expr::Paren(x) | Expr::Ref(_, x) | Expr::RawRef(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => f(x),
+        Expr::Binary(_, l, r, _) | Expr::Assign(l, r) | Expr::AssignOp(_, l, r, _) | Expr::Index(l, r, _) | Expr::Repeat(l, r) => {
             f(l);
             f(r);
         }
@@ -97,7 +140,7 @@ fn each_child(e: &Expr, f: &mut dyn FnMut(&Expr)) {
                 f(y);
             }
         }
-        Expr::MethodCall(x, _, _, a) => {
+        Expr::MethodCall(x, _, _, a, _) => {
             f(x);
             for y in a {
                 f(y);
@@ -188,8 +231,8 @@ fn collect_closures(e: &Expr, out: &mut Vec<Expr>) {
     if let Expr::Closure(..) = e {
         out.push(e.clone());
     }
-    if let Expr::Macro(_, g) = e {
-        for x in macro_exprs(g) {
+    if let Expr::Macro(_, g, sp) = e {
+        for x in macro_exprs_at(g, sp.at) {
             collect_closures(&x, out);
         }
         return;
@@ -209,9 +252,9 @@ fn collect_slots(e: &Expr, out: &mut Vec<(Option<usize>, String)>) {
     if let Expr::Closure(..) = e {
         out.push((Some(e as *const Expr as usize), format!("{e:?}")));
     }
-    if let Expr::Macro(_, g) = e {
+    if let Expr::Macro(_, g, sp) = e {
         let mut v = Vec::new();
-        for x in macro_exprs(g) {
+        for x in macro_exprs_at(g, sp.at) {
             collect_closures(&x, &mut v);
         }
         for c in v {
@@ -377,7 +420,7 @@ impl Free {
                 self.block(b);
                 self.scopes.pop();
             }
-            Expr::Macro(mp, g) if mp.segs.len() == 1 && mp.segs[0].name == "matches" => {
+            Expr::Macro(mp, g, _) if mp.segs.len() == 1 && mp.segs[0].name == "matches" => {
                 // `matches!(e, pat if guard)`: e と guard の中を見る (パターンの束縛は guard の中だけ)
                 let Some(inner) = strip_delims(g) else { return };
                 let Some(parts) = split_top_commas(inner) else { return };
@@ -397,8 +440,8 @@ impl Free {
                     }
                 }
             }
-            Expr::Macro(_, g) => {
-                if let Some(es) = macro_args(g) {
+            Expr::Macro(_, g, sp) => {
+                if let Some(es) = macro_args_at(g, sp.at) {
                     for x in &es {
                         self.expr(x);
                         if let Expr::Lit(t) = x {
@@ -503,7 +546,7 @@ pub fn each_child_pub(e: &Expr, f: &mut dyn FnMut(&Expr)) {
 fn assign_base(e: &Expr) -> Option<String> {
     match e {
         Expr::Path(None, p) if !p.global && p.segs.len() == 1 && p.segs[0].args.is_empty() => Some(p.segs[0].name.clone()),
-        Expr::Field(x, _) | Expr::Index(x, _) | Expr::Paren(x) | Expr::Unary(_, x) => assign_base(x),
+        Expr::Field(x, _) | Expr::Index(x, _, _) | Expr::Paren(x) | Expr::Unary(_, x, _) => assign_base(x),
         _ => None,
     }
 }
@@ -511,7 +554,7 @@ fn assign_base(e: &Expr) -> Option<String> {
 fn assigns_in(e: &Expr, caps: &[String]) -> bool {
     match e {
         Expr::Closure(..) => return false,
-        Expr::Assign(l, _) | Expr::AssignOp(_, l, _) if assign_base(l).is_some_and(|n| caps.iter().any(|c| *c == n)) => return true,
+        Expr::Assign(l, _) | Expr::AssignOp(_, l, _, _) if assign_base(l).is_some_and(|n| caps.iter().any(|c| *c == n)) => return true,
         _ => {}
     }
     let mut found = false;

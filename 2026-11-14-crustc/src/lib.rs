@@ -28,7 +28,6 @@ pub mod ast_summary;
 pub mod ast_consteval;
 #[cfg(feature = "acg")]
 pub mod acg;
-pub mod ast_codegen;
 pub mod ast_infer;
 pub mod prelude;
 pub mod program;
