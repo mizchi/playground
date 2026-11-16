@@ -12,6 +12,7 @@ use crate::types::{Ty, TySyn, VariantKind, intern, intern_fn, FnTy};
 /// 注釈なし let と、値を作る式の型 (ノードのアドレス → 型)
 pub type LetTypes = crate::fxhash::FxMap<usize, Ty>;
 
+
 /// 推論結果: (let と式の型, 戻り値型, 引数の型)
 pub type Full = (LetTypes, Option<Ty>, Vec<Option<Ty>>);
 
@@ -197,6 +198,10 @@ struct Inf<'p> {
     clo_root: Option<(u32, u32, *const Block)>,
     /// クロージャのキー (構文木の表示) → 前順の番号
     clo_keys: Option<crate::fxhash::FxMap<String, u32>>,
+    /// マクロの引数を読んだもの (マクロのトークン列のテキストのアドレス → keep の番号)。コード生成も同じ構文木を使う
+    margs: crate::fxhash::FxMap<usize, usize>,
+    /// 型を記録した式 (テキストでも引けるようにする)
+    exprs: Vec<(*const Expr, u32)>,
 }
 
 impl<'p> std::ops::Deref for Inf<'p> {
@@ -218,6 +223,26 @@ pub fn infer(prog: &Program, recv: bool, params: &[(Pat, PTy)], body: &Block, si
 }
 
 /// extra は最初からスコープにある変数 (クロージャのキャプチャ)。ret が None なら戻り値型も推論して返す
+/// マクロの引数を読んだ構文木 (マクロのトークン列のテキストのアドレス → 引数)。型推論はこの構文木の上で記録する
+pub type MacroArgs = crate::fxhash::FxMap<usize, Vec<Expr>>;
+
+/// 式の構文木のハッシュ → 型 (同じ形の式で型が違うものは None)。コード生成が複製した式の型を引くため
+pub type TextTypes = crate::fxhash::FxMap<u64, Option<Ty>>;
+
+/// 式の形のハッシュ (Debug の表示をハッシュする)
+pub fn expr_hash(e: &Expr) -> u64 {
+    struct W(crate::fxhash::FxHasher);
+    impl std::fmt::Write for W {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            std::hash::Hasher::write(&mut self.0, s.as_bytes());
+            Ok(())
+        }
+    }
+    let mut w = W(crate::fxhash::FxHasher::default());
+    let _ = std::fmt::write(&mut w, format_args!("{e:?}"));
+    std::hash::Hasher::finish(&w.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn infer_ctx(
     prog: &Program,
@@ -230,8 +255,24 @@ pub fn infer_ctx(
     ret: Option<Ty>,
     root: Option<(u32, u32)>,
 ) -> Full {
+    infer_ctx_margs(prog, recv, params, body, sig, env, extra, ret, root).0
+}
+
+/// infer_ctx と同じで、読んだマクロの引数も返す
+#[allow(clippy::too_many_arguments)]
+pub fn infer_ctx_margs(
+    prog: &Program,
+    recv: bool,
+    params: &[(Pat, PTy)],
+    body: &Block,
+    sig: &FnSig,
+    env: &TyEnv,
+    extra: &[(String, Ty)],
+    ret: Option<Ty>,
+    root: Option<(u32, u32)>,
+) -> (Full, MacroArgs, TextTypes) {
     let clo_root = root.map(|(r, base)| (r, base, body as *const Block));
-    let mut s = Inf { s: Solver::new(prog, env), pending: vec![], keep: vec![], turbofish: None, clo_root, clo_keys: None };
+    let mut s = Inf { s: Solver::new(prog, env), pending: vec![], keep: vec![], turbofish: None, clo_root, clo_keys: None, margs: Default::default(), exprs: vec![] };
     s.ret = match ret {
         Some(t) if prog.has_param(t) => s.known_g(t, &mut vec![]),
         Some(t) => s.known(t),
@@ -277,7 +318,38 @@ pub fn infer_ctx(
             out.insert(k, t);
         }
     }
-    (out, r, ps)
+    let mut texts = TextTypes::default();
+    // (同じ式を何度か推論し直すことがある: lets と同じく後の記録を使う)
+    let mut last: crate::fxhash::FxMap<usize, (*const Expr, u32)> = Default::default();
+    for &(e, v) in &std::mem::take(&mut s.exprs) {
+        last.insert(e as usize, (e, v));
+    }
+    let mut recs: Vec<(*const Expr, u32)> = last.into_values().collect();
+    recs.sort_by_key(|r| r.0 as usize);
+    for (e, v) in recs {
+        let Some(t) = s.resolve(v) else { continue };
+        let t = Some(t);
+        // SAFETY: 記録した式は本体か keep の中にあり、まだ生きている
+        let h = expr_hash(unsafe { &*e });
+        match texts.get(&h) {
+            Some(&old) if old != t => {
+                texts.insert(h, None);
+            }
+            Some(_) => {}
+            None => {
+                texts.insert(h, t);
+            }
+        }
+    }
+    let mut margs = MacroArgs::default();
+    let keep = std::mem::take(&mut s.keep);
+    let mut keep: Vec<Option<Vec<Expr>>> = keep.into_iter().map(Some).collect();
+    for (&g, &ki) in &s.margs {
+        if let Some(v) = keep[ki].take() {
+            margs.insert(g, v);
+        }
+    }
+    ((out, r, ps), margs, texts)
 }
 
 impl Inf<'_> {
@@ -404,30 +476,36 @@ impl Inf<'_> {
         r
     }
 
-    /// 書式マクロの引数 (`println!("{}", (1..4).map(..))`) も推論する (記録はしない)
-    fn fmt_args(&mut self, g: &str) {
-        let Some(args) = ast_closure::macro_args(g) else { return };
-        let xs: Vec<Expr> = args
-            .into_iter()
-            .filter(|a| !matches!(a, Expr::Lit(t) if t.starts_with('"') || t.starts_with("r\"") || t.starts_with("r#")))
-            .map(|a| match a {
-                Expr::Assign(_, r) => *r,
-                a => a,
-            })
-            .collect();
-        if xs.is_empty() {
-            return;
+    /// マクロの引数を読む (同じマクロは 1 回だけ。読んだ構文木はコード生成にも渡す)
+    fn macro_args_kept(&mut self, g: &str) -> Option<usize> {
+        let k = g.as_ptr() as usize;
+        if let Some(&ki) = self.margs.get(&k) {
+            return Some(ki);
         }
-        self.no_record += 1;
-        self.pos_record += 1;
+        let args = ast_closure::macro_args(g)?;
         let ki = self.keep.len();
-        self.keep.push(xs);
-        for i in 0..self.keep[ki].len() {
-            let x: *const Expr = &self.keep[ki][i];
+        self.keep.push(args);
+        self.margs.insert(k, ki);
+        Some(ki)
+    }
+
+    /// 書式マクロの引数 (`println!("{}", (1..4).map(..))`) も推論する (読んだ構文木の上で記録する)
+    fn fmt_args(&mut self, g: &str) {
+        let Some(ki) = self.macro_args_kept(g) else { return };
+        let mut xs: Vec<*const Expr> = vec![];
+        for a in &self.keep[ki] {
+            match a {
+                Expr::Lit(t) if t.starts_with('"') || t.starts_with("r\"") || t.starts_with("r#") => {}
+                Expr::Assign(_, r) => xs.push(&**r as *const Expr),
+                a => xs.push(a as *const Expr),
+            }
+        }
+        self.pos_record += 1;
+        for x in xs {
+            // SAFETY: keep の要素は推論の終わりまで動かさない
             self.expr(unsafe { &*x });
         }
         self.pos_record -= 1;
-        self.no_record -= 1;
     }
 
     /// 書式文字列の幅・精度に名前で使う変数 (`{:w$}` / `{:.p$}`) は usize
@@ -802,9 +880,11 @@ impl Inf<'_> {
                 | Expr::Unary(..)
                 | Expr::Binary(..)
                 | Expr::Cast(..)
-        ) && self.no_record == 0
-        {
-            self.lets.push((e as *const Expr as usize, v));
+        ) {
+            if self.no_record == 0 || self.pos_record > 0 {
+                self.lets.push((e as *const Expr as usize, v));
+                self.exprs.push((e as *const Expr, v));
+            }
         }
         v
     }
@@ -1533,7 +1613,7 @@ impl Inf<'_> {
                 }
             }
         }
-        if self.no_record == 0 {
+        if self.no_record == 0 || self.pos_record > 0 {
             for ((p, _), &v) in ps.iter().zip(&vs) {
                 self.lets.push((p as *const Pat as usize, v));
             }

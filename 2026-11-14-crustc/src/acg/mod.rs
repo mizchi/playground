@@ -228,7 +228,7 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
     }
     let extra: Vec<(String, Ty)> = caps.iter().map(|c| (c.0.clone(), c.1)).collect();
     let user_code = prog.item_of.get(body_id as usize).copied().flatten().is_some_and(|i| i < prog.prelude_from);
-    let lets = crate::ast_infer::infer_ctx(prog, f.sig.recv.is_some(), &f.sig.params, &f.block, &sig, &env, &extra, Some(sig.ret), Some((root, base_k))).0;
+    let ((lets, _, _), margs, texts) = crate::ast_infer::infer_ctx_margs(prog, f.sig.recv.is_some(), &f.sig.params, &f.block, &sig, &env, &extra, Some(sig.ret), Some((root, base_k)));
     let mut cx = Cx {
         b: FunctionBuilder::new(&clif_sig(&sig)),
         prog,
@@ -275,6 +275,8 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
         cmp_depth: 0,
         pending_label: None,
         keep: vec![],
+        margs,
+        texts,
     };
     let r = if prog.index.get(crate::prelude::DROP_GLUE) == Some(&body_id) {
         cx.drop_glue_body(&sig)
@@ -515,6 +517,10 @@ pub struct Cx<'p> {
     pub last_scrut: Option<StackSlot>,
     /// 書き換えで作った式 (コード生成の間アドレスを動かさないために持っておく)
     pub keep: Vec<Box<Expr>>,
+    /// 型推論が読んだマクロの引数 (同じ構文木を使うと、型の記録をアドレスで引ける)
+    pub margs: crate::ast_infer::MacroArgs,
+    /// 式の形 → 型 (複製した式の型を引く)
+    pub texts: crate::ast_infer::TextTypes,
 }
 
 /// 間接呼び出しの呼び先
@@ -653,6 +659,15 @@ impl Cx<'_> {
     pub fn parse_ty(&self, t: &crate::parse::Ty) -> R<Ty> {
         let ts = crate::ast_types::tysyn(t, Some(&crate::types::TySyn::Named("Self".into())))?;
         self.prog.resolve_env(&ts, &self.env)
+    }
+
+    /// マクロの引数。型推論が読んだものがあればその構文木 (型の記録がある)、なければ読み直す
+    pub fn macro_args_of(&self, g: &str) -> Option<Vec<&'static Expr>> {
+        if let Some(v) = self.margs.get(&(g.as_ptr() as usize)) {
+            // SAFETY: margs の中身は Cx が生きている間動かない
+            return Some(v.iter().map(|e| unsafe { &*(e as *const Expr) }).collect());
+        }
+        None
     }
 
     /// 書き換えで作った式をコード生成の間持っておき、その参照を返す
@@ -1052,6 +1067,12 @@ impl Cx<'_> {
     pub fn peek(&self, e: &Expr) -> Option<Ty> {
         if let Some(&t) = self.lets.get(&(e as *const Expr as usize)) {
             return Some(t);
+        }
+        // (書き換えで複製した式は、同じ形の式の型で引く。形が同じで型の違う式があれば使わない)
+        if !self.texts.is_empty() && !matches!(e, Expr::Path(..)) {
+            if let Some(&Some(t)) = self.texts.get(&crate::ast_infer::expr_hash(e)) {
+                return Some(t);
+            }
         }
         self.peek_syn(e)
     }

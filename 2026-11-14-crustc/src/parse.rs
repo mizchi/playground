@@ -1013,7 +1013,8 @@ impl Parser {
             if self.punct_at(0, "&&") {
                 self.i += 1;
                 self.toks[self.i].joint = false;
-                let inner = self.pat_ref_rest()?;
+                // (2 つ目の `&` から読む: `&&x` は Ref(Ref(x)))
+                let inner = self.pat_atom()?;
                 return Ok(Pat::Ref(false, Box::new(inner)));
             }
             self.i += 1;

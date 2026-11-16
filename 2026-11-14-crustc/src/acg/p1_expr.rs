@@ -245,7 +245,15 @@ impl Cx<'_> {
 
     /// 式を評価し、期待型への暗黙の変換 (`&[T; N]` → `&[T]`) をする
     pub(crate) fn expr(&mut self, e: &Expr, expected: Option<Ty>) -> R<V> {
-        let (v, t) = self.expr_inner(e, expected)?;
+        let (v, t) = self.expr_inner(e, expected).map_err(|m| {
+            // (場所の代わりに、エラーになった一番内側の式を付ける)
+            if m.contains(" (at `") || std::env::var_os("CRUSTC_NO_AT").is_some() {
+                m
+            } else {
+                let d = format!("{e:?}");
+                format!("{m} (at `{}`)", d.chars().take(160).collect::<String>())
+            }
+        })?;
         // `&Box<T>` → `&T` (deref の強制変換: `e = x;` で x: &Box<Expr>)
         if let (Some(want @ Ty::Ref(m2, we)), Some(val), Ty::Ref(m1, Ty::Box(bi))) = (expected, v, t) {
             if *we == **bi && !bi.is_fat() && (m1 || !m2) {
@@ -308,9 +316,8 @@ impl Cx<'_> {
         // (syn 版の in_fmt_args のときの pos_key の引き直しは、自前の構文木にはないので省く)
         let expected = match expected {
             Some(t) => Some(t),
-            None if matches!(e, Expr::Lit(_) | Expr::Struct(..) | Expr::Call(..) | Expr::Path(..)) => {
-                self.lets.get(&(e as *const Expr as usize)).copied()
-            }
+            None if matches!(e, Expr::Lit(_) | Expr::Struct(..) | Expr::Call(..)) => self.peek(e),
+            None if matches!(e, Expr::Path(..)) => self.lets.get(&(e as *const Expr as usize)).copied(),
             None => None,
         };
         match e {

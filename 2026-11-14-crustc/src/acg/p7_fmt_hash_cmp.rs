@@ -271,6 +271,9 @@ impl Cx<'_> {
     pub(crate) fn fmt_macro(&mut self, p: &Path, g: &str, name: &str) -> R<V> {
         let _ = p;
         let span = SP;
+        if let Some(args) = self.macro_args_of(g) {
+            return self.fmt_macro_args(args, name);
+        }
         let Some(parsed) = crate::ast_closure::macro_args(g) else {
             return err(span, format!("`{name}!`: expected comma-separated expressions"));
         };
