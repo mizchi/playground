@@ -419,8 +419,20 @@ pub fn expr_start(e: &Expr) -> Sp {
 
 /// メッセージが `行:桁: ` で始まるか
 pub fn has_loc(m: &str) -> bool {
-    let mut it = m.splitn(3, ':');
-    matches!((it.next(), it.next(), it.next()), (Some(a), Some(b), Some(_)) if !a.is_empty() && !b.is_empty() && a.bytes().all(|c| c.is_ascii_digit()) && b.bytes().all(|c| c.is_ascii_digit()))
+    // (数字の並び `:` 数字の並び `:` で始まる)
+    let b = m.as_bytes();
+    let mut i = 0;
+    for _ in 0..2 {
+        let st = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == st || i >= b.len() || b[i] != b':' {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// 1 つの名前だけのパス (`x`)
