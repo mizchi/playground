@@ -82,7 +82,7 @@ pub fn analyze(src0: &str, opt: bool) -> R<Analysis> {
                 continue;
             }
             let ow = if pass == 1 { crate::ast_summary::owner_of(it, &sums) } else { None };
-            sums[i] = crate::ast_summary::parse_and_summarize(&src, it, ow.as_ref()).map_err(|e| format!("line {}: {e}", it.line))?;
+            sums[i] = crate::ast_summary::parse_and_summarize(&src, it, ow.as_ref()).map_err(|e| relocate(e, it))?;
         }
     }
     let mut prog = Program::build(&items, &sums)?;
@@ -135,10 +135,20 @@ fn resolve_opaque(prog: &mut Program, src: &str, items: &[SrcItem]) -> R<()> {
     Ok(())
 }
 
+/// アイテムの中の `行:桁:` のエラーを、ファイルの中の行にする (driver.rs の relocate_err と同じ)。位置がなければアイテムの先頭の行
+fn relocate(e: String, it: &SrcItem) -> String {
+    if let Some((l, rest)) = e.split_once(':') {
+        if let Ok(l) = l.parse::<usize>() {
+            return format!("{}:{rest}", l + it.line - 1);
+        }
+    }
+    format!("{}:1: {e}", it.line)
+}
+
 /// アイテムの関数を自前の構文木で読む (本体がなければ None)。引数のパターンは本体の先頭の let にする
 pub fn parse_fn(src: &str, it: &SrcItem) -> R<Option<ItemFn>> {
     let text = &src[it.start..it.end];
-    let f = crate::parse::parse_file(text).map_err(|e| format!("line {}: {e}", it.line))?;
+    let f = crate::parse::parse_file(text).map_err(|e| relocate(e, it))?;
     let Some(item) = f.items.into_iter().next() else { return Ok(None) };
     let crate::parse::ItemKind::Fn(mut sig, Some(mut block)) = item.kind else { return Ok(None) };
     let mut lets = vec![];
@@ -226,7 +236,9 @@ pub fn build_object(src0: &str, opt: bool) -> R<Vec<u8>> {
             let f = fn_ast(&a, body)?;
             let ii = a.prog.item_of[body as usize].unwrap() as usize;
             let it = &a.items[ii];
-            let (b, _) = acg::compile(&a.prog, &insts, id, &f, it.line as u32 - 1).map_err(|e| format!("line {}: in `{}`: {e}", it.line, a.prog.names[body as usize]))?;
+            // (acg のエラーはファイルの中の `行:桁:` を持つ。持たないものはアイテムの先頭の行にする)
+            let (b, _) = acg::compile(&a.prog, &insts, id, &f, it.line as u32 - 1)
+                .map_err(|e| if acg::has_loc(&e) { e } else { format!("{}:1: in `{}`: {e}", it.line, a.prog.names[body as usize]) })?;
             blobs.insert(id, b);
         }
         wave = std::mem::take(&mut insts.lock().unwrap().pending);

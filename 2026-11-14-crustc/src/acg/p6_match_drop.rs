@@ -935,7 +935,7 @@ impl Cx<'_> {
         loop {
             match e {
                 Expr::Paren(p) => e = p,
-                Expr::Field(b, _) => e = b,
+                Expr::Field(b, _, _) => e = b,
                 Expr::Unary(op, x, _) if op == "*" => e = x,
                 Expr::Path(_, p) => {
                     let (loc, t) = self.lookup(ident_of(p)?)?;
@@ -957,7 +957,7 @@ impl Cx<'_> {
             match e {
                 Expr::Paren(p) => e = p,
                 // 参照越しのフィールドからはムーブできない (Copy 以外は rustc が弾く)
-                Expr::Field(b, _) => {
+                Expr::Field(b, _, _) => {
                     via_field = true;
                     e = b
                 }

@@ -50,6 +50,10 @@ impl Cx<'_> {
     // --- place (左辺値) ---------------------------------------------------
 
     pub(crate) fn place(&mut self, e: &Expr) -> R<Place> {
+        self.place_inner(e).map_err(|m| self.at(err_pos(e), m))
+    }
+
+    pub(crate) fn place_inner(&mut self, e: &Expr) -> R<Place> {
         match e {
             Expr::Paren(p) => self.place(p),
             Expr::Path(..) if self.const_generic(e).is_some() => {
@@ -118,12 +122,12 @@ impl Cx<'_> {
                     },
                 }
             }
-            Expr::Field(base, fname) => {
+            Expr::Field(base, fname, _) => {
                 // (フィールドがなく Deref を実装した型 (`self.prog` で self: &Inf): `(*self.deref()).prog`)
                 if let Some(Ty::Struct(sid)) = self.peek(base).map(|t| self.strip_refs(t)) {
                     if self.prog.field(sid, fname).is_none() {
                         if let Some(d) = self.user_deref_sid(base, sid) {
-                            let f2 = self.keep_expr(Expr::Field(Box::new(Expr::Paren(Box::new(d))), fname.clone()));
+                            let f2 = self.keep_expr(Expr::Field(Box::new(Expr::Paren(Box::new(d))), fname.clone(), crate::parse::Span::default()));
                             return self.place(f2);
                         }
                     }
@@ -247,13 +251,14 @@ impl Cx<'_> {
     /// 式を評価し、期待型への暗黙の変換 (`&[T; N]` → `&[T]`) をする
     pub(crate) fn expr(&mut self, e: &Expr, expected: Option<Ty>) -> R<V> {
         let (v, t) = self.expr_inner(e, expected).map_err(|m| {
-            // (場所の代わりに、エラーになった一番内側の式を付ける)
-            if m.contains(" (at `") || std::env::var_os("CRUSTC_NO_AT").is_some() {
-                m
-            } else {
+            // (エラーに、位置を持つ一番内側の式の先頭の行:桁を付ける。ACG_DEBUG_AT=1 なら式も)
+            let m = if std::env::var_os("ACG_DEBUG_AT").is_some() && !m.contains(" (at `") {
                 let d = format!("{e:?}");
-                format!("{m} (at `{}`)", d.chars().take(if std::env::var_os("ACG_FULL_AT").is_some() { 100000 } else { 160 }).collect::<String>())
-            }
+                format!("{m} (at `{}`)", d.chars().take(400).collect::<String>())
+            } else {
+                m
+            };
+            self.at(err_pos(e), m)
         })?;
         // `&Box<T>` → `&T` (deref の強制変換: `e = x;` で x: &Box<Expr>)
         if let (Some(want @ Ty::Ref(m2, we)), Some(val), Ty::Ref(m1, Ty::Box(bi))) = (expected, v, t) {
@@ -371,7 +376,7 @@ impl Cx<'_> {
                 // drop が要る値を値として読んだらムーブ
                 if self.needs_drop(r.1) {
                     let mut root = e;
-                    while let Expr::Field(b, _) = strip_paren(root) {
+                    while let Expr::Field(b, _, _) = strip_paren(root) {
                         root = b;
                     }
                     if let Expr::Path(_, rp) = strip_paren(root) {
@@ -888,7 +893,7 @@ impl Cx<'_> {
             for f in all {
                 let given = sfields.iter().any(|fv| fv.0 == f);
                 if !given {
-                    nfields.push((f.clone(), Expr::Field(Box::new(path_expr("__exr_base")), f)));
+                    nfields.push((f.clone(), Expr::Field(Box::new(path_expr("__exr_base")), f, crate::parse::Span::default())));
                 }
             }
             let ns = self.keep_expr(Expr::Struct(path.clone(), nfields, None));
@@ -1453,12 +1458,12 @@ impl Cx<'_> {
             let n = p.segs.len();
             if n >= 2 && !p.segs[n - 2].args.is_empty() {
                 let seg = p.segs[n - 2].clone();
-                let ty = crate::parse::Ty::Path(None, Path { global: false, segs: vec![seg] });
+                let ty = crate::parse::Ty::Path(None, Path { global: false, segs: vec![seg], pos: Default::default() });
                 self.seg_self = Some(self.parse_ty(&ty)?);
             } else if n == 2 && self.prog.sigs[id as usize].self_ty.is_some_and(|t| self.prog.has_param(t)) {
                 // `T::dec(r)` (T はインスタンスの中で具体的な型): ジェネリックな impl の型引数を Self から
                 let seg = p.segs[0].clone();
-                let ty = crate::parse::Ty::Path(None, Path { global: false, segs: vec![seg] });
+                let ty = crate::parse::Ty::Path(None, Path { global: false, segs: vec![seg], pos: Default::default() });
                 self.seg_self = self.parse_ty(&ty).ok().filter(|&t| !self.prog.has_param(t));
             }
         }

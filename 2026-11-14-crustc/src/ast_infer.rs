@@ -126,7 +126,7 @@ fn ident(p: &Path) -> Option<&str> {
 }
 
 fn path1(name: &str) -> Path {
-    Path { global: false, segs: vec![seg(name)] }
+    Path { global: false, segs: vec![seg(name)], pos: Default::default() }
 }
 
 fn seg(name: &str) -> crate::parse::Seg {
@@ -1198,7 +1198,7 @@ impl Inf<'_> {
                 let v = self.expr(x);
                 self.with(Shape::Ref(*m, v))
             }
-            Expr::Field(b, name) => {
+            Expr::Field(b, name, _) => {
                 let b = self.expr(b);
                 self.field(b, name)
             }
@@ -1530,7 +1530,7 @@ impl Inf<'_> {
                 let ty: Option<PTy> = match q {
                     Some(t) => Some((**t).clone()),
                     None if rest.len() == 2 && rest[0].name != "Default" => {
-                        Some(PTy::Path(None, Path { global: false, segs: vec![rest[0].clone()] }))
+                        Some(PTy::Path(None, Path { global: false, segs: vec![rest[0].clone()], pos: Default::default() }))
                     }
                     None => None,
                 };

@@ -1145,7 +1145,7 @@ impl Cx<'_> {
                 _ => None,
             },
             Expr::Ref(m, x) => self.static_ty(x).map(|t| Ty::Ref(*m, intern(t))),
-            Expr::Field(base, name) => {
+            Expr::Field(base, name, _) => {
                 let Ty::Struct(sid) = self.strip_refs(self.static_ty(base)?) else { return None };
                 if let Some((t, _)) = self.prog.field(sid, name) {
                     return Some(t);

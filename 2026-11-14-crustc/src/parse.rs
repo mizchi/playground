@@ -269,6 +269,8 @@ impl std::fmt::Debug for Span {
 pub struct Path {
     pub global: bool,
     pub segs: Vec<Seg>,
+    /// パスの先頭のソース上の位置 (エラーの場所)
+    pub pos: Pos,
 }
 
 #[derive(Clone, Debug)]
@@ -338,7 +340,7 @@ pub enum Expr {
     AssignOp(String, Box<Expr>, Box<Expr>, Span),
     Call(Box<Expr>, Vec<Expr>),
     MethodCall(Box<Expr>, String, Vec<GArg>, Vec<Expr>, Span),
-    Field(Box<Expr>, String),
+    Field(Box<Expr>, String, Span),
     Index(Box<Expr>, Box<Expr>, Span),
     Range(Option<Box<Expr>>, Option<Box<Expr>>, bool),
     Ref(bool, Box<Expr>),
@@ -840,6 +842,7 @@ impl Parser {
 
     /// 式の中のパス (`a::b::<T>::c`)。型の中では `::` なしの `<..>` も取る
     fn path(&mut self, in_ty: bool) -> R<Path> {
+        let pos = self.pos();
         let global = self.eat_punct("::");
         let mut segs = Vec::new();
         loop {
@@ -871,7 +874,7 @@ impl Parser {
                 self.i += 2;
                 continue;
             }
-            return Ok(Path { global: global, segs: segs });
+            return Ok(Path { global: global, segs: segs, pos });
         }
     }
 
@@ -1005,7 +1008,7 @@ impl Parser {
             // `<T as Trait>::Name`
             self.i += 1;
             let q = self.ty()?;
-            let mut path = Path { global: false, segs: Vec::new() };
+            let mut path = Path { global: false, segs: Vec::new(), pos: self.pos() };
             if self.eat_ident("as") {
                 path = self.path(true)?;
             }
@@ -1104,7 +1107,7 @@ impl Parser {
             let lo = match p {
                 Pat::Lit(e) => e,
                 Pat::Path(pa) => Box::new(Expr::Path(None, pa)),
-                Pat::Ident(false, false, n, None) => Box::new(Expr::Path(None, Path { global: false, segs: vec![Seg { name: n, args: Vec::new(), fn_args: None, text: String::new() }] })),
+                Pat::Ident(false, false, n, None) => Box::new(Expr::Path(None, Path { global: false, segs: vec![Seg { name: n, args: Vec::new(), fn_args: None, text: String::new() }], pos: Default::default() })),
                 _ => return Err(self.err("bad range pattern")),
             };
             self.i += 3;
@@ -1409,11 +1412,12 @@ impl Parser {
                     continue;
                 }
                 let t = self.tok(0).ok_or_else(|| self.err("expected a field"))?.clone();
+                let fpos = self.pos();
                 if t.kind == TokKind::Lit {
                     // `x.0` / `x.0.1` (字句では 0.1 が 1 つの数)
                     self.i += 1;
                     for part in t.text.split('.') {
-                        e = Expr::Field(Box::new(e), part.to_string());
+                        e = Expr::Field(Box::new(e), part.to_string(), Span { start, at: fpos });
                     }
                     continue;
                 }
@@ -1428,7 +1432,7 @@ impl Parser {
                     let args = self.call_args()?;
                     e = Expr::MethodCall(Box::new(e), name, targs, args, Span { start, at });
                 } else {
-                    e = Expr::Field(Box::new(e), name);
+                    e = Expr::Field(Box::new(e), name, Span { start, at });
                 }
             } else if self.is_open("(") {
                 let args = self.call_args()?;
@@ -1579,7 +1583,7 @@ impl Parser {
                     // `<T>::f` / `<T as Tr>::f`
                     self.i += 1;
                     let q = self.ty()?;
-                    let mut path = Path { global: false, segs: Vec::new() };
+                    let mut path = Path { global: false, segs: Vec::new(), pos: self.pos() };
                     if self.eat_ident("as") {
                         path = self.path(true)?;
                     }
@@ -1743,7 +1747,7 @@ impl Parser {
                 if self.eat_punct(":") {
                     fs.push((n, self.expr(true)?));
                 } else {
-                    let e = Expr::Path(None, Path { global: false, segs: vec![Seg { name: n.clone(), args: Vec::new(), fn_args: None, text: String::new() }] });
+                    let e = Expr::Path(None, Path { global: false, segs: vec![Seg { name: n.clone(), args: Vec::new(), fn_args: None, text: String::new() }], pos: Default::default() });
                     fs.push((n, e));
                 }
                 if !self.eat_punct(",") {
@@ -1911,7 +1915,7 @@ impl Parser {
             if let Some(l) = self.lifetime() {
                 self.expect_punct(":")?;
                 let bs = self.bounds()?;
-                g.preds.push((Ty::Path(None, Path { global: false, segs: vec![Seg { name: l, args: Vec::new(), fn_args: None, text: String::new() }] }), bs));
+                g.preds.push((Ty::Path(None, Path { global: false, segs: vec![Seg { name: l, args: Vec::new(), fn_args: None, text: String::new() }], pos: Default::default() }), bs));
             } else {
                 if self.eat_ident("for") {
                     self.expect_punct("<")?;
@@ -2004,7 +2008,7 @@ impl Parser {
                 }
                 if self.eat_ident("self") {
                     r.push_str("self");
-                    let self_path = Ty::Path(None, Path { global: false, segs: vec![Seg { name: "Self".to_string(), args: Vec::new(), fn_args: None, text: "Self".to_string() }] });
+                    let self_path = Ty::Path(None, Path { global: false, segs: vec![Seg { name: "Self".to_string(), args: Vec::new(), fn_args: None, text: "Self".to_string() }], pos: Default::default() });
                     let mut rt = match by_ref {
                         Some(l) => Ty::Ref(l, m, Box::new(self_path)),
                         None => self_path,
@@ -2477,7 +2481,7 @@ impl Counts {
                 self.expr(r);
                 self.exprs(a);
             }
-            Expr::Field(x, _) => {
+            Expr::Field(x, _, _) => {
                 self.fields += 1;
                 self.expr(x);
             }

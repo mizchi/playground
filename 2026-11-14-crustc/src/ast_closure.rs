@@ -136,7 +136,7 @@ pub fn vec_repeat_parts(g: &str, base: Pos) -> Option<(Expr, Expr)> {
 fn each_child(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     match e {
         Expr::Lit(_) | Expr::Path(..) | Expr::Continue(_) => {}
-        Expr::Unary(_, x, _) | Expr::Try(x) | Expr::Paren(x) | Expr::Ref(_, x) | Expr::RawRef(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => f(x),
+        Expr::Unary(_, x, _) | Expr::Try(x) | Expr::Paren(x) | Expr::Ref(_, x) | Expr::RawRef(_, x) | Expr::Field(x, _, _) | Expr::Cast(x, _) => f(x),
         Expr::Binary(_, l, r, _) | Expr::Assign(l, r) | Expr::AssignOp(_, l, r, _) | Expr::Index(l, r, _) | Expr::Repeat(l, r) => {
             f(l);
             f(r);
@@ -553,7 +553,7 @@ pub fn each_child_pub(e: &Expr, f: &mut dyn FnMut(&Expr)) {
 fn assign_base(e: &Expr) -> Option<String> {
     match e {
         Expr::Path(None, p) if !p.global && p.segs.len() == 1 && p.segs[0].args.is_empty() => Some(p.segs[0].name.clone()),
-        Expr::Field(x, _) | Expr::Index(x, _, _) | Expr::Paren(x) | Expr::Unary(_, x, _) => assign_base(x),
+        Expr::Field(x, _, _) | Expr::Index(x, _, _) | Expr::Paren(x) | Expr::Unary(_, x, _) => assign_base(x),
         _ => None,
     }
 }

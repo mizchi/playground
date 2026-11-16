@@ -44,7 +44,7 @@ fn simple_text(e: &Expr) -> Option<String> {
         Expr::Unary(op, x, _) => format!("{op}{}", simple_text(x)?),
         Expr::Ref(m, x) => format!("&{}{}", if *m { "mut " } else { "" }, simple_text(x)?),
         Expr::Paren(x) => format!("({})", simple_text(x)?),
-        Expr::Field(b, n) => format!("{}.{n}", simple_text(b)?),
+        Expr::Field(b, n, _) => format!("{}.{n}", simple_text(b)?),
         Expr::Tuple(xs) if xs.len() == 1 => format!("({},)", simple_text(&xs[0])?),
         Expr::Tuple(xs) => format!("({})", simple_texts(xs)?),
         Expr::Array(xs) => format!("[{}]", simple_texts(xs)?),
@@ -138,7 +138,7 @@ impl Cx<'_> {
                         let n = self.prog.structs[sid as usize].fields.len();
                         let mut stmts = vec![let_stmt("__hs", st.clone()), let_stmt("__hv", rv)];
                         for i in 0..n {
-                            let f = paren(Expr::Field(Box::new(path_expr("__hv")), i.to_string()));
+                            let f = paren(Expr::Field(Box::new(path_expr("__hv")), i.to_string(), crate::parse::Span::default()));
                             let hs = Expr::Ref(true, Box::new(Expr::Unary("*".into(), Box::new(path_expr("__hs")), crate::parse::Span::default())));
                             stmts.push(Stmt::Expr(mcall(f, "hash", vec![hs]), true));
                         }

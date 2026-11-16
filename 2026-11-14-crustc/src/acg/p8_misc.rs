@@ -592,7 +592,7 @@ impl Cx<'_> {
         let mut path = path.clone();
         if let Some(q) = stripped {
             let k = path.segs.len() - q.segs.len();
-            path = crate::parse::Path { global: false, segs: path.segs[k..].to_vec() };
+            path = crate::parse::Path { global: false, segs: path.segs[k..].to_vec(), pos: Default::default() };
         }
         let path = &path;
         let t = if let Some(q) = qself {

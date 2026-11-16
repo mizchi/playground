@@ -1621,7 +1621,7 @@ impl Cx<'_> {
     fn strip_mods_path(&self, p: &Path) -> Option<Path> {
         let q = self.prog.strip_mods_p(&PPath::of(p))?;
         let k = p.segs.len() - q.segs.len();
-        Some(Path { global: false, segs: p.segs[k..].to_vec() })
+        Some(Path { global: false, segs: p.segs[k..].to_vec(), pos: Default::default() })
     }
 
     /// 1 セグメントのパスが (ローカル変数でない) const なら、その index

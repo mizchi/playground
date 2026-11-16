@@ -346,7 +346,7 @@ fn addr_taken(b: &crate::parse::Block) -> HashSet<String> {
     fn root(e: &Expr) -> Option<String> {
         match e {
             Expr::Path(None, p) => ident_of(p).map(|s| s.to_string()),
-            Expr::Field(b, _) => root(b),
+            Expr::Field(b, _, _) => root(b),
             Expr::Paren(x) => root(x),
             _ => None,
         }
@@ -396,14 +396,30 @@ fn addr_taken(b: &crate::parse::Block) -> HashSet<String> {
     out
 }
 
+/// エラーの場所にする位置: メソッド呼び出しはメソッド名 (rustc・syn 版と同じ)、ほかは式の先頭
+pub fn err_pos(e: &Expr) -> Sp {
+    match e {
+        Expr::MethodCall(_, _, _, _, s) | Expr::Field(_, _, s) => s.at,
+        e => expr_start(e),
+    }
+}
+
 /// 式の先頭のソース上の位置 (syn の `e.span()` の始まり)。位置を持つ式か、その一番左の子から。分からなければ SP
 pub fn expr_start(e: &Expr) -> Sp {
     match e {
         Expr::Unary(_, _, s) | Expr::Binary(_, _, _, s) | Expr::AssignOp(_, _, _, s) | Expr::MethodCall(_, _, _, _, s) | Expr::Index(_, _, s) | Expr::Macro(_, _, s) => s.start,
-        Expr::Field(x, _) | Expr::Call(x, _) | Expr::Cast(x, _) | Expr::Try(x) | Expr::Paren(x) | Expr::Assign(x, _) => expr_start(x),
+        Expr::Field(_, _, s) => s.start,
+        Expr::Call(x, _) | Expr::Cast(x, _) | Expr::Try(x) | Expr::Paren(x) | Expr::Assign(x, _) => expr_start(x),
         Expr::Range(Some(x), _, _) => expr_start(x),
+        Expr::Path(_, p) | Expr::Struct(p, _, _) => p.pos,
         _ => SP,
     }
+}
+
+/// メッセージが `行:桁: ` で始まるか
+pub fn has_loc(m: &str) -> bool {
+    let mut it = m.splitn(3, ':');
+    matches!((it.next(), it.next(), it.next()), (Some(a), Some(b), Some(_)) if !a.is_empty() && !b.is_empty() && a.bytes().all(|c| c.is_ascii_digit()) && b.bytes().all(|c| c.is_ascii_digit()))
 }
 
 /// 1 つの名前だけのパス (`x`)
@@ -422,7 +438,7 @@ pub fn is_ident(p: &Path, n: &str) -> bool {
 
 /// 名前だけのパス
 pub fn path_of(n: &str) -> Path {
-    Path { global: false, segs: vec![crate::parse::Seg { name: n.to_string(), args: vec![], fn_args: None, text: n.to_string() }] }
+    Path { global: false, segs: vec![crate::parse::Seg { name: n.to_string(), args: vec![], fn_args: None, text: n.to_string() }], pos: Default::default() }
 }
 
 /// 名前だけのパスの式 (`x`)
@@ -910,6 +926,14 @@ impl Cx<'_> {
         }
     }
 
+    /// エラーのメッセージに場所 (ファイルの中の `行:桁: `) を付ける。もう付いているか、位置が分からなければそのまま
+    pub fn at(&self, sp: Sp, m: String) -> String {
+        if sp.line == 0 || has_loc(&m) {
+            return m;
+        }
+        format!("{}:{}: {m}", self.line_base + sp.line, sp.col + 1)
+    }
+
     /// `&&T` (`&&&T` ..) を `&T` の場所に渡すときの deref の強制変換
     pub fn deref_coerce(&mut self, mut v: Option<Value>, mut t: Ty, want: Ty) -> (Option<Value>, Ty) {
         while let (Ty::Ref(..), Ty::Ref(_, inner @ Ty::Ref(..)), Some(val)) = (want, t, v) {
@@ -1064,7 +1088,7 @@ impl Cx<'_> {
                     }
                     let ann = ann.filter(|&a| !has_hole(self.prog, a));
                     let ty = ann.unwrap_or(t);
-                    self.same(SP, t, ty).map_err(|m| format!("{m} (in `let {name}`)"))?;
+                    self.same(SP, t, ty).map_err(|m| self.at(expr_start(init), m))?;
                     self.bind(name, ty, v);
                     self.extend_temps(t0);
                 }
@@ -1288,7 +1312,7 @@ impl Cx<'_> {
                 }
             }
             Expr::Ref(m, x) => Some(Ty::Ref(*m, intern(self.peek(x)?))),
-            Expr::Field(b, name) => {
+            Expr::Field(b, name, _) => {
                 let mut t = self.peek(b)?;
                 while let Ty::Ref(_, i) = t {
                     t = *i;
