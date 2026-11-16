@@ -12,6 +12,9 @@ pub enum Type {
     I16,
     I32,
     I64,
+    I128,
+    F32,
+    F64,
 }
 
 impl Type {
@@ -20,9 +23,28 @@ impl Type {
             Type::I8 => 1,
             Type::I16 => 2,
             Type::I32 => 4,
-            Type::I64 => 8,
+            Type::I64 | Type::F64 => 8,
+            Type::I128 => 16,
+            Type::F32 => 4,
         }
     }
+    pub fn is_float(self) -> bool {
+        matches!(self, Type::F32 | Type::F64)
+    }
+    pub fn bits(self) -> u32 {
+        self.bytes() * 8
+    }
+}
+
+/// 浮動小数点の比較
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FloatCC {
+    Equal,
+    NotEqual,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
 }
 
 /// 整数の比較
@@ -163,7 +185,7 @@ impl FunctionBuilder {
     }
 
     fn new_value(&mut self, t: Type) -> Value {
-        let off = self.alloc(8, 8);
+        let off = if t == Type::I128 { self.alloc(16, 16) } else { self.alloc(8, 8) };
         self.values.push((off, t));
         Value(self.values.len() as u32 - 1)
     }
@@ -271,7 +293,7 @@ impl FunctionBuilder {
             Type::I8 => self.emit(&[0x48, 0x0F, 0xB6, 0xC0]),
             Type::I16 => self.emit(&[0x48, 0x0F, 0xB7, 0xC0]),
             Type::I32 => self.emit(&[0x89, 0xC0]),
-            Type::I64 => {}
+            _ => {}
         }
     }
 
@@ -281,7 +303,7 @@ impl FunctionBuilder {
             Type::I8 => self.emit(&[0x48, 0x0F, 0xBE, 0xC0]),
             Type::I16 => self.emit(&[0x48, 0x0F, 0xBF, 0xC0]),
             Type::I32 => self.emit(&[0x48, 0x63, 0xC0]),
-            Type::I64 => {}
+            _ => {}
         }
     }
 
@@ -290,7 +312,7 @@ impl FunctionBuilder {
             Type::I8 => self.emit(&[0x48, 0x0F, 0xBE, 0xC9]),
             Type::I16 => self.emit(&[0x48, 0x0F, 0xBF, 0xC9]),
             Type::I32 => self.emit(&[0x48, 0x63, 0xC9]),
-            Type::I64 => {}
+            _ => {}
         }
     }
 
@@ -467,10 +489,20 @@ impl FunctionBuilder {
     pub fn load(&mut self, t: Type, addr: Value, off: i32) -> Value {
         self.load_rax(addr);
         match t {
-            Type::I64 => self.emit_disp(&[0x48, 0x8B, 0x80], off),
-            Type::I32 => self.emit_disp(&[0x8B, 0x80], off),
+            Type::I64 | Type::F64 => self.emit_disp(&[0x48, 0x8B, 0x80], off),
+            Type::I32 | Type::F32 => self.emit_disp(&[0x8B, 0x80], off),
             Type::I16 => self.emit_disp(&[0x48, 0x0F, 0xB7, 0x80], off),
             Type::I8 => self.emit_disp(&[0x48, 0x0F, 0xB6, 0x80], off),
+            Type::I128 => {
+                // 下位を rcx、上位を rax に読んで書く
+                self.emit_disp(&[0x48, 0x8B, 0x88], off);
+                self.emit_disp(&[0x48, 0x8B, 0x80], off + 8);
+                let v = self.new_value(t);
+                let o = self.values[v.0 as usize].0;
+                self.emit_disp(&[0x48, 0x89, 0x8D], o);
+                self.store_rax_at(o + 8);
+                return v;
+            }
         }
         self.result(t)
     }
@@ -481,10 +513,16 @@ impl FunctionBuilder {
         self.load_rax(addr);
         self.load_rcx(v);
         match t {
-            Type::I64 => self.emit_disp(&[0x48, 0x89, 0x88], off),
-            Type::I32 => self.emit_disp(&[0x89, 0x88], off),
+            Type::I64 | Type::F64 => self.emit_disp(&[0x48, 0x89, 0x88], off),
+            Type::I32 | Type::F32 => self.emit_disp(&[0x89, 0x88], off),
             Type::I16 => self.emit_disp(&[0x66, 0x89, 0x88], off),
             Type::I8 => self.emit_disp(&[0x88, 0x88], off),
+            Type::I128 => {
+                self.emit_disp(&[0x48, 0x89, 0x88], off);
+                let o = self.values[v.0 as usize].0;
+                self.emit_disp(&[0x48, 0x8B, 0x8D], o + 8);
+                self.emit_disp(&[0x48, 0x89, 0x88], off + 8);
+            }
         }
     }
 
