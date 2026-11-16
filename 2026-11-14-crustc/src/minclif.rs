@@ -111,8 +111,8 @@ pub struct Reloc {
     pub addend: i64,
 }
 
-/// 1 関数分の組み立て
-pub struct FunctionBuilder {
+/// 1 関数分の機械語の組み立て (FunctionBuilder が 2 回使う: 解析 (track) と、割り当てを使った本番)
+pub struct Emitter {
     params: Vec<Type>,
     rets: Vec<Type>,
     /// 値のスロット (rbp からの負のオフセット) と型
@@ -136,6 +136,68 @@ pub struct FunctionBuilder {
     /// 直前の命令が「rax を値 v のスロットに書く」なら (v, その後のコードの位置)。
     /// すぐ後で v を rax に読むなら読まなくてよい (ブロックの始まりでは消す: ほかの所から飛んでくる)
     rax_holds: Option<(u32, usize)>,
+    /// 今の命令の番号 (FunctionBuilder が記録した順)
+    pub op: u32,
+    /// 解析のときの記録
+    track: Option<Box<Track>>,
+    /// 割り当て (本番のとき)
+    plan: Plan,
+    /// 割り当てたレジスタの保存先
+    save_slots: [i32; 5],
+}
+
+/// 値・変数を置くレジスタ: rbx, r12, r13, r14, r15 (呼ばれた側が保存するので、呼び出しをまたいでも残る。
+/// 命令の組み立てで使う rax / rcx / rdx / 引数のレジスタ / r11 とぶつからない)
+/// 後ろの 5 つ (rsi, rdi, r8, r9, r10) は呼ばれた側が保存しないので、呼び出しを含まない生存区間にだけ使う
+/// (引数のレジスタは call の中で順に書くが、引数に渡す値の区間はその call を含む)
+pub const ALLOC_REGS: [u8; 10] = [3, 12, 13, 14, 15, 6, 7, 8, 9, 10];
+/// レジスタに置かない (スロット)
+pub const MEM: u8 = 255;
+/// 変数の番号を値の番号と分ける
+const VAR_BASE: u32 = 1 << 28;
+
+/// 解析の記録: 値・変数 (vreg) の読み書きと、区間 (ブロックを続けて書いた範囲) とその行き先
+#[derive(Default)]
+pub struct Track {
+    /// (vreg, 命令の番号, 書き込みか)
+    ev: Vec<(u32, u32, bool)>,
+    /// スロットとして直接使う (アドレス・幅の違う読み書き) か、整数でない: レジスタに置けない
+    mem_only: Vec<bool>,
+    var_mem_only: Vec<bool>,
+    segs: Vec<Seg>,
+    /// 関数を呼ぶ命令の番号
+    calls: Vec<u32>,
+}
+
+#[derive(Clone, Default)]
+struct Seg {
+    block: u32,
+    start: u32,
+    end: u32,
+    /// jump / brif の飛び先のブロック
+    succ: Vec<u32>,
+    /// 終端命令なしで別のブロックへ切り替えた (同じブロックの次の区間へ続く)
+    falls: bool,
+}
+
+/// 割り当ての結果: 値・変数ごとのレジスタ (MEM ならスロット)、使ったレジスタ (ALLOC_REGS のビット)
+#[derive(Clone, Default)]
+pub struct Plan {
+    pub vloc: Vec<u8>,
+    pub varloc: Vec<u8>,
+    /// 使った ALLOC_REGS[..5] (呼ばれた側が保存するもの) のビット
+    pub used: u8,
+}
+
+/// mov dst, src (64 bit。レジスタの番号は 0〜15)
+fn mov_rr(dst: u8, src: u8) -> [u8; 3] {
+    [0x48 | ((src >> 3) << 2) | (dst >> 3), 0x89, 0xC0 | ((src & 7) << 3) | (dst & 7)]
+}
+
+/// mov [rbp+d], r / mov r, [rbp+d]
+fn mov_mr(r: u8, d: i32, load: bool) -> [u8; 7] {
+    let db = d.to_le_bytes();
+    [0x48 | ((r >> 3) << 2), if load { 0x8B } else { 0x89 }, 0x85 | ((r & 7) << 3), db[0], db[1], db[2], db[3]]
 }
 
 struct BlockData {
@@ -146,9 +208,18 @@ struct BlockData {
     cont: Option<usize>,
 }
 
-impl FunctionBuilder {
-    pub fn new(params: Vec<Type>, rets: Vec<Type>) -> FunctionBuilder {
-        let mut b = FunctionBuilder {
+impl Emitter {
+    pub fn new(params: Vec<Type>, rets: Vec<Type>, plan: Option<Plan>) -> Emitter {
+        let track = if plan.is_none() {
+            // (入口の前の区間: 最初のブロックへ続く)
+            let mut t = Track::default();
+            t.segs.push(Seg { block: u32::MAX, start: 0, end: 0, succ: vec![], falls: true });
+            Some(Box::new(t))
+        } else {
+            None
+        };
+        let plan = plan.unwrap_or_default();
+        let mut b = Emitter {
             params: params.clone(),
             rets,
             values: vec![],
@@ -166,9 +237,21 @@ impl FunctionBuilder {
             entry_jump: 0,
             terminated: false,
             rax_holds: None,
+            op: 0,
+            track,
+            plan,
+            save_slots: [0; 5],
         };
         // プロローグ: push rbp; mov rbp, rsp; sub rsp, <frame> (frame は最後に書き込む)
         b.code.extend_from_slice(&[0x55, 0x48, 0x89, 0xE5, 0x48, 0x81, 0xEC, 0, 0, 0, 0]);
+        // (割り当てたレジスタの保存)
+        for i in 0..5 {
+            b.save_slots[i] = b.alloc(8, 8);
+            if b.plan.used & (1 << i) != 0 {
+                let d = b.save_slots[i];
+                b.code.extend_from_slice(&mov_mr(ALLOC_REGS[i], d, false));
+            }
+        }
         // 引数をスロットへ
         const ARG_STORE: [[u8; 3]; 6] = [[0x48, 0x89, 0xBD], [0x48, 0x89, 0xB5], [0x48, 0x89, 0x95], [0x48, 0x89, 0x8D], [0x4C, 0x89, 0x85], [0x4C, 0x89, 0x8D]];
         let (mut ni, mut nf) = (0usize, 0u8);
@@ -183,6 +266,7 @@ impl FunctionBuilder {
                 b.code.extend_from_slice(&off.to_le_bytes());
                 nf += 1;
                 b.entry_params.push(v);
+                b.force_mem(v);
                 continue;
             }
             // (i128 はレジスタ 2 つ (下位, 上位)。2 つ残っていなければ全体をスタックで)
@@ -205,8 +289,22 @@ impl FunctionBuilder {
                 }
             }
             b.entry_params.push(v);
+            // (整数の引数はレジスタに置ける: 入口 (命令 0) で書いたことにし、本番では下でレジスタへ読む)
+            if t == Type::I128 {
+                b.force_mem(v);
+            } else {
+                b.ev_def(v.0);
+            }
         }
         // (入口で 0 にしたいスロットがあれば finish_zeroing がここから飛ぶ: 普段は次の命令へ飛ぶだけ)
+        for k in 0..b.entry_params.len() {
+            let v = b.entry_params[k];
+            let r = b.loc(v);
+            if r != MEM {
+                let o = b.values[v.0 as usize].0;
+                b.code.extend_from_slice(&mov_mr(r, o, true));
+            }
+        }
         b.entry_jump = b.code.len();
         b.code.extend_from_slice(&[0xE9, 0, 0, 0, 0]);
         b
@@ -226,6 +324,9 @@ impl FunctionBuilder {
     fn new_value(&mut self, t: Type) -> Value {
         let off = if t == Type::I128 { self.alloc(16, 16) } else { self.alloc(8, 8) };
         self.values.push((off, t));
+        if let Some(tr) = &mut self.track {
+            tr.mem_only.push(t == Type::I128 || t.is_float());
+        }
         Value(self.values.len() as u32 - 1)
     }
 
@@ -251,6 +352,10 @@ impl FunctionBuilder {
     /// ブロックに切り替える。途中のブロック (終端命令がまだない) から離れるときは続きへの jmp を置き、
     /// 後でそのブロックに戻ったら (Cranelift と同じく続きを書ける) その jmp を今の位置へ向ける
     pub fn switch_to_block(&mut self, b: Block) {
+        let falls = self.cur.is_some_and(|c| c != b) && !self.terminated;
+        if self.cur != Some(b) {
+            self.seg_switch(b, falls);
+        }
         if let Some(c) = self.cur {
             if !self.terminated && c != b {
                 self.emit(&[0xE9]);
@@ -279,15 +384,24 @@ impl FunctionBuilder {
     pub fn declare_var(&mut self, t: Type) -> Variable {
         let off = if t == Type::I128 { self.alloc(16, 16) } else { self.alloc(8, 8) };
         self.vars.push((off, t));
+        if let Some(tr) = &mut self.track {
+            tr.var_mem_only.push(t == Type::I128 || t.is_float());
+        }
         Variable(self.vars.len() as u32 - 1)
     }
 
     pub fn def_var(&mut self, var: Variable, v: Value) {
         let (off, t) = self.vars[var.0 as usize];
         self.load_rax(v);
-        self.store_rax_at(off);
+        self.ev_def(VAR_BASE + var.0);
+        let l = self.var_loc(var);
+        if l != MEM {
+            self.emit(&mov_rr(l, 0));
+        } else {
+            self.store_rax_at(off);
+        }
         if t == Type::I128 {
-            let o = self.values[v.0 as usize].0;
+            let o = self.off(v);
             self.load_rax_at(o + 8);
             self.store_rax_at(off + 8);
         }
@@ -296,12 +410,21 @@ impl FunctionBuilder {
     pub fn use_var(&mut self, var: Variable) -> Value {
         let (off, t) = self.vars[var.0 as usize];
         let v = self.new_value(t);
-        self.load_rax_at(off);
-        self.store_rax(v);
+        self.ev_use(VAR_BASE + var.0);
+        let l = self.var_loc(var);
+        if l != MEM {
+            self.emit(&mov_rr(0, l));
+        } else {
+            self.load_rax_at(off);
+        }
         if t == Type::I128 {
+            self.force_mem(v);
             let o = self.values[v.0 as usize].0;
+            self.store_rax_at(o);
             self.load_rax_at(off + 8);
             self.store_rax_at(o + 8);
+        } else {
+            self.store_rax(v);
         }
         v
     }
@@ -345,26 +468,46 @@ impl FunctionBuilder {
         self.rax_holds == Some((v.0, self.code.len()))
     }
 
-    fn load_rax(&mut self, v: Value) {
-        if self.rax_is(v) {
+    /// 値 v を整数のレジスタ r に読む
+    fn load_reg(&mut self, r: u8, v: Value) {
+        self.ev_use(v.0);
+        let l = self.loc(v);
+        if l != MEM {
+            if l != r {
+                self.emit(&mov_rr(r, l));
+            }
             return;
         }
         let off = self.values[v.0 as usize].0;
-        self.load_rax_at(off);
+        self.emit(&mov_mr(r, off, true));
+    }
+
+    fn load_rax(&mut self, v: Value) {
+        if self.rax_is(v) {
+            self.ev_use(v.0);
+            return;
+        }
+        self.load_reg(0, v);
     }
 
     fn load_rcx(&mut self, v: Value) {
         if self.rax_is(v) {
+            self.ev_use(v.0);
             self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
             return;
         }
-        let off = self.values[v.0 as usize].0;
-        self.emit_disp(&[0x48, 0x8B, 0x8D], off);
+        self.load_reg(1, v);
     }
 
     fn store_rax(&mut self, v: Value) {
-        let off = self.values[v.0 as usize].0;
-        self.store_rax_at(off);
+        self.ev_def(v.0);
+        let l = self.loc(v);
+        if l != MEM {
+            self.emit(&mov_rr(l, 0));
+        } else {
+            let off = self.values[v.0 as usize].0;
+            self.store_rax_at(off);
+        }
         if self.values[v.0 as usize].1 != Type::I128 {
             self.rax_holds = Some((v.0, self.code.len()));
         }
@@ -409,13 +552,107 @@ impl FunctionBuilder {
     // --- 命令 ----------------------------------------------------------
 
     pub fn iconst(&mut self, t: Type, x: i64) -> Value {
+        // (結果をレジスタに置くなら直接書く: 型の幅で 0 拡張した値)
+        let d = self.next_loc();
+        if d != MEM && t != Type::I128 && !t.is_float() {
+            let xv: u64 = match t {
+                Type::I8 => x as u64 & 0xFF,
+                Type::I16 => x as u64 & 0xFFFF,
+                Type::I32 => x as u64 & 0xFFFF_FFFF,
+                _ => x as u64,
+            };
+            let b = if d >= 8 { 1u8 } else { 0 };
+            if xv <= 0xFFFF_FFFF {
+                // mov r32, imm32 (上位は 0 になる)
+                if b != 0 {
+                    self.emit(&[0x41]);
+                }
+                self.emit(&[0xB8 + (d & 7)]);
+                self.emit(&(xv as u32).to_le_bytes());
+            } else if (xv as i64) >= i32::MIN as i64 && (xv as i64) < 0 {
+                // mov r64, imm32 (符号拡張)
+                self.emit(&[0x48 | b, 0xC7, 0xC0 | (d & 7)]);
+                self.emit(&(xv as i64 as i32).to_le_bytes());
+            } else {
+                self.emit(&[0x48 | b, 0xB8 + (d & 7)]);
+                self.emit(&xv.to_le_bytes());
+            }
+            return self.result_in_reg(t);
+        }
         self.emit(&[0x48, 0xB8]);
         self.emit(&x.to_le_bytes());
         self.result(t)
     }
 
+    /// 64 / 32 bit の a と b がレジスタなら cmp a, b を書いて true (32 bit の比較は符号つきも正しい)
+    fn cmp_regs(&mut self, t: Type, a: Value, b: Value) -> bool {
+        if t != Type::I64 && t != Type::I32 {
+            return false;
+        }
+        let (Some(ra), Some(rb)) = (self.rloc(a), self.rloc(b)) else { return false };
+        let w = if t == Type::I64 { 0x48 } else { 0x40 };
+        // cmp ra, rb: 39 /r (reg = rb, rm = ra)
+        self.emit(&[w | ((rb >> 3) << 2) | (ra >> 3), 0x39, 0xC0 | ((rb & 7) << 3) | (ra & 7)]);
+        true
+    }
+
+    /// modrm (+ SIB) + disp32: [base + off]、reg フィールドは r
+    fn mem_operand(&mut self, r: u8, base: u8, off: i32) {
+        self.emit(&[0x80 | ((r & 7) << 3) | (base & 7)]);
+        if base & 7 == 4 {
+            self.emit(&[0x24]);
+        }
+        self.emit(&off.to_le_bytes());
+    }
+
+    /// 次に作る値のレジスタ (MEM ならスロット)
+    fn next_loc(&self) -> u8 {
+        self.plan.vloc.get(self.values.len()).copied().unwrap_or(MEM)
+    }
+
+    /// 次の値をレジスタに直接書いた後: 値を作る (rax は持っていない)
+    fn result_in_reg(&mut self, t: Type) -> Value {
+        let v = self.new_value(t);
+        self.ev_def(v.0);
+        self.rax_holds = None;
+        v
+    }
+
+    /// 値のレジスタ (スロットなら None)
+    fn rloc(&self, v: Value) -> Option<u8> {
+        let l = self.loc(v);
+        if l == MEM { None } else { Some(l) }
+    }
+
     fn binop(&mut self, a: Value, b: Value, op: &[u8]) -> Value {
         let t = self.value_type(a);
+        // (64 / 32 bit で、両方と結果がレジスタなら 2 オペランドの形: mov d, a; op d, b。
+        //  生存区間は閉じているので d は a / b のレジスタと違う。32 bit の命令は上位を 0 にする)
+        if t == Type::I64 || t == Type::I32 {
+            let d = self.next_loc();
+            if let (Some(ra), Some(rb), true) = (self.rloc(a), self.rloc(b), d != MEM) {
+                // (add / sub / and / or / xor rax, rcx と imul rax, rcx)
+                let code: Option<u8> = if op.len() == 3 && op[2] == 0xC8 && matches!(op[1], 0x01 | 0x29 | 0x21 | 0x09 | 0x31) {
+                    Some(op[1])
+                } else if op.len() == 4 && op[1] == 0x0F && op[2] == 0xAF {
+                    Some(0xAF)
+                } else {
+                    None
+                };
+                if let Some(c) = code {
+                    let w = if t == Type::I64 { 0x48 } else { 0x40 };
+                    self.emit(&mov_rr(d, ra));
+                    if c == 0xAF {
+                        // imul d, b: 0F AF /r (reg = d)
+                        self.emit(&[w | ((d >> 3) << 2) | (rb >> 3), 0x0F, 0xAF, 0xC0 | ((d & 7) << 3) | (rb & 7)]);
+                    } else {
+                        // op d, b: op /r (reg = b, rm = d)
+                        self.emit(&[w | ((rb >> 3) << 2) | (d >> 3), c, 0xC0 | ((rb & 7) << 3) | (d & 7)]);
+                    }
+                    return self.result_in_reg(t);
+                }
+            }
+        }
         // (rax が b を持っていれば先に rcx へ移す)
         if self.rax_is(b) && a != b {
             self.load_rcx(b);
@@ -526,6 +763,10 @@ impl FunctionBuilder {
     /// 比較 (結果は I8 の 0 / 1)
     pub fn icmp(&mut self, cc: IntCC, a: Value, b: Value) -> Value {
         let t = self.value_type(a);
+        if self.cmp_regs(t, a, b) {
+            self.emit(&[0x0F, cc.setcc(), 0xC0]); // setcc al
+            return self.result(Type::I8);
+        }
         self.load_rax(a);
         self.load_rcx(b);
         if cc.signed() {
@@ -534,8 +775,33 @@ impl FunctionBuilder {
         }
         self.emit(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
         self.emit(&[0x0F, cc.setcc(), 0xC0]); // setcc al
-        self.emit(&[0x48, 0x0F, 0xB6, 0xC0]); // movzx rax, al
+        // (movzx rax, al は result がする)
         self.result(Type::I8)
+    }
+
+    /// `brif(icmp(cc, a, b), ..)` で icmp の値をほかで使わないとき: 値を作らずに cmp と jcc で分ける。
+    /// (icmp の値の番号は同じにする: 作るだけで書かない)
+    pub fn cmp_only(&mut self, cc: IntCC, a: Value, b: Value) {
+        let t = self.value_type(a);
+        if self.cmp_regs(t, a, b) {
+            let _ = self.new_value(Type::I8);
+            self.rax_holds = None;
+            return;
+        }
+        self.load_rax(a);
+        self.load_rcx(b);
+        if cc.signed() {
+            self.sext_rax(t);
+            self.sext_rcx(t);
+        }
+        self.emit(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+        let _ = self.new_value(Type::I8);
+        self.rax_holds = None;
+    }
+
+    /// cmp_only の後: 成り立たなければ else へ (setcc の逆の条件の jcc)
+    pub fn brif_cc(&mut self, cc: IntCC, then_b: Block, then_args: &[Value], else_b: Block, else_args: &[Value]) {
+        self.branch_on((cc.setcc() ^ 1) - 0x10, then_b, then_args, else_b, else_args);
     }
 
     pub fn icmp_imm(&mut self, cc: IntCC, a: Value, x: i64) -> Value {
@@ -549,7 +815,7 @@ impl FunctionBuilder {
         let t = self.value_type(a);
         self.load_rcx(a);
         self.load_rax(b);
-        let off = self.values[c.0 as usize].0;
+        let off = self.off(c);
         // cmp byte [rbp+off], 0; cmovne rax, rcx
         self.emit_disp(&[0x80, 0xBD], off);
         self.emit(&[0x00]);
@@ -576,6 +842,19 @@ impl FunctionBuilder {
 
     /// [addr + off] を読む
     pub fn load(&mut self, t: Type, addr: Value, off: i32) -> Value {
+        // (アドレスと結果がレジスタなら mov d, [base + off] / movzx)
+        let d = self.next_loc();
+        if let (Some(base), true) = (self.rloc(addr), d != MEM && matches!(t, Type::I64 | Type::I32 | Type::I16 | Type::I8)) {
+            let rx = ((d >> 3) << 2) | (base >> 3);
+            match t {
+                Type::I64 => self.emit(&[0x48 | rx, 0x8B]),
+                Type::I32 => self.emit(&[0x40 | rx, 0x8B]),
+                Type::I16 => self.emit(&[0x48 | rx, 0x0F, 0xB7]),
+                _ => self.emit(&[0x48 | rx, 0x0F, 0xB6]),
+            }
+            self.mem_operand(d, base, off);
+            return self.result_in_reg(t);
+        }
         self.load_rax(addr);
         match t {
             Type::I64 | Type::F64 => self.emit_disp(&[0x48, 0x8B, 0x80], off),
@@ -587,7 +866,7 @@ impl FunctionBuilder {
                 self.emit_disp(&[0x48, 0x8B, 0x88], off);
                 self.emit_disp(&[0x48, 0x8B, 0x80], off + 8);
                 let v = self.new_value(t);
-                let o = self.values[v.0 as usize].0;
+                let o = self.off(v);
                 self.emit_disp(&[0x48, 0x89, 0x8D], o);
                 self.store_rax_at(o + 8);
                 return v;
@@ -599,6 +878,21 @@ impl FunctionBuilder {
     /// [addr + off] に v を書く
     pub fn store(&mut self, v: Value, addr: Value, off: i32) {
         let t = self.value_type(v);
+        // (値とアドレスがレジスタなら mov [base + off], r)
+        if let (Some(r), Some(base)) = (self.rloc(v), self.rloc(addr)) {
+            if matches!(t, Type::I64 | Type::I32 | Type::I16 | Type::I8) {
+                let rx = ((r >> 3) << 2) | (base >> 3);
+                match t {
+                    Type::I64 => self.emit(&[0x48 | rx, 0x89]),
+                    Type::I32 => self.emit(&[0x40 | rx, 0x89]),
+                    Type::I16 => self.emit(&[0x66, 0x40 | rx, 0x89]),
+                    // (REX を付けると sil / dil などの下位 8 bit になる)
+                    _ => self.emit(&[0x40 | rx, 0x88]),
+                }
+                self.mem_operand(r, base, off);
+                return;
+            }
+        }
         if self.rax_is(v) && v != addr {
             self.load_rcx(v);
             self.load_rax(addr);
@@ -613,7 +907,7 @@ impl FunctionBuilder {
             Type::I8 => self.emit_disp(&[0x88, 0x88], off),
             Type::I128 => {
                 self.emit_disp(&[0x48, 0x89, 0x88], off);
-                let o = self.values[v.0 as usize].0;
+                let o = self.off(v);
                 self.emit_disp(&[0x48, 0x8B, 0x8D], o + 8);
                 self.emit_disp(&[0x48, 0x89, 0x88], off + 8);
             }
@@ -641,14 +935,14 @@ impl FunctionBuilder {
             self.load_rax(a);
             self.emit(&[0x50]); // push rax
             if self.value_type(a) == Type::I128 {
-                let o = self.values[a.0 as usize].0;
+                let o = self.off(a);
                 self.load_rax_at(o + 8);
                 self.emit(&[0x50]);
             }
         }
         for &p in ps.iter().rev().take(args.len()) {
             if self.value_type(p) == Type::I128 {
-                let o = self.values[p.0 as usize].0;
+                let o = self.off(p);
                 self.emit(&[0x58]);
                 self.store_rax_at(o + 8);
             }
@@ -658,6 +952,7 @@ impl FunctionBuilder {
     }
 
     pub fn jump(&mut self, b: Block, args: &[Value]) {
+        self.seg_succ(b);
         self.pass_args(b, args);
         self.emit(&[0xE9]);
         self.rel32_to(b);
@@ -666,17 +961,29 @@ impl FunctionBuilder {
 
     /// c が 0 でなければ then_b へ、0 なら else_b へ
     pub fn brif(&mut self, c: Value, then_b: Block, then_args: &[Value], else_b: Block, else_args: &[Value]) {
-        let off = self.values[c.0 as usize].0;
-        self.load_rax_at(off);
+        self.load_rax(c);
         self.emit(&[0x48, 0x85, 0xC0]); // test rax, rax
-        // jz → else 側の引数渡しへ
-        self.emit(&[0x0F, 0x84]);
+        self.branch_on(0x84, then_b, then_args, else_b, else_args);
+    }
+
+    /// 直前の比べた結果で、条件 jcc (0x0F の次の byte) が成り立てば else へ、成り立たなければ then へ
+    fn branch_on(&mut self, jcc: u8, then_b: Block, then_args: &[Value], else_b: Block, else_args: &[Value]) {
+        if else_args.is_empty() {
+            // (else に渡すものがなければ直接飛ぶ)
+            self.seg_succ(else_b);
+            self.emit(&[0x0F, jcc]);
+            self.rel32_to(else_b);
+            self.jump(then_b, then_args);
+            return;
+        }
+        self.emit(&[0x0F, jcc]);
         let jz_at = self.code.len();
         self.emit(&[0, 0, 0, 0]);
         self.jump(then_b, then_args);
         let here = self.code.len() as i32;
         let rel = here - (jz_at as i32 + 4);
         self.code[jz_at..jz_at + 4].copy_from_slice(&rel.to_le_bytes());
+        self.rax_holds = None;
         self.jump(else_b, else_args);
     }
 
@@ -689,14 +996,21 @@ impl FunctionBuilder {
             }
             if self.value_type(v) == Type::I128 {
                 // (上位は rdx)
-                let off = self.values[v.0 as usize].0;
+                let off = self.off(v);
                 self.emit_disp(&[0x48, 0x8B, 0x95], off + 8);
             }
         }
         if let Some(&v) = vals.get(1) {
             // 2 つ目は rdx
-            let off = self.values[v.0 as usize].0;
+            let off = self.off(v);
             self.emit_disp(&[0x48, 0x8B, 0x95], off);
+        }
+        // (割り当てたレジスタを戻す)
+        for i in 0..5 {
+            if self.plan.used & (1 << i) != 0 {
+                let d = self.save_slots[i];
+                self.emit(&mov_mr(ALLOC_REGS[i], d, true));
+            }
         }
         // leave; ret
         self.emit(&[0xC9, 0xC3]);
@@ -710,19 +1024,31 @@ impl FunctionBuilder {
 
     /// 関数を呼ぶ (引数は 6 個まではレジスタ、それ以降はスタック)。戻り値は 0〜2 個 (rax, rdx)
     pub fn call(&mut self, f: FuncRef, args: &[Value], rets: &[Type]) -> Vec<Value> {
+        let op = self.op;
+        if let Some(tr) = &mut self.track {
+            tr.calls.push(op);
+        }
         const ARG_LOAD: [[u8; 3]; 6] = [[0x48, 0x8B, 0xBD], [0x48, 0x8B, 0xB5], [0x48, 0x8B, 0x95], [0x48, 0x8B, 0x8D], [0x4C, 0x8B, 0x85], [0x4C, 0x8B, 0x8D]];
         let fargs: Vec<Value> = args.iter().copied().filter(|&a| self.value_type(a).is_float()).collect();
         let args: Vec<Value> = args.iter().copied().filter(|&a| !self.value_type(a).is_float()).collect();
         // 8 byte ずつの部分 (スロットのオフセット) をレジスタとスタックに分ける (i128 は 2 つ。2 つ残っていなければ全体をスタック)
-        let mut regs: Vec<i32> = vec![];
+        // (レジスタで渡す部分は (値, 上位か)。写しがあればそこから読む)
+        let mut regs: Vec<(Value, bool)> = vec![];
         let mut stack_parts: Vec<i32> = vec![];
         for &a in &args {
-            let off = self.values[a.0 as usize].0;
-            let parts: Vec<i32> = if self.value_type(a) == Type::I128 { vec![off, off + 8] } else { vec![off] };
-            if regs.len() + parts.len() <= 6 && stack_parts.is_empty() {
-                regs.extend(parts);
+            let wide = self.value_type(a) == Type::I128;
+            let n = if wide { 2 } else { 1 };
+            if regs.len() + n <= 6 && stack_parts.is_empty() {
+                regs.push((a, false));
+                if wide {
+                    regs.push((a, true));
+                }
             } else {
-                stack_parts.extend(parts);
+                let off = self.off(a);
+                stack_parts.push(off);
+                if wide {
+                    stack_parts.push(off + 8);
+                }
             }
         }
         // (スタック渡しの引数: rsp を 16 byte に揃えてから逆順に push)
@@ -734,8 +1060,38 @@ impl FunctionBuilder {
             self.load_rax_at(o);
             self.emit(&[0x50]);
         }
-        for (i, &off) in regs.iter().enumerate() {
-            self.emit_disp(&ARG_LOAD[i], off);
+        const ARG_REG: [u8; 6] = [7, 6, 2, 1, 8, 9];
+        // (引数の値が引数のレジスタにあると、順に書くと先に書いたもので壊れる: そのときはスタックを経由する)
+        let clash = regs.iter().any(|&(v, hi)| !hi && self.value_type(v) != Type::I128 && ARG_REG.contains(&self.loc(v)));
+        if clash {
+            for &(v, hi) in regs.iter() {
+                if hi || self.value_type(v) == Type::I128 {
+                    let off = self.off(v) + if hi { 8 } else { 0 };
+                    self.load_rax_at(off);
+                } else {
+                    self.load_reg(0, v);
+                }
+                self.emit(&[0x50]); // push rax
+            }
+            for i in (0..regs.len()).rev() {
+                let r = ARG_REG[i];
+                // pop r
+                if r >= 8 {
+                    self.emit(&[0x41, 0x58 + (r - 8)]);
+                } else {
+                    self.emit(&[0x58 + r]);
+                }
+            }
+            self.rax_holds = None;
+        } else {
+            for (i, &(v, hi)) in regs.iter().enumerate() {
+                if hi || self.value_type(v) == Type::I128 {
+                    let off = self.off(v) + if hi { 8 } else { 0 };
+                    self.emit_disp(&ARG_LOAD[i], off);
+                } else {
+                    self.load_reg(ARG_REG[i], v);
+                }
+            }
         }
         for (k, &a) in fargs.iter().enumerate().take(8) {
             self.xmm_load(k as u8, a);
@@ -760,7 +1116,7 @@ impl FunctionBuilder {
             if t == Type::I128 {
                 // rax (下位) と rdx (上位)
                 let v = self.new_value(t);
-                let o = self.values[v.0 as usize].0;
+                let o = self.off(v);
                 self.store_rax_at(o);
                 self.emit_disp(&[0x48, 0x89, 0x95], o + 8); // mov [rbp+o+8], rdx
                 out.push(v);
@@ -804,6 +1160,10 @@ impl FunctionBuilder {
             let target = self.blocks[b.0 as usize].offset.expect("jump to a block that was never switched to") as i32;
             let rel = target - (at as i32 + 4);
             self.code[at..at + 4].copy_from_slice(&rel.to_le_bytes());
+            // (すぐ次への jmp は 5 byte の nop に)
+            if rel == 0 && at >= 1 && self.code[at - 1] == 0xE9 {
+                self.code[at - 1..at + 4].copy_from_slice(&[0x0F, 0x1F, 0x44, 0x00, 0x00]);
+            }
         }
         let _ = (&self.params, &self.rets);
         (self.code, self.relocs)
@@ -812,10 +1172,72 @@ impl FunctionBuilder {
 
 
 // --- 浮動小数点・i128・オーバーフロー・ビット演算・間接呼び出し・アドレス ---------------
-impl FunctionBuilder {
-    fn off(&self, v: Value) -> i32 {
-        self.values[v.0 as usize].0
+impl Emitter {
+    /// 値のスロットのオフセット (メモリから読む・アドレスとして使う: そのスロットへの書き込みは消せない)
+    fn off(&mut self, v: Value) -> i32 {
+        self.ev_use(v.0);
+        self.force_mem(v);
+        // (レジスタに置いた値はスロットにない: 念のため書いてから。解析で mem_only にしたので普通は起きない)
+        let r = self.loc(v);
+        let o = self.values[v.0 as usize].0;
+        if r != MEM {
+            self.emit(&mov_mr(r, o, false));
+        }
+        o
     }
+
+    /// 値のレジスタ (MEM ならスロット)
+    fn loc(&self, v: Value) -> u8 {
+        self.plan.vloc.get(v.0 as usize).copied().unwrap_or(MEM)
+    }
+    fn var_loc(&self, var: Variable) -> u8 {
+        self.plan.varloc.get(var.0 as usize).copied().unwrap_or(MEM)
+    }
+    fn force_mem(&mut self, v: Value) {
+        if let Some(tr) = &mut self.track {
+            tr.mem_only[v.0 as usize] = true;
+        }
+    }
+    fn ev_use(&mut self, id: u32) {
+        let op = self.op;
+        if let Some(tr) = &mut self.track {
+            tr.ev.push((id, op, false));
+        }
+    }
+    fn ev_def(&mut self, id: u32) {
+        let op = self.op;
+        if let Some(tr) = &mut self.track {
+            tr.ev.push((id, op, true));
+        }
+    }
+    /// 区間を閉じて次を始める (解析のとき)
+    fn seg_switch(&mut self, b: Block, falls: bool) {
+        let op = self.op;
+        if let Some(tr) = &mut self.track {
+            if let Some(last) = tr.segs.last_mut() {
+                last.end = op;
+                last.falls = falls;
+            }
+            tr.segs.push(Seg { block: b.0, start: op, end: op, succ: vec![], falls: false });
+        }
+    }
+    fn seg_succ(&mut self, b: Block) {
+        if let Some(tr) = &mut self.track {
+            if let Some(last) = tr.segs.last_mut() {
+                last.succ.push(b.0);
+            }
+        }
+    }
+    pub fn take_track(&mut self) -> Option<Box<Track>> {
+        let op = self.op;
+        if let Some(tr) = &mut self.track {
+            if let Some(last) = tr.segs.last_mut() {
+                last.end = op;
+            }
+        }
+        self.track.take()
+    }
+
 
     /// xmm0 (reg 0) / xmm1 (reg 1) に読む
     fn xmm_load(&mut self, reg: u8, v: Value) {
@@ -1649,4 +2071,1260 @@ pub fn write_object_full(funcs: &[(String, Vec<u8>, Vec<Reloc>, bool)], datas: &
     }
     out[..64].copy_from_slice(&h);
     out
+}
+
+// --- レジスタ割り当て -------------------------------------------------------------
+
+/// 解析の記録から、値・変数をレジスタに割り当てる (線形走査)。
+/// 生存区間は命令の番号の範囲 [最初, 最後]: 1 つの区間 (ブロックを続けて書いた範囲) の中だけで書いて読む値はそのまま、
+/// 区間をまたぐものは区間の入口・出口で生きているか (後ろ向きのデータフロー) を見て、生きている区間の端まで延ばす
+pub fn plan(tr: &Track, nvals: usize, nvars: usize) -> Plan {
+    let n = nvals + nvars;
+    let idx = |id: u32| -> usize { if id >= VAR_BASE { nvals + (id - VAR_BASE) as usize } else { id as usize } };
+    let cand = |i: usize| -> bool { if i < nvals { !tr.mem_only.get(i).copied().unwrap_or(true) } else { !tr.var_mem_only.get(i - nvals).copied().unwrap_or(true) } };
+    let segs = &tr.segs;
+    // 命令の番号 → 区間 (区間は始まりの順)
+    let seg_of = |op: u32| -> usize {
+        let mut lo = 0usize;
+        let mut hi = segs.len();
+        while lo + 1 < hi {
+            let m = (lo + hi) / 2;
+            if segs[m].start <= op {
+                lo = m;
+            } else {
+                hi = m;
+            }
+        }
+        lo
+    };
+    const NONE: u32 = u32::MAX;
+    let mut first = vec![NONE; n];
+    let mut last = vec![0u32; n];
+    let mut first_def = vec![false; n];
+    let mut seg1 = vec![usize::MAX; n];
+    let mut multi = vec![false; n];
+    for &(id, op, def) in &tr.ev {
+        let i = idx(id);
+        if i >= n {
+            continue;
+        }
+        let s = seg_of(op);
+        if first[i] == NONE {
+            first[i] = op;
+            first_def[i] = def;
+            seg1[i] = s;
+        } else if seg1[i] != s {
+            multi[i] = true;
+        }
+        if op > last[i] {
+            last[i] = op;
+        }
+    }
+    // 区間をまたぐもの (と、区間の中で書く前に読むもの): データフローで見る
+    let mut gid = vec![usize::MAX; n];
+    let mut globals: Vec<usize> = vec![];
+    for i in 0..n {
+        if first[i] != NONE && cand(i) && (multi[i] || !first_def[i]) {
+            gid[i] = globals.len();
+            globals.push(i);
+        }
+    }
+    let mut lo: Vec<u32> = first.clone();
+    let mut hi: Vec<u32> = last.clone();
+    if !globals.is_empty() && !segs.is_empty() {
+        let g = globals.len();
+        let words = (g + 63) / 64;
+        let ns = segs.len();
+        let mut gens = vec![0u64; ns * words];
+        let mut kill = vec![0u64; ns * words];
+        for &(id, op, def) in &tr.ev {
+            let i = idx(id);
+            if i >= n || gid[i] == usize::MAX {
+                continue;
+            }
+            let s = seg_of(op);
+            let (w, bit) = (gid[i] / 64, 1u64 << (gid[i] % 64));
+            if def {
+                kill[s * words + w] |= bit;
+            } else if kill[s * words + w] & bit == 0 {
+                gens[s * words + w] |= bit;
+            }
+        }
+        // 区間の行き先: 飛び先のブロックの最初の区間、続き (同じブロックの次の区間 / 入口の前の区間は次)
+        let mut first_seg: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        for (k, sg) in segs.iter().enumerate() {
+            first_seg.entry(sg.block).or_insert(k);
+        }
+        let mut succ: Vec<Vec<usize>> = vec![vec![]; ns];
+        for (k, sg) in segs.iter().enumerate() {
+            for b in &sg.succ {
+                if let Some(&t) = first_seg.get(b) {
+                    succ[k].push(t);
+                }
+            }
+            if sg.block == u32::MAX && k + 1 < ns {
+                succ[k].push(k + 1);
+            } else if sg.falls {
+                if let Some(t) = (k + 1..ns).find(|&t| segs[t].block == sg.block) {
+                    succ[k].push(t);
+                }
+            }
+        }
+        let mut lin = vec![0u64; ns * words];
+        let mut lout = vec![0u64; ns * words];
+        loop {
+            let mut changed = false;
+            for k in (0..ns).rev() {
+                for w in 0..words {
+                    let mut o = 0u64;
+                    for &t in &succ[k] {
+                        o |= lin[t * words + w];
+                    }
+                    let iv = gens[k * words + w] | (o & !kill[k * words + w]);
+                    if o != lout[k * words + w] || iv != lin[k * words + w] {
+                        lout[k * words + w] = o;
+                        lin[k * words + w] = iv;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for (gi, &i) in globals.iter().enumerate() {
+            let (w, bit) = (gi / 64, 1u64 << (gi % 64));
+            for k in 0..ns {
+                if lin[k * words + w] & bit != 0 && segs[k].start < lo[i] {
+                    lo[i] = segs[k].start;
+                }
+                if lout[k * words + w] & bit != 0 && segs[k].end > hi[i] {
+                    hi[i] = segs[k].end;
+                }
+            }
+        }
+    }
+    // 線形走査: 始まりの順に、空いているレジスタへ。呼び出しを含む区間は呼ばれた側が保存するレジスタだけ。
+    // なければ「使う回数 / 長さ」がいちばん小さいもの (今のものか、同じ種類のレジスタを持っているもの) をスロットへ
+    let mut uses = vec![0u32; n];
+    for &(id, _, _) in &tr.ev {
+        let i = idx(id);
+        if i < n {
+            uses[i] += 1;
+        }
+    }
+    let mut calls = tr.calls.clone();
+    calls.sort_unstable();
+    let has_call = |a: u32, b: u32| -> bool {
+        // (a 以上の最初の呼び出し: 二分探索)
+        let (mut l, mut h) = (0usize, calls.len());
+        while l < h {
+            let m = (l + h) / 2;
+            if calls[m] < a {
+                l = m + 1;
+            } else {
+                h = m;
+            }
+        }
+        l < calls.len() && calls[l] <= b
+    };
+    let weight = |i: usize| -> f64 { uses[i] as f64 / (hi[i] - lo[i] + 1) as f64 };
+    let mut order: Vec<usize> = (0..n).filter(|&i| first[i] != NONE && cand(i)).collect();
+    order.sort_by_key(|&i| (lo[i], i));
+    let mut loc = vec![MEM; n];
+    let mut active: Vec<usize> = vec![];
+    let mut free_saved: Vec<u8> = vec![4, 3, 2, 1, 0];
+    let mut free_temp: Vec<u8> = vec![9, 8, 7, 6, 5];
+    let mut used = 0u8;
+    for &i in &order {
+        // (終わったものを外す)
+        let mut k = 0;
+        while k < active.len() {
+            let a = active[k];
+            if hi[a] < lo[i] {
+                if loc[a] < 5 {
+                    free_saved.push(loc[a]);
+                } else {
+                    free_temp.push(loc[a]);
+                }
+                active.remove(k);
+            } else {
+                k += 1;
+            }
+        }
+        let crosses = has_call(lo[i], hi[i]);
+        let got = if crosses { free_saved.pop() } else { free_temp.pop().or_else(|| free_saved.pop()) };
+        if let Some(r) = got {
+            loc[i] = r;
+            if r < 5 {
+                used |= 1 << r;
+            }
+            active.push(i);
+            continue;
+        }
+        // (追い出す: 呼び出しをまたぐなら、呼ばれた側が保存するレジスタを持つものから)
+        let mut worst: Option<usize> = None;
+        for k in 0..active.len() {
+            let a = active[k];
+            if crosses && loc[a] >= 5 {
+                continue;
+            }
+            let better = match worst {
+                None => true,
+                Some(w) => weight(a) < weight(active[w]),
+            };
+            if better {
+                worst = Some(k);
+            }
+        }
+        if let Some(w) = worst {
+            let a = active[w];
+            if weight(a) < weight(i) {
+                loc[i] = loc[a];
+                loc[a] = MEM;
+                active[w] = i;
+            }
+        }
+    }
+    // (番号 → レジスタの番号)
+    let reg = |l: u8| -> u8 { if l == MEM { MEM } else { ALLOC_REGS[l as usize] } };
+    Plan { vloc: (0..nvals).map(|i| reg(loc[i])).collect(), varloc: (nvals..n).map(|i| reg(loc[i])).collect(), used }
+}
+
+// --- 記録して 2 回組み立てる FunctionBuilder ---------------------------------------------
+
+/// FunctionBuilder の命令 (呼ばれた順に記録し、割り当てを決めてから本番の Emitter でもう一度呼ぶ)
+#[derive(Clone)]
+enum Op {
+    CreateBlock,
+    AppendBlockParam(Block, Type),
+    SwitchToBlock(Block),
+    DeclareVar(Type),
+    DefVar(Variable, Value),
+    UseVar(Variable),
+    CreateStackSlot(u32, u32),
+    ImportFunction(String),
+    Iconst(Type, i64),
+    Iadd(Value, Value),
+    Isub(Value, Value),
+    Imul(Value, Value),
+    Band(Value, Value),
+    Bor(Value, Value),
+    Bxor(Value, Value),
+    IaddImm(Value, i64),
+    Udiv(Value, Value),
+    Sdiv(Value, Value),
+    Urem(Value, Value),
+    Srem(Value, Value),
+    Ishl(Value, Value),
+    Ushr(Value, Value),
+    Sshr(Value, Value),
+    Ineg(Value),
+    Bnot(Value),
+    Icmp(IntCC, Value, Value),
+    IcmpImm(IntCC, Value, i64),
+    Select(Value, Value, Value),
+    Uextend(Type, Value),
+    Sextend(Type, Value),
+    Ireduce(Type, Value),
+    Load(Type, Value, i32),
+    Store(Value, Value, i32),
+    StackAddr(StackSlot, i32),
+    Jump(Block, Vec<Value>),
+    Brif(Value, Block, Vec<Value>, Block, Vec<Value>),
+    Return_(Vec<Value>),
+    Trap,
+    Call(FuncRef, Vec<Value>, Vec<Type>),
+    F64const(f64),
+    F32const(f32),
+    Fadd(Value, Value),
+    Fsub(Value, Value),
+    Fmul(Value, Value),
+    Fdiv(Value, Value),
+    Sqrt(Value),
+    Floor(Value),
+    Ceil(Value),
+    Trunc(Value),
+    Fneg(Value),
+    Fabs(Value),
+    Fcopysign(Value, Value),
+    Fma(Value, Value, Value),
+    Bitcast(Type, Value),
+    Fcmp(FloatCC, Value, Value),
+    Fpromote(Value),
+    Fdemote(Value),
+    FcvtFromSint(Type, Value),
+    FcvtFromUint(Type, Value),
+    FcvtToSintSat(Type, Value),
+    FcvtToUintSat(Type, Value),
+    Iconcat(Value, Value),
+    Isplit(Value),
+    Iadd128(Value, Value),
+    Isub128(Value, Value),
+    Band128(Value, Value),
+    Bor128(Value, Value),
+    Bxor128(Value, Value),
+    Imul128(Value, Value),
+    Udiv128(Value, Value),
+    Sdiv128(Value, Value),
+    Urem128(Value, Value),
+    Srem128(Value, Value),
+    Icmp128(IntCC, Value, Value),
+    Ishl128(Value, Value),
+    Ushr128(Value, Value),
+    Sshr128(Value, Value),
+    Extend128(Value, bool),
+    Reduce128(Type, Value),
+    UaddOverflow(Value, Value),
+    UsubOverflow(Value, Value),
+    SaddOverflow(Value, Value),
+    SsubOverflow(Value, Value),
+    UmulOverflow(Value, Value),
+    SmulOverflow(Value, Value),
+    Umulhi(Value, Value),
+    Clz(Value),
+    Ctz(Value),
+    Popcnt(Value),
+    Bswap(Value),
+    Rotl(Value, Value),
+    Rotr(Value, Value),
+    Smin(Value, Value),
+    Umin(Value, Value),
+    Smax(Value, Value),
+    Umax(Value, Value),
+    Iabs(Value),
+    TrapCode(u8),
+    TrapzCode(Value, u8),
+    TrapnzCode(Value, u8),
+    Trapz(Value),
+    Trapnz(Value),
+    CallIndirect(Value, Vec<Value>, Vec<Type>),
+    SymbolAddr(String),
+}
+
+/// 1 関数分の組み立て。命令は記録しながら解析用の Emitter で組み立て (値の番号と型を決める)、
+/// finish で値・変数をレジスタに割り当ててから、本番の Emitter で記録した命令を同じ順にもう一度組み立てる
+pub struct FunctionBuilder {
+    params: Vec<Type>,
+    rets: Vec<Type>,
+    dry: Emitter,
+    ops: Vec<Op>,
+    real: Option<Emitter>,
+}
+
+impl FunctionBuilder {
+    pub fn new(params: Vec<Type>, rets: Vec<Type>) -> FunctionBuilder {
+        let dry = Emitter::new(params.clone(), rets.clone(), None);
+        FunctionBuilder { params, rets, dry, ops: vec![], real: None }
+    }
+    pub fn func_params(&self) -> Vec<Value> {
+        self.dry.func_params()
+    }
+    pub fn value_type(&self, v: Value) -> Type {
+        self.dry.value_type(v)
+    }
+    pub fn block_params(&self, b: Block) -> Vec<Value> {
+        self.dry.block_params(b)
+    }
+    pub fn current_block(&self) -> Option<Block> {
+        self.dry.current_block()
+    }
+    /// 割り当てを決めて本番を組み立てる (1 回だけ)
+    fn realize(&mut self) {
+        if self.real.is_some() {
+            return;
+        }
+        let mut tr = self.dry.take_track().unwrap_or_default();
+        // (すぐ後が trap の呼び出し (panic) は戻ってこない: 呼び出しをまたぐとしない)
+        let ops = &self.ops;
+        tr.calls.retain(|&c| !matches!(ops.get(c as usize + 1), Some(Op::Trap | Op::TrapCode(_))));
+        let pl = if std::env::var_os("MINCLIF_NO_REGALLOC").is_some() { Plan::default() } else { plan(&tr, self.dry.values.len(), self.dry.vars.len()) };
+        let mut e = Emitter::new(self.params.clone(), self.rets.clone(), Some(pl));
+        // (値ごとの読む回数: icmp の値を brif だけが読むなら、まとめて cmp + jcc にする)
+        let mut reads = vec![0u32; self.dry.values.len()];
+        for &(id, _, def) in &tr.ev {
+            if !def && (id as usize) < reads.len() {
+                reads[id as usize] += 1;
+            }
+        }
+        let ops = std::mem::take(&mut self.ops);
+        let mut i = 0;
+        while i < ops.len() {
+            e.op = i as u32;
+            if let Op::Icmp(cc, a, b) = &ops[i] {
+                // (間に値もコードも作らない命令 (ブロック・変数・スロットを作る) があってもよい)
+                let mut j = i + 1;
+                while j < ops.len() && matches!(ops[j], Op::CreateBlock | Op::DeclareVar(_) | Op::CreateStackSlot(..) | Op::ImportFunction(_)) {
+                    j += 1;
+                }
+                let next = e.values.len() as u32;
+                if let Some(Op::Brif(c, tb, ta, eb, ea)) = ops.get(j) {
+                    if c.0 == next && reads.get(next as usize) == Some(&1) {
+                        e.cmp_only(*cc, *a, *b);
+                        for k in i + 1..j {
+                            e.op = k as u32;
+                            replay(&mut e, &ops[k]);
+                        }
+                        e.op = j as u32;
+                        e.brif_cc(*cc, *tb, ta.as_slice(), *eb, ea.as_slice());
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+            replay(&mut e, &ops[i]);
+            i += 1;
+        }
+        self.real = Some(e);
+    }
+    pub fn traps(&mut self) -> Vec<(u32, u8)> {
+        self.realize();
+        self.real.as_ref().unwrap().traps()
+    }
+    pub fn finish(mut self) -> (Vec<u8>, Vec<Reloc>) {
+        self.realize();
+        self.real.take().unwrap().finish()
+    }
+    pub fn finish_zeroing(mut self, zero: &[StackSlot]) -> (Vec<u8>, Vec<Reloc>) {
+        self.realize();
+        self.real.take().unwrap().finish_zeroing(zero)
+    }
+    pub fn create_block(&mut self) -> Block {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::CreateBlock);
+        self.dry.create_block()
+    }
+    pub fn append_block_param(&mut self, b: Block, t: Type) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::AppendBlockParam(b, t));
+        self.dry.append_block_param(b, t)
+    }
+    pub fn switch_to_block(&mut self, b: Block) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::SwitchToBlock(b));
+        self.dry.switch_to_block(b)
+    }
+    pub fn declare_var(&mut self, t: Type) -> Variable {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::DeclareVar(t));
+        self.dry.declare_var(t)
+    }
+    pub fn def_var(&mut self, var: Variable, v: Value) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::DefVar(var, v));
+        self.dry.def_var(var, v)
+    }
+    pub fn use_var(&mut self, var: Variable) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::UseVar(var));
+        self.dry.use_var(var)
+    }
+    pub fn create_stack_slot(&mut self, size: u32, align: u32) -> StackSlot {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::CreateStackSlot(size, align));
+        self.dry.create_stack_slot(size, align)
+    }
+    pub fn import_function(&mut self, name: &str) -> FuncRef {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::ImportFunction(name.to_string()));
+        self.dry.import_function(name)
+    }
+    pub fn iconst(&mut self, t: Type, x: i64) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Iconst(t, x));
+        self.dry.iconst(t, x)
+    }
+    pub fn iadd(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Iadd(a, b));
+        self.dry.iadd(a, b)
+    }
+    pub fn isub(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Isub(a, b));
+        self.dry.isub(a, b)
+    }
+    pub fn imul(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Imul(a, b));
+        self.dry.imul(a, b)
+    }
+    pub fn band(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Band(a, b));
+        self.dry.band(a, b)
+    }
+    pub fn bor(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Bor(a, b));
+        self.dry.bor(a, b)
+    }
+    pub fn bxor(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Bxor(a, b));
+        self.dry.bxor(a, b)
+    }
+    pub fn iadd_imm(&mut self, a: Value, x: i64) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::IaddImm(a, x));
+        self.dry.iadd_imm(a, x)
+    }
+    pub fn udiv(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Udiv(a, b));
+        self.dry.udiv(a, b)
+    }
+    pub fn sdiv(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Sdiv(a, b));
+        self.dry.sdiv(a, b)
+    }
+    pub fn urem(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Urem(a, b));
+        self.dry.urem(a, b)
+    }
+    pub fn srem(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Srem(a, b));
+        self.dry.srem(a, b)
+    }
+    pub fn ishl(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Ishl(a, b));
+        self.dry.ishl(a, b)
+    }
+    pub fn ushr(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Ushr(a, b));
+        self.dry.ushr(a, b)
+    }
+    pub fn sshr(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Sshr(a, b));
+        self.dry.sshr(a, b)
+    }
+    pub fn ineg(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Ineg(a));
+        self.dry.ineg(a)
+    }
+    pub fn bnot(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Bnot(a));
+        self.dry.bnot(a)
+    }
+    pub fn icmp(&mut self, cc: IntCC, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Icmp(cc, a, b));
+        self.dry.icmp(cc, a, b)
+    }
+    pub fn icmp_imm(&mut self, cc: IntCC, a: Value, x: i64) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::IcmpImm(cc, a, x));
+        self.dry.icmp_imm(cc, a, x)
+    }
+    pub fn select(&mut self, c: Value, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Select(c, a, b));
+        self.dry.select(c, a, b)
+    }
+    pub fn uextend(&mut self, t: Type, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Uextend(t, a));
+        self.dry.uextend(t, a)
+    }
+    pub fn sextend(&mut self, t: Type, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Sextend(t, a));
+        self.dry.sextend(t, a)
+    }
+    pub fn ireduce(&mut self, t: Type, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Ireduce(t, a));
+        self.dry.ireduce(t, a)
+    }
+    pub fn load(&mut self, t: Type, addr: Value, off: i32) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Load(t, addr, off));
+        self.dry.load(t, addr, off)
+    }
+    pub fn store(&mut self, v: Value, addr: Value, off: i32) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Store(v, addr, off));
+        self.dry.store(v, addr, off)
+    }
+    pub fn stack_addr(&mut self, s: StackSlot, off: i32) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::StackAddr(s, off));
+        self.dry.stack_addr(s, off)
+    }
+    pub fn jump(&mut self, b: Block, args: &[Value]) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Jump(b, args.to_vec()));
+        self.dry.jump(b, args)
+    }
+    pub fn brif(&mut self, c: Value, then_b: Block, then_args: &[Value], else_b: Block, else_args: &[Value]) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Brif(c, then_b, then_args.to_vec(), else_b, else_args.to_vec()));
+        self.dry.brif(c, then_b, then_args, else_b, else_args)
+    }
+    pub fn return_(&mut self, vals: &[Value]) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Return_(vals.to_vec()));
+        self.dry.return_(vals)
+    }
+    pub fn trap(&mut self) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Trap);
+        self.dry.trap()
+    }
+    pub fn call(&mut self, f: FuncRef, args: &[Value], rets: &[Type]) -> Vec<Value> {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Call(f, args.to_vec(), rets.to_vec()));
+        self.dry.call(f, args, rets)
+    }
+    pub fn f64const(&mut self, x: f64) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::F64const(x));
+        self.dry.f64const(x)
+    }
+    pub fn f32const(&mut self, x: f32) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::F32const(x));
+        self.dry.f32const(x)
+    }
+    pub fn fadd(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Fadd(a, b));
+        self.dry.fadd(a, b)
+    }
+    pub fn fsub(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Fsub(a, b));
+        self.dry.fsub(a, b)
+    }
+    pub fn fmul(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Fmul(a, b));
+        self.dry.fmul(a, b)
+    }
+    pub fn fdiv(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Fdiv(a, b));
+        self.dry.fdiv(a, b)
+    }
+    pub fn sqrt(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Sqrt(a));
+        self.dry.sqrt(a)
+    }
+    pub fn floor(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Floor(a));
+        self.dry.floor(a)
+    }
+    pub fn ceil(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Ceil(a));
+        self.dry.ceil(a)
+    }
+    pub fn trunc(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Trunc(a));
+        self.dry.trunc(a)
+    }
+    pub fn fneg(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Fneg(a));
+        self.dry.fneg(a)
+    }
+    pub fn fabs(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Fabs(a));
+        self.dry.fabs(a)
+    }
+    pub fn fcopysign(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Fcopysign(a, b));
+        self.dry.fcopysign(a, b)
+    }
+    pub fn fma(&mut self, a: Value, b: Value, c: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Fma(a, b, c));
+        self.dry.fma(a, b, c)
+    }
+    pub fn bitcast(&mut self, t: Type, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Bitcast(t, a));
+        self.dry.bitcast(t, a)
+    }
+    pub fn fcmp(&mut self, cc: FloatCC, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Fcmp(cc, a, b));
+        self.dry.fcmp(cc, a, b)
+    }
+    pub fn fpromote(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Fpromote(a));
+        self.dry.fpromote(a)
+    }
+    pub fn fdemote(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Fdemote(a));
+        self.dry.fdemote(a)
+    }
+    pub fn fcvt_from_sint(&mut self, t: Type, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::FcvtFromSint(t, a));
+        self.dry.fcvt_from_sint(t, a)
+    }
+    pub fn fcvt_from_uint(&mut self, t: Type, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::FcvtFromUint(t, a));
+        self.dry.fcvt_from_uint(t, a)
+    }
+    pub fn fcvt_to_sint_sat(&mut self, t: Type, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::FcvtToSintSat(t, a));
+        self.dry.fcvt_to_sint_sat(t, a)
+    }
+    pub fn fcvt_to_uint_sat(&mut self, t: Type, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::FcvtToUintSat(t, a));
+        self.dry.fcvt_to_uint_sat(t, a)
+    }
+    pub fn iconcat(&mut self, lo: Value, hi: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Iconcat(lo, hi));
+        self.dry.iconcat(lo, hi)
+    }
+    pub fn isplit(&mut self, v: Value) -> (Value, Value) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Isplit(v));
+        self.dry.isplit(v)
+    }
+    pub fn iadd128(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Iadd128(a, b));
+        self.dry.iadd128(a, b)
+    }
+    pub fn isub128(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Isub128(a, b));
+        self.dry.isub128(a, b)
+    }
+    pub fn band128(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Band128(a, b));
+        self.dry.band128(a, b)
+    }
+    pub fn bor128(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Bor128(a, b));
+        self.dry.bor128(a, b)
+    }
+    pub fn bxor128(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Bxor128(a, b));
+        self.dry.bxor128(a, b)
+    }
+    pub fn imul128(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Imul128(a, b));
+        self.dry.imul128(a, b)
+    }
+    pub fn udiv128(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Udiv128(a, b));
+        self.dry.udiv128(a, b)
+    }
+    pub fn sdiv128(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Sdiv128(a, b));
+        self.dry.sdiv128(a, b)
+    }
+    pub fn urem128(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Urem128(a, b));
+        self.dry.urem128(a, b)
+    }
+    pub fn srem128(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Srem128(a, b));
+        self.dry.srem128(a, b)
+    }
+    pub fn icmp128(&mut self, cc: IntCC, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Icmp128(cc, a, b));
+        self.dry.icmp128(cc, a, b)
+    }
+    pub fn ishl128(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Ishl128(a, b));
+        self.dry.ishl128(a, b)
+    }
+    pub fn ushr128(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Ushr128(a, b));
+        self.dry.ushr128(a, b)
+    }
+    pub fn sshr128(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Sshr128(a, b));
+        self.dry.sshr128(a, b)
+    }
+    pub fn extend128(&mut self, a: Value, signed: bool) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Extend128(a, signed));
+        self.dry.extend128(a, signed)
+    }
+    pub fn reduce128(&mut self, t: Type, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Reduce128(t, a));
+        self.dry.reduce128(t, a)
+    }
+    pub fn uadd_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::UaddOverflow(a, b));
+        self.dry.uadd_overflow(a, b)
+    }
+    pub fn usub_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::UsubOverflow(a, b));
+        self.dry.usub_overflow(a, b)
+    }
+    pub fn sadd_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::SaddOverflow(a, b));
+        self.dry.sadd_overflow(a, b)
+    }
+    pub fn ssub_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::SsubOverflow(a, b));
+        self.dry.ssub_overflow(a, b)
+    }
+    pub fn umul_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::UmulOverflow(a, b));
+        self.dry.umul_overflow(a, b)
+    }
+    pub fn smul_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::SmulOverflow(a, b));
+        self.dry.smul_overflow(a, b)
+    }
+    pub fn umulhi(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Umulhi(a, b));
+        self.dry.umulhi(a, b)
+    }
+    pub fn clz(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Clz(a));
+        self.dry.clz(a)
+    }
+    pub fn ctz(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Ctz(a));
+        self.dry.ctz(a)
+    }
+    pub fn popcnt(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Popcnt(a));
+        self.dry.popcnt(a)
+    }
+    pub fn bswap(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Bswap(a));
+        self.dry.bswap(a)
+    }
+    pub fn rotl(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Rotl(a, b));
+        self.dry.rotl(a, b)
+    }
+    pub fn rotr(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Rotr(a, b));
+        self.dry.rotr(a, b)
+    }
+    pub fn smin(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Smin(a, b));
+        self.dry.smin(a, b)
+    }
+    pub fn umin(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Umin(a, b));
+        self.dry.umin(a, b)
+    }
+    pub fn smax(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Smax(a, b));
+        self.dry.smax(a, b)
+    }
+    pub fn umax(&mut self, a: Value, b: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Umax(a, b));
+        self.dry.umax(a, b)
+    }
+    pub fn iabs(&mut self, a: Value) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Iabs(a));
+        self.dry.iabs(a)
+    }
+    pub fn trap_code(&mut self, code: u8) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::TrapCode(code));
+        self.dry.trap_code(code)
+    }
+    pub fn trapz_code(&mut self, c: Value, code: u8) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::TrapzCode(c, code));
+        self.dry.trapz_code(c, code)
+    }
+    pub fn trapnz_code(&mut self, c: Value, code: u8) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::TrapnzCode(c, code));
+        self.dry.trapnz_code(c, code)
+    }
+    pub fn trapz(&mut self, c: Value) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Trapz(c));
+        self.dry.trapz(c)
+    }
+    pub fn trapnz(&mut self, c: Value) {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::Trapnz(c));
+        self.dry.trapnz(c)
+    }
+    pub fn call_indirect(&mut self, p: Value, args: &[Value], rets: &[Type]) -> Vec<Value> {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::CallIndirect(p, args.to_vec(), rets.to_vec()));
+        self.dry.call_indirect(p, args, rets)
+    }
+    pub fn symbol_addr(&mut self, name: &str) -> Value {
+        self.dry.op = self.ops.len() as u32;
+        self.ops.push(Op::SymbolAddr(name.to_string()));
+        self.dry.symbol_addr(name)
+    }
+}
+
+/// 記録した命令を本番の Emitter で組み立てる (戻り値は解析のときと同じ番号になる)
+fn replay(e: &mut Emitter, op: &Op) {
+    match op {
+        Op::CreateBlock => {
+            let _ = e.create_block();
+        }
+        Op::AppendBlockParam(f0, f1) => {
+            let _ = e.append_block_param(*f0, *f1);
+        }
+        Op::SwitchToBlock(f0) => {
+            let _ = e.switch_to_block(*f0);
+        }
+        Op::DeclareVar(f0) => {
+            let _ = e.declare_var(*f0);
+        }
+        Op::DefVar(f0, f1) => {
+            let _ = e.def_var(*f0, *f1);
+        }
+        Op::UseVar(f0) => {
+            let _ = e.use_var(*f0);
+        }
+        Op::CreateStackSlot(f0, f1) => {
+            let _ = e.create_stack_slot(*f0, *f1);
+        }
+        Op::ImportFunction(f0) => {
+            let _ = e.import_function(f0.as_str());
+        }
+        Op::Iconst(f0, f1) => {
+            let _ = e.iconst(*f0, *f1);
+        }
+        Op::Iadd(f0, f1) => {
+            let _ = e.iadd(*f0, *f1);
+        }
+        Op::Isub(f0, f1) => {
+            let _ = e.isub(*f0, *f1);
+        }
+        Op::Imul(f0, f1) => {
+            let _ = e.imul(*f0, *f1);
+        }
+        Op::Band(f0, f1) => {
+            let _ = e.band(*f0, *f1);
+        }
+        Op::Bor(f0, f1) => {
+            let _ = e.bor(*f0, *f1);
+        }
+        Op::Bxor(f0, f1) => {
+            let _ = e.bxor(*f0, *f1);
+        }
+        Op::IaddImm(f0, f1) => {
+            let _ = e.iadd_imm(*f0, *f1);
+        }
+        Op::Udiv(f0, f1) => {
+            let _ = e.udiv(*f0, *f1);
+        }
+        Op::Sdiv(f0, f1) => {
+            let _ = e.sdiv(*f0, *f1);
+        }
+        Op::Urem(f0, f1) => {
+            let _ = e.urem(*f0, *f1);
+        }
+        Op::Srem(f0, f1) => {
+            let _ = e.srem(*f0, *f1);
+        }
+        Op::Ishl(f0, f1) => {
+            let _ = e.ishl(*f0, *f1);
+        }
+        Op::Ushr(f0, f1) => {
+            let _ = e.ushr(*f0, *f1);
+        }
+        Op::Sshr(f0, f1) => {
+            let _ = e.sshr(*f0, *f1);
+        }
+        Op::Ineg(f0) => {
+            let _ = e.ineg(*f0);
+        }
+        Op::Bnot(f0) => {
+            let _ = e.bnot(*f0);
+        }
+        Op::Icmp(f0, f1, f2) => {
+            let _ = e.icmp(*f0, *f1, *f2);
+        }
+        Op::IcmpImm(f0, f1, f2) => {
+            let _ = e.icmp_imm(*f0, *f1, *f2);
+        }
+        Op::Select(f0, f1, f2) => {
+            let _ = e.select(*f0, *f1, *f2);
+        }
+        Op::Uextend(f0, f1) => {
+            let _ = e.uextend(*f0, *f1);
+        }
+        Op::Sextend(f0, f1) => {
+            let _ = e.sextend(*f0, *f1);
+        }
+        Op::Ireduce(f0, f1) => {
+            let _ = e.ireduce(*f0, *f1);
+        }
+        Op::Load(f0, f1, f2) => {
+            let _ = e.load(*f0, *f1, *f2);
+        }
+        Op::Store(f0, f1, f2) => {
+            let _ = e.store(*f0, *f1, *f2);
+        }
+        Op::StackAddr(f0, f1) => {
+            let _ = e.stack_addr(*f0, *f1);
+        }
+        Op::Jump(f0, f1) => {
+            let _ = e.jump(*f0, f1.as_slice());
+        }
+        Op::Brif(f0, f1, f2, f3, f4) => {
+            let _ = e.brif(*f0, *f1, f2.as_slice(), *f3, f4.as_slice());
+        }
+        Op::Return_(f0) => {
+            let _ = e.return_(f0.as_slice());
+        }
+        Op::Trap => {
+            let _ = e.trap();
+        }
+        Op::Call(f0, f1, f2) => {
+            let _ = e.call(*f0, f1.as_slice(), f2.as_slice());
+        }
+        Op::F64const(f0) => {
+            let _ = e.f64const(*f0);
+        }
+        Op::F32const(f0) => {
+            let _ = e.f32const(*f0);
+        }
+        Op::Fadd(f0, f1) => {
+            let _ = e.fadd(*f0, *f1);
+        }
+        Op::Fsub(f0, f1) => {
+            let _ = e.fsub(*f0, *f1);
+        }
+        Op::Fmul(f0, f1) => {
+            let _ = e.fmul(*f0, *f1);
+        }
+        Op::Fdiv(f0, f1) => {
+            let _ = e.fdiv(*f0, *f1);
+        }
+        Op::Sqrt(f0) => {
+            let _ = e.sqrt(*f0);
+        }
+        Op::Floor(f0) => {
+            let _ = e.floor(*f0);
+        }
+        Op::Ceil(f0) => {
+            let _ = e.ceil(*f0);
+        }
+        Op::Trunc(f0) => {
+            let _ = e.trunc(*f0);
+        }
+        Op::Fneg(f0) => {
+            let _ = e.fneg(*f0);
+        }
+        Op::Fabs(f0) => {
+            let _ = e.fabs(*f0);
+        }
+        Op::Fcopysign(f0, f1) => {
+            let _ = e.fcopysign(*f0, *f1);
+        }
+        Op::Fma(f0, f1, f2) => {
+            let _ = e.fma(*f0, *f1, *f2);
+        }
+        Op::Bitcast(f0, f1) => {
+            let _ = e.bitcast(*f0, *f1);
+        }
+        Op::Fcmp(f0, f1, f2) => {
+            let _ = e.fcmp(*f0, *f1, *f2);
+        }
+        Op::Fpromote(f0) => {
+            let _ = e.fpromote(*f0);
+        }
+        Op::Fdemote(f0) => {
+            let _ = e.fdemote(*f0);
+        }
+        Op::FcvtFromSint(f0, f1) => {
+            let _ = e.fcvt_from_sint(*f0, *f1);
+        }
+        Op::FcvtFromUint(f0, f1) => {
+            let _ = e.fcvt_from_uint(*f0, *f1);
+        }
+        Op::FcvtToSintSat(f0, f1) => {
+            let _ = e.fcvt_to_sint_sat(*f0, *f1);
+        }
+        Op::FcvtToUintSat(f0, f1) => {
+            let _ = e.fcvt_to_uint_sat(*f0, *f1);
+        }
+        Op::Iconcat(f0, f1) => {
+            let _ = e.iconcat(*f0, *f1);
+        }
+        Op::Isplit(f0) => {
+            let _ = e.isplit(*f0);
+        }
+        Op::Iadd128(f0, f1) => {
+            let _ = e.iadd128(*f0, *f1);
+        }
+        Op::Isub128(f0, f1) => {
+            let _ = e.isub128(*f0, *f1);
+        }
+        Op::Band128(f0, f1) => {
+            let _ = e.band128(*f0, *f1);
+        }
+        Op::Bor128(f0, f1) => {
+            let _ = e.bor128(*f0, *f1);
+        }
+        Op::Bxor128(f0, f1) => {
+            let _ = e.bxor128(*f0, *f1);
+        }
+        Op::Imul128(f0, f1) => {
+            let _ = e.imul128(*f0, *f1);
+        }
+        Op::Udiv128(f0, f1) => {
+            let _ = e.udiv128(*f0, *f1);
+        }
+        Op::Sdiv128(f0, f1) => {
+            let _ = e.sdiv128(*f0, *f1);
+        }
+        Op::Urem128(f0, f1) => {
+            let _ = e.urem128(*f0, *f1);
+        }
+        Op::Srem128(f0, f1) => {
+            let _ = e.srem128(*f0, *f1);
+        }
+        Op::Icmp128(f0, f1, f2) => {
+            let _ = e.icmp128(*f0, *f1, *f2);
+        }
+        Op::Ishl128(f0, f1) => {
+            let _ = e.ishl128(*f0, *f1);
+        }
+        Op::Ushr128(f0, f1) => {
+            let _ = e.ushr128(*f0, *f1);
+        }
+        Op::Sshr128(f0, f1) => {
+            let _ = e.sshr128(*f0, *f1);
+        }
+        Op::Extend128(f0, f1) => {
+            let _ = e.extend128(*f0, *f1);
+        }
+        Op::Reduce128(f0, f1) => {
+            let _ = e.reduce128(*f0, *f1);
+        }
+        Op::UaddOverflow(f0, f1) => {
+            let _ = e.uadd_overflow(*f0, *f1);
+        }
+        Op::UsubOverflow(f0, f1) => {
+            let _ = e.usub_overflow(*f0, *f1);
+        }
+        Op::SaddOverflow(f0, f1) => {
+            let _ = e.sadd_overflow(*f0, *f1);
+        }
+        Op::SsubOverflow(f0, f1) => {
+            let _ = e.ssub_overflow(*f0, *f1);
+        }
+        Op::UmulOverflow(f0, f1) => {
+            let _ = e.umul_overflow(*f0, *f1);
+        }
+        Op::SmulOverflow(f0, f1) => {
+            let _ = e.smul_overflow(*f0, *f1);
+        }
+        Op::Umulhi(f0, f1) => {
+            let _ = e.umulhi(*f0, *f1);
+        }
+        Op::Clz(f0) => {
+            let _ = e.clz(*f0);
+        }
+        Op::Ctz(f0) => {
+            let _ = e.ctz(*f0);
+        }
+        Op::Popcnt(f0) => {
+            let _ = e.popcnt(*f0);
+        }
+        Op::Bswap(f0) => {
+            let _ = e.bswap(*f0);
+        }
+        Op::Rotl(f0, f1) => {
+            let _ = e.rotl(*f0, *f1);
+        }
+        Op::Rotr(f0, f1) => {
+            let _ = e.rotr(*f0, *f1);
+        }
+        Op::Smin(f0, f1) => {
+            let _ = e.smin(*f0, *f1);
+        }
+        Op::Umin(f0, f1) => {
+            let _ = e.umin(*f0, *f1);
+        }
+        Op::Smax(f0, f1) => {
+            let _ = e.smax(*f0, *f1);
+        }
+        Op::Umax(f0, f1) => {
+            let _ = e.umax(*f0, *f1);
+        }
+        Op::Iabs(f0) => {
+            let _ = e.iabs(*f0);
+        }
+        Op::TrapCode(f0) => {
+            let _ = e.trap_code(*f0);
+        }
+        Op::TrapzCode(f0, f1) => {
+            let _ = e.trapz_code(*f0, *f1);
+        }
+        Op::TrapnzCode(f0, f1) => {
+            let _ = e.trapnz_code(*f0, *f1);
+        }
+        Op::Trapz(f0) => {
+            let _ = e.trapz(*f0);
+        }
+        Op::Trapnz(f0) => {
+            let _ = e.trapnz(*f0);
+        }
+        Op::CallIndirect(f0, f1, f2) => {
+            let _ = e.call_indirect(*f0, f1.as_slice(), f2.as_slice());
+        }
+        Op::SymbolAddr(f0) => {
+            let _ = e.symbol_addr(f0.as_str());
+        }
+    }
 }

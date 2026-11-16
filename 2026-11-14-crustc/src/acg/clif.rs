@@ -152,7 +152,7 @@ impl FunctionBuilder {
     pub fn inst_results(&self, i: Inst) -> &[Value] {
         &self.results[i.0 as usize]
     }
-    pub fn traps(&self) -> Vec<(u32, u8)> {
+    pub fn traps(&mut self) -> Vec<(u32, u8)> {
         self.m.traps()
     }
     pub fn finish(self) -> (Vec<u8>, Vec<Reloc>) {

@@ -1268,6 +1268,38 @@ crustc で作ったコンパイラ (`tests/selfhost/build_compiler.py`) で自�
   `-O` のコンパイルは約 20% 遅くなる (型推論の使い回しの後)。minclif はすべての値をスタックに置くので、呼び出しを
   なくしても値の読み書きが残り、効果は小さい。大きく速くするにはレジスタ割り当てが要る
 
+#### minclif のレジスタ割り当て
+
+minclif は命令をすぐ機械語にし、値はすべてスタックのスロットに置いていた (命令ごとに rax / rcx に読んで結果を書く)。
+割り当てには関数全体を見る必要があるので、2 回組み立てる形にした (`src/minclif.rs`):
+
+1. **記録と解析**: `FunctionBuilder` は呼ばれた命令を `Op` (104 種。Emitter の公開メソッドから機械的に作った) として記録しながら、
+   今までの組み立て (`Emitter`) で 1 回目を組み立てる (値の番号と型を決め、acg が問い合わせる値・ブロックを返す)。
+   1 回目は値・変数の読み書き (命令の番号)、区間 (ブロックを続けて書いた範囲) と飛び先、関数を呼ぶ命令を記録する
+2. **割り当て** (`plan`): 1 つの区間の中で書いて読む値はその範囲、区間をまたぐもの (変数・ブロック引数・ループで生きる値) は
+   後ろ向きのデータフロー (区間の入口・出口で生きているか) で生きている区間の端まで延ばした範囲を生存区間にし、線形走査で
+   rbx・r12〜r15 (呼ばれた側が保存: 呼び出しをまたぐ区間用) と rsi・rdi・r8〜r10 (呼び出しを含まない区間用) に割り当てる。
+   足りなければ「読み書きの回数 / 長さ」が小さいものをスロットへ。浮動小数点・i128・スロットを直接使う値 (アドレスとして
+   使う・幅の違う読み書き) はスロットのまま。すぐ後が trap の呼び出し (panic) は戻らないので、またぐとしない
+3. **本番**: 割り当てを持った Emitter で記録した命令をもう一度組み立てる。今までの命令の組み立てはそのまま使え、
+   値の読み書き (load_rax / store_rax など) が割り当てを見る。よく使う命令はレジスタの形で書く: 64 / 32 bit の
+   add / sub / and / or / xor / imul と cmp は `mov d, a; op d, b`、定数は直接、load / store は `[base + off]`。
+   使った呼ばれた側が保存するレジスタはプロローグで保存し ret の前に戻す。呼び出しの引数が引数のレジスタにあるときは
+   スタックを経由する (順に書くと壊れる)
+
+あわせて: `icmp` の値を `brif` だけが使うなら `cmp` + `jcc` にする、else に渡すものがなければ直接飛ぶ、すぐ次への `jmp` は nop。
+`MINCLIF_NO_REGALLOC=1` で割り当てなし (比較用)。
+
+結果:
+- `python3 bench/runtime.py` (driver2 -O、割り当てなし → あり。rustc -O 比): fib 2.80x → 2.29x、hashmap 3.18x → 1.96x、
+  matmul 6.67x → 5.25x、nbody 24.1x → 15.2x、sieve 3.29x → 1.76x、sort 2.95x → 1.62x、strings 5.32x → 2.80x (出力はすべて一致)。
+  rustc のデバッグビルドよりどれも速い。Cranelift の経路 (`crustc -O`) にはまだ届かない (特に浮動小数点はスロットのまま)
+- 簡単なループ (1000 要素の和 × 20 万回): 1.08 秒 → 0.44 秒 (rustc の opt-level=0 と同じ)
+- セルフホスト版のコンパイラで自分自身をコンパイルする時間: 18.0 秒 → **10.4 秒** (front 3.2 → 1.8 秒、codegen 13.0 → 7.7 秒)。
+  コンパイラの実行ファイルは 23 MB → 12 MB
+- リンカに wild (0.10) を入れた (`cargo install --locked wild-linker --version 0.10.0`。link.rs は wild > mold > ld.lld の順に使う)。
+  ワークスペースのベンチ: cold 355 ms、関数の本体の変更 37 ms、bin の変更 60 ms
+
 ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen / program / ast_consteval / solver / ctors / ast_infer / minclif / ast_codegen）と、
 依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。
 残りの front（syn の構文木を引く検索）/ infer（syn 版。自前の構文木の版 ast_infer はある）/ consteval（codegen の定数の昇格）/ closure / codegen / driver / cache は syn と cranelift の上に書かれている。

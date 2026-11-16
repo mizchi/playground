@@ -5,9 +5,12 @@ import os, shutil, statistics, subprocess, sys, time
 
 CRUSTC = os.path.abspath("target/release/crustc")
 W = os.path.abspath("out/runtime")
+# (driver2: syn・Cranelift を使わない経路。`env` で CRUSTC_DRIVER2 などを渡す。MINCLIF_NO_REGALLOC はレジスタ割り当てなし)
 CONFIGS = [
     ("crustc", lambda s, o: [CRUSTC, s, "-o", o, "--no-cache"]),
     ("crustc -O", lambda s, o: [CRUSTC, s, "-o", o, "-O", "--no-cache"]),
+    ("driver2 -O (割り当てなし)", lambda s, o: ["env", "CRUSTC_DRIVER2=1", "MINCLIF_NO_REGALLOC=1", CRUSTC, s, "-o", o, "-O", "--no-cache"]),
+    ("driver2 -O", lambda s, o: ["env", "CRUSTC_DRIVER2=1", CRUSTC, s, "-o", o, "-O", "--no-cache"]),
     ("rustc (debug)", lambda s, o: ["rustc", "--edition", "2021", "-Awarnings", s, "-o", o]),
     ("rustc -O", lambda s, o: ["rustc", "--edition", "2021", "-Awarnings", "-O", s, "-o", o]),
 ]
@@ -23,7 +26,7 @@ def bench(name):
     src = os.path.abspath(f"bench/rt/{name}.rs")
     rows, want = [], None
     for label, mk in reversed(CONFIGS):  # rustc -O の出力を正解にする
-        exe = os.path.join(W, f"{name}-{label.replace(' ', '').replace('(', '').replace(')', '')}")
+        exe = os.path.join(W, f"{name}-{abs(hash(label)) % 10**8}")
         builds = [timed(mk(src, exe))[0] for _ in range(3)]
         runs, out = [], None
         for _ in range(3):

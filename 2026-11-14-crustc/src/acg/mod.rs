@@ -324,7 +324,7 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
     let vtables = std::mem::take(&mut cx.vtables);
     let infos = std::mem::take(&mut cx.traps);
     let loc_used = cx.loc_used;
-    let b = cx.b;
+    let mut b = cx.b;
     let traps_raw = b.traps();
     let (code, relocs) = b.finish_zeroing(&late);
     let mut out = vec![];
