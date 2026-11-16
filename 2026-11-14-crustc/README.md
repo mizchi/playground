@@ -1092,7 +1092,14 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
   bswap / 回転 / min / max / abs / umulhi、trapz / trapnz、関数ポインタの呼び出し、名前のアドレス (GOT 経由)、
   浮動小数点の引数・戻り値 (xmm)、.data とその中のポインタ (R_X86_64_64) まで。`tests/minclif.rs` の ext_ops が 69 個の結果を rustc の計算と比べる
 
-ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen / program / ast_consteval / solver / ctors / ast_infer / minclif）と、
+#### セルフホストの第 17 段階: syn・Cranelift を使わない経路でプログラムを作る
+
+- `src/ast_codegen.rs`：自前の構文木と ast_infer の型から minclif で機械語を作るコード生成 (codegen.rs の置き換えの始まり)。
+  `build_object(src)` が lexer → prelude → ast_summary → program → ast_infer → ast_codegen → minclif → ELF の .o を作る (syn も Cranelift も使わない)
+- いま扱えるもの: 整数・bool・char・キャスト、let / 代入 / 複合代入、算術・ビット演算・比較・`&&` / `||`、if / while / loop / break / continue / return、
+  ユーザの関数と extern "C" の関数の呼び出し。`tests/ast_codegen.rs` が `tests/acg/*.rs` (no_std) を cc でリンクして rustc 版と出力を比べる
+
+ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen / program / ast_consteval / solver / ctors / ast_infer / minclif / ast_codegen）と、
 依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。
 残りの front（syn の構文木を引く検索）/ infer（syn 版。自前の構文木の版 ast_infer はある）/ consteval（codegen の定数の昇格）/ closure / codegen / driver / cache は syn と cranelift の上に書かれている。
 syn の代わりは src/parse.rs（自前の構文木）を土台にして front から順に移す。cranelift の代わり (自前のコード生成) はその後。
