@@ -325,6 +325,7 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
     let infos = std::mem::take(&mut cx.traps);
     let loc_used = cx.loc_used;
     let mut b = cx.b;
+    b.set_zero(&late);
     let traps_raw = b.traps();
     let (code, relocs) = b.finish_zeroing(&late);
     let mut out = vec![];
@@ -764,12 +765,35 @@ impl Cx<'_> {
 
     /// struct のコピー
     pub fn copy(&mut self, dst: Value, src: Value, t: Ty) {
+        self.copy_at(dst, src, t, 0, 0);
+    }
+
+    /// src + so にある t を dst + doff に写す。struct (enum でない) はフィールドごとにその型で写す
+    /// (minclif がスタックの struct のフィールドをレジスタに置けるように: 読み書きの幅をフィールドと揃える)
+    fn copy_at(&mut self, dst: Value, src: Value, t: Ty, doff: u32, soff: u32) {
+        if let Ty::Struct(sid) = t {
+            let sd = &self.prog.structs[sid as usize];
+            if !sd.is_enum && sd.generics.is_empty() && sd.fields.len() <= 16 {
+                let fs = sd.fields.clone();
+                for (_, ft, off) in fs {
+                    self.copy_at(dst, src, ft, doff + off, soff + off);
+                }
+                return;
+            }
+        }
+        if !t.is_agg() && !t.is_fat() {
+            if let Some(ct) = clif_ty(t) {
+                let v = self.b.ins().load(ct, mf(), src, soff as i32);
+                self.b.ins().store(mf(), v, dst, doff as i32);
+            }
+            return;
+        }
         let (size, _) = self.prog.size_align(t);
         let mut off = 0;
         for (n, ty) in [(8, types::I64), (4, types::I32), (2, types::I16), (1, types::I8)] {
             while off + n <= size {
-                let v = self.b.ins().load(ty, mf(), src, off as i32);
-                self.b.ins().store(mf(), v, dst, off as i32);
+                let v = self.b.ins().load(ty, mf(), src, (soff + off) as i32);
+                self.b.ins().store(mf(), v, dst, (doff + off) as i32);
                 off += n;
             }
         }

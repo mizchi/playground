@@ -152,6 +152,9 @@ impl FunctionBuilder {
     pub fn inst_results(&self, i: Inst) -> &[Value] {
         &self.results[i.0 as usize]
     }
+    pub fn set_zero(&mut self, z: &[StackSlot]) {
+        self.m.set_zero(z)
+    }
     pub fn traps(&mut self) -> Vec<(u32, u8)> {
         self.m.traps()
     }

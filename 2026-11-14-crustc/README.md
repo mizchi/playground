@@ -1313,6 +1313,21 @@ minclif は命令をすぐ機械語にし、値はすべてスタックのスロ
 - リンカに wild (0.10) を入れた (`cargo install --locked wild-linker --version 0.10.0`。link.rs は wild > mold > ld.lld の順に使う)。
   ワークスペースのベンチ: cold 355 ms、関数の本体の変更 37 ms、bin の変更 60 ms
 
+#### スタックの struct のフィールドをレジスタに置く (minclif)
+
+- スロット (struct・tuple・配列の一時領域) のアドレスを、解析のときに追う: `stack_addr` の値と、それに定数を足した値は
+  「(スロット, オフセット)」。そのアドレスが load / store / 定数の足し算にしか使われず (呼び出しに渡す・保存する・
+  ほかの計算に使うと逃げたとみなす)、読み書きが重ならず同じ場所はいつも同じ型なら、(スロット, オフセット) ごとに
+  フィールドを 1 つの変数にする (scalar replacement)。割り当てでは値・変数と同じに扱い、レジスタに置けなかったフィールドは
+  スロットのその場所を使う。アドレスの値は作らない
+- acg の struct のコピーを、8 byte ずつからフィールドごと (その型) にした (読み書きの幅がフィールドと揃うように)
+- 入口で 0 にするスロット (drop フラグ) は変数にしない。`MINCLIF_NO_SROA=1` で切れる
+- 値で渡して値で返す struct のループ (tests/acg/struct_fields_regs.rs と同じもの、2000 万回): 176 ms → 147 ms (rustc -O 87 ms)。
+  bench/rt はほとんど変わらない (nbody などの struct は Vec の中: ヒープ)
+- セルフホスト版のコンパイラで自分自身: 9.7 秒
+
+Rust を 1.100.0、wild を 0.11.0 に上げた (`rustup update stable`、`cargo install --locked wild-linker`)。
+
 ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen / program / ast_consteval / solver / ctors / ast_infer / minclif / ast_codegen）と、
 依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。
 残りの front（syn の構文木を引く検索）/ infer（syn 版。自前の構文木の版 ast_infer はある）/ consteval（codegen の定数の昇格）/ closure / codegen / driver / cache は syn と cranelift の上に書かれている。

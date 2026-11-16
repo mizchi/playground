@@ -144,6 +144,10 @@ pub struct Emitter {
     plan: Plan,
     /// 割り当てたレジスタの保存先
     save_slots: [i32; 5],
+    /// 値ごとの、スロットのアドレス (スロット, オフセット) か
+    paddr: Vec<Option<(u32, i32)>>,
+    /// 値ごとの、iconst の定数か
+    kval: Vec<Option<i64>>,
 }
 
 /// 値・変数を置くレジスタ: rbx, r12, r13, r14, r15 (呼ばれた側が保存するので、呼び出しをまたいでも残る。
@@ -155,6 +159,8 @@ pub const ALLOC_REGS: [u8; 10] = [3, 12, 13, 14, 15, 6, 7, 8, 9, 10];
 pub const MEM: u8 = 255;
 /// 変数の番号を値の番号と分ける
 const VAR_BASE: u32 = 1 << 28;
+/// レジスタに置くスタックのスロットのフィールドの番号
+const FIELD_BASE: u32 = 1 << 29;
 
 /// 解析の記録: 値・変数 (vreg) の読み書きと、区間 (ブロックを続けて書いた範囲) とその行き先
 #[derive(Default)]
@@ -170,6 +176,10 @@ pub struct Track {
     segs: Vec<Seg>,
     /// 関数を呼ぶ命令の番号
     calls: Vec<u32>,
+    /// 値ごとの、スロットのアドレスとして load / store / iadd_imm に使った回数
+    addr_uses: Vec<u32>,
+    /// スロットのアドレスからの load / store: (命令, スロット, オフセット, 型, store か)
+    acc: Vec<(u32, u32, i32, Type, bool)>,
 }
 
 #[derive(Clone, Default)]
@@ -190,6 +200,11 @@ pub struct Plan {
     pub varloc: Vec<u8>,
     /// 使った ALLOC_REGS[..5] (呼ばれた側が保存するもの) のビット
     pub used: u8,
+    /// スロットごとの、フィールドを変数にしたか (アドレスが load / store にしか使われない)
+    pub prom: Vec<bool>,
+    /// (スロット, オフセット) → フィールドの番号、フィールドのレジスタ (MEM ならスロットのその場所)
+    pub fields: std::collections::HashMap<(u32, i32), u32>,
+    pub floc: Vec<u8>,
 }
 
 /// mov dst, src (64 bit。レジスタの番号は 0〜15)
@@ -254,6 +269,8 @@ impl Emitter {
             track,
             plan,
             save_slots: [0; 5],
+            paddr: vec![],
+            kval: vec![],
         };
         // プロローグ: push rbp; mov rbp, rsp; sub rsp, <frame> (frame は最後に書き込む)
         b.code.extend_from_slice(&[0x55, 0x48, 0x89, 0xE5, 0x48, 0x81, 0xEC, 0, 0, 0, 0]);
@@ -337,7 +354,10 @@ impl Emitter {
     fn new_value(&mut self, t: Type) -> Value {
         let off = if t == Type::I128 { self.alloc(16, 16) } else { self.alloc(8, 8) };
         self.values.push((off, t));
+        self.paddr.push(None);
+        self.kval.push(None);
         if let Some(tr) = &mut self.track {
+            tr.addr_uses.push(0);
             tr.mem_only.push(t == Type::I128);
             tr.vfloat.push(t.is_float());
         }
@@ -613,6 +633,12 @@ impl Emitter {
     // --- 命令 ----------------------------------------------------------
 
     pub fn iconst(&mut self, t: Type, x: i64) -> Value {
+        let v = self.iconst_inner(t, x);
+        self.kval[v.0 as usize] = Some(x);
+        v
+    }
+
+    fn iconst_inner(&mut self, t: Type, x: i64) -> Value {
         // (結果をレジスタに置くなら直接書く: 型の幅で 0 拡張した値)
         let d = self.next_loc();
         if d != MEM && t != Type::I128 && !t.is_float() {
@@ -727,6 +753,24 @@ impl Emitter {
     }
 
     pub fn iadd(&mut self, a: Value, b: Value) -> Value {
+        // (スロットのアドレス + 定数: そのスロットのアドレスのまま。変数にしたスロットなら値の番号だけ作る)
+        let (pa, pb) = (self.paddr[a.0 as usize], self.paddr[b.0 as usize]);
+        let derived = match (pa, self.kval[b.0 as usize], pb, self.kval[a.0 as usize]) {
+            (Some((sl, o)), Some(x), _, _) if (x as i32) as i64 == x => Some((a, sl, o.wrapping_add(x as i32))),
+            (_, _, Some((sl, o)), Some(x)) if (x as i32) as i64 == x => Some((b, sl, o.wrapping_add(x as i32))),
+            _ => None,
+        };
+        if let Some((base, sl, no)) = derived {
+            if self.promoted(sl) {
+                let r = self.new_value(Type::I64);
+                self.paddr[r.0 as usize] = Some((sl, no));
+                return r;
+            }
+            self.addr_use(base);
+            let r = self.binop(a, b, &[0x48, 0x01, 0xC8]);
+            self.paddr[r.0 as usize] = Some((sl, no));
+            return r;
+        }
         self.binop(a, b, &[0x48, 0x01, 0xC8])
     }
     pub fn isub(&mut self, a: Value, b: Value) -> Value {
@@ -748,7 +792,6 @@ impl Emitter {
     pub fn iadd_imm(&mut self, a: Value, x: i64) -> Value {
         let t = self.value_type(a);
         let k = self.iconst(t, x);
-        let _ = t;
         self.iadd(a, k)
     }
 
@@ -903,6 +946,13 @@ impl Emitter {
 
     /// [addr + off] を読む
     pub fn load(&mut self, t: Type, addr: Value, off: i32) -> Value {
+        if let Some((s, o)) = self.paddr[addr.0 as usize] {
+            if self.promoted(s) {
+                return self.field_load(t, s, o + off);
+            }
+            self.addr_use(addr);
+            self.acc(s, o + off, t, false);
+        }
         // (アドレスと結果がレジスタなら mov d, [base + off] / movzx)
         let d = self.next_loc();
         if let (Some(base), true) = (self.rloc(addr), d != MEM && matches!(t, Type::I64 | Type::I32 | Type::I16 | Type::I8)) {
@@ -939,6 +989,14 @@ impl Emitter {
     /// [addr + off] に v を書く
     pub fn store(&mut self, v: Value, addr: Value, off: i32) {
         let t = self.value_type(v);
+        if let Some((s, o)) = self.paddr[addr.0 as usize] {
+            if self.promoted(s) {
+                self.field_store(v, s, o + off);
+                return;
+            }
+            self.addr_use(addr);
+            self.acc(s, o + off, t, true);
+        }
         // (値とアドレスがレジスタなら mov [base + off], r)
         if let (Some(r), Some(base)) = (self.rloc(v), self.rloc(addr)) {
             if matches!(t, Type::I64 | Type::I32 | Type::I16 | Type::I8) {
@@ -977,9 +1035,100 @@ impl Emitter {
 
     /// スタックスロットのアドレス
     pub fn stack_addr(&mut self, s: StackSlot, off: i32) -> Value {
+        // (フィールドを変数にしたスロット: アドレスは作らない)
+        if self.promoted(s.0) {
+            let v = self.new_value(Type::I64);
+            self.paddr[v.0 as usize] = Some((s.0, off));
+            return v;
+        }
         let base = self.slots[s.0 as usize];
         self.emit_disp(&[0x48, 0x8D, 0x85], base + off);
-        self.result(Type::I64)
+        let v = self.result(Type::I64);
+        self.paddr[v.0 as usize] = Some((s.0, off));
+        v
+    }
+
+    fn promoted(&self, s: u32) -> bool {
+        self.plan.prom.get(s as usize).copied().unwrap_or(false)
+    }
+
+    /// スロットのアドレスの値を load / store / iadd_imm に使った (解析のとき)
+    fn addr_use(&mut self, a: Value) {
+        if let Some(tr) = &mut self.track {
+            tr.addr_uses[a.0 as usize] += 1;
+        }
+    }
+
+    fn acc(&mut self, s: u32, off: i32, t: Type, store: bool) {
+        let op = self.op;
+        if let Some(tr) = &mut self.track {
+            tr.acc.push((op, s, off, t, store));
+        }
+    }
+
+    /// 変数にしたフィールドを読む (結果の値を作る)
+    fn field_load(&mut self, t: Type, s: u32, off: i32) -> Value {
+        let f = self.plan.fields[&(s, off)] as usize;
+        let l = self.plan.floc[f];
+        let d = self.slots[s as usize] + off;
+        if t.is_float() {
+            let p = if t == Type::F32 { 0xF3 } else { 0xF2 };
+            if l != MEM {
+                let dl = self.next_loc();
+                if dl != MEM && dl >= 16 {
+                    self.emit(&movaps(dl - 16, l - 16));
+                    return self.result_in_reg(t);
+                }
+                self.emit(&movaps(0, l - 16));
+            } else {
+                self.emit_disp(&[p, 0x0F, 0x10, 0x85], d);
+            }
+            return self.xmm0_result(t);
+        }
+        if l != MEM {
+            let dl = self.next_loc();
+            if dl != MEM && dl < 16 {
+                self.emit(&mov_rr(dl, l));
+                return self.result_in_reg(t);
+            }
+            self.emit(&mov_rr(0, l));
+            return self.result(t);
+        }
+        match t {
+            Type::I64 => self.emit_disp(&[0x48, 0x8B, 0x85], d),
+            Type::I32 => self.emit_disp(&[0x8B, 0x85], d),
+            Type::I16 => self.emit_disp(&[0x48, 0x0F, 0xB7, 0x85], d),
+            _ => self.emit_disp(&[0x48, 0x0F, 0xB6, 0x85], d),
+        }
+        self.result(t)
+    }
+
+    /// 変数にしたフィールドに v を書く
+    fn field_store(&mut self, v: Value, s: u32, off: i32) {
+        let t = self.value_type(v);
+        let f = self.plan.fields[&(s, off)] as usize;
+        let l = self.plan.floc[f];
+        let d = self.slots[s as usize] + off;
+        if t.is_float() {
+            self.xmm_load(0, v);
+            if l != MEM {
+                self.emit(&movaps(l - 16, 0));
+            } else {
+                let p = if t == Type::F32 { 0xF3 } else { 0xF2 };
+                self.emit_disp(&[p, 0x0F, 0x11, 0x85], d);
+            }
+        } else if l != MEM {
+            self.load_reg(l, v);
+        } else {
+            self.load_rax(v);
+            match t {
+                Type::I64 => self.emit_disp(&[0x48, 0x89, 0x85], d),
+                Type::I32 => self.emit_disp(&[0x89, 0x85], d),
+                Type::I16 => self.emit_disp(&[0x66, 0x89, 0x85], d),
+                _ => self.emit_disp(&[0x88, 0x85], d),
+            }
+        }
+        self.rax_holds = None;
     }
 
     fn rel32_to(&mut self, b: Block) {
@@ -2182,10 +2331,101 @@ pub fn write_object_full(funcs: &[(String, Vec<u8>, Vec<Reloc>, bool)], datas: &
 /// 解析の記録から、値・変数をレジスタに割り当てる (線形走査)。
 /// 生存区間は命令の番号の範囲 [最初, 最後]: 1 つの区間 (ブロックを続けて書いた範囲) の中だけで書いて読む値はそのまま、
 /// 区間をまたぐものは区間の入口・出口で生きているか (後ろ向きのデータフロー) を見て、生きている区間の端まで延ばす
-pub fn plan(tr: &Track, nvals: usize, nvars: usize) -> Plan {
-    let n = nvals + nvars;
-    let idx = |id: u32| -> usize { if id >= VAR_BASE { nvals + (id - VAR_BASE) as usize } else { id as usize } };
-    let cand = |i: usize| -> bool { if i < nvals { !tr.mem_only.get(i).copied().unwrap_or(true) } else { !tr.var_mem_only.get(i - nvals).copied().unwrap_or(true) } };
+/// paddr: 値ごとのスロットのアドレス、nslots: スロットの数、zero: 入口で 0 にするスロット (変数にしない)
+pub fn plan(tr: &Track, nvals: usize, nvars: usize, paddr: &[Option<(u32, i32)>], nslots: usize, zero: &[u32]) -> Plan {
+    // --- スロットのフィールドを変数にする: アドレスを load / store / iadd_imm にしか使わず、読み書きが重ならず型が同じ
+    let mut prom = vec![std::env::var_os("MINCLIF_NO_SROA").is_none(); nslots];
+    for &z in zero {
+        if (z as usize) < nslots {
+            prom[z as usize] = false;
+        }
+    }
+    let mut reads = vec![0u32; nvals];
+    for &(id, _, def) in &tr.ev {
+        if !def && id < VAR_BASE && (id as usize) < nvals {
+            reads[id as usize] += 1;
+        }
+    }
+    for v in 0..nvals.min(paddr.len()) {
+        if let Some((sl, _)) = paddr[v] {
+            if reads[v] != tr.addr_uses.get(v).copied().unwrap_or(0) {
+                prom[sl as usize] = false;
+            }
+        }
+    }
+    let mut ftype: std::collections::HashMap<(u32, i32), Type> = std::collections::HashMap::new();
+    for &(_, sl, off, t, _) in &tr.acc {
+        let su = sl as usize;
+        if !prom[su] {
+            continue;
+        }
+        if t == Type::I128 || off < 0 {
+            prom[su] = false;
+            continue;
+        }
+        match ftype.get(&(sl, off)) {
+            Some(&t0) if t0 != t => prom[su] = false,
+            Some(_) => {}
+            None => {
+                ftype.insert((sl, off), t);
+            }
+        }
+    }
+    // (重なり: スロットごとにオフセットの順に並べて見る)
+    let mut keys: Vec<(u32, i32)> = ftype.keys().copied().filter(|k| prom[k.0 as usize]).collect();
+    keys.sort();
+    for w in 1..keys.len() {
+        let (a, b) = (keys[w - 1], keys[w]);
+        if a.0 == b.0 && a.1 + ftype[&a].bytes() as i32 > b.1 {
+            prom[a.0 as usize] = false;
+        }
+    }
+    let mut fields: std::collections::HashMap<(u32, i32), u32> = std::collections::HashMap::new();
+    let mut ftys: Vec<Type> = vec![];
+    for k in &keys {
+        if prom[k.0 as usize] {
+            fields.insert(*k, ftys.len() as u32);
+            ftys.push(ftype[k]);
+        }
+    }
+    let nf = ftys.len();
+    // (読み書きの記録にフィールドの読み書きを足す: 命令の順のまま)
+    let mut ev: Vec<(u32, u32, bool)> = Vec::with_capacity(tr.ev.len() + tr.acc.len());
+    {
+        let mut k = 0;
+        for &(op, sl, off, _, st) in &tr.acc {
+            let Some(&f) = fields.get(&(sl, off)) else { continue };
+            while k < tr.ev.len() && tr.ev[k].1 <= op {
+                ev.push(tr.ev[k]);
+                k += 1;
+            }
+            ev.push((FIELD_BASE + f, op, st));
+        }
+        while k < tr.ev.len() {
+            ev.push(tr.ev[k]);
+            k += 1;
+        }
+    }
+    let n = nvals + nvars + nf;
+    let idx = |id: u32| -> usize {
+        if id >= FIELD_BASE {
+            nvals + nvars + (id - FIELD_BASE) as usize
+        } else if id >= VAR_BASE {
+            nvals + (id - VAR_BASE) as usize
+        } else {
+            id as usize
+        }
+    };
+    let cand = |i: usize| -> bool {
+        if i < nvals {
+            // (変数にしたスロットのアドレスは作らないので要らない)
+            !tr.mem_only.get(i).copied().unwrap_or(true) && !paddr.get(i).copied().flatten().is_some_and(|(sl, _)| prom[sl as usize])
+        } else if i < nvals + nvars {
+            !tr.var_mem_only.get(i - nvals).copied().unwrap_or(true)
+        } else {
+            true
+        }
+    };
     let segs = &tr.segs;
     // 命令の番号 → 区間 (区間は始まりの順)
     let seg_of = |op: u32| -> usize {
@@ -2207,7 +2447,7 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize) -> Plan {
     let mut first_def = vec![false; n];
     let mut seg1 = vec![usize::MAX; n];
     let mut multi = vec![false; n];
-    for &(id, op, def) in &tr.ev {
+    for &(id, op, def) in &ev {
         let i = idx(id);
         if i >= n {
             continue;
@@ -2241,7 +2481,7 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize) -> Plan {
         let ns = segs.len();
         let mut gens = vec![0u64; ns * words];
         let mut kill = vec![0u64; ns * words];
-        for &(id, op, def) in &tr.ev {
+        for &(id, op, def) in &ev {
             let i = idx(id);
             if i >= n || gid[i] == usize::MAX {
                 continue;
@@ -2311,7 +2551,7 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize) -> Plan {
     // 線形走査: 始まりの順に、空いているレジスタへ。呼び出しを含む区間は呼ばれた側が保存するレジスタだけ。
     // なければ「使う回数 / 長さ」がいちばん小さいもの (今のものか、同じ種類のレジスタを持っているもの) をスロットへ
     let mut uses = vec![0u32; n];
-    for &(id, _, _) in &tr.ev {
+    for &(id, _, _) in &ev {
         let i = idx(id);
         if i < n {
             uses[i] += 1;
@@ -2341,7 +2581,15 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize) -> Plan {
     let mut free_temp: Vec<u8> = vec![9, 8, 7, 6, 5];
     // (浮動小数点: xmm8〜15。どれも呼び出しで壊れるので、呼び出しを含まない区間だけ。番号は 16 + xmm の番号)
     let mut free_xmm: Vec<u8> = vec![31, 30, 29, 28, 27, 26, 25, 24];
-    let is_float = |i: usize| -> bool { if i < nvals { tr.vfloat.get(i).copied().unwrap_or(false) } else { tr.varfloat.get(i - nvals).copied().unwrap_or(false) } };
+    let is_float = |i: usize| -> bool {
+        if i < nvals {
+            tr.vfloat.get(i).copied().unwrap_or(false)
+        } else if i < nvals + nvars {
+            tr.varfloat.get(i - nvals).copied().unwrap_or(false)
+        } else {
+            ftys[i - nvals - nvars].is_float()
+        }
+    };
     let mut used = 0u8;
     for &i in &order {
         // (終わったものを外す)
@@ -2414,7 +2662,14 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize) -> Plan {
             ALLOC_REGS[l as usize]
         }
     };
-    Plan { vloc: (0..nvals).map(|i| reg(loc[i])).collect(), varloc: (nvals..n).map(|i| reg(loc[i])).collect(), used }
+    Plan {
+        vloc: (0..nvals).map(|i| reg(loc[i])).collect(),
+        varloc: (nvals..nvals + nvars).map(|i| reg(loc[i])).collect(),
+        used,
+        prom,
+        fields,
+        floc: (nvals + nvars..n).map(|i| reg(loc[i])).collect(),
+    }
 }
 
 // --- 記録して 2 回組み立てる FunctionBuilder ---------------------------------------------
@@ -2536,12 +2791,14 @@ pub struct FunctionBuilder {
     dry: Emitter,
     ops: Vec<Op>,
     real: Option<Emitter>,
+    /// 入口で 0 にするスロット (finish_zeroing に渡すもの。変数にしない)
+    zero: Vec<u32>,
 }
 
 impl FunctionBuilder {
     pub fn new(params: Vec<Type>, rets: Vec<Type>) -> FunctionBuilder {
         let dry = Emitter::new(params.clone(), rets.clone(), None);
-        FunctionBuilder { params, rets, dry, ops: vec![], real: None }
+        FunctionBuilder { params, rets, dry, ops: vec![], real: None, zero: vec![] }
     }
     pub fn func_params(&self) -> Vec<Value> {
         self.dry.func_params()
@@ -2555,6 +2812,11 @@ impl FunctionBuilder {
     pub fn current_block(&self) -> Option<Block> {
         self.dry.current_block()
     }
+    /// finish_zeroing で 0 にするスロットを先に教える (traps / finish の前)
+    pub fn set_zero(&mut self, z: &[StackSlot]) {
+        self.zero = z.iter().map(|s| s.0).collect();
+    }
+
     /// 割り当てを決めて本番を組み立てる (1 回だけ)
     fn realize(&mut self) {
         if self.real.is_some() {
@@ -2564,7 +2826,7 @@ impl FunctionBuilder {
         // (すぐ後が trap の呼び出し (panic) は戻ってこない: 呼び出しをまたぐとしない)
         let ops = &self.ops;
         tr.calls.retain(|&c| !matches!(ops.get(c as usize + 1), Some(Op::Trap | Op::TrapCode(_))));
-        let pl = if std::env::var_os("MINCLIF_NO_REGALLOC").is_some() { Plan::default() } else { plan(&tr, self.dry.values.len(), self.dry.vars.len()) };
+        let pl = if std::env::var_os("MINCLIF_NO_REGALLOC").is_some() { Plan::default() } else { plan(&tr, self.dry.values.len(), self.dry.vars.len(), &self.dry.paddr, self.dry.slots.len(), &self.zero) };
         let mut e = Emitter::new(self.params.clone(), self.rets.clone(), Some(pl));
         // (値ごとの読む回数: icmp の値を brif だけが読むなら、まとめて cmp + jcc にする)
         let mut reads = vec![0u32; self.dry.values.len()];
@@ -2612,6 +2874,9 @@ impl FunctionBuilder {
         self.real.take().unwrap().finish()
     }
     pub fn finish_zeroing(mut self, zero: &[StackSlot]) -> (Vec<u8>, Vec<Reloc>) {
+        if self.real.is_none() {
+            self.set_zero(zero);
+        }
         self.realize();
         self.real.take().unwrap().finish_zeroing(zero)
     }
