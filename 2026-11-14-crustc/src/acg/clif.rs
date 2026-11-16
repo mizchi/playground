@@ -443,17 +443,51 @@ impl Ins<'_> {
     pub fn isplit(mut self, v: Value) -> (Value, Value) {
         self.m().isplit(v)
     }
-    pub fn uadd_overflow(mut self, a: Value, b: Value) -> (Value, Value) {
-        self.m().uadd_overflow(a, b)
+    pub fn uadd_overflow(self, a: Value, b: Value) -> (Value, Value) {
+        let m = &mut self.0.m;
+        if is128(m, a) {
+            let r = m.iadd128(a, b);
+            let of = m.icmp128(IntCC::UnsignedLessThan, r, a);
+            return (r, of);
+        }
+        m.uadd_overflow(a, b)
     }
-    pub fn usub_overflow(mut self, a: Value, b: Value) -> (Value, Value) {
-        self.m().usub_overflow(a, b)
+    pub fn usub_overflow(self, a: Value, b: Value) -> (Value, Value) {
+        let m = &mut self.0.m;
+        if is128(m, a) {
+            let r = m.isub128(a, b);
+            let of = m.icmp128(IntCC::UnsignedLessThan, a, b);
+            return (r, of);
+        }
+        m.usub_overflow(a, b)
     }
-    pub fn sadd_overflow(mut self, a: Value, b: Value) -> (Value, Value) {
-        self.m().sadd_overflow(a, b)
+    pub fn sadd_overflow(self, a: Value, b: Value) -> (Value, Value) {
+        let m = &mut self.0.m;
+        if is128(m, a) {
+            let r = m.iadd128(a, b);
+            let x = m.bxor128(a, r);
+            let y = m.bxor128(b, r);
+            let w = m.band128(x, y);
+            let lo = m.iconst(Type::I64, 0);
+            let z = m.iconcat(lo, lo);
+            let of = m.icmp128(IntCC::SignedLessThan, w, z);
+            return (r, of);
+        }
+        m.sadd_overflow(a, b)
     }
-    pub fn ssub_overflow(mut self, a: Value, b: Value) -> (Value, Value) {
-        self.m().ssub_overflow(a, b)
+    pub fn ssub_overflow(self, a: Value, b: Value) -> (Value, Value) {
+        let m = &mut self.0.m;
+        if is128(m, a) {
+            let r = m.isub128(a, b);
+            let x = m.bxor128(a, b);
+            let y = m.bxor128(a, r);
+            let w = m.band128(x, y);
+            let lo = m.iconst(Type::I64, 0);
+            let z = m.iconcat(lo, lo);
+            let of = m.icmp128(IntCC::SignedLessThan, w, z);
+            return (r, of);
+        }
+        m.ssub_overflow(a, b)
     }
     pub fn umul_overflow(mut self, a: Value, b: Value) -> (Value, Value) {
         self.m().umul_overflow(a, b)
@@ -539,8 +573,17 @@ impl Ins<'_> {
         }
         m.umax(a, b)
     }
-    pub fn iabs(mut self, a: Value) -> Value {
-        self.m().iabs(a)
+    pub fn iabs(self, a: Value) -> Value {
+        let m = &mut self.0.m;
+        if is128(m, a) {
+            // (負なら 0 - a)
+            let lo = m.iconst(Type::I64, 0);
+            let z = m.iconcat(lo, lo);
+            let neg = m.icmp128(IntCC::SignedLessThan, a, z);
+            let na = m.isub128(z, a);
+            return Ins(&mut *self.0).select(neg, na, a);
+        }
+        m.iabs(a)
     }
 
     // --- 浮動小数点 ----------------------------------------------------

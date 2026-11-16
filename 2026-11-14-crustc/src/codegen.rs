@@ -8114,7 +8114,7 @@ impl Cx<'_, '_> {
                 let res = self.b.append_block_param(merge, types::I8);
                 self.pat_test(&pat, place, no)?;
                 self.scopes.push(vec![]);
-                self.pat_bind(&pat, place, BindMode::Move)?;
+                self.pat_bind(&pat, place, BindMode::Ref(false))?;
                 if let Some(g) = &guard {
                     let (c, _) = self.expr(g, Some(Ty::Bool))?;
                     if let Some(c) = c {
