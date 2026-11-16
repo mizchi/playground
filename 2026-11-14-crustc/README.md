@@ -118,7 +118,7 @@ crustc（debug / `-O`）と rustc（`-Cincremental` / `-O`）でビルドし、c
 tests/probe.sh
 ```
 
-よく使う機能の小さいプログラム（`tests/probe/*.rs`、90 本）を rustc と比べ、通った数を出す。
+よく使う機能の小さいプログラム（`tests/probe/*.rs`、91 本）を rustc と比べ、通った数を出す。
 
 ```bash
 tests/selfhost.sh
@@ -133,6 +133,7 @@ tests/selfhost.sh
 - `src/parse.rs`（syn を使わない自前の構文解析）：probe / examples / src の 149 ファイル（parse.rs 自身も）を解析し、アイテムと節の数が rustc 版と一致する（-O で rustc 版 0.12 秒に対し 0.33 秒）。
 - `src/ast_closure.rs`（自前の構文木の上のクロージャ解析。closure.rs の移植）：全ファイルの関数のクロージャの自由変数と「値でキャプチャするか」が rustc 版と一致する。
 - `src/types.rs` + `src/ast_types.rs`（front.rs から分けた型の表現・intern と、自前の構文木の型 → TySyn）：全ファイルの型の変換結果と intern が rustc 版と一致する。
+- `src/ast_summary.rs`（アイテムの要約。front.rs の summarize / parse_sig / クロージャの持ち上げの移植）：全ファイルの全アイテムの要約が rustc 版と一致する。
 - `src/enc.rs`（キャッシュの直列化。`enc_struct!` マクロと trait の静的呼び出し `T::dec(r)`）と `src/fxhash.rs`（FxHasher / `FxMap`）：構造体・Vec・Option・タプルを符号化して戻し、バイト列とハッシュが rustc 版と一致する（-O でも）。
 
 環境変数：`CRUSTC_DUMP_PRELUDE=1` は付けた prelude を stderr に出す。`CRUSTC_NO_STRIP=1` は出力のシンボルを残す（callgrind などで関数名を見るため）。
@@ -1007,6 +1008,16 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
 - 修正：`v == b"crate"`（v は後で型の決まる `x.to_vec()`）で v をバイト列の型にしていた
 - 修正：`String` の `contains` などの書き換えで作ったノードに型の記録がなく、メソッドが見つからなかった
 - クロージャの変数の呼び出し `tok(k)` の戻り値の型を `peek` で引く
+
+#### セルフホストの第 10 段階: アイテムの要約を自前の構文木へ移す
+
+- `src/ast_summary.rs`：front.rs の `summarize` / `parse_sig` / `lift_closures` / `parse_and_summarize`（syn の構文木 → 要約）を自前の構文木に移植。
+  `tests/ast_summary.rs` が driver と同じ前処理の後の全 2199 アイテムで syn 版と同じ要約になることを確かめる
+  （const の初期値のテキスト・境界のテキストは proc_macro2 の表示と同じ空け方）
+- 要約の型（`Summary` / `SigSyn` / `VariantSyn` / `ClosureSyn` / `Owner` など）も types.rs へ
+- モジュールの中の `use a::{X as Y}` の別名（名前がぶつからないときも）
+- 修正：`let nn = ..; if let Some(nn) = nn { v.push(nn) }`（match 対象と同じ名前の束縛でムーブ）で外側の変数をムーブ済みにせず、二重に解放していた
+- `if` / ブロックの式の型を `peek` で引く（`if c { "a" } else { "b" }.to_string()`）
 
 ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen）と、
 依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。

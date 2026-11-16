@@ -249,33 +249,6 @@ fn ffi_alias(s: &str) -> Option<Ty> {
     })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub struct SigSyn {
-    pub params: Vec<TySyn>,
-    pub ret: TySyn,
-    pub symbol: String,
-    pub is_extern: bool,
-    pub is_main: bool,
-    /// impl の中の関数なら self 型の名前
-    pub impl_of: Option<String>,
-    /// 第 1 引数が self (メソッド呼び出し構文で呼べる)
-    pub has_self: bool,
-    /// 型パラメータと、それぞれのトレイト境界。trait の中の関数は先頭に `Self` を持つ
-    pub generics: Vec<(String, Vec<String>)>,
-    /// trait の中で宣言された関数ならその trait 名
-    pub trait_of: Option<String>,
-    /// 本体があるか (trait の宣言だけの関数は false)
-    pub has_body: bool,
-    /// `impl Trait for S` の中の関数ならその trait 名
-    pub impl_trait: Option<String>,
-    /// impl の中の関数なら `Self` の型 (`impl<T> Option<T>` なら `Option<T>`)
-    pub self_ty: Option<TySyn>,
-    /// `#[no_mangle]` / `#[unsafe(no_mangle)]`: 名前そのままで外に見せる
-    pub export: bool,
-    /// `#[panic_handler]`
-    pub panic_handler: bool,
-}
-
 #[derive(Clone, Debug)]
 pub struct FnSig {
     pub params: Vec<Ty>,
@@ -311,25 +284,6 @@ pub struct TyEnv {
     pub params: Vec<(String, Ty)>,
     /// `Self` の型 (struct なら Struct(self_sid)、プリミティブへの trait 実装なら u32 など)
     pub self_ty: Option<Ty>,
-}
-
-/// enum のバリアント (要約に保存する形)
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub struct VariantSyn {
-    pub name: String,
-    pub kind: VariantKind,
-    pub fields: Vec<(String, TySyn)>,
-    pub discr: Option<i64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum VariantKind {
-    #[default]
-    Unit,
-    /// `V(a, b)`。フィールド名は "0", "1", ...
-    Tuple,
-    /// `V { x, y }`
-    Struct,
 }
 
 pub struct VariantDef {
@@ -441,66 +395,6 @@ enum AdtShape {
     Enum(Vec<VariantSyn>),
 }
 
-/// アイテム 1 個分の要約 (キャッシュされる)。ここに入っている情報だけで
-/// 他の関数のコード生成ができる。
-#[derive(Clone, Debug, Default)]
-pub struct Summary {
-    /// (名前, シグネチャ)。fn アイテムなら 1 個、extern ブロックなら複数
-    pub fns: Vec<(String, SigSyn)>,
-    /// (名前, フィールド)。struct アイテムなら 1 個
-    pub structs: Vec<(String, Vec<(String, TySyn)>)>,
-    /// impl ヘッダなら self 型の名前
-    pub impl_self: Option<String>,
-    /// (名前, バリアント)。enum アイテムなら 1 個
-    pub enums: Vec<(String, Vec<VariantSyn>)>,
-    /// trait ヘッダならその名前
-    pub trait_decl: Option<String>,
-    /// `impl Trait for S` のヘッダなら trait 名
-    pub impl_trait: Option<String>,
-    /// `#[derive(..)]` された (型名, trait 名)。derive した trait は実装扱いにする
-    pub derives: Vec<(String, Vec<String>)>,
-    /// このアイテムの struct / enum の型パラメータ (`struct W<T>` なら ["T"])
-    pub adt_generics: Vec<String>,
-    /// impl ヘッダの型パラメータと self 型 (`impl<T> Option<T>`)
-    pub impl_generics: Vec<(String, Vec<String>)>,
-    pub impl_self_ty: Option<TySyn>,
-    /// `const N: T = e;` の (名前, 型, 式のソース)。使う側で式として埋め込む
-    pub consts: Vec<(String, TySyn, String)>,
-    /// `static [mut] N: T = e;` の (名前, 型, 初期値のソース, mut)
-    pub statics: Vec<(String, TySyn, String, bool)>,
-    /// fn 本体の中のクロージャ (前順)。[`crate::closure`] を参照
-    pub closures: Vec<ClosureSyn>,
-    /// impl の関連型 (`type Item = u32;`)
-    pub assocs: Vec<AssocSyn>,
-    /// `type Key = u128;` / `type R<T> = Result<T, E>;` の (名前, 型パラメータ, 中身)
-    pub aliases: Vec<(String, Vec<String>, TySyn)>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct AssocSyn {
-    pub name: String,
-    pub self_ty: TySyn,
-    pub generics: Vec<String>,
-    pub value: TySyn,
-}
-
-/// 持ち上げたクロージャ 1 個分 (struct と fn)
-#[derive(Clone, Debug, Default)]
-pub struct ClosureSyn {
-    /// struct の名前 (`親::{closure#k}`)。fn は `<name>::call`
-    pub name: String,
-    /// struct と fn の型パラメータ: 親の型パラメータ, __C.., __P.., __R
-    pub generics: Vec<String>,
-    /// キャプチャ (名前, `__Ci`)
-    pub fields: Vec<(String, TySyn)>,
-    pub sig: SigSyn,
-    pub by_move: bool,
-    /// 戻り値型の注釈 (`|x| -> u8 { .. }`)
-    pub ret_ann: Option<TySyn>,
-    /// 親の型パラメータの数
-    pub n_parent: u64,
-}
-
 /// const / static の定義
 pub struct ConstDef {
     pub name: String,
@@ -511,19 +405,6 @@ pub struct ConstDef {
     pub item: u32,
     /// static なら Some(mut か)
     pub stat: Option<bool>,
-}
-
-/// impl / trait のメンバの所有者
-pub struct Owner {
-    /// メソッド名の前に付ける名前 (impl なら self 型の名前、trait なら trait 名)
-    pub base: String,
-    /// `Self` の中身
-    pub self_ty: TySyn,
-    /// `impl Trait for S` の trait
-    pub impl_trait: Option<String>,
-    /// impl の型パラメータ (trait なら `Self`)
-    pub generics: Vec<(String, Vec<String>)>,
-    pub is_trait: bool,
 }
 
 /// `u32::MAX` などの関連定数
@@ -3485,12 +3366,6 @@ fn ty_code(t: Ty) -> u8 {
     TYS.iter().position(|&x| x == t).unwrap() as u8
 }
 
-impl Default for TySyn {
-    fn default() -> Self {
-        TySyn::Prim(Ty::Unit)
-    }
-}
-
 impl Enc for TySyn {
     fn enc(&self, out: &mut Vec<u8>) {
         match self {
@@ -3812,16 +3687,7 @@ pub fn const_generic_value(env: &TyEnv, name: &str) -> Option<u32> {
     })
 }
 
-/// const ジェネリクスの印 (境界の名前の位置に入れる)
-pub const CONST_GENERIC: &str = "__const";
-/// `[T; N]` の N が型パラメータ i のとき、Ty::Array の長さは CONST_LEN_BASE + i
-pub const CONST_LEN_BASE: u32 = 0xFFFF_FF00;
 
-/// owner: impl / trait のメンバならその所有者
-/// 戻り値位置の `impl Trait` の仮の型名
-pub const IMPL_RET: &str = "impl Trait";
-/// クロージャでない `impl Trait` の戻り値 (`-> impl Iterator<Item = u32>`): 本体の型推論で決める
-pub const OPAQUE_RET: &str = "impl Trait (opaque)";
 
 fn parse_sig(
     sig: &syn::Signature,

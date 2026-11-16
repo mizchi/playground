@@ -377,6 +377,8 @@ pub struct FnSig {
     pub generics: Generics,
     /// self の受け方 ("self" / "&self" / "&mut self" / "mut self")
     pub recv: Option<String>,
+    /// self の型 (`&self` → `&Self`、`self: Box<Self>` → `Box<Self>`)
+    pub recv_ty: Option<Ty>,
     pub params: Vec<(Pat, Ty)>,
     pub ret: Option<Ty>,
     pub quals: Vec<String>,
@@ -395,6 +397,8 @@ pub struct Item {
     pub vis: bool,
     pub kind: ItemKind,
     pub line: u32,
+    /// const / static の初期値の式のトークン列のテキスト (proc_macro2 の表示と同じ空け方)
+    pub init_text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -427,6 +431,7 @@ pub struct File {
 pub struct Parser {
     toks: Vec<Tok>,
     i: usize,
+    init_text: String,
 }
 
 type R<T> = Result<T, String>;
@@ -448,7 +453,7 @@ fn bin_prec(op: &str) -> u32 {
 
 pub fn parse_file(src: &str) -> R<File> {
     let toks = tokenize(src)?;
-    let mut p = Parser { toks: toks, i: 0 };
+    let mut p = Parser { toks: toks, i: 0, init_text: String::new() };
     let mut attrs = Vec::new();
     while p.is_punct("#") && p.peek_is(1, "!") {
         attrs.push(p.attr()?);
@@ -462,7 +467,7 @@ pub fn parse_file(src: &str) -> R<File> {
 
 pub fn parse_expr(src: &str) -> R<Expr> {
     let toks = tokenize(src)?;
-    let mut p = Parser { toks: toks, i: 0 };
+    let mut p = Parser { toks: toks, i: 0, init_text: String::new() };
     let e = p.expr(true)?;
     if p.i < p.toks.len() {
         return Err(p.err("unexpected token after expression"));
@@ -473,7 +478,7 @@ pub fn parse_expr(src: &str) -> R<Expr> {
 /// `pat` / `pat if guard` (matches! の 2 つ目の引数)
 pub fn parse_pat_guard(src: &str) -> Option<(Pat, Option<Expr>)> {
     let toks = tokenize(src).ok()?;
-    let mut p = Parser { toks: toks, i: 0 };
+    let mut p = Parser { toks: toks, i: 0, init_text: String::new() };
     let pat = p.pat().ok()?;
     let guard = if p.eat_ident("if") { Some(p.expr(true).ok()?) } else { None };
     p.eat_punct(",");
@@ -607,6 +612,10 @@ impl Parser {
         for k in a..b {
             let t = &self.toks[k];
             if t.kind == TokKind::Close {
+                // (`{ .. }` は中身の両側に空白: proc_macro2 と同じ)
+                if t.text == "}" && !prev_open {
+                    s.push(' ');
+                }
                 s.push_str(&t.text);
                 prev_joint = false;
                 prev_open = false;
@@ -615,10 +624,15 @@ impl Parser {
             if !s.is_empty() && !prev_joint && !prev_open {
                 s.push(' ');
             }
+            if prev_open && s.ends_with('{') {
+                s.push(' ');
+            }
             s.push_str(&t.text);
             prev_open = t.kind == TokKind::Open;
-            // (記号の Joint は次も記号のとき。ライフタイムは 1 つのトークン)
-            prev_joint = t.kind == TokKind::Punct && t.joint && self.toks.get(k + 1).is_some_and(|n| n.kind == TokKind::Punct);
+            // (記号の Joint は次も記号のとき (`,` は続けない)。ライフタイムは 1 つのトークン)
+            prev_joint = t.kind == TokKind::Punct
+                && t.joint
+                && self.toks.get(k + 1).is_some_and(|n| n.kind == TokKind::Punct && n.text != ",");
         }
         s
     }
@@ -1816,6 +1830,7 @@ impl Parser {
         let mut g = self.generics()?;
         self.expect_open("(")?;
         let mut recv = None;
+        let mut recv_ty: Option<Ty> = None;
         let mut params = Vec::new();
         let mut first = true;
         while !self.is_close() {
@@ -1824,24 +1839,35 @@ impl Parser {
                 // self の受け方
                 let save = self.i;
                 let mut r = String::new();
+                let mut by_ref: Option<Option<String>> = None;
                 if self.is_punct("&") {
                     self.i += 1;
                     r.push('&');
-                    if let Some(l) = self.lifetime() {
-                        r.push_str(&l);
+                    let l = self.lifetime();
+                    if let Some(l) = &l {
+                        r.push_str(l);
                         r.push(' ');
                     }
+                    by_ref = Some(l);
                 }
-                if self.eat_ident("mut") {
+                let m = self.eat_ident("mut");
+                if m {
                     r.push_str("mut ");
                 }
                 if self.eat_ident("self") {
                     r.push_str("self");
+                    let self_path = Ty::Path(None, Path { global: false, segs: vec![Seg { name: "Self".to_string(), args: Vec::new(), fn_args: None, text: "Self".to_string() }] });
+                    let mut rt = match by_ref {
+                        Some(l) => Ty::Ref(l, m, Box::new(self_path)),
+                        None => self_path,
+                    };
                     if self.eat_punct(":") {
                         let t = self.ty()?;
                         r.push_str(&format!(": {}", ty_text(&t)));
+                        rt = t;
                     }
                     recv = Some(r);
+                    recv_ty = Some(rt);
                     first = false;
                     if !self.eat_punct(",") {
                         break;
@@ -1867,7 +1893,7 @@ impl Parser {
         self.expect_close(")")?;
         let ret = if self.eat_punct("->") { Some(self.ty()?) } else { None };
         self.where_clause(&mut g)?;
-        Ok(FnSig { name: name, generics: g, recv: recv, params: params, ret: ret, quals: quals })
+        Ok(FnSig { name: name, generics: g, recv: recv, recv_ty: recv_ty, params: params, ret: ret, quals: quals })
     }
 
     fn items_in_braces(&mut self) -> R<Vec<Item>> {
@@ -1891,8 +1917,10 @@ impl Parser {
         let attrs = self.attrs()?;
         let line = self.tok(0).map(|t| t.line).unwrap_or(0);
         let vis = self.vis()?;
+        self.init_text = String::new();
         let kind = self.item_kind()?;
-        Ok(Item { attrs: attrs, vis: vis, kind: kind, line: line })
+        let init_text = std::mem::take(&mut self.init_text);
+        Ok(Item { attrs: attrs, vis: vis, kind: kind, line: line, init_text: init_text })
     }
 
     fn item_kind(&mut self) -> R<ItemKind> {
@@ -1999,8 +2027,15 @@ impl Parser {
             "use" => {
                 self.i += 1;
                 let mut s = String::new();
+                let mut prev_word = false;
                 while !self.is_punct(";") {
                     let t = self.tok(0).ok_or_else(|| self.err("unterminated use"))?;
+                    // (名前・`}` の後ろにすぐ名前は来ない: `use a::{b} struct X` は `;` がない)
+                    let word = t.kind == TokKind::Ident || (t.kind == TokKind::Close);
+                    if prev_word && t.kind == TokKind::Ident && t.text != "as" && !s.ends_with("as") {
+                        return Err(self.err("expected `;`"));
+                    }
+                    prev_word = word;
                     s.push_str(&t.text);
                     self.i += 1;
                 }
@@ -2011,7 +2046,14 @@ impl Parser {
                 self.i += 1;
                 let n = if self.eat_ident("_") { "_".to_string() } else { self.ident()? };
                 let t = if self.eat_punct(":") { Some(self.ty()?) } else { None };
-                let e = if self.eat_punct("=") { Some(self.expr(true)?) } else { None };
+                let e = if self.eat_punct("=") {
+                    let st = self.i;
+                    let e = self.expr(true)?;
+                    self.init_text = self.tokens_text(st, self.i);
+                    Some(e)
+                } else {
+                    None
+                };
                 self.expect_punct(";")?;
                 Ok(ItemKind::Const(n, t, e))
             }
@@ -2022,7 +2064,9 @@ impl Parser {
                 self.expect_punct(":")?;
                 let t = self.ty()?;
                 self.expect_punct("=")?;
+                let st = self.i;
                 let e = self.expr(true)?;
+                self.init_text = self.tokens_text(st, self.i);
                 self.expect_punct(";")?;
                 Ok(ItemKind::Static(m, n, t, e))
             }

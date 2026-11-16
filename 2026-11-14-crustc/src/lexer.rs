@@ -876,7 +876,8 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
             renamed.push((d.1, d.0.clone(), new_name(d.1, &d.0)));
         }
     }
-    if renamed.is_empty() {
+    // (ぶつかる名前も `use .. as X` の別名もなければ何もしない)
+    if renamed.is_empty() && !src.contains(" as ") {
         return None;
     }
     // モジュールのパス (`crate::a::b` / `a::b` / `self` / `super`) → mods の番号
@@ -988,6 +989,9 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
             if let Some(m) = resolve_mod(sc, mpath) {
                 if let Some(nn) = renamed_in(m, &name[0]) {
                     imports.push((sc, local, nn));
+                } else if local.as_slice() != name[0].as_slice() && defs.iter().any(|d| d.1 == m && d.0.as_slice() == name[0].as_slice()) {
+                    // (`use crate::parse::{FnSig as PSig}`: 別名はそのモジュールの中で元の名前に)
+                    imports.push((sc, local, name[0].clone()));
                 }
             }
         }

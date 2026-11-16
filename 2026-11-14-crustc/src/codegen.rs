@@ -1448,6 +1448,15 @@ impl Cx<'_, '_> {
             Expr::Binary(b) if is_cmp(&b.op) || matches!(b.op, BinOp::And(_) | BinOp::Or(_)) => {
                 Some(Ty::Bool)
             }
+            // `if c { "a" } else { "b" }` / `{ .. ; x }`: 末尾の式の型
+            Expr::If(i) => match i.then_branch.stmts.last() {
+                Some(Stmt::Expr(e, None)) => self.peek(e),
+                _ => None,
+            },
+            Expr::Block(b) => match b.block.stmts.last() {
+                Some(Stmt::Expr(e, None)) => self.peek(e),
+                _ => None,
+            },
             Expr::Binary(b) if matches!(b.op, BinOp::Shl(_) | BinOp::Shr(_)) => self.peek(&b.left),
             Expr::Binary(b) => self.peek(&b.left).or_else(|| self.peek(&b.right)),
             _ => None,
@@ -8510,7 +8519,7 @@ impl Cx<'_, '_> {
             let ob = self.owned_binds;
             self.pat_bind(&arm.pat, place, BindMode::Move)?;
             if self.owned_binds > ob {
-                self.release(&m.expr, sflag);
+                self.release_outer(&m.expr, sflag);
             }
             if let Some((_, g)) = &arm.guard {
                 let (c, ct) = self.expr(g, Some(Ty::Bool))?;
@@ -8549,7 +8558,7 @@ impl Cx<'_, '_> {
         let ob = self.owned_binds;
         self.pat_bind(&l.pat, place, BindMode::Move)?;
         if self.owned_binds > ob {
-            self.release(&l.expr, sflag);
+            self.release_outer(&l.expr, sflag);
         }
         let (tv, tt) = self.block(&i.then_branch, expected)?;
         self.pop_scope();
@@ -8599,7 +8608,7 @@ impl Cx<'_, '_> {
         let ob = self.owned_binds;
         self.pat_bind(pat, place, BindMode::Move)?;
         if self.owned_binds > ob {
-            self.release(e, sflag);
+            self.release_outer(e, sflag);
         }
         self.loops.push(Loop {
             cont: header,
@@ -9569,6 +9578,16 @@ impl Cx<'_, '_> {
             self.mark_moved(e);
         } else if let Some(f) = flag {
             self.clear_flag(f);
+        }
+    }
+
+    /// パターンの束縛のスコープ (いちばん内側) を除いて release する:
+    /// `let nn = ..; if let Some(nn) = nn { .. }` の match 対象 `nn` は外側の変数 (内側の束縛と同じ名前)
+    fn release_outer(&mut self, e: &Expr, flag: Option<StackSlot>) {
+        let top = self.scopes.pop();
+        self.release(e, flag);
+        if let Some(t) = top {
+            self.scopes.push(t);
         }
     }
 

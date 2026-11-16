@@ -456,3 +456,37 @@ pub fn moves_capture(c: &Expr, caps: &[String]) -> bool {
     }
     moves_in(body, caps)
 }
+
+/// 子の式を順に f に渡す (外から使う版)
+pub fn each_child_pub(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+    each_child(e, f)
+}
+
+fn assign_base(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Path(None, p) if !p.global && p.segs.len() == 1 && p.segs[0].args.is_empty() => Some(p.segs[0].name.clone()),
+        Expr::Field(x, _) | Expr::Index(x, _) | Expr::Paren(x) | Expr::Unary(_, x) => assign_base(x),
+        _ => None,
+    }
+}
+
+fn assigns_in(e: &Expr, caps: &[String]) -> bool {
+    match e {
+        Expr::Closure(..) => return false,
+        Expr::Assign(l, _) | Expr::AssignOp(_, l, _) if assign_base(l).is_some_and(|n| caps.iter().any(|c| *c == n)) => return true,
+        _ => {}
+    }
+    let mut found = false;
+    each_child(e, &mut |c| {
+        if !found && assigns_in(c, caps) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// クロージャの本体がキャプチャした変数に代入するか (`r = ..` / `n += 1` / `v.x = ..`)
+pub fn assigns_capture(c: &Expr, caps: &[String]) -> bool {
+    let Expr::Closure(_, _, _, body) = c else { return false };
+    assigns_in(body, caps)
+}

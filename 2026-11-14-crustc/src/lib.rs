@@ -18,6 +18,7 @@ pub mod macros;
 pub mod parse;
 pub mod ast_closure;
 pub mod ast_types;
+pub mod ast_summary;
 pub mod prelude;
 #[doc(hidden)]
 pub mod testgen;
