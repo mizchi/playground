@@ -971,6 +971,13 @@ impl Cx<'_> {
             self.same(sp, t, pt)?;
             self.push_arg(&mut cv, v, pt);
         }
+        // (-O: 小さい prelude の関数は呼ばずに本体を展開する)
+        if let Some(r) = self.try_inline(target, &sig, &cv)? {
+            if let Some(a) = sret {
+                return Ok((Some(a), sig.ret));
+            }
+            return Ok((r, sig.ret));
+        }
         let f = self.fref(target, &sig);
         let call = self.b.ins().call(f, &cv);
         if sig.ret == Ty::Never {

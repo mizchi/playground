@@ -95,6 +95,8 @@ pub struct Analysis {
     pub n_parsed: usize,
     /// アイテムごとの、依存するクレートのものか (CrateCtx)
     pub ext_items: Vec<bool>,
+    /// `-O` で展開してよい (prelude の小さい) 関数の本体
+    pub inl: acg::Inline,
 }
 
 impl Analysis {
@@ -433,7 +435,11 @@ impl Session2 {
             crefs.push(c);
         }
         tm.lap("refs", String::new());
-        Ok(Analysis { src, items, prog, refs, srefs, crefs, n_parsed, ext_items })
+        let mut a = Analysis { src, items, prog, refs, srefs, crefs, n_parsed, ext_items, inl: acg::Inline::default() };
+        if self.opts.opt && std::env::var_os("CRUSTC_NO_INLINE").is_none() {
+            a.inl = inline_bodies(&a);
+        }
+        Ok(a)
     }
 }
 
@@ -554,6 +560,43 @@ fn fn_ast(a: &Analysis, body: u32) -> R<ItemFn> {
     }
 }
 
+/// 展開してよい関数: prelude の (クロージャでも特別な本体でもない) 小さい関数
+fn inline_bodies(a: &Analysis) -> acg::Inline {
+    let p = &a.prog;
+    let mut inl = acg::Inline::default();
+    let special = [
+        crate::prelude::DROP_GLUE, "__exr_hash", "__exr_cmp", "__exr_eq", "__exr_clone", "__exr_default", "__exr_display", "__exr_debug",
+        "__exr_rt_init", "__exr_on_trap", "Option::unwrap", "Option::expect", "Result::unwrap", "Result::expect", "Result::unwrap_err", "Result::expect_err",
+    ];
+    for id in 0..p.names.len() {
+        let Some(ii) = p.item_of[id] else { continue };
+        // (依存するクレートの関数は展開しない: 本体はインターフェースのハッシュに入らないので、変わっても気付けない)
+        if a.ext_items.get(ii as usize).copied().unwrap_or(false) || !p.sigs[id].has_body || p.sigs[id].is_extern || p.closures.contains_key(&(id as u32)) {
+            continue;
+        }
+        if special.contains(&p.names[id].as_str()) {
+            continue;
+        }
+        let it = &a.items[ii as usize];
+        if it.end - it.start > 1500 {
+            continue;
+        }
+        if let Ok(f) = fn_ast(a, id as u32) {
+            let ok = acg::inline_candidate(&f);
+            if std::env::var_os("CRUSTC_INLINE_LOG").is_some() {
+                eprintln!("inline {} {} {}", if ok { "yes" } else { "no " }, format!("{:?}", f.block).len(), p.names[id]);
+            }
+            if ok {
+                inl.bodies.insert(id as u32, f);
+                if ii < p.prelude_from {
+                    inl.user_lines.insert(id as u32, it.line as u32 - 1);
+                }
+            }
+        }
+    }
+    inl
+}
+
 fn concrete(p: &Program, id: usize) -> bool {
     p.item_of[id].is_some() && !p.sigs[id].is_generic() && p.sigs[id].has_body
 }
@@ -612,6 +655,13 @@ impl Session2 {
         a.prog.hash_sig(id as u32, &mut h);
         for &r in &a.refs[id] {
             a.prog.hash_sig(r, &mut h);
+            // (展開しうるユーザの関数は、本体と行も効く)
+            if let Some(&lb) = a.inl.user_lines.get(&r) {
+                if let Some(ri) = a.prog.item_of[r as usize] {
+                    h.add(&a.items[ri as usize].hash);
+                    h.add(&lb);
+                }
+            }
         }
         for &st in &a.srefs[id] {
             h.add(&a.prog.structs[st as usize].deep);
@@ -737,6 +787,7 @@ impl Session2 {
         let mut blobs: FxMap<u32, Blob> = FxMap::default();
         let mut wave = user_live.clone();
         while !wave.is_empty() {
+            let cur = wave.clone();
             let mut misses = vec![];
             let mut keys: FxMap<u32, Key> = FxMap::default();
             for &id in &wave {
@@ -773,6 +824,20 @@ impl Session2 {
                 blobs.insert(id, b);
             }
             wave = std::mem::take(&mut insts.lock().unwrap().pending);
+            // (展開した本体が呼ぶ関数は、呼んだ側の名前からは届かない: 再配置が指す総称でない関数もコンパイルする)
+            for &id in &cur {
+                if let Some(b) = blobs.get(&id) {
+                    for r in &b.relocs {
+                        if let Target::Func(f) = r.target {
+                            if f != u32::MAX && (f as usize) < a.prog.names.len() && concrete(&a.prog, f as usize) && !a.is_ext(f) && !blobs.contains_key(&f) && !live[f as usize] {
+                                live[f as usize] = true;
+                                user_live.push(f);
+                                wave.push(f);
+                            }
+                        }
+                    }
+                }
+            }
             wave.retain(|id| !blobs.contains_key(id));
             let starts: Vec<u32> = {
                 let g = insts.lock().unwrap();
@@ -838,7 +903,7 @@ fn compile_id(a: &Analysis, insts: &Mutex<Insts>, id: u32) -> R<Blob> {
     let ii = a.prog.item_of[body as usize].unwrap() as usize;
     let it = &a.items[ii];
     // (acg のエラーはファイルの中の `行:桁:` を持つ。持たないものはアイテムの先頭の行にする)
-    let (b, _) = acg::compile(&a.prog, insts, id, &f, it.line as u32 - 1)
+    let (b, _) = acg::compile(&a.prog, insts, id, &f, it.line as u32 - 1, &a.inl)
         .map_err(|e| if acg::has_loc(&e) { e } else { format!("{}:1: in `{}`: {e}", it.line, a.prog.names[body as usize]) })?;
     Ok(b)
 }

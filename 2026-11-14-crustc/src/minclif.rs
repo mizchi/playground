@@ -133,6 +133,9 @@ pub struct FunctionBuilder {
     entry_jump: usize,
     /// 今のブロックが終端命令 (jump / brif / return / trap) で終わったか
     terminated: bool,
+    /// 直前の命令が「rax を値 v のスロットに書く」なら (v, その後のコードの位置)。
+    /// すぐ後で v を rax に読むなら読まなくてよい (ブロックの始まりでは消す: ほかの所から飛んでくる)
+    rax_holds: Option<(u32, usize)>,
 }
 
 struct BlockData {
@@ -162,6 +165,7 @@ impl FunctionBuilder {
             traps: vec![],
             entry_jump: 0,
             terminated: false,
+            rax_holds: None,
         };
         // プロローグ: push rbp; mov rbp, rsp; sub rsp, <frame> (frame は最後に書き込む)
         b.code.extend_from_slice(&[0x55, 0x48, 0x89, 0xE5, 0x48, 0x81, 0xEC, 0, 0, 0, 0]);
@@ -256,6 +260,7 @@ impl FunctionBuilder {
             }
         }
         let here = self.code.len();
+        self.rax_holds = None;
         let bd = &mut self.blocks[b.0 as usize];
         if let Some(at) = bd.cont.take() {
             let rel = here as i32 - (at as i32 + 4);
@@ -335,12 +340,24 @@ impl FunctionBuilder {
         self.emit_disp(&[0x48, 0x89, 0x85], off);
     }
 
+    /// rax が今 v を持っているか (直前に書いたばかり)
+    fn rax_is(&self, v: Value) -> bool {
+        self.rax_holds == Some((v.0, self.code.len()))
+    }
+
     fn load_rax(&mut self, v: Value) {
+        if self.rax_is(v) {
+            return;
+        }
         let off = self.values[v.0 as usize].0;
         self.load_rax_at(off);
     }
 
     fn load_rcx(&mut self, v: Value) {
+        if self.rax_is(v) {
+            self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+            return;
+        }
         let off = self.values[v.0 as usize].0;
         self.emit_disp(&[0x48, 0x8B, 0x8D], off);
     }
@@ -348,6 +365,9 @@ impl FunctionBuilder {
     fn store_rax(&mut self, v: Value) {
         let off = self.values[v.0 as usize].0;
         self.store_rax_at(off);
+        if self.values[v.0 as usize].1 != Type::I128 {
+            self.rax_holds = Some((v.0, self.code.len()));
+        }
     }
 
     /// rax を型の幅で 0 拡張する (I64 は何もしない)
@@ -396,8 +416,14 @@ impl FunctionBuilder {
 
     fn binop(&mut self, a: Value, b: Value, op: &[u8]) -> Value {
         let t = self.value_type(a);
-        self.load_rax(a);
-        self.load_rcx(b);
+        // (rax が b を持っていれば先に rcx へ移す)
+        if self.rax_is(b) && a != b {
+            self.load_rcx(b);
+            self.load_rax(a);
+        } else {
+            self.load_rax(a);
+            self.load_rcx(b);
+        }
         self.emit(op);
         self.result(t)
     }
@@ -573,8 +599,13 @@ impl FunctionBuilder {
     /// [addr + off] に v を書く
     pub fn store(&mut self, v: Value, addr: Value, off: i32) {
         let t = self.value_type(v);
-        self.load_rax(addr);
-        self.load_rcx(v);
+        if self.rax_is(v) && v != addr {
+            self.load_rcx(v);
+            self.load_rax(addr);
+        } else {
+            self.load_rax(addr);
+            self.load_rcx(v);
+        }
         match t {
             Type::I64 | Type::F64 => self.emit_disp(&[0x48, 0x89, 0x88], off),
             Type::I32 | Type::F32 => self.emit_disp(&[0x89, 0x88], off),

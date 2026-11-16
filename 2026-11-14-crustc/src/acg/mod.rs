@@ -27,6 +27,8 @@ mod p5_loops_macros;
 mod p6_match_drop;
 mod p7_fmt_hash_cmp;
 mod p8_misc;
+mod p9_inline;
+pub use p9_inline::{inline_candidate, Inline};
 #[allow(unused_imports)]
 pub use p1_expr::*;
 #[allow(unused_imports)]
@@ -197,7 +199,7 @@ pub const TRAP_SITE_BASE: u8 = 5;
 pub const TRAP_SITE_MAX: usize = 245;
 
 /// 1 関数をコンパイルする。返り値は (Blob, 要求したインスタンス)
-pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_base: u32) -> R<(Blob, Vec<u32>)> {
+pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_base: u32, inl: &Inline) -> R<(Blob, Vec<u32>)> {
     let (sig, env, body_id) = {
         let g = insts.lock().unwrap();
         (g.sig(prog, id).clone(), g.env(prog, id), g.body_of(id))
@@ -290,6 +292,10 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
         texts,
         mbase: Default::default(),
         mstart: Default::default(),
+        inl,
+        inline_ret: None,
+        inline_depth: 0,
+        inlined: 0,
     };
     let r = if prog.index.get(crate::prelude::DROP_GLUE) == Some(&body_id) {
         cx.drop_glue_body(&sig)
@@ -577,6 +583,12 @@ pub struct Cx<'p> {
     pub mbase: crate::parse::Pos,
     /// 今コード生成しているマクロの先頭 (syn の `mac.span()`: panic! / assert! の場所)
     pub mstart: crate::parse::Pos,
+    /// 展開してよい関数の本体 (p9_inline)
+    pub inl: &'p Inline,
+    /// 展開している本体の続きのブロック (return / 末尾の値はここへ飛ぶ)
+    pub inline_ret: Option<Block>,
+    pub inline_depth: u32,
+    pub inlined: u32,
 }
 
 /// 間接呼び出しの呼び先
@@ -913,6 +925,23 @@ impl Cx<'_> {
     }
 
     pub fn emit_return(&mut self, v: Option<Value>) {
+        // (展開した本体: 続きのブロックへ)
+        if let Some(cont) = self.inline_ret {
+            if let Some(dst) = self.sret {
+                if let Some(v) = v {
+                    self.copy(dst, v, self.ret);
+                }
+                self.b.ins().jump(cont, &[]);
+            } else if self.b.block_params(cont).is_empty() {
+                self.b.ins().jump(cont, &[]);
+            } else {
+                match v {
+                    Some(v) => self.b.ins().jump(cont, &[v]),
+                    None => self.b.ins().trap(TrapCode::unwrap_user(1)),
+                }
+            }
+            return;
+        }
         if self.is_main {
             // `fn main() -> Result<(), E>`: Err なら `Error: {:?}` を出して 1 で終わる
             if let (Ty::Struct(rs), Some(v)) = (self.ret, v) {
