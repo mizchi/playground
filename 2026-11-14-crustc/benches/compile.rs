@@ -13,15 +13,16 @@ use std::time::Duration;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crustc::lsp::Server;
 use crustc::testgen::program;
-use crustc::{Options, Session};
+use crustc::{Options2, Session2};
 use serde_json::json;
 
 const N: usize = 1000;
 
-fn opts() -> Options {
-    Options {
+fn opts() -> Options2 {
+    Options2 {
         linker: std::env::var("CRUSTC_BENCH_LINKER").ok(),
-        ..Options::default()
+        backend: Some(crustc::clif_backend::compile),
+        ..Options2::default()
     }
 }
 
@@ -88,8 +89,8 @@ fn cold(c: &mut Criterion) {
     let out = tmpdir().join("cold");
     g.bench_function(format!("build/{N}"), |b| {
         b.iter_batched(
-            || Session::new(opts()),
-            |mut s| s.build(&v, &out).unwrap(),
+            || Session2::new(opts()),
+            |mut s: Session2| s.build(&v, &out).unwrap(),
             BatchSize::PerIteration,
         )
     });
@@ -103,8 +104,8 @@ fn build(c: &mut Criterion) {
 
     // CLI と同じく build → save_cache (今回使ったエントリだけを残す) の流れ
     let out = dir.join("noop");
-    let cp = crustc::cache_path(&out);
-    let mut s = Session::new(opts());
+    let cp = out.with_extension("crcache2");
+    let mut s = Session2::new(opts());
     s.build(&v[0], &out).unwrap();
     s.save_cache(&cp).unwrap();
     g.bench_function(format!("noop/{N}"), |b| {
@@ -116,8 +117,8 @@ fn build(c: &mut Criterion) {
     });
 
     let out = dir.join("edit");
-    let cp = crustc::cache_path(&out);
-    let mut s = Session::new(opts());
+    let cp = out.with_extension("crcache2");
+    let mut s = Session2::new(opts());
     s.build(&v[1], &out).unwrap();
     s.save_cache(&cp).unwrap();
     let mut k = false;

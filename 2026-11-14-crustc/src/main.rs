@@ -1,30 +1,33 @@
 //! crustc の CLI。
-//!   crustc <input.rs> [-o out] [...]   ビルド (driver2: 自前のフロントエンド + Cranelift。`--backend=minclif` で minclif)
+//!   crustc <input.rs> [-o out] [...]   ビルド (自前のフロントエンド + Cranelift。`--backend=minclif` で minclif)
 //!   crustc build <workspace> [-o dir]   ワークスペース (複数のクレート) をビルド
-//!   crustc check <input.rs>            型検査だけ (全診断を表示。今は最初の syn 版のドライバ)
-//!   crustc lsp                         LSP サーバ (stdio。同上)
-//! `--legacy` (か CRUSTC_LEGACY=1) で最初の syn + Cranelift のドライバでビルドする (比較用)
+//!   crustc check <input.rs>            型検査だけ (全診断を表示)
+//!   crustc lsp                         LSP サーバ (stdio)
 
 use std::path::PathBuf;
 
-use crustc::{Options, Session, cache_path};
+use crustc::driver2::{Options2, Session2};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: crustc <input.rs> [-o out] [-O] [--backend=cranelift|minclif] [--legacy] [--regalloc=fast|good] [--linker=NAME] [--time] [-j N] [--no-cache]\n       crustc check <input.rs>\n       crustc build <workspace-file> [-o out-dir] [-O] [-j N] [--time] [--no-cache]\n       crustc lsp"
+        "usage: crustc <input.rs> [-o out] [-O] [--backend=cranelift|minclif] [--linker=NAME] [--time] [-j N] [--no-cache]\n       crustc build <workspace-file> [-o out-dir] [-O] [--backend=..] [-j N] [--time] [--no-cache]\n       crustc check <input.rs>\n       crustc lsp"
     );
     std::process::exit(2)
 }
 
+fn die(msg: String) -> ! {
+    eprintln!("error: {msg}");
+    std::process::exit(1)
+}
+
 fn main() {
     let mut args = std::env::args().skip(1).peekable();
-    let mut o = Options::default();
+    let mut o = Options2::default();
     let mut input = PathBuf::new();
     let mut output = PathBuf::new();
     let mut mode = "build";
     // (バックエンド: 既定は Cranelift。CRUSTC_BACKEND=minclif / --backend=minclif で minclif)
     let mut backend = std::env::var("CRUSTC_BACKEND").unwrap_or_else(|_| "cranelift".to_string());
-    let mut legacy = std::env::var_os("CRUSTC_LEGACY").is_some();
     match args.peek().map(String::as_str) {
         Some("check") => {
             mode = "check";
@@ -35,37 +38,24 @@ fn main() {
             args.next();
         }
         Some("lsp") => {
-            std::process::exit(
-                match crustc::lsp::run(std::io::stdin().lock(), std::io::stdout().lock()) {
-                    Ok(()) => 0,
-                    Err(e) => {
-                        eprintln!("crustc lsp: {e}");
-                        1
-                    }
-                },
-            );
+            std::process::exit(match crustc::lsp::run(std::io::stdin().lock(), std::io::stdout().lock()) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("crustc lsp: {e}");
+                    1
+                }
+            });
         }
         _ => {}
     }
     while let Some(a) = args.next() {
         match a.as_str() {
             "-o" => output = args.next().unwrap_or_else(|| usage()).into(),
-            "-O" => {
-                o.opt = true;
-                o.fast_regalloc = false;
-            }
-            "--legacy" => legacy = true,
-            s if s.starts_with("--backend=") => backend = s["--backend=".len()..].to_string(),
-            "--regalloc=fast" => o.fast_regalloc = true,
-            "--regalloc=good" => o.fast_regalloc = false,
+            "-O" => o.opt = true,
             "--time" => o.time = true,
             "--no-cache" => o.no_cache = true,
-            "-j" => {
-                o.jobs = args
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or_else(|| usage())
-            }
+            "-j" => o.jobs = args.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
+            s if s.starts_with("--backend=") => backend = s["--backend=".len()..].to_string(),
             s if s.starts_with("--linker=") => o.linker = Some(s["--linker=".len()..].into()),
             s if s.starts_with('-') => usage(),
             s => input = s.into(),
@@ -74,103 +64,44 @@ fn main() {
     if input.as_os_str().is_empty() {
         usage();
     }
-    #[cfg(feature = "acg")]
+    match backend.as_str() {
+        "cranelift" => o.backend = Some(crustc::clif_backend::compile),
+        "minclif" => o.backend = None,
+        b => {
+            eprintln!("error: unknown backend `{b}` (cranelift / minclif)");
+            std::process::exit(2);
+        }
+    }
     if mode == "workspace" {
-        let crates = match crustc::driver2::read_workspace(&input) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("error: {e}");
-                std::process::exit(1);
-            }
-        };
-        let out_dir = if output.as_os_str().is_empty() { input.parent().map(|d| d.join("target")).unwrap_or("target".into()) } else { output.clone() };
-        let mut opts = crustc::driver2::Options2 { opt: o.opt, jobs: o.jobs, linker: o.linker.clone(), no_cache: o.no_cache, time: o.time, backend: None };
-        if backend == "cranelift" {
-            opts.backend = Some(crustc::clif_backend::compile);
-        } else if backend != "minclif" {
-            eprintln!("error: unknown backend `{backend}` (cranelift / minclif)");
-            std::process::exit(2);
-        }
-        let mut s = crustc::driver2::Session2::new(opts);
+        let crates = crustc::driver2::read_workspace(&input).unwrap_or_else(|e| die(e));
+        let out_dir = if output.as_os_str().is_empty() { input.parent().map(|d| d.join("target")).unwrap_or("target".into()) } else { output };
         // (キャッシュはクレートごとに out_dir/<名前>.crcache2)
-        match s.build_workspace(&crates, &out_dir) {
+        match Session2::new(o).build_workspace(&crates, &out_dir) {
             Ok(_) => std::process::exit(0),
-            Err(e) => {
-                eprintln!("error: {e}");
-                std::process::exit(1);
-            }
+            Err(e) => die(e),
         }
     }
-    let src = match std::fs::read_to_string(&input) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: {}: {e}", input.display());
-            std::process::exit(1);
-        }
-    };
-    // `include_str!("..")` / `include_bytes!("..")`: 入力ファイルのディレクトリから読んでリテラルに
-    let dir = input.parent().map(|d| d.to_path_buf()).unwrap_or_default();
-    let src = match crustc::macros::expand_includes(&src, &dir) {
-        Ok(Some(s)) => s,
-        Ok(None) => src,
-        Err(e) => {
-            eprintln!("error: {}: {e}", input.display());
-            std::process::exit(1);
-        }
-    };
-    // (CRUSTC_DRIVER2=1: syn・Cranelift を使わないドライバでビルドする。`--features acg` のときだけ)
-    #[cfg(feature = "acg")]
-    if !legacy && mode != "check" {
-        let output = if output.as_os_str().is_empty() { input.with_extension("") } else { output.clone() };
-        let mut opts = crustc::driver2::Options2 { opt: o.opt, jobs: o.jobs, linker: o.linker.clone(), no_cache: o.no_cache, time: o.time, backend: None };
-        if backend == "cranelift" {
-            opts.backend = Some(crustc::clif_backend::compile);
-        } else if backend != "minclif" {
-            eprintln!("error: unknown backend `{backend}` (cranelift / minclif)");
-            std::process::exit(2);
-        }
-        let mut s = crustc::driver2::Session2::new(opts);
-        let mut cp = output.as_os_str().to_owned();
-        cp.push(".crcache2");
-        let cp = std::path::PathBuf::from(cp);
-        s.load_cache(&cp);
-        let _ = &src;
-        match s.build_path(&input, "src/main.rs", &output) {
-            Ok(_) => {
-                if let Err(e) = s.save_cache(&cp) {
-                    eprintln!("warning: failed to write cache: {e}");
-                }
-                std::process::exit(0)
-            }
-            Err(e) => {
-                eprintln!("error: {}: {e}", input.display());
-                std::process::exit(1);
-            }
-        }
-    }
-    let mut s = Session::new(o);
     if mode == "check" {
-        let diags = s.check(&src);
+        // (`mod x;` のファイルも読む。診断の行は結合したソースのもの: 1 ファイルならそのまま)
+        let (src, _) = crustc::srcmap::load_crate(&input, "src/main.rs").unwrap_or_else(|e| die(e));
+        let diags = Session2::new(Options2 { no_cache: true, jobs: 1, ..o }).check(&src);
         for d in &diags {
-            eprintln!("error: {}:{d}", input.display());
+            eprintln!("error: {}:{}:{}: {}", input.display(), d.line, d.col, d.msg);
         }
         std::process::exit(if diags.is_empty() { 0 } else { 1 });
     }
-    if output.as_os_str().is_empty() {
-        output = input.with_extension("");
-    }
-    let cp = cache_path(&output);
+    let output = if output.as_os_str().is_empty() { input.with_extension("") } else { output };
+    let mut s = Session2::new(o);
+    let mut cp = output.as_os_str().to_owned();
+    cp.push(".crcache2");
+    let cp = PathBuf::from(cp);
     s.load_cache(&cp);
-    let r = s.build(&src, &output);
-    match r {
+    match s.build_path(&input, "src/main.rs", &output) {
         Ok(_) => {
             if let Err(e) = s.save_cache(&cp) {
                 eprintln!("warning: failed to write cache: {e}");
             }
         }
-        Err(e) => {
-            eprintln!("error: {}: {e}", input.display());
-            std::process::exit(1);
-        }
+        Err(e) => die(format!("{}: {e}", input.display())),
     }
 }

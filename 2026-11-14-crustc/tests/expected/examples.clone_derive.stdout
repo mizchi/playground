@@ -1,0 +1,9 @@
+Person { name: "ann", tags: ["a", "b"], age: 30 }
+Person { name: "annie", tags: ["a", "b", "c"], age: 30 } false
+Pair(Leaf("x"), Empty)
+Pair(Leaf("changed"), Empty)
+Wrap { inner: ["w"], n: 1 } Wrap { inner: ["w"], n: 1 }
+("t", 5, [1, 2]) ("t", 5, [1, 2]) ["p", "q"] ["p", "q"]
+Some("o") Ok(["r"]) Some("o")
+["x", "y"] ["x", "y"] ["x", "y"] ["x"]
+Counter { hits: 101 } [Counter { hits: 102 }] (1, 'x')

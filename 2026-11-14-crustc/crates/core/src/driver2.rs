@@ -258,9 +258,19 @@ impl Session2 {
 
     /// 今回使ったエントリだけを書く
     pub fn save_cache(&mut self, path: &std::path::Path) -> Result<usize, String> {
+        // (今回使ったものはディスクの上の古い表にしかなくてもメモリに移す: 書いたファイルを開き直さないので)
+        let used = self.used.clone();
+        for &k in &used {
+            if !self.mem.contains_key(&k) {
+                if let Some(v) = self.disk.get(k) {
+                    let v = v.to_vec();
+                    self.mem.insert(k, v);
+                }
+            }
+        }
         let n = self.save_cache_keep(path)?;
-        let used = std::mem::take(&mut self.used);
         self.mem.retain(|k, _| used.contains(k));
+        self.disk = crate::cache2::Cache2::empty();
         Ok(n)
     }
 
@@ -1705,5 +1715,91 @@ impl Session2 {
             eprintln!("  {:<12} {:>8.2} ms", "total", (now_ns() - t0) as f64 / 1e6);
         }
         Ok(rep)
+    }
+}
+
+/// 位置付きのエラー (行・桁は 1 始まり)。check / LSP が返す
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Diagnostic {
+    pub line: usize,
+    pub col: usize,
+    pub msg: String,
+}
+
+impl Diagnostic {
+    /// 内部の "L:C: msg" (か "L: msg") の形の文字列から作る
+    pub fn parse(s: &str) -> Diagnostic {
+        let b = s.as_bytes();
+        let num = |from: usize| -> (usize, usize) {
+            let mut i = from;
+            while i < b.len() && b[i] == b' ' {
+                i += 1;
+            }
+            let st = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            (s[st..i].parse().unwrap_or(0), i)
+        };
+        let (line, i) = num(0);
+        if line > 0 && i < b.len() && b[i] == b':' {
+            let (col, j) = num(i + 1);
+            if col > 0 && j < b.len() && b[j] == b':' {
+                return Diagnostic { line, col, msg: s[j + 1..].trim().to_string() };
+            }
+            return Diagnostic { line, col: 1, msg: s[i + 1..].trim().to_string() };
+        }
+        Diagnostic { line: 1, col: 1, msg: s.to_string() }
+    }
+}
+
+impl Session2 {
+    /// 型検査だけを行い、全診断を返す (`crustc check` と LSP)。到達しない関数も、総称関数は要求されたインスタンスごとに
+    /// 検査する (コード生成までしてエラーを集め、結果はキャッシュに入れる: 次の検査・ビルドはそれを使う)。prelude の中の診断は出さない
+    pub fn check(&mut self, src: &str) -> Vec<Diagnostic> {
+        let user_lines = src.bytes().filter(|&c| c == b'\n').count() + 1;
+        let a = match self.analyze(src) {
+            Ok(a) => a,
+            Err(e) => return vec![Diagnostic::parse(&e)],
+        };
+        let insts = Mutex::new(Insts::new(&a.prog));
+        let mut errs: Vec<String> = vec![];
+        let mut done: FxSet<u32> = FxSet::default();
+        let n = a.prog.names.len();
+        let mut wave: Vec<u32> = (0..n)
+            .filter(|&i| concrete(&a.prog, i) && a.prog.item_of[i].is_some_and(|ii| ii < a.prog.prelude_from) && !a.is_ext(i as u32))
+            .map(|i| i as u32)
+            .collect();
+        while !wave.is_empty() {
+            for &id in &wave {
+                if !done.insert(id) {
+                    continue;
+                }
+                let k = self.key_of(&a, &insts, id);
+                // (キャッシュにあれば検査済み: 読み戻すと要求していたインスタンスも要求し直す)
+                if self.get(k).and_then(|d| crate::cache2::decode_blob(&d, &a.prog, &insts)).is_some() {
+                    continue;
+                }
+                match compile_id(&a, &insts, id) {
+                    Ok(b) => {
+                        if !self.opts.no_cache {
+                            let mut e = vec![];
+                            {
+                                let g = insts.lock().unwrap();
+                                crate::cache2::encode_blob(&b, &a.prog, &*g, &mut e);
+                            }
+                            self.put(k, e);
+                        }
+                    }
+                    Err(e) => errs.push(e),
+                }
+            }
+            wave = std::mem::take(&mut insts.lock().unwrap().pending);
+            wave.retain(|id| !done.contains(id));
+        }
+        let mut d: Vec<Diagnostic> = errs.iter().map(|e| Diagnostic::parse(e)).filter(|d| d.line <= user_lines).collect();
+        d.sort_by(|x, y| (x.line, x.col).cmp(&(y.line, y.col)));
+        d.dedup();
+        d
     }
 }

@@ -1,0 +1,5 @@
+1 basic 100
+2 savings 255
+355
+circle(3)
+[("basic", 100), ("savings", 255)]

@@ -1,11 +1,11 @@
-//! サイズ予算テスト: バイナリ・キャッシュ・LSP のメモリ上キャッシュが予算 (bench/budget.txt) を超えたら失敗する。
+//! サイズ予算テスト: バイナリ・オブジェクト・キャッシュ (driver2 + Cranelift) が予算 (bench/budget.txt) を超えたら失敗する。
 //! 意図して増やしたときは `UPDATE_BUDGET=1 cargo test --release --test budget` で予算を書き直す
 //! (現在値 + 5% の余裕で書かれる)。新しい例を足しただけなら `UPDATE_BUDGET=new` で、既存の上限を変えずに追加する。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crustc::{Options, Session, cache_path, testgen::program};
+use crustc::{Options2, Session2, testgen::program};
 
 const BUDGET: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bench/budget.txt");
 
@@ -25,21 +25,18 @@ fn measure() -> BTreeMap<String, u64> {
     for (name, src) in &cases {
         let out = dir.join(name);
         // リンカで大きさが変わるので bfd ではなく既定 (自動選択) を使う。CI では CRUSTC_BENCH_LINKER で固定
-        let o = Options {
+        let o = Options2 {
             linker: std::env::var("CRUSTC_BENCH_LINKER").ok(),
-            ..Options::default()
+            backend: Some(crustc::clif_backend::compile),
+            ..Options2::default()
         };
-        let mut s = Session::new(o);
+        let mut s = Session2::new(o);
         let r = s.build(src, &out).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let cache = s.save_cache(&cache_path(&out)).unwrap();
-        m.insert(format!("{name}.binary_bytes"), r.binary_bytes);
+        let cache = s.save_cache(&dir.join(format!("{name}.crcache2"))).unwrap();
+        m.insert(format!("{name}.binary_bytes"), std::fs::metadata(&out).unwrap().len());
         m.insert(format!("{name}.object_bytes"), r.object_bytes as u64);
         m.insert(format!("{name}.cache_bytes"), cache as u64);
     }
-    // LSP: 1000 関数を開いた後にメモリ上に残るキャッシュの量
-    let mut s = Session::new(Options::default());
-    s.check(&program(1000, 0));
-    m.insert("lsp1000.mem_bytes".into(), s.mem_usage().1 as u64);
     m
 }
 

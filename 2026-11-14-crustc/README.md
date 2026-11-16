@@ -18,10 +18,10 @@ Cranelift (既定) か自前の minclif でコード生成する。crustc 自身
 | `crates/minclif` | Cranelift に似た API の小さな x86-64 バックエンド (命令の記録・レジスタ割り当て・スタックの struct のフィールドの変数化・ELF の .o) | なし |
 | `crates/core` (`crustc-core`) | lexer / parse / macros / prelude / ast_* (要約・型推論) / program / acg (コード生成) / driver2 (キャッシュ・fork の並列化・複数クレート・リンク) | proc-macro2 だけ |
 | `crates/clif` (`crustc-clif`) | driver2 の Cranelift バックエンド: minclif が記録した命令の列を Cranelift の IR にしてコンパイルする | cranelift |
-| `crates/legacy` (`crustc-legacy`) | 最初のドライバ (syn で読み、syn の構文木から Cranelift の IR を作る)。`check` / LSP と、比較の基準 | syn・cranelift・zstd |
-| `.` (`crustc`) | CLI と、上のものの再輸出 (テスト・ベンチ) | |
+| `.` (`crustc`) | CLI・LSP サーバ (`src/lsp.rs`) と、上のものの再輸出 (テスト・ベンチ) | serde_json |
 
-主経路は **driver2 + Cranelift** (`crustc x.rs`)。`--backend=minclif` で minclif、`--legacy` で最初のドライバ。
+経路は **driver2** だけ (`crustc x.rs` は Cranelift、`--backend=minclif` で minclif)。build / check / LSP のすべてが driver2 を使う。
+最初のドライバ (syn + Cranelift、`crates/legacy`) は 2026-11-16 に削除した (git の履歴にある)。
 セルフホスト (tests/selfhost*.sh) は crustc-core と minclif のソースを 1 ファイルにまとめて crustc でコンパイルする。
 
 ## 現状（2026-11-15、`python3 bench/vs_rustc.py`）
@@ -85,7 +85,8 @@ cargo build --release
 ./target/release/crustc check examples/traits.rs
 ```
 
-型検査だけを行い、全関数の診断を表示する。
+全関数 (到達しないものも、総称関数は要求されたインスタンスごと) を検査して全診断を表示する (`Session2::check`。
+コード生成までして minclif でエラーを集める。結果はキャッシュに入る)。
 
 ```bash
 ./target/release/crustc lsp
@@ -95,10 +96,9 @@ LSP サーバ（stdio）。対応は initialize / didOpen / didChange（全文�
 
 | オプション | 意味 |
 |---|---|
-| `-o PATH` | 出力パス。同じ場所に `PATH.o`、`PATH.crcache2`（キャッシュ。`--legacy` は `PATH.crcache`）、`PATH.link`（リンク行）を置く |
+| `-o PATH` | 出力パス。同じ場所に `PATH.o`、`PATH.crcache2`（キャッシュ）、`PATH.link`（リンク行）を置く |
 | `-O` | 小さい関数のインライン展開と、Cranelift の `speed` + backtracking regalloc (minclif ならレジスタ割り当ての後の命令の形)。オーバーフローの検査をしない |
 | `--backend=cranelift\|minclif` | コード生成 (既定 cranelift。環境変数 `CRUSTC_BACKEND` でも) |
-| `--legacy` | 最初の syn + Cranelift のドライバでビルドする (`CRUSTC_LEGACY=1` でも) |
 | `--linker=wild\|mold\|lld\|bfd\|PATH` | リンカを選ぶ。既定は PATH にある順に wild > mold > ld.lld > ld |
 | `--time` | フェーズごとの時間とピーク RSS を表示する |
 | `-j N` | コード生成のスレッド数。ミスが 32 件未満ならスレッドを立てない |
@@ -179,19 +179,22 @@ bench/regress.sh
 
 | ベンチ（`benches/compile.rs`、N=1000） | 何を見るか | 現在値 |
 |---|---|---:|
-| `lsp/did_change_1fn` | LSP 応答性：1 関数編集の didChange から publishDiagnostics まで | 3.9 ms |
-| `lsp/did_change_noop` | 内容が同じ didChange（保存など） | 0.19 ms |
-| `cold/lsp_did_open` | 初めて開いたとき（全関数を検査） | 41 ms |
-| `build/noop` | 無変更ビルド（リンク省略） | 7.1 ms |
-| `build/edit_1fn` | 1 関数編集ビルド（リンク込み） | 28 ms |
-| `cold/build` | キャッシュなしのビルド | 84 ms |
-| `front/lex` | 字句解析だけ（no-op の下限） | 1.7 ms |
+| `lsp/did_change_1fn` | LSP 応答性：1 関数編集の didChange から publishDiagnostics まで | 10.0 ms |
+| `lsp/did_change_noop` | 内容が同じ didChange（保存など） | 0.28 ms |
+| `cold/lsp_did_open` | 初めて開いたとき（全関数を検査） | 166 ms |
+| `build/noop` | 無変更ビルド（リンク省略） | 12.7 ms |
+| `build/edit_1fn` | 1 関数編集ビルド（リンク込み、wild） | 20.7 ms |
+| `cold/build` | キャッシュなしのビルド (Cranelift) | 188 ms |
+| `front/lex` | 字句解析だけ（no-op の下限） | 2.3 ms |
+
+(2026-11-16、driver2 に移した後の値。最初のドライバの check は型検査だけで 1 関数編集 3.9 ms / didOpen 41 ms だった。
+driver2 の check はコード生成までするので遅い: 型検査だけで止める経路は次の課題)
 
 （値はマシンの状態で変わる。比べるときは同じ時間帯に、ベースラインのコミットと並べて測る。`build/edit_1fn` はリンク（この環境では ld.lld）が大半を占める）
 
 - 判定の閾値：5% 未満の変化は無視し（`noise_threshold`）、有意水準は 1% にしている。
   cold 系は実行ごとに ±10% ぶれるので、閾値を 15% にしている。
-- サイズ予算は、バイナリ・`.o`・キャッシュ・LSP のメモリ上キャッシュを、例ごとに上限バイトで持つ。
+- サイズ予算は、バイナリ・`.o`・キャッシュ (driver2 + Cranelift。キャッシュは機械語を持つ) を、例ごとに上限バイトで持つ。
   意図して増やすなら `UPDATE_BUDGET=1`、新しい例を足しただけなら `UPDATE_BUDGET=new`（既存の上限は変えない）。
 - 回帰検出が実際に働いた例（どれも予算や閾値を緩めずに直した）：
   - サイズ
@@ -669,44 +672,19 @@ src.rs ──srcmap (mod x; のファイル)──▶ macros (macro_rules!) ─�
    ──▶ minclif の ELF 書き出しで .o (panic の場所の表を含む) ──▶ wild でリンク (変わらなければしない)
 ```
 
-以下は最初のドライバ (crates/legacy) の図と表 (ファイルは crates/legacy/src と crates/core/src にある):
-
-```
-src.rs ──lexer(自前)──▶ アイテム列 + 正規化ハッシュ
-                          │ (空白・コメントは無視)
-                          ▼
-           要約キャッシュ? ── hit ──▶ シグネチャ
-                 │ miss
-                 ▼
-          syn でそのアイテムだけ parse → シグネチャ
-                          ▼
-     識別子集合から参照グラフ → main からの到達集合
-                          ▼
- 関数キー = H(コンパイラ, 設定, 本体ハッシュ, 自分と参照先の「シグネチャ」,
-               名前で現れる struct の deep hash)
-                          ▼
-           機械語キャッシュ? ── hit ──▶ Blob（機械語 + 名前付きリロケーション）
-                 │ miss
-                 ▼
-  syn parse → infer → syn AST から直接 Cranelift IR → 機械語 → Blob
-                          ▼
-   cranelift-object で 1 個の .o にまとめる（関数ごとのセクション、Local シンボル）
-                          ▼
-   .o が前回と同一ならリンクを省略。違えば、保存したリンク行で wild を直接起動
-```
-
-| ファイル | 役割 |
+| 場所 | 役割 |
 |---|---|
-| `src/lexer.rs` | トップレベルのアイテム分割と、正規化トークン列のハッシュ。syn より 1 桁以上速い。`impl` はヘッダとメンバに分ける |
-| `src/front.rs` | 型（intern）、struct レイアウト、シグネチャ、アイテム要約とそのシリアライズ、参照グラフ、到達可能性 |
-| `src/infer.rs` | 関数単位の型推論（union-find。参照・クロージャの形も単一化する） |
-| `src/closure.rs` | クロージャの持ち上げ：キャプチャの抽出（スコープを辿る自由変数解析）と、本体を fn にする合成 |
-| `src/codegen.rs` | syn AST から Cranelift IR への 1 パス lowering と型検査（place / スタックスロット / sret）。出力は `Blob` |
-| `src/cache.rs` | 1 ファイルキャッシュ（index + payload、tmp + rename で書き込む） |
-| `src/link.rs` | `cc -###` からリンク行を抽出して保存し、リンカを直接起動する |
-| `src/driver.rs` | `Session`：2 層キャッシュ（ディスク + メモリ）、check / build、インスタンスの作業リスト、並列化、.o 生成 |
-| `src/lsp.rs` | 最小の LSP サーバ（ドキュメントごとに Session を持つ） |
-| `src/main.rs` | CLI（build / check / lsp） |
+| `crates/core/src/lexer.rs` | トップレベルのアイテム分割と、正規化トークン列のハッシュ。`impl` はヘッダとメンバに分ける |
+| `crates/core/src/macros.rs` / `srcmap.rs` | macro_rules! の展開・include_str!、`mod x;` のファイルの読み込みと行の対応 |
+| `crates/core/src/parse.rs` / `ast_*.rs` | 自前の構文木・要約・型推論・クロージャ解析・定数評価 |
+| `crates/core/src/program.rs` | 全体の表 (シグネチャ・レイアウト・trait 実装・インスタンス) |
+| `crates/core/src/acg/` | 構文木から minclif の FunctionBuilder への 1 パスの lowering と型検査。-O で小さい関数をインライン展開 |
+| `crates/core/src/driver2.rs` / `cache2.rs` | `Session2`：キャッシュ (ディスク + メモリ)、build / check / ワークスペース、fork の並列化、.o の書き出し |
+| `crates/core/src/link.rs` | `cc -###` からリンク行を取り出して保存し、リンカを直接起動する |
+| `crates/minclif` | 命令の記録・レジスタ割り当て・x86-64 の機械語・ELF の .o |
+| `crates/clif` | 記録した命令の列 → Cranelift の IR → 機械語 |
+| `src/lsp.rs` | 最小の LSP サーバ (ドキュメントごとに `Session2` を持ち、`check` の診断を返す) |
+| `src/main.rs` | CLI (build / check / lsp / ワークスペースの build) |
 
 ### インクリメンタル性の要点
 
@@ -1145,7 +1123,7 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
 - `src/driver2.rs`：syn と Cranelift を使わないドライバ。lexer / macros / prelude → ast_summary → Program → acg → minclif の ELF の .o → リンク。
   インスタンスの不動点・クロージャ・static・vtable・同じ機械語のインスタンスの畳み込み・panic の場所の表は driver.rs と同じ
 - `--features acg` で有効になる。`CRUSTC_DRIVER2=1 crustc x.rs` でこちらを使う。`tests/driver2.rs` が probe / examples / acg を今のドライバと比べ、
-  `SELFHOST_DRIVER2=1 tests/selfhost.sh` がセルフホストの全段階 (lexer〜program・minclif・enc) を driver2 でビルドして rustc 版と比べる (すべて一致)
+  `tests/selfhost.sh` (当時は `SELFHOST_DRIVER2=1`。今は常にこの経路) がセルフホストの全段階 (lexer〜program・minclif・enc) を driver2 でビルドして rustc 版と比べる (すべて一致)
 - 移して分かったこと:
   - minclif のブロックに後から戻って続きを書けなかった (Cranelift は書ける)。離れるときに続きへの jmp を置くようにした
   - i128 の引数・戻り値はレジスタ 2 つ (System V)。i128 の変数・ブロック引数も 16 byte で写す
@@ -1407,6 +1385,17 @@ cold のときだけ効く。
 依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。
 残りの front（syn の構文木を引く検索）/ infer（syn 版。自前の構文木の版 ast_infer はある）/ consteval（codegen の定数の昇格）/ closure / codegen / driver / cache は syn と cranelift の上に書かれている。
 syn の代わりは src/parse.rs（自前の構文木）を土台にして front から順に移す。cranelift の代わり (自前のコード生成) はその後。
+
+#### 最初のドライバ (syn + Cranelift) を外す
+
+- `crustc check` と LSP を driver2 の `Session2::check` に移した。全関数 (到達しないものも) と要求された総称関数のインスタンスを
+  コンパイルしてエラーを集め、結果はキャッシュに入れる (次の検査・ビルドはそれを使う)
+- `crates/legacy` (syn・cranelift-object・zstd) と、syn 版と比べていたテスト (ast_closure / ast_consteval / ast_infer /
+  ast_summary / ast_types) とセルフホストの elfz を削除した。期待する出力は `tests/expected/` の golden ファイル
+  (syn 版で作ったもの) にして、`tests/driver2.rs` が比べる
+- 見つかったバグ: `Session2::save_cache` の後にメモリ上のキャッシュが空になっていた (使ったキーの集合を先に消していた)。
+  同じ Session で続けてビルドすると全関数をコンパイルし直していた。ベンチの `build/edit_1fn` の assert で見つかった
+- タプル構造体のパターンのフィールドの数のエラーに場所 (パスの位置) を付けた
 
 ### 途中で分かったこと
 

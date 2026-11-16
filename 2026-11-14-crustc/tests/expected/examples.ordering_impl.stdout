@@ -1,0 +1,6 @@
+true false false Less
+1 2 3
+true Pair { a: 1, b: 2 }
+[Num(-1), Num(3), Word("a"), Word("b"), End]
+(1, 3)
+true

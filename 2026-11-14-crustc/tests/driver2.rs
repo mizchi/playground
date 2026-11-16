@@ -1,11 +1,12 @@
-//! syn・Cranelift を使わないドライバ (driver2 + acg + minclif) で tests/probe と examples をビルドし、
-//! 今のドライバ (syn + Cranelift) でビルドしたものと出力 (stdout と終了コード) を比べる。
-//! DRIVER2_FILE=path で 1 ファイルだけ、DRIVER2_MIN=n で一致しなければならない数を指定する。
-#![cfg(feature = "acg")]
+//! tests/probe・examples・tests/acg を driver2 (minclif) でビルドして動かし、出力 (stdout・stderr・終了コード) が
+//! tests/expected/<ディレクトリ>.<名前>.{stdout,stderr,code} と同じか。期待値は最初の syn + Cranelift のドライバで作ったもの
+//! (そのドライバは消した)。Cranelift のバックエンドは tests/driver2_cranelift.rs が minclif と比べる。
+//! DRIVER2_FILE=path で 1 ファイルだけ。
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 
 #[test]
-fn driver2_like_driver() {
+fn driver2_matches_expected() {
     let dir = std::env::temp_dir().join(format!("drv2_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut files: Vec<PathBuf> = vec![];
@@ -24,48 +25,27 @@ fn driver2_like_driver() {
     let (mut ok, mut bad) = (0, vec![]);
     for p in &files {
         let name = p.file_stem().unwrap().to_string_lossy().to_string();
-        let src = std::fs::read_to_string(p).unwrap();
-        // (no_std の例は C の main と libc でリンクする前提: 今のドライバも同じリンカを使う)
-        let ref_exe = dir.join(format!("{name}.ref"));
-        let mut s = crustc::driver::Session::new(crustc::driver::Options { no_cache: true, ..Default::default() });
-        if s.build(&src, &ref_exe).is_err() {
+        let d = p.parent().unwrap().file_name().unwrap().to_string_lossy().to_string();
+        let exp = |ext: &str| PathBuf::from("tests/expected").join(format!("{d}.{name}.{ext}"));
+        let (Ok(want_out), Ok(want_err), Ok(want_code)) = (std::fs::read(exp("stdout")), std::fs::read(exp("stderr")), std::fs::read_to_string(exp("code"))) else {
+            bad.push(format!("{d}/{name}: no expected output in tests/expected"));
             continue;
-        }
+        };
+        let src = std::fs::read_to_string(p).unwrap();
         let exe = dir.join(&name);
         if let Err(e) = crustc::driver2::build(&src, &exe, false, None) {
             bad.push(format!("{name}: {}", e.lines().next().unwrap_or("")));
             continue;
         }
-        let run = |e: &PathBuf| std::process::Command::new(e).stdin(std::process::Stdio::null()).output();
-        let (Ok(a), Ok(b)) = (run(&exe), run(&ref_exe)) else {
-            bad.push(format!("{name}: failed to run"));
-            continue;
-        };
-        // (panic のメッセージ (場所) も比べる)
-        if a.stdout == b.stdout && a.status.code() == b.status.code() && a.stderr == b.stderr {
+        let a = std::process::Command::new(&exe).current_dir("tests/expected").stdin(std::process::Stdio::null()).output().unwrap();
+        let code = a.status.code().unwrap_or_else(|| 128 + a.status.signal().unwrap_or(0));
+        if a.stdout == want_out && a.stderr == want_err && code.to_string() == want_code.trim() {
             ok += 1;
         } else {
-            let why = if a.stdout != b.stdout || a.status.code() != b.status.code() { "output" } else { "stderr" };
-            bad.push(format!("{name}: {why} differs (exit {:?} vs {:?})", a.status.code(), b.status.code()));
-            if why == "stderr" && std::env::var("DRIVER2_FILE").is_err() {
-                eprintln!("    ours: {}\n    ref:  {}", String::from_utf8_lossy(&a.stderr).lines().next().unwrap_or(""), String::from_utf8_lossy(&b.stderr).lines().next().unwrap_or(""));
-            }
-            if std::env::var("DRIVER2_FILE").is_ok() {
-                let (x, y) = (String::from_utf8_lossy(&a.stdout), String::from_utf8_lossy(&b.stdout));
-                for (i, (l1, l2)) in x.lines().zip(y.lines()).enumerate() {
-                    if l1 != l2 {
-                        eprintln!("first diff at line {i}:\n  ours: {l1}\n  ref:  {l2}");
-                        break;
-                    }
-                }
-                eprintln!("ours {} lines, ref {} lines; ours stderr: {}", x.lines().count(), y.lines().count(), String::from_utf8_lossy(&a.stderr));
-            }
+            let why = if a.stdout != want_out { "stdout" } else if a.stderr != want_err { "stderr" } else { "exit code" };
+            bad.push(format!("{d}/{name}: {why} differs (exit {code} vs {})", want_code.trim()));
         }
     }
-    eprintln!("{ok} same, {} differ", bad.len());
-    for b in &bad {
-        eprintln!("  {b}");
-    }
-    let min: usize = std::env::var("DRIVER2_MIN").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
-    assert!(ok >= min, "only {ok} programs match (need {min})");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(bad.is_empty(), "{ok} same\n{}", bad.join("\n"));
 }

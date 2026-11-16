@@ -1,0 +1,4 @@
+Config { name: "svc", retries: 3, verbose: false, tags: ["a", "b"] }
+true false
+5 Some(Greater)
+[4.5, 5.0, 2.5, 9.5]

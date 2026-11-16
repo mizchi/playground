@@ -1,0 +1,11 @@
+"alpha\nbeta\n" 11
+No such file or directory (os error 2) | Os { code: 2, kind: NotFound, message: "No such file or directory" }
+Ok(()) Err(NotPresent)
+1
+a6ea253bd08f16e20000000000000007
+434946af6a68ed75
+Ok(12) Err("bad x: invalid digit found in string")
+Some('y') None
+[52, 18] [1, 2, 3, 4] 1
+true true
+hi�!

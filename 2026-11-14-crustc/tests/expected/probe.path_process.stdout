@@ -1,0 +1,12 @@
+/usr/bin/ld Some("ld") true "/usr/bin/ld"
+/usr/bin/ld.link
+Some("rs") Some("main") Some("dir/sub") dir/sub/main.o
+x/y/z.md /etc
+true true
+"out\n" "err\n" false exit status: 3
+true exit status: 0
+err No such file or directory (os error 2)
+true
+"a b c x y\n"
+21 36.5
+names=["p", "q"] n=2

@@ -461,7 +461,7 @@ impl Cx<'_> {
                             }
                             None => self.tuple_struct_fields(path, t, SP)?,
                         };
-                        for (fi, sub) in Self::tuple_fields(elems.iter(), fields.len(), SP)? {
+                        for (fi, sub) in Self::tuple_fields(elems.iter(), fields.len(), SP).map_err(|m| self.at(path.pos, m))? {
                             let (_, fty, off) = fields[fi];
                             self.pat_test(sub, Self::field_place(p, fty, off), fail)?;
                         }
@@ -663,7 +663,7 @@ impl Cx<'_> {
                     Some((sid, vi)) => self.prog.structs[sid as usize].variants[vi].fields.clone(),
                     None => self.tuple_struct_fields(path, p.ty(), SP)?,
                 };
-                for (fi, sub) in Self::tuple_fields(elems.iter(), fields.len(), SP)? {
+                for (fi, sub) in Self::tuple_fields(elems.iter(), fields.len(), SP).map_err(|m| self.at(path.pos, m))? {
                     let (_, fty, off) = fields[fi];
                     self.pat_bind(sub, Self::field_place(p, fty, off), mode)?;
                 }

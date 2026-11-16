@@ -3,9 +3,10 @@
 //! - `minclif`: Cranelift に似た API の小さな x86-64 バックエンド (外部 crate なし)
 //! - `crustc-core`: フロントエンド・acg・driver2 (syn・Cranelift なし。crustc 自身でコンパイルできる)
 //! - `crustc-clif`: driver2 の Cranelift バックエンド (既定)
-//! - `crustc-legacy`: 最初の syn + Cranelift のドライバ (check / LSP と比較の基準)
+//! - `lsp`: driver2 の check を使う LSP サーバ (このクレート)
 
 pub use crustc_core::*;
 pub use crustc_clif as clif_backend;
-pub use crustc_legacy::{cache, closure, codegen, consteval, driver, elfz, front, infer, lsp};
-pub use crustc_legacy::{BuildReport, Diagnostic, Options, Session, cache_path};
+pub use crustc_core::driver2::{Diagnostic, Options2, Report2, Session2};
+
+pub mod lsp;

@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # セルフホストの確認: crustc 自身のソースの一部 (外部クレートに依存しないもの) を crustc でコンパイルし、
 # rustc でコンパイルしたものと同じ入力で同じ出力になるかを確かめる。
-#   lexer: crates/core/src/lexer.rs と crates/legacy/src/cache.rs の KeyHasher (SipHash) → crustc 自身のソースを字句解析してアイテムとハッシュを出す
+#   lexer: crates/core/src/lexer.rs と crates/core/src/key.rs の KeyHasher (SipHash) → crustc 自身のソースを字句解析してアイテムとハッシュを出す
 #   prelude: crates/core/src/prelude.rs (prelude の項目を名前で選ぶ。lexer / fxhash / KeyHasher と、build.rs が作る表を含む)
 #            → probe / examples をユーザのソースとして、選ばれた prelude の長さとハッシュを出す
 #   link:  crates/core/src/link.rs (リンカを探して直接起動する) と crates/core/src/testgen.rs → C の .o をリンクして実行する (std::path / process::Command)
-#   elfz:  crates/legacy/src/elfz.rs (.o のセクションの圧縮。zstd の代わりに同じ API の RLE を付ける) → C の .o を圧縮・解凍して中身を比べる
 #   macros: crates/core/src/macros.rs (macro_rules! の展開と include_str!。proc_macro2 の代わりに tests/selfhost/mini_pm2.rs を付ける)
 #           → probe / examples / src を展開して、結果の長さとハッシュを出す
 #   parse: crates/core/src/parse.rs (syn を使わない構文解析) → probe / examples / src を解析して節の数とアイテムを出す
@@ -20,14 +19,9 @@
 #   enc:   crates/core/src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と crates/core/src/fxhash.rs (FxHasher / FxMap)
 set -uo pipefail
 cd "$(dirname "$0")/.."
-# SELFHOST_DRIVER2=1: crustc 側を自前のフロントエンド (driver2 + acg) と minclif でビルドする (syn・Cranelift を使わない経路)。
-# なければ最初の syn + Cranelift のドライバ (--legacy)
+# crustc 側のバックエンドは SELFHOST_BACKEND (既定 minclif: 外部クレートを使わない経路。cranelift も可)
 cargo build --release -q || exit 1
-if [ -n "${SELFHOST_DRIVER2:-}" ]; then
-  crustc_cmd() { target/release/crustc --backend=minclif "$@"; }
-else
-  crustc_cmd() { target/release/crustc --legacy "$@"; }
-fi
+crustc_cmd() { target/release/crustc --backend="${SELFHOST_BACKEND:-minclif}" "$@"; }
 out=out/selfhost
 mkdir -p "$out"
 fail=0
@@ -75,31 +69,6 @@ for opt in "" -O; do
     echo "ok   link $opt ($(wc -l < "$out/link.rustc.out") lines)"
   else
     echo "DIFF link $opt"; diff "$out/link.rustc.out" "$out/link.crustc.out" | head; fail=1
-  fi
-done
-python3 tests/selfhost/build_elfz.py > "$out/elfz_main.rs"
-cat > "$out/many.c" <<'EOF2'
-#include <stdio.h>
-static int tbl[256];
-int f1(int x) { return x * 3 + 1; }
-int f2(int x) { return f1(x) ^ 7; }
-double g(double a) { return a * 0.5; }
-const char *names[] = {"a", "bb", "ccc"};
-const int zeros[2048] = {1, 2, 3};
-int main(void) { for (int i = 0; i < 256; i++) tbl[i] = f2(i); printf("%d %f %s %d\n", tbl[9], g(3.0), names[2], zeros[1]); return 0; }
-EOF2
-cc -O1 -c "$out/many.c" -o "$out/many.o" || exit 1
-rustc --edition 2024 -O -Awarnings "$out/elfz_main.rs" -o "$out/elfz_rustc" || exit 1
-"$out/elfz_rustc" "$out/hello.o" "$out/many.o" > "$out/elfz.rustc.out"
-for opt in "" -O; do
-  if ! crustc_cmd "$out/elfz_main.rs" -o "$out/elfz_crustc" $opt; then
-    echo "FAIL elfz $opt (crustc)"; fail=1; continue
-  fi
-  "$out/elfz_crustc" "$out/hello.o" "$out/many.o" > "$out/elfz.crustc.out"
-  if cmp -s "$out/elfz.rustc.out" "$out/elfz.crustc.out"; then
-    echo "ok   elfz $opt ($(wc -l < "$out/elfz.rustc.out") lines)"
-  else
-    echo "DIFF elfz $opt"; diff "$out/elfz.rustc.out" "$out/elfz.crustc.out" | head; fail=1
   fi
 done
 python3 tests/selfhost/build_macros.py > "$out/macros_main.rs"

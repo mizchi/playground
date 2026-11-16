@@ -39,12 +39,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -78,8 +72,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33ef9e3e8154a45c7a95cff4c1299702106ad94062d7bb85fdc5d3a5afd91d45"
 dependencies = [
  "find-msvc-tools",
- "jobserver",
- "libc",
  "shlex",
 ]
 
@@ -262,18 +254,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a92e743f35915d55cd3d3178aab483661f78c2f9274aa704f29be69e3789c5bd"
 
 [[package]]
-name = "cranelift-module"
-version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1fc79497db837c8433435264d34eec0fd5e0db56dc41ffc1a3d096dad28e572"
-dependencies = [
- "anyhow",
- "cranelift-codegen",
- "cranelift-control",
- "hashbrown 0.17.1",
-]
-
-[[package]]
 name = "cranelift-native"
 version = "0.137.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -286,35 +266,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "cranelift-object"
-version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c38304b64d440315410ae0229340dd2087bed7d7e8411a7bb72b4b6a2132db05"
-dependencies = [
- "anyhow",
- "cranelift-codegen",
- "cranelift-control",
- "cranelift-module",
- "gimli",
- "log",
- "object",
- "target-lexicon",
-]
-
-[[package]]
 name = "cranelift-srcgen"
 version = "0.137.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6f34b169b8cbbaed2b4995205f1d02d7eac4b2771df5479255fe5483e1334a39"
-
-[[package]]
-name = "crc32fast"
-version = "1.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b929dd2a135771f40afabd1073f85eed59c800b7c61901e5c254270497dad64"
-dependencies = [
- "cfg-if",
-]
 
 [[package]]
 name = "criterion"
@@ -362,7 +317,6 @@ dependencies = [
  "criterion",
  "crustc-clif",
  "crustc-core",
- "crustc-legacy",
  "minclif",
  "proc-macro2",
  "serde_json",
@@ -385,23 +339,6 @@ version = "0.1.0"
 dependencies = [
  "minclif",
  "proc-macro2",
-]
-
-[[package]]
-name = "crustc-legacy"
-version = "0.1.0"
-dependencies = [
- "cranelift-codegen",
- "cranelift-frontend",
- "cranelift-module",
- "cranelift-native",
- "cranelift-object",
- "crustc-core",
- "proc-macro2",
- "quote",
- "serde_json",
- "syn 2.0.119",
- "zstd",
 ]
 
 [[package]]
@@ -433,17 +370,6 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
-
-[[package]]
-name = "getrandom"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
-dependencies = [
- "cfg-if",
- "libc",
- "r-efi",
-]
 
 [[package]]
 name = "gimli"
@@ -515,16 +441,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
-name = "jobserver"
-version = "0.1.35"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
-dependencies = [
- "getrandom",
- "libc",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -568,18 +484,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "object"
-version = "0.40.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
-dependencies = [
- "crc32fast",
- "hashbrown 0.17.1",
- "indexmap",
- "memchr",
-]
-
-[[package]]
 name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -594,12 +498,6 @@ dependencies = [
  "libc",
  "winapi",
 ]
-
-[[package]]
-name = "pkg-config"
-version = "0.3.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "proc-macro2"
@@ -618,12 +516,6 @@ checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
 ]
-
-[[package]]
-name = "r-efi"
-version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "regalloc2"
@@ -879,31 +771,3 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
-
-[[package]]
-name = "zstd"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50adf04cf3ec914b0b9905c9dde90c80fe74bfd701e331fc80a39c512c525278"
-dependencies = [
- "zstd-safe",
-]
-
-[[package]]
-name = "zstd-safe"
-version = "7.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "498d94ad68720c89b4fbe41b9090850651e68cb2dd9210ce7ffbff3a94653819"
-dependencies = [
- "zstd-sys",
-]
-
-[[package]]
-name = "zstd-sys"
-version = "2.1.3+zstd.1.5.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f729a06d0257428fd9d997ac8db7e1407bd0262ab016b085b36bc52957c0052d"
-dependencies = [
- "cc",
- "pkg-config",
-]

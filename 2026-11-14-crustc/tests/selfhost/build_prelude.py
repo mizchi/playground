@@ -1,4 +1,4 @@
-"""crustc 自身の crates/core/src/prelude.rs (prelude の項目を名前で選ぶ) を、lexer.rs・fxhash.rs・cache.rs の KeyHasher と一緒に
+"""crustc 自身の crates/core/src/prelude.rs (prelude の項目を名前で選ぶ) を、lexer.rs・fxhash.rs・key.rs の KeyHasher と一緒に
 1 ファイルのプログラムにまとめる。
 usage: python3 tests/selfhost/build_prelude.py > out/selfhost/prelude_main.rs
 main は引数のファイルごとに、ユーザのソースとして prelude::select を呼び、選ばれた prelude の長さ・行数・ハッシュを出す。

@@ -1,10 +1,10 @@
 //! check (LSP の診断) はエラーがあっても止まらず、全関数の診断を返す
-use crustc::{Options, Session};
+use crustc::{Options2, Session2};
 
 #[test]
 fn reports_all_errors_and_recovers() {
     let src = "enum E { A(i64), B }\nfn f(e: E) -> i64 {\n    match e {\n        E::A(x, y) => x,\n        E::B => 0,\n    }\n}\nfn g() -> bool { 1 }\nfn h() -> u8 { 2 }\nfn main() {}\n";
-    let mut s = Session::new(Options::default());
+    let mut s = Session2::new(Options2 { jobs: 1, ..Options2::default() });
     let d = s.check(src);
     assert_eq!(d.len(), 2, "{d:?}");
     assert_eq!((d[0].line, d[1].line), (4, 8));
@@ -22,7 +22,7 @@ fn reports_all_errors_and_recovers() {
 fn generic_body_errors_with_cached_callers() {
     let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/traits.rs"))
         .unwrap();
-    let mut s = Session::new(Options::default());
+    let mut s = Session2::new(Options2 { jobs: 1, ..Options2::default() });
     assert!(s.check(&src).is_empty());
     let bad = src.replace(
         "    a.area() + b.area()\n",
@@ -41,7 +41,7 @@ fn generic_body_errors_with_cached_callers() {
 fn closure_and_dyn_errors() {
     let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/closures.rs"))
         .unwrap();
-    let mut s = Session::new(Options::default());
+    let mut s = Session2::new(Options2 { jobs: 1, ..Options2::default() });
     assert!(s.check(&src).is_empty());
     let bad = src.replace("let add_k = |x| x + k;", "let add_k = |x| x + k + nope;");
     assert_ne!(bad, src);

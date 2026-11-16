@@ -1,0 +1,13 @@
+abc|0xff|101|10|FF|+7|0b101
+[    ab] [cd    ] [   e   ]
+3    3 s "s" n
+true
+[8, 109, 201]
+[alpha beta] true
+[gamma] false
+[delta] false
+["alpha", "beta", "gamma", "delta"] 4
+Some("q") Err("bad") (
+    1,
+    "t",
+)

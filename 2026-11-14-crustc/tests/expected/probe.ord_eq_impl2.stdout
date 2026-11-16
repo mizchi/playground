@@ -1,0 +1,12 @@
+Greater true
+[Name("a"), Name("ab"), Name("bb"), Name("ccc")]
+Some(Name("ccc"))
+Greater
+true
+Some(Name("a"))
+true
+true
+false
+[Name("x"), Name("y")]
+[Hearts, Clubs, Clubs] Some(Hearts)
+Name("aa")

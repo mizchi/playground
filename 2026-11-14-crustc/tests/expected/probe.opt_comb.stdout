@@ -1,0 +1,11 @@
+Some(2) None
+-1 2
+None Ok(2)
+Some((1, "a")) Some(2)
+Some(5) None
+Ok(3) Err("bad x: invalid digit found in string")
+7
+Some(9)
+true
+Some([1, 2])
+Err("bad q: invalid digit found in string")

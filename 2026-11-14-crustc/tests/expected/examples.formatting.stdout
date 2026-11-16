@@ -1,0 +1,42 @@
+(1, -2) Point { x: 1, y: -2 }
+Point {
+    x: 1,
+    y: -2,
+}
+[Circle { center: Point { x: 1, y: -2 }, r: 3 }, Rect(Point { x: 0, y: 0 }, Point { x: 2, y: 2 }), Empty]
+Rect(
+    Point {
+        x: 0,
+        y: 0,
+    },
+    Point {
+        x: 2,
+        y: 2,
+    },
+)
+Unit Wrap(5) Wrap("s")
+  1  2  3
+ 40 50 60
+<(1, -2)>
+<7>
+7 (1, -2)
+None Some(Point { x: 1, y: -2 })
+Err("bad")
+0,1,2,
+      ab|cd      |   ef   |
+***mid***
+abc     
+"quote\"and\\slash\n"
+{} a b a
+[Some([1, 2]), None]
+[
+    Some(
+        [
+            1,
+            2,
+        ],
+    ),
+    None,
+]
+(1, (2, 'c'), [1, 2])
+[    42]

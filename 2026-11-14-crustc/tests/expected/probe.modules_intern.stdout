@@ -1,0 +1,9 @@
+Ty { inner: Name("x"), depth: 3 } Int 10 true
+true false R(N(3)) true
+Ok(42)
+Err("bad")
+Err("word hi")
+Ok(7)
+true false
+true false true
+long 5

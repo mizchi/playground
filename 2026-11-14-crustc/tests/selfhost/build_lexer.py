@@ -1,4 +1,4 @@
-"""crustc 自身の crates/core/src/lexer.rs (と cache.rs の KeyHasher) を 1 ファイルのプログラムにまとめる。
+"""crustc 自身の crates/core/src/lexer.rs (と key.rs の KeyHasher) を 1 ファイルのプログラムにまとめる。
 usage: python3 tests/selfhost/build_lexer.py > out/selfhost/lexer_main.rs
 main は引数のファイルを split / hoist_nested_items / flatten_modules に通し、アイテムの種類・位置・ハッシュを出す。"""
 import re
