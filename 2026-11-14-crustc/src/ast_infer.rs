@@ -231,16 +231,13 @@ pub type TextTypes = crate::fxhash::FxMap<u64, Option<Ty>>;
 
 /// 式の形のハッシュ (Debug の表示をハッシュする)
 pub fn expr_hash(e: &Expr) -> u64 {
-    struct W(crate::fxhash::FxHasher);
-    impl std::fmt::Write for W {
-        fn write_str(&mut self, s: &str) -> std::fmt::Result {
-            std::hash::Hasher::write(&mut self.0, s.as_bytes());
-            Ok(())
-        }
+    // (FNV-1a: crustc でもコンパイルできるよう trait を使わずに書く)
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in format!("{e:?}").as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
     }
-    let mut w = W(crate::fxhash::FxHasher::default());
-    let _ = std::fmt::write(&mut w, format_args!("{e:?}"));
-    std::hash::Hasher::finish(&w.0)
+    h
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -320,12 +317,17 @@ pub fn infer_ctx_margs(
     }
     let mut texts = TextTypes::default();
     // (同じ式を何度か推論し直すことがある: lets と同じく後の記録を使う)
-    let mut last: crate::fxhash::FxMap<usize, (*const Expr, u32)> = Default::default();
-    for &(e, v) in &std::mem::take(&mut s.exprs) {
-        last.insert(e as usize, (e, v));
-    }
-    let mut recs: Vec<(*const Expr, u32)> = last.into_values().collect();
+    let mut recs: Vec<(*const Expr, u32)> = std::mem::take(&mut s.exprs);
+    // (アドレスで並べ、同じアドレスは最後の記録だけ残す: 安定ソートなので記録順は保たれる)
     recs.sort_by_key(|r| r.0 as usize);
+    let mut dedup: Vec<(*const Expr, u32)> = Vec::with_capacity(recs.len());
+    for r in recs {
+        match dedup.last_mut() {
+            Some(l) if l.0 == r.0 => *l = r,
+            _ => dedup.push(r),
+        }
+    }
+    let recs = dedup;
     for (e, v) in recs {
         let Some(t) = s.resolve(v) else { continue };
         let t = Some(t);

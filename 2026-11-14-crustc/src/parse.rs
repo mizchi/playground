@@ -1044,6 +1044,12 @@ impl Parser {
         if self.tok(0).is_some_and(|t| t.kind == TokKind::Lit) || self.is_punct("-") {
             return Ok(Pat::Lit(Box::new(self.pat_lit_expr()?)));
         }
+        // (`true` / `false` はリテラルのパターン)
+        if (self.is_ident("true") || self.is_ident("false")) && !self.punct_at(1, "::") {
+            let t = self.toks[self.i].text.clone();
+            self.i += 1;
+            return Ok(Pat::Lit(Box::new(Expr::Lit(t))));
+        }
         if self.is_ident("ref") || self.is_ident("mut") {
             let r = self.eat_ident("ref");
             let m = self.eat_ident("mut");

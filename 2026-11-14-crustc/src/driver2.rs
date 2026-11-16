@@ -71,6 +71,9 @@ pub struct Analysis {
 
 pub fn analyze(src0: &str, opt: bool) -> R<Analysis> {
     let (src, items, user) = with_prelude(src0)?;
+    if let Some(p) = std::env::var_os("CRUSTC_DUMP_SRC") {
+        let _ = std::fs::write(p, &src);
+    }
     let mut sums: Vec<Summary> = vec![Summary::default(); items.len()];
     for pass in 0..2 {
         for (i, it) in items.iter().enumerate() {
@@ -79,7 +82,7 @@ pub fn analyze(src0: &str, opt: bool) -> R<Analysis> {
                 continue;
             }
             let ow = if pass == 1 { crate::ast_summary::owner_of(it, &sums) } else { None };
-            sums[i] = crate::ast_summary::parse_and_summarize(&src, it, ow.as_ref())?;
+            sums[i] = crate::ast_summary::parse_and_summarize(&src, it, ow.as_ref()).map_err(|e| format!("line {}: {e}", it.line))?;
         }
     }
     let mut prog = Program::build(&items, &sums)?;
