@@ -66,13 +66,40 @@ fn workspace_matches_rustc_and_rebuilds_incrementally() {
     assert_eq!(r.linked, 1);
     let (o, _, _) = run(&out.join("app"), &dir, 1);
     assert!(o.starts_with("(9, -12)"), "{o}");
-    // シグネチャを変えると使う側もコンパイルし直す
+    // シグネチャを変えると、それを使う側だけコンパイルし直す (geom は calls を使わないので見ない)
     let t = std::fs::read_to_string(&lib).unwrap().replace("pub fn calls() -> u32 { unsafe { CALLS } }", "pub fn calls() -> u64 { unsafe { CALLS as u64 } }");
     std::fs::write(&lib, t).unwrap();
     let r = s.build_workspace(&crates, &out).unwrap();
     let rebuilt: Vec<&str> = r.crates.iter().filter(|(_, c)| c.fns_compiled + c.fns_hit > 0).map(|(n, _)| n.as_str()).collect();
-    assert_eq!(rebuilt, ["util", "geom", "app"]);
+    assert_eq!(rebuilt, ["util", "app"]);
     let (o, _, _) = run(&out.join("app"), &dir, 1);
     assert!(o.contains("calls 2"), "{o}");
+    // 本体だけを変えれば util だけ
+    let t = std::fs::read_to_string(&lib).unwrap().replace("pub fn helper(x: i64) -> i64 { unsafe { CALLS += 1; } x * 3 }", "pub fn helper(x: i64) -> i64 { unsafe { CALLS += 2; } x * 3 }");
+    std::fs::write(&lib, t).unwrap();
+    let r = s.build_workspace(&crates, &out).unwrap();
+    let compiled: Vec<&str> = r.crates.iter().filter(|(_, c)| c.fns_compiled > 0).map(|(n, _)| n.as_str()).collect();
+    assert_eq!(compiled, ["util"]);
+    let t = std::fs::read_to_string(&lib).unwrap().replace("pub fn helper(x: i64) -> i64 {", "pub fn helper(x: i64) -> i64 { let _ = 0u8;");
+    std::fs::write(&lib, t).unwrap();
+    let r = s.build_workspace(&crates, &out).unwrap();
+    let rebuilt: Vec<&str> = r.crates.iter().filter(|(_, c)| c.fns_compiled + c.fns_hit > 0).map(|(n, _)| n.as_str()).collect();
+    assert_eq!(rebuilt, ["util"], "body change only");
+    // geom が使う関数のシグネチャを変えると geom も (rustc で作ったものと同じ動き)
+    let geom = dir.join("geom/src/lib.rs");
+    let t = std::fs::read_to_string(&lib).unwrap().replace("pub fn helper(x: i64) -> i64 { let _ = 0u8; unsafe { CALLS += 2; } x * 3 }", "pub fn helper(x: i32) -> i64 { unsafe { CALLS += 2; } x as i64 * 3 }");
+    std::fs::write(&lib, t).unwrap();
+    let g = std::fs::read_to_string(&geom).unwrap().replace("P::new(util::helper(self.x), util::helper(self.y))", "P::new(util::helper(self.x as i32), util::helper(self.y as i32))");
+    std::fs::write(&geom, g).unwrap();
+    let r = s.build_workspace(&crates, &out).unwrap();
+    let rebuilt: Vec<&str> = r.crates.iter().filter(|(_, c)| c.fns_compiled + c.fns_hit > 0).map(|(n, _)| n.as_str()).collect();
+    assert!(rebuilt.contains(&"util") && rebuilt.contains(&"geom"), "{rebuilt:?}");
+    let (a, _, _) = run(&out.join("app"), &dir, 1);
+    let rs2 = dir.join("target_rustc2");
+    std::fs::create_dir_all(&rs2).unwrap();
+    let st = Command::new("bash").arg(dir.join("build_rustc.sh")).arg(&rs2).status().unwrap();
+    assert!(st.success());
+    let (b, _, _) = run(&rs2.join("app"), &dir, 1);
+    assert_eq!(a, b);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -896,15 +896,17 @@ impl Session2 {
             }
             wave = std::mem::take(&mut insts.lock().unwrap().pending);
             // (展開した本体が呼ぶ関数は、呼んだ側の名前からは届かない: 再配置が指す総称でない関数もコンパイルする)
+            // (vtable の欄も: `Box<dyn Shape>` にした自分の型のメソッドは、名前で届くとは限らない
+            //  (呼ぶのが依存するクレートの関数の中で、その本体はインターフェースでは消してある))
             for &id in &cur {
                 if let Some(b) = blobs.get(&id) {
-                    for r in &b.relocs {
-                        if let Target::Func(f) = r.target {
-                            if f != u32::MAX && (f as usize) < a.prog.names.len() && concrete(&a.prog, f as usize) && !a.is_ext(f) && !blobs.contains_key(&f) && !live[f as usize] {
-                                live[f as usize] = true;
-                                user_live.push(f);
-                                wave.push(f);
-                            }
+                    let fs = b.relocs.iter().filter_map(|r| if let Target::Func(f) = r.target { Some(f) } else { None });
+                    let vs = b.vtables.iter().flat_map(|v| v.iter().copied());
+                    for f in fs.chain(vs) {
+                        if f != u32::MAX && (f as usize) < a.prog.names.len() && concrete(&a.prog, f as usize) && !a.is_ext(f) && !blobs.contains_key(&f) && !live[f as usize] {
+                            live[f as usize] = true;
+                            user_live.push(f);
+                            wave.push(f);
                         }
                     }
                 }
@@ -1578,6 +1580,77 @@ impl Session2 {
         Ok((r, changed, now_ns() - t1))
     }
 
+    /// 細かい指紋 (build_workspace の .fp2): コンパイラ・設定・自分のソース (展開したもの)・依存するクレートの名前と
+    /// ファイル、依存するクレートのインターフェースのアイテムのうち、自分の識別子から名前でたどって届くもののハッシュ
+    #[allow(clippy::too_many_arguments)]
+    fn precise_fp(
+        &self,
+        c: &CrateSpec,
+        own: &str,
+        own_map: &crate::srcmap::SrcMap,
+        deps: &[usize],
+        crates: &[CrateSpec],
+        loaded: &[Option<(String, crate::srcmap::SrcMap)>],
+        dep_items: &[Option<Vec<crate::stub::StubItem>>],
+    ) -> String {
+        // (名前 → (クレート, アイテム))
+        let mut by_name: FxMap<String, Vec<(usize, usize)>> = FxMap::default();
+        for &j in deps {
+            for (k, it) in dep_items[j].as_ref().unwrap().iter().enumerate() {
+                for nm in &it.names {
+                    by_name.entry(nm.clone()).or_default().push((j, k));
+                }
+            }
+        }
+        let mut seen_name: FxSet<String> = FxSet::default();
+        let mut work: Vec<String> = vec![];
+        let b = own.as_bytes();
+        for t in lexer::tokenize(b) {
+            if t.0 == 0 {
+                let w = String::from_utf8_lossy(&b[t.1..t.2]).into_owned();
+                if seen_name.insert(w.clone()) {
+                    work.push(w);
+                }
+            }
+        }
+        let mut reached: Vec<(usize, usize)> = vec![];
+        let mut seen_item: FxSet<(usize, usize)> = FxSet::default();
+        while let Some(w) = work.pop() {
+            let Some(v) = by_name.get(&w) else { continue };
+            for &(j, k) in v {
+                if !seen_item.insert((j, k)) {
+                    continue;
+                }
+                reached.push((j, k));
+                for x in &dep_items[j].as_ref().unwrap()[k].idents {
+                    if seen_name.insert(x.clone()) {
+                        work.push(x.clone());
+                    }
+                }
+            }
+        }
+        reached.sort_unstable();
+        let mut h = KeyHasher::new();
+        h.add(&self.cid);
+        h.add(&(self.opts.opt as u8));
+        h.add(&(c.lib as u8));
+        h.add(own);
+        for f in &own_map.files {
+            h.add(f);
+        }
+        for &j in deps {
+            h.add(&crates[j].name);
+            for f in &loaded[j].as_ref().unwrap().1.files {
+                h.add(f);
+            }
+        }
+        for (j, k) in reached {
+            h.add(&(j as u64));
+            h.add(&dep_items[j].as_ref().unwrap()[k].hash);
+        }
+        key_hex(h.finish())
+    }
+
     /// ワークスペースをビルドする: クレートごとに .o を out_dir に作り (変わらなければ書かない)、
     /// bin ごとに自分と依存するクレートの .o をリンクする。キャッシュはこの Session2 のものを共有する
     pub fn build_workspace(&mut self, crates: &[CrateSpec], out_dir: &std::path::Path) -> R<WsReport> {
@@ -1674,6 +1747,7 @@ impl Session2 {
         // 展開して総称でない関数の本体を消したもの (stub::interface_text)。どちらもクレートごとに 1 回だけ作る
         // (使う側で依存するクレートのソース全体を展開・解析し直すと、依存が多いと推移的な依存の大きさに比例する)
         let reuse = std::env::var_os("CRUSTC_NO_DEP_STUB").is_none();
+        let mut fp2s: Vec<(usize, String)> = vec![];
         let mut own_v: Vec<Option<(String, crate::srcmap::SrcMap)>> = loaded.clone();
         let mut dep_v: Vec<Option<(String, crate::srcmap::SrcMap)>> = loaded.clone();
         if reuse && !stale.is_empty() {
@@ -1699,6 +1773,31 @@ impl Session2 {
                 for j in all_deps(i) {
                     dd.push_str(&defs[j]);
                 }
+                // (前回と同じ入力なら out_dir/<名前>.prep から読む: `キー\n展開したものの長さ\n展開したもの インターフェース`)
+                let mut kh = KeyHasher::new();
+                kh.add(&self.cid);
+                kh.add(&text);
+                kh.add(&dd);
+                for f in &crates[i].features {
+                    kh.add(f);
+                }
+                let pkey = key_hex(kh.finish());
+                let pp = out_dir.join(format!("{}.prep", crates[i].name).as_str());
+                if let Ok(old) = std::fs::read_to_string(pp.as_path()) {
+                    if let Some((k, rest)) = old.split_once('\n') {
+                        if k == pkey {
+                            if let Some((nl, body)) = rest.split_once('\n') {
+                                if let Ok(nl) = nl.parse::<usize>() {
+                                    if nl <= body.len() && body.is_char_boundary(nl) {
+                                        dep_v[i] = Some((body[nl..].to_string(), map.clone()));
+                                        own_v[i] = Some((body[..nl].to_string(), map));
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 let marker = "\n// __crustc_dep_macros__\n";
                 let exp = if dd.is_empty() && !text.contains("macro_rules!") {
                     text.clone()
@@ -1715,13 +1814,48 @@ impl Session2 {
                         None => text.clone(),
                     }
                 };
-                if need_dep[i] {
-                    dep_v[i] = Some((crate::stub::interface_text(&exp), map.clone()));
+                let stub = crate::stub::interface_text(&exp);
+                if !self.opts.no_cache {
+                    let _ = std::fs::write(pp.as_path(), format!("{pkey}\n{}\n{exp}{stub}", exp.len()));
                 }
+                let _ = need_dep[i];
+                dep_v[i] = Some((stub, map.clone()));
                 own_v[i] = Some((exp, map));
             }
             if self.opts.time {
                 eprintln!("  {:<12} {:>8.2} ms", "(prepare)", (now_ns() - t2) as f64 / 1e6);
+            }
+            // 細かい指紋: 自分 (展開したもの) と、依存するクレートのインターフェースのうち自分から名前でたどって届くアイテム。
+            // 前回と同じなら作り直さない (依存するクレートの使っていない所が変わっただけ: 本体を消してあるので、依存の
+            // 依存の関数のシグネチャは、呼んでいる総称関数の本体などから名前が届かなければ効かない)
+            let t3 = now_ns();
+            let mut dep_items: Vec<Option<Vec<crate::stub::StubItem>>> = (0..crates.len()).map(|_| None).collect();
+            let mut keep: Vec<(usize, String)> = vec![];
+            for (i, fp) in std::mem::take(&mut stale) {
+                let deps = all_deps(i);
+                for &j in &deps {
+                    if dep_items[j].is_none() {
+                        dep_items[j] = Some(crate::stub::items(&dep_v[j].as_ref().unwrap().0));
+                    }
+                }
+                let own = &own_v[i].as_ref().unwrap().0;
+                let fp2 = self.precise_fp(&crates[i], own, &loaded[i].as_ref().unwrap().1, &deps, crates, &loaded, &dep_items);
+                let p2 = out_dir.join(format!("{}.fp2", crates[i].name).as_str());
+                let op = out_dir.join(format!("{}.o", crates[i].name).as_str());
+                if !self.opts.no_cache && op.exists() && std::fs::read_to_string(p2.as_path()).is_ok_and(|old| old == fp2) {
+                    let _ = std::fs::write(out_dir.join(format!("{}.fp", crates[i].name).as_str()), &fp);
+                    if self.opts.time {
+                        eprintln!("  {:<12} fresh (used interface unchanged)", crates[i].name);
+                    }
+                    rep.crates.push((crates[i].name.clone(), Report2::default()));
+                    continue;
+                }
+                fp2s.push((i, fp2));
+                keep.push((i, fp));
+            }
+            stale = keep;
+            if self.opts.time {
+                eprintln!("  {:<12} {:>8.2} ms", "(fp2)", (now_ns() - t3) as f64 / 1e6);
             }
         }
         // (クレートは互いのソースしか使わない (.o は使わない) ので、古いものを fork して同時にコンパイルする)
@@ -1820,6 +1954,11 @@ impl Session2 {
                 None => self.build_one(crates, &own_v, &dep_v, i, &all_deps(i), &fp, out_dir),
             };
             let (r, ch, ns) = r?;
+            if !self.opts.no_cache {
+                if let Some((_, f2)) = fp2s.iter().find(|x| x.0 == i) {
+                    let _ = std::fs::write(out_dir.join(format!("{}.fp2", crates[i].name).as_str()), f2);
+                }
+            }
             changed[i] = ch;
             if ch {
                 rep.objects_written += 1;

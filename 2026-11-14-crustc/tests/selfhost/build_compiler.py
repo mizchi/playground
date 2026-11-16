@@ -40,7 +40,7 @@ parts = [("key", body("crates/core/src/key.rs")), ("fxhash", body("crates/core/s
          ("ast_summary", body("crates/core/src/ast_summary.rs")), ("program", body("crates/core/src/program.rs")),
          ("ast_consteval", body("crates/core/src/ast_consteval.rs")), ("solver", body("crates/core/src/solver.rs")), ("ctors", body("crates/core/src/ctors.rs")),
          ("ast_infer", body("crates/core/src/ast_infer.rs")), ("minclif", body("crates/minclif/src/lib.rs")), ("link", body("crates/core/src/link.rs")),
-         ("macros", body("crates/core/src/macros.rs") + "\nuse crate::proc_macro2;\n"), ("acg", acg), ("enc", body("crates/core/src/enc.rs")), ("types_enc", expand_enc_struct(body("crates/core/src/types_enc.rs"))), ("cache2", body("crates/core/src/cache2.rs")), ("cfg", body("crates/core/src/cfg.rs")), ("srcmap", body("crates/core/src/srcmap.rs")), ("driver2", body("crates/core/src/driver2.rs"))]
+         ("macros", body("crates/core/src/macros.rs") + "\nuse crate::proc_macro2;\n"), ("acg", acg), ("enc", body("crates/core/src/enc.rs")), ("types_enc", expand_enc_struct(body("crates/core/src/types_enc.rs"))), ("cache2", body("crates/core/src/cache2.rs")), ("cfg", body("crates/core/src/cfg.rs")), ("stub", body("crates/core/src/stub.rs")), ("srcmap", body("crates/core/src/srcmap.rs")), ("driver2", body("crates/core/src/driver2.rs"))]
 out = ["// 自動生成: tests/selfhost/build_compiler.py (crustc の src/*.rs をそのまま含む)",
        "mod cache {\n    pub use crate::key::*;\n}\n", body("tests/selfhost/mini_pm2.rs")]
 for name, src in parts:

@@ -169,6 +169,122 @@ pub fn interface_text(src: &str) -> String {
     out
 }
 
+/// モジュールの中のアイテム (依存するクレートのインターフェースを、使う側が名前でたどるため)
+pub struct StubItem {
+    /// 定義する名前 (impl はヘッダの名前すべて: 型か trait が届けば impl も届く)
+    pub names: Vec<String>,
+    /// アイテムのテキストのハッシュ
+    pub hash: crate::key::Key,
+    /// 中の識別子すべて
+    pub idents: Vec<String>,
+}
+
+/// src (クレートのテキスト) のアイテム。`mod m { .. }` の中も (mod 自体はアイテムにしない)
+pub fn items(src: &str) -> Vec<StubItem> {
+    let s = src.as_bytes();
+    let toks = crate::lexer::tokenize(s);
+    let close = matching(s, &toks);
+    let n = toks.len();
+    let t = |k: usize| -> &[u8] {
+        if k < n {
+            &s[toks[k].1..toks[k].2]
+        } else {
+            b""
+        }
+    };
+    let id = |k: usize, w: &[u8]| k < n && toks[k].0 == 0 && t(k) == w;
+    let sym = |k: usize, c: u8| k < n && toks[k].0 == 1 && s[toks[k].1] == c;
+    let mut out: Vec<StubItem> = vec![];
+    let mut k = 0;
+    while k < n {
+        // (モジュールの閉じ括弧)
+        if sym(k, b'}') || sym(k, b';') {
+            k += 1;
+            continue;
+        }
+        // `[pub] mod m {`: 中を見る
+        let mut j = k;
+        while sym(j, b'#') && sym(j + 1, b'[') && close[j + 1] != usize::MAX {
+            j = close[j + 1] + 1;
+        }
+        if id(j, b"pub") {
+            j += 1;
+            if sym(j, b'(') && close[j] != usize::MAX {
+                j = close[j] + 1;
+            }
+        }
+        if id(j, b"mod") && toks.get(j + 1).is_some_and(|x| x.0 == 0) && sym(j + 2, b'{') {
+            k = j + 3;
+            continue;
+        }
+        // アイテムの終わり: `;` か、本体の `}` (const / static / use / type は `;` まで)
+        let semi_kind = (j..n.min(j + 4)).any(|q| id(q, b"const") && !id(q + 1, b"fn") || id(q, b"static") || id(q, b"use") || id(q, b"type"));
+        let mut e = j;
+        while e < n {
+            if sym(e, b';') {
+                break;
+            }
+            if (sym(e, b'(') || sym(e, b'[') || sym(e, b'{')) && close[e] != usize::MAX {
+                let c = close[e];
+                if sym(e, b'{') && !semi_kind {
+                    e = c;
+                    if sym(e + 1, b';') {
+                        e += 1;
+                    }
+                    break;
+                }
+                e = c + 1;
+                continue;
+            }
+            e += 1;
+        }
+        let e = e.min(n - 1);
+        let mut idents: Vec<String> = vec![];
+        let mut q = k;
+        while q <= e {
+            if toks[q].0 == 0 {
+                let w = String::from_utf8_lossy(t(q)).into_owned();
+                if !idents.contains(&w) {
+                    idents.push(w);
+                }
+            }
+            q += 1;
+        }
+        let mut names: Vec<String> = vec![];
+        let mut q = j;
+        while q < e {
+            let w = t(q);
+            if toks[q].0 == 0 && matches!(w, b"fn" | b"struct" | b"enum" | b"union" | b"trait" | b"type" | b"const" | b"static") && toks.get(q + 1).is_some_and(|x| x.0 == 0) {
+                let nm = if w == b"static" && id(q + 1, b"mut") { q + 2 } else { q + 1 };
+                if !(w == b"const" && id(nm, b"fn")) {
+                    names.push(String::from_utf8_lossy(t(nm)).into_owned());
+                    break;
+                }
+            }
+            if toks[q].0 == 0 && (w == b"impl" || w == b"use") {
+                // (impl / use はヘッダ (use は全体) の名前すべて)
+                let mut r = q + 1;
+                while r <= e && !sym(r, b'{') || (w == b"use" && r <= e) {
+                    if toks[r].0 == 0 {
+                        names.push(String::from_utf8_lossy(t(r)).into_owned());
+                    }
+                    r += 1;
+                }
+                break;
+            }
+            q += 1;
+        }
+        if names.is_empty() {
+            names = idents.clone();
+        }
+        let mut h = crate::key::KeyHasher::new();
+        h.add(&src[toks[k].1..toks[e].2]);
+        out.push(StubItem { names, hash: h.finish(), idents });
+        k = e + 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +298,9 @@ mod tests {
         let src = "pub mod m {\n pub fn a(x: u32) -> u32 {\n x + 1\n }\n pub fn g<T: Copy>(x: T) -> T { x }\n pub fn h(x: impl Fn()) { x() }\n pub const fn c() -> u8 { 3 }\n pub fn o() -> impl Iterator<Item = u8> { 0..3 }\n struct S;\n impl S { fn m(&self) -> u8 { 1 } }\n impl<T> W<T> { fn n(&self) { body() } }\n trait Tr { fn d(&self) -> u8 { 2 } }\n fn w<T>(t: T) where T: Copy { t; }\n mod inner { fn z() { q() } }\n}\n";
         let o = interface_text(src);
         assert_eq!(o.lines().count(), src.lines().count());
+        let its = items(&o);
+        let names: Vec<String> = its.iter().map(|i| i.names.join("+")).collect();
+        assert_eq!(names, ["a", "g", "h", "c", "o", "S", "S", "T+W+T", "Tr", "w", "z"]);
         assert_eq!(
             norm(&o),
             norm("pub mod m { pub fn a(x: u32) -> u32 { loop {} } pub fn g<T: Copy>(x: T) -> T { x } pub fn h(x: impl Fn()) { x() } pub const fn c() -> u8 { 3 } pub fn o() -> impl Iterator<Item = u8> { 0..3 } struct S; impl S { fn m(&self) -> u8 { loop {} } } impl<T> W<T> { fn n(&self) { body() } } trait Tr { fn d(&self) -> u8 { 2 } } fn w<T>(t: T) where T: Copy { t; } mod inner { fn z() { loop {} } } }")
