@@ -71,7 +71,7 @@ fn infer_like_syn() {
             crustc::ast_infer::lets_in_order(body, &mut lb);
             fns += 1;
             let ta: Vec<Option<_>> = la.0.iter().map(|&l| a.get(&(l as usize)).copied()).collect();
-            let tb: Vec<Option<_>> = lb.iter().map(|&l| b.get(&(l as usize)).copied()).collect();
+            let tb: Vec<Option<_>> = lb.iter().map(|&l| b.get(&(l as usize + 1)).copied()).collect();
             lets += ta.len();
             if std::env::var("AST_INFER_SHOW").is_ok_and(|n| p.display().to_string().contains(&n)) {
                 for (i, (x, y)) in ta.iter().zip(&tb).enumerate() {

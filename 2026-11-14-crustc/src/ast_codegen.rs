@@ -226,7 +226,7 @@ impl Cx<'_> {
                 Stmt::Let(pat, ann, init, els) => {
                     let t = match ann.as_ref().and_then(|a| self.parse_ty(a)) {
                         Some(t) => t,
-                        None => match self.lets.get(&(st as *const Stmt as usize)).copied() {
+                        None => match self.lets.get(&crate::ast_infer::stmt_key(st)).copied() {
                             Some(t) => t,
                             None => return self.err(format!("cannot infer the type of `let {}`", short_pat(pat))),
                         },

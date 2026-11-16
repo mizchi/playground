@@ -2,7 +2,8 @@ use super::*;
 use crate::parse::{Block as PBlock, Expr, GArg, Pat};
 use crate::program::{FnSig, PPath};
 use crate::types::{Ty, intern};
-use clif::{FloatCC, IntCC, MemFlagsData, Type, Value, types};
+use crate::acg::clif::{MemFlagsData, types};
+use crate::minclif::{FloatCC, IntCC, Type, Value};
 
 /// turbofish (空なら None)
 fn tf_of(tf: &[GArg]) -> Option<&[GArg]> {

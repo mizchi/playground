@@ -2,7 +2,8 @@ use super::*;
 use crate::parse::{Block, Expr, GArg, Pat, Path, Stmt};
 use crate::program::{FnSig, PPath, TyEnv};
 use crate::types::{Ty, intern};
-use clif::{IntCC, TrapCode, Value, types};
+use crate::acg::clif::{TrapCode, types};
+use crate::minclif::{IntCC, Value};
 
 /// ラベルの名前 (syn の `l.ident` と同じく先頭の `'` を除く)
 pub(crate) fn label_name(l: &str) -> String {
@@ -297,14 +298,14 @@ impl Cx<'_> {
         // `Box<T>` → `Box<dyn Trait>`
         if let (Some(want @ Ty::Box(Ty::Dyn(tr))), Some(v), Ty::Box(inner)) = (expected, v, t) {
             if !matches!(inner, Ty::Dyn(_)) {
-                let fat = self.to_dyn(v, *inner, tr, SP)?;
+                let fat = self.to_dyn(v, *inner, tr.as_str(), SP)?;
                 return Ok((Some(fat), want));
             }
         }
         // `&T` → `&dyn Trait` (データのポインタ + vtable)
         if let (Some(want @ Ty::Ref(m2, Ty::Dyn(tr))), Some(v), Ty::Ref(m1, inner)) = (expected, v, t) {
             if !matches!(inner, Ty::Dyn(_)) && (m1 || !m2) {
-                let fat = self.to_dyn(v, *inner, tr, SP)?;
+                let fat = self.to_dyn(v, *inner, tr.as_str(), SP)?;
                 return Ok((Some(fat), want));
             }
         }
@@ -969,6 +970,9 @@ impl Cx<'_> {
             .or(hint.as_ref().and_then(|h| h.1).filter(|&t| !prog.has_param(t)))
             .or_else(|| self.lets.get(&(c as *const Expr as usize)).copied().filter(|&t| !prog.has_param(t)))
             .or(hint.as_ref().and_then(|h| h.1));
+        if std::env::var_os("ACG_DEBUG_CLO").is_some() {
+            eprintln!("closure k={k} ret_ann={:?} hint={:?} rec={:?} -> {:?}", cd.ret_ann, hint, self.lets.get(&(c as *const Expr as usize)), sol[ri]);
+        }
         if let Some(a) = exp_args {
             for (s, a) in sol.iter_mut().zip(a) {
                 *s = Some(a);

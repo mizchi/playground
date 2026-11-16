@@ -47,8 +47,9 @@ pub use p8_misc::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use clif::{AbiParam, Block, FuncRef, FunctionBuilder, IntCC, Signature, StackSlot, TrapCode, Type, Value, Variable, types};
-pub use clif::FloatCC;
+use crate::acg::clif::{AbiParam, FuncRef, FunctionBuilder, Signature, TrapCode, types};
+use crate::minclif::{Block, IntCC, StackSlot, Type, Value, Variable};
+pub use crate::minclif::FloatCC;
 use lit::Lit;
 
 use crate::parse::{Expr, Pat, Path, Stmt};
@@ -892,6 +893,27 @@ impl Cx<'_> {
         }
     }
 
+    /// `&&T` (`&&&T` ..) を `&T` の場所に渡すときの deref の強制変換
+    pub fn deref_coerce(&mut self, mut v: Option<Value>, mut t: Ty, want: Ty) -> (Option<Value>, Ty) {
+        while let (Ty::Ref(..), Ty::Ref(_, inner @ Ty::Ref(..)), Some(val)) = (want, t, v) {
+            if t == want || t.is_fat() {
+                break;
+            }
+            v = Some(self.b.ins().load(PTR, mf(), val, 0));
+            t = *inner;
+        }
+        // (`&String` を `&str` に)
+        if let (Ty::Ref(false, Ty::Str), Ty::Ref(_, Ty::Struct(sid)), Some(val)) = (want, t, v) {
+            let sd = &self.prog.structs[*sid as usize];
+            if sd.name == "String" && sd.base.is_none() && self.prog.index.contains_key("String::as_str") {
+                if let Ok((Some(r), rt)) = self.call_named("String::as_str", vec![], &[(val, Ty::Ref(false, intern(Ty::Struct(*sid))))], SP) {
+                    return (Some(r), rt);
+                }
+            }
+        }
+        (v, t)
+    }
+
     /// 終端命令の後に続くコード用の到達不能ブロックへ移る。
     pub fn dead(&mut self) -> V {
         let blk = self.b.create_block();
@@ -972,7 +994,7 @@ impl Cx<'_> {
                         // (型推論は強制変換の行き先 `[T]` などを入れてしまうことがあるので、サイズ不定の型は使わない)
                         None => self
                             .lets
-                            .get(&(st as *const Stmt as usize))
+                            .get(&crate::ast_infer::stmt_key(st))
                             .copied()
                             .filter(|t| !matches!(t, Ty::Slice(_) | Ty::Str | Ty::Dyn(_))),
                     };
@@ -1025,7 +1047,7 @@ impl Cx<'_> {
                     }
                     let ann = ann.filter(|&a| !has_hole(self.prog, a));
                     let ty = ann.unwrap_or(t);
-                    self.same(SP, t, ty)?;
+                    self.same(SP, t, ty).map_err(|m| format!("{m} (in `let {name}`)"))?;
                     self.bind(name, ty, v);
                     self.extend_temps(t0);
                 }

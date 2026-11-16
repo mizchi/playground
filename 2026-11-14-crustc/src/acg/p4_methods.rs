@@ -1,5 +1,5 @@
 use super::*;
-use clif::MemFlagsData;
+use crate::acg::clif::MemFlagsData;
 use crate::parse::GArg;
 
 impl Cx<'_> {

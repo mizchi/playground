@@ -2038,6 +2038,8 @@ impl Inf<'_> {
                 self.known(Ty::U32)
             }
             "abs_diff" => self.var(),
+            // (受け手の型がまだ分からない `c.len()` (chunks の要素など) も usize)
+            "len" => self.known(Ty::Usize),
             _ => self.known(Ty::Bool),
         }
     }

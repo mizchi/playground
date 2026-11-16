@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::HashSet;
 
-use super::clif::MemFlagsData;
+use crate::acg::clif::MemFlagsData;
 use crate::parse::{Block as PBlock, Expr, GArg, Pat, Path, Stmt, TokKind, tokenize};
 use crate::types::{Ty, intern};
 
@@ -98,6 +98,189 @@ fn str_lit(e: &Expr) -> Option<String> {
 
 fn let_stmt(name: &str, init: Expr) -> Stmt {
     Stmt::Let(Pat::Ident(false, false, name.to_string(), None), None, Some(init), None)
+}
+
+/// hoist_index_bases の走査 (関数の中に置くと crustc の入れ子のアイテムの持ち上げが impl を扱えないので外に置く)
+struct HoistScan {
+    /// 現れた添字の鎖: (根の名前, 受け手の式の列 (`x`, `x[i]`, ..), 代入の左辺か)
+    chains: Vec<(String, Vec<Expr>, bool)>,
+    /// 鎖でない形で現れた名前 (メソッドの受け手・&mut・値として・マクロの中・束縛)
+    other: HashSet<String>,
+    assigned: HashSet<String>,
+    bail: bool,
+}
+fn hoist_root(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Path(_, p) => ident_of(p).map(|i| i.to_string()),
+        Expr::Index(b, _) => hoist_root(b),
+        Expr::Paren(p) => hoist_root(p),
+        _ => None,
+    }
+}
+fn hoist_chain(e: &Expr, out: &mut Vec<Expr>) -> bool {
+    match e {
+        Expr::Path(_, p) if ident_of(p).is_some() => {
+            out.push(e.clone());
+            true
+        }
+        Expr::Index(b, ix) if !matches!(&**ix, Expr::Range(..)) => {
+            if !hoist_chain(b, out) {
+                return false;
+            }
+            out.push(e.clone());
+            true
+        }
+        _ => false,
+    }
+}
+impl HoistScan {
+    fn visit_expr(&mut self, e: &Expr) {
+        match e {
+            Expr::Index(_, ix) if !matches!(&**ix, Expr::Range(..)) => {
+                let mut c = vec![];
+                if hoist_chain(e, &mut c) {
+                    c.pop(); // (いちばん外の添字は要素そのもの: 受け手は手前まで)
+                    self.chains.push((hoist_root(e).unwrap(), c, false));
+                    // 添字の式の中も見る
+                    let mut x = e;
+                    while let Expr::Index(b, ix) = x {
+                        self.visit_expr(ix);
+                        x = b;
+                    }
+                    return;
+                }
+                self.walk(e);
+            }
+            Expr::Assign(l, r) => {
+                self.assign_target(l);
+                self.visit_expr(r);
+            }
+            Expr::AssignOp(_, l, r) => {
+                self.assign_target(l);
+                self.visit_expr(r);
+            }
+            Expr::Path(_, p) => {
+                if let Some(i) = ident_of(p) {
+                    self.other.insert(i.to_string());
+                }
+            }
+            Expr::Closure(..) => self.bail = true,
+            Expr::Macro(_, g) => self.visit_macro(g),
+            _ => self.walk(e),
+        }
+    }
+    /// 子の式とパターンを見る (syn::visit::visit_expr の代わり)
+    fn walk(&mut self, e: &Expr) {
+        match e {
+            Expr::Let(p, x) => {
+                self.visit_pat(p);
+                self.visit_expr(x);
+            }
+            Expr::Match(x, arms) => {
+                self.visit_expr(x);
+                for a in arms {
+                    self.visit_pat(&a.pat);
+                    if let Some(g) = &a.guard {
+                        self.visit_expr(g);
+                    }
+                    self.visit_expr(&a.body);
+                }
+            }
+            Expr::For(_, p, x, b) => {
+                self.visit_pat(p);
+                self.visit_expr(x);
+                self.visit_block(b);
+            }
+            Expr::Block(_, _, b) | Expr::Const(b) | Expr::Loop(_, b) => self.visit_block(b),
+            Expr::If(c, t, el) => {
+                self.visit_expr(c);
+                self.visit_block(t);
+                if let Some(el) = el {
+                    self.visit_expr(el);
+                }
+            }
+            Expr::While(_, c, b) => {
+                self.visit_expr(c);
+                self.visit_block(b);
+            }
+            _ => crate::ast_closure::each_child_pub(e, &mut |c| self.visit_expr(c)),
+        }
+    }
+    fn visit_block(&mut self, b: &PBlock) {
+        for s in &b.stmts {
+            match s {
+                Stmt::Let(p, _, init, els) => {
+                    self.visit_pat(p);
+                    if let Some(e) = init {
+                        self.visit_expr(e);
+                    }
+                    if let Some(b) = els {
+                        self.visit_block(b);
+                    }
+                }
+                Stmt::Expr(e, _) => self.visit_expr(e),
+                Stmt::Item(_) => {}
+            }
+        }
+    }
+    fn visit_pat(&mut self, p: &Pat) {
+        match p {
+            Pat::Ident(_, _, n, _) => {
+                self.other.insert(n.clone());
+                self.assigned.insert(n.clone());
+            }
+            Pat::Lit(e) => self.visit_expr(e),
+            Pat::Range(a, b, _) => {
+                if let Some(a) = a {
+                    self.visit_expr(a);
+                }
+                if let Some(b) = b {
+                    self.visit_expr(b);
+                }
+            }
+            Pat::Tuple(ps) | Pat::TupleStruct(_, ps) | Pat::Or(ps) | Pat::Slice(ps) => {
+                for p in ps {
+                    self.visit_pat(p);
+                }
+            }
+            Pat::Struct(_, fs, _) => {
+                for f in fs {
+                    self.visit_pat(&f.1);
+                }
+            }
+            Pat::Ref(_, x) => self.visit_pat(x),
+            Pat::Macro(t) => self.visit_macro(t),
+            Pat::Wild | Pat::Rest | Pat::Path(_) => {}
+        }
+    }
+    fn visit_macro(&mut self, g: &str) {
+        // (マクロの引数の名前は全部「鎖でない」とみなす)
+        if let Ok(toks) = tokenize(g) {
+            for t in toks {
+                if t.kind == TokKind::Ident {
+                    self.other.insert(t.text);
+                }
+            }
+        }
+    }
+    fn assign_target(&mut self, t: &Expr) {
+        let mut c = vec![];
+        if matches!(t, Expr::Index(..)) && hoist_chain(t, &mut c) {
+            c.pop();
+            self.chains.push((hoist_root(t).unwrap(), c, true));
+            let mut x = t;
+            while let Expr::Index(b, ix) = x {
+                self.visit_expr(ix);
+                x = b;
+            }
+        } else {
+            if let Some(r) = hoist_root(t) {
+                self.assigned.insert(r.clone());
+                self.other.insert(r);
+            }
+            self.visit_expr(t);
+        }
+    }
 }
 
 impl Cx<'_> {
@@ -479,188 +662,7 @@ impl Cx<'_> {
     /// x や i を束縛し直さず、x を含むマクロもクロージャもない。`x[i]` の i の検査は本体の中で (前で比べた値で) 行う
     /// (hoisted の鍵は受け手の式の Debug の文字列 `format!("{e:?}")`)
     pub(crate) fn hoist_index_bases(&mut self, body: &PBlock, pat: Option<&Pat>, cond: Option<&Expr>) -> R<()> {
-        struct Scan {
-            /// 現れた添字の鎖: (根の名前, 受け手の式の列 (`x`, `x[i]`, ..), 代入の左辺か)
-            chains: Vec<(String, Vec<Expr>, bool)>,
-            /// 鎖でない形で現れた名前 (メソッドの受け手・&mut・値として・マクロの中・束縛)
-            other: HashSet<String>,
-            assigned: HashSet<String>,
-            bail: bool,
-        }
-        fn root(e: &Expr) -> Option<String> {
-            match e {
-                Expr::Path(_, p) => ident_of(p).map(|i| i.to_string()),
-                Expr::Index(b, _) => root(b),
-                Expr::Paren(p) => root(p),
-                _ => None,
-            }
-        }
-        fn chain(e: &Expr, out: &mut Vec<Expr>) -> bool {
-            match e {
-                Expr::Path(_, p) if ident_of(p).is_some() => {
-                    out.push(e.clone());
-                    true
-                }
-                Expr::Index(b, ix) if !matches!(&**ix, Expr::Range(..)) => {
-                    if !chain(b, out) {
-                        return false;
-                    }
-                    out.push(e.clone());
-                    true
-                }
-                _ => false,
-            }
-        }
-        impl Scan {
-            fn visit_expr(&mut self, e: &Expr) {
-                match e {
-                    Expr::Index(_, ix) if !matches!(&**ix, Expr::Range(..)) => {
-                        let mut c = vec![];
-                        if chain(e, &mut c) {
-                            c.pop(); // (いちばん外の添字は要素そのもの: 受け手は手前まで)
-                            self.chains.push((root(e).unwrap(), c, false));
-                            // 添字の式の中も見る
-                            let mut x = e;
-                            while let Expr::Index(b, ix) = x {
-                                self.visit_expr(ix);
-                                x = b;
-                            }
-                            return;
-                        }
-                        self.walk(e);
-                    }
-                    Expr::Assign(l, r) => {
-                        self.assign_target(l);
-                        self.visit_expr(r);
-                    }
-                    Expr::AssignOp(_, l, r) => {
-                        self.assign_target(l);
-                        self.visit_expr(r);
-                    }
-                    Expr::Path(_, p) => {
-                        if let Some(i) = ident_of(p) {
-                            self.other.insert(i.to_string());
-                        }
-                    }
-                    Expr::Closure(..) => self.bail = true,
-                    Expr::Macro(_, g) => self.visit_macro(g),
-                    _ => self.walk(e),
-                }
-            }
-            /// 子の式とパターンを見る (syn::visit::visit_expr の代わり)
-            fn walk(&mut self, e: &Expr) {
-                match e {
-                    Expr::Let(p, x) => {
-                        self.visit_pat(p);
-                        self.visit_expr(x);
-                    }
-                    Expr::Match(x, arms) => {
-                        self.visit_expr(x);
-                        for a in arms {
-                            self.visit_pat(&a.pat);
-                            if let Some(g) = &a.guard {
-                                self.visit_expr(g);
-                            }
-                            self.visit_expr(&a.body);
-                        }
-                    }
-                    Expr::For(_, p, x, b) => {
-                        self.visit_pat(p);
-                        self.visit_expr(x);
-                        self.visit_block(b);
-                    }
-                    Expr::Block(_, _, b) | Expr::Const(b) | Expr::Loop(_, b) => self.visit_block(b),
-                    Expr::If(c, t, el) => {
-                        self.visit_expr(c);
-                        self.visit_block(t);
-                        if let Some(el) = el {
-                            self.visit_expr(el);
-                        }
-                    }
-                    Expr::While(_, c, b) => {
-                        self.visit_expr(c);
-                        self.visit_block(b);
-                    }
-                    _ => crate::ast_closure::each_child_pub(e, &mut |c| self.visit_expr(c)),
-                }
-            }
-            fn visit_block(&mut self, b: &PBlock) {
-                for s in &b.stmts {
-                    match s {
-                        Stmt::Let(p, _, init, els) => {
-                            self.visit_pat(p);
-                            if let Some(e) = init {
-                                self.visit_expr(e);
-                            }
-                            if let Some(b) = els {
-                                self.visit_block(b);
-                            }
-                        }
-                        Stmt::Expr(e, _) => self.visit_expr(e),
-                        Stmt::Item(_) => {}
-                    }
-                }
-            }
-            fn visit_pat(&mut self, p: &Pat) {
-                match p {
-                    Pat::Ident(_, _, n, _) => {
-                        self.other.insert(n.clone());
-                        self.assigned.insert(n.clone());
-                    }
-                    Pat::Lit(e) => self.visit_expr(e),
-                    Pat::Range(a, b, _) => {
-                        if let Some(a) = a {
-                            self.visit_expr(a);
-                        }
-                        if let Some(b) = b {
-                            self.visit_expr(b);
-                        }
-                    }
-                    Pat::Tuple(ps) | Pat::TupleStruct(_, ps) | Pat::Or(ps) | Pat::Slice(ps) => {
-                        for p in ps {
-                            self.visit_pat(p);
-                        }
-                    }
-                    Pat::Struct(_, fs, _) => {
-                        for f in fs {
-                            self.visit_pat(&f.1);
-                        }
-                    }
-                    Pat::Ref(_, x) => self.visit_pat(x),
-                    Pat::Macro(t) => self.visit_macro(t),
-                    Pat::Wild | Pat::Rest | Pat::Path(_) => {}
-                }
-            }
-            fn visit_macro(&mut self, g: &str) {
-                // (マクロの引数の名前は全部「鎖でない」とみなす)
-                if let Ok(toks) = tokenize(g) {
-                    for t in toks {
-                        if t.kind == TokKind::Ident {
-                            self.other.insert(t.text);
-                        }
-                    }
-                }
-            }
-            fn assign_target(&mut self, t: &Expr) {
-                let mut c = vec![];
-                if matches!(t, Expr::Index(..)) && chain(t, &mut c) {
-                    c.pop();
-                    self.chains.push((root(t).unwrap(), c, true));
-                    let mut x = t;
-                    while let Expr::Index(b, ix) = x {
-                        self.visit_expr(ix);
-                        x = b;
-                    }
-                } else {
-                    if let Some(r) = root(t) {
-                        self.assigned.insert(r.clone());
-                        self.other.insert(r);
-                    }
-                    self.visit_expr(t);
-                }
-            }
-        }
-        let mut sc = Scan { chains: vec![], other: Default::default(), assigned: Default::default(), bail: false };
+        let mut sc = HoistScan { chains: vec![], other: Default::default(), assigned: Default::default(), bail: false };
         sc.visit_block(body);
         if let Some(p) = pat {
             sc.visit_pat(p);

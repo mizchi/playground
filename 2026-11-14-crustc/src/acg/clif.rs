@@ -178,8 +178,7 @@ impl Ins<'_> {
     fn m(&mut self) -> &mut M {
         &mut self.0.m
     }
-    pub fn iconst(self, t: Type, x: impl Into<i64>) -> Value {
-        let x: i64 = x.into();
+    pub fn iconst(self, t: Type, x: i64) -> Value {
         let m = &mut self.0.m;
         if t == Type::I128 {
             let lo = m.iconst(Type::I64, x);

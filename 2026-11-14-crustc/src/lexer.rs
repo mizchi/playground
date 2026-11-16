@@ -968,7 +968,7 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
             let kw = tok(k);
             // (`*const T` の const / `&'static` の static は定義でない)
             let after_star = k >= 1 && is_sym(k - 1, b'*');
-            let after_tick = k >= 1 && toks[k - 1].0 == 1 && s[toks[k - 1].1] == b'\'';
+            let after_tick = toks[k].1 >= 1 && s[toks[k].1 - 1] == b'\'';
             if matches!(kw, b"fn" | b"struct" | b"enum" | b"trait" | b"type" | b"const" | b"static" | b"union") && k + 1 < toks.len() && !after_star && !after_tick {
                 let nk = if kw == b"static" && is_id(k + 1, b"mut") { k + 2 } else { k + 1 };
                 // (`const fn f` は fn で数える)
@@ -980,7 +980,29 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
         }
         k += 1;
     }
+    // `use std::path::{Path, PathBuf};` などで std / core / alloc から取り込む型の名前: モジュールの中で同じ名前を
+    // 定義していたら (crustc 自身の `parse::Path` など) ぶつかるものとして名前を変える
+    let mut std_names: Vec<Vec<u8>> = vec![];
+    {
+        let mut j = 0;
+        while j + 1 < toks.len() {
+            if is_id(j, b"use") && (is_id(j + 1, b"std") || is_id(j + 1, b"core") || is_id(j + 1, b"alloc")) {
+                let mut e = j + 1;
+                while e < toks.len() && !is_sym(e, b';') {
+                    if toks[e].0 == 0 && tok(e).first().is_some_and(|c| c.is_ascii_uppercase()) {
+                        std_names.push(tok(e).to_vec());
+                    }
+                    e += 1;
+                }
+                j = e;
+            }
+            j += 1;
+        }
+    }
     let colliding = |n: &[u8]| -> bool {
+        if std_names.iter().any(|x| x.as_slice() == n) && defs.iter().any(|d| d.0.as_slice() == n && d.1 != usize::MAX) {
+            return true;
+        }
         let mut first: Option<usize> = None;
         for d in &defs {
             if d.0.as_slice() == n {
@@ -1004,6 +1026,14 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
     };
     // 名前を変える定義: (スコープ, 元の名前) → 新しい名前
     let mut renamed: Vec<(usize, Vec<u8>, Vec<u8>)> = vec![];
+    if std::env::var_os("CRUSTC_DEBUG_RENAME").is_some() {
+        for d in &defs {
+            if colliding(&d.0) {
+                let line = s[..toks[d.2].1].iter().filter(|&&c| c == b'\n').count() + 1;
+                eprintln!("collide {} scope {} line {line}", String::from_utf8_lossy(&d.0), d.1);
+            }
+        }
+    }
     for d in &defs {
         if d.1 != usize::MAX && colliding(&d.0) && !renamed.iter().any(|r| r.0 == d.1 && r.1 == d.0) {
             renamed.push((d.1, d.0.clone(), new_name(d.1, &d.0)));
@@ -1228,7 +1258,9 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
             let n = tok(k);
             let nn = renamed_in(sc, n)
                 .or_else(|| imports.iter().find(|i| i.0 == sc && i.1.as_slice() == n).map(|i| i.2.clone()))
-                .or_else(|| globs.iter().filter(|g| g.0 == sc).find_map(|g| renamed_in(g.1, n)));
+                .or_else(|| globs.iter().filter(|g| g.0 == sc).find_map(|g| renamed_in(g.1, n)))
+                // (`use super::*;` は親が use で取り込んだ名前も見える)
+                .or_else(|| globs.iter().filter(|g| g.0 == sc).find_map(|g| imports.iter().find(|i| i.0 == g.1 && i.1.as_slice() == n).map(|i| i.2.clone())));
             if let Some(nn) = nn {
                 repl.push((k, k, nn));
             }

@@ -12,6 +12,11 @@ use crate::types::{Ty, TySyn, VariantKind, intern, intern_fn, FnTy};
 /// 注釈なし let と、値を作る式の型 (ノードのアドレス → 型)
 pub type LetTypes = crate::fxhash::FxMap<usize, Ty>;
 
+/// let 文の型のキー (文のアドレス + 1)。文の中の式 (初期値) が文と同じアドレスにあることがあるので、ずらして区別する
+pub fn stmt_key(st: &Stmt) -> usize {
+    st as *const Stmt as usize + 1
+}
+
 
 /// 推論結果: (let と式の型, 戻り値型, 引数の型)
 pub type Full = (LetTypes, Option<Ty>, Vec<Option<Ty>>);
@@ -797,7 +802,7 @@ impl Inf<'_> {
                         self.unify(v, k);
                     }
                     if self.no_record == 0 {
-                        self.lets.push((st as *const Stmt as usize, v));
+                        self.lets.push((stmt_key(st), v));
                     }
                     match pat {
                         Pat::Ident(_, _, n, None) => self.scopes.last_mut().unwrap().push((n.clone(), v)),
@@ -2113,6 +2118,8 @@ impl Inf<'_> {
             }
             "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros" => self.known(Ty::U32),
             "abs_diff" => self.var(),
+            // (受け手の型がまだ分からない `c.len()` (chunks の要素など) も usize)
+            "len" => self.known(Ty::Usize),
             _ => self.known(Ty::Bool),
         }
     }

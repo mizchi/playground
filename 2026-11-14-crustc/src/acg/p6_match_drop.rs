@@ -1,7 +1,8 @@
 use super::*;
 use crate::parse::{Block as PBlock, Expr, Pat, Path};
 use crate::types::{Ty, intern};
-use clif::{AbiParam, Block, IntCC, Signature, StackSlot, TrapCode, Value, types};
+use crate::acg::clif::{AbiParam, Signature, TrapCode, types};
+use crate::minclif::{Block, IntCC, StackSlot, Value};
 use lit::Lit;
 
 /// 式がこの種類のリテラルか

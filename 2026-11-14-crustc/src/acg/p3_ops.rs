@@ -1,7 +1,7 @@
 use super::*;
 use crate::parse::{Expr, GArg};
 use crate::types::{Ty, intern};
-use clif::MemFlagsData;
+use crate::acg::clif::MemFlagsData;
 
 /// `(x)` (syn の parse_quote! の括弧と同じ形)
 fn paren(e: &Expr) -> Expr {
@@ -1031,6 +1031,8 @@ impl Cx<'_> {
         }
         for (fi, v, vt, sp) in vals {
             let (_, fty, off) = fields[fi];
+            // (`V(x)` で x: &&T を &T のフィールドに: deref の強制変換)
+            let (v, vt) = self.deref_coerce(v, vt, fty);
             self.same(sp, vt, fty)?;
             self.write(Place::Mem(a, off as i32, fty), v);
         }

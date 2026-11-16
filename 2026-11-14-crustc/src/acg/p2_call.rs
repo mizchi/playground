@@ -28,6 +28,15 @@ fn ty_named(n: &str) -> Box<crate::parse::Ty> {
 }
 
 /// 名前とリテラルなどだけからなる式のソースのテキスト (`vec![..]` のトークン列を作るのに使う)
+/// 式の列を `, ` でつないだテキスト (どれかが書けなければ None)
+fn simple_texts(xs: &[Expr]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for x in xs {
+        parts.push(simple_text(x)?);
+    }
+    Some(parts.join(", "))
+}
+
 fn simple_text(e: &Expr) -> Option<String> {
     Some(match e {
         Expr::Lit(t) => t.clone(),
@@ -37,8 +46,8 @@ fn simple_text(e: &Expr) -> Option<String> {
         Expr::Paren(x) => format!("({})", simple_text(x)?),
         Expr::Field(b, n) => format!("{}.{n}", simple_text(b)?),
         Expr::Tuple(xs) if xs.len() == 1 => format!("({},)", simple_text(&xs[0])?),
-        Expr::Tuple(xs) => format!("({})", xs.iter().map(simple_text).collect::<Option<Vec<_>>>()?.join(", ")),
-        Expr::Array(xs) => format!("[{}]", xs.iter().map(simple_text).collect::<Option<Vec<_>>>()?.join(", ")),
+        Expr::Tuple(xs) => format!("({})", simple_texts(xs)?),
+        Expr::Array(xs) => format!("[{}]", simple_texts(xs)?),
         _ => return None,
     })
 }
@@ -337,7 +346,7 @@ impl Cx<'_> {
                     }
                     Some(Ty::Struct(sid)) => {
                         if let Some(id) = self.prog.method(sid, "from") {
-                            let args = [recv];
+                            let args: [&Expr; 1] = [recv];
                             return self.call_fn(id, None, &args, None, Some(Ty::Struct(sid)), SP);
                         }
                     }
@@ -930,6 +939,12 @@ impl Cx<'_> {
             None
         };
         for ((v, t, sp), &pt) in vals.into_iter().zip(&sig.params) {
+            let (v, t) = if matches!(pt, Ty::Ref(false, Ty::Str)) {
+                let (v2, t2) = self.deref_coerce(Some(v), t, pt);
+                (v2.unwrap_or(v), t2)
+            } else {
+                (v, t)
+            };
             // 参照の参照を参照に (deref の強制変換: `t.starts_with(k)` で k: &&str)
             let (v, t) = match (t, pt) {
                 (Ty::Ref(_, a), Ty::Ref(_, pi)) if matches!(*a, Ty::Ref(_, i) if *i == *pi) => {
