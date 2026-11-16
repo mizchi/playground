@@ -915,6 +915,10 @@ impl FunctionBuilder {
     /// 型だけを変える (ビット列はそのまま)
     pub fn bitcast(&mut self, t: Type, a: Value) -> Value {
         self.load_rax(a);
+        if !t.is_float() {
+            // (整数にするときは幅で 0 拡張する: f32 のスロットの上位 4 byte は決まっていない)
+            return self.result(t);
+        }
         let v = self.new_value(t);
         self.store_rax(v);
         v
