@@ -296,6 +296,7 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
         inline_ret: None,
         inline_depth: 0,
         inlined: 0,
+        try_into_hint: None,
     };
     let r = if prog.index.get(crate::prelude::DROP_GLUE) == Some(&body_id) {
         cx.drop_glue_body(&sig)
@@ -603,6 +604,8 @@ pub struct Cx<'p> {
     pub inline_ret: Option<Block>,
     pub inline_depth: u32,
     pub inlined: u32,
+    /// `x.try_into().unwrap()` の unwrap の期待型 (型推論が try_into の行き先を記録していないとき)
+    pub try_into_hint: Option<Ty>,
 }
 
 /// 間接呼び出しの呼び先

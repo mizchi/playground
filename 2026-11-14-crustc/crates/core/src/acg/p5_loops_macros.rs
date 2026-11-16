@@ -1428,7 +1428,7 @@ impl Cx<'_> {
             let m = name == "from_raw_parts_mut";
             return Ok(Some((Some(fat), Ty::Ref(m, intern(Ty::Slice(e))))));
         }
-        if !matches!(name.as_str(), "size_of" | "align_of" | "null" | "null_mut" | "needs_drop" | "__exr_int_kind") {
+        if !matches!(name.as_str(), "size_of" | "align_of" | "null" | "null_mut" | "needs_drop" | "__exr_int_kind" | "zeroed") {
             return Ok(None);
         }
         // ユーザが同名の関数を定義していればそちら
@@ -1455,6 +1455,34 @@ impl Cx<'_> {
                 };
                 let v = if t.is_int() && t.bits() <= 64 { 1 + t.signed() as i64 } else { 0 };
                 (Some(self.b.ins().iconst(types::I8, v)), Ty::U8)
+            }
+            // `core::mem::zeroed::<T>()` (型は turbofish か期待型): 0 で埋めた値
+            "zeroed" => {
+                let Some(t) = targ.or(expected) else {
+                    return err(SP, "cannot infer the type of `zeroed()`; annotate it");
+                };
+                if t.is_agg() {
+                    let a = self.temp(t);
+                    let (size, _) = self.prog.size_align(t);
+                    let mut off = 0;
+                    for (n, ty) in [(8u32, types::I64), (4, types::I32), (2, types::I16), (1, types::I8)] {
+                        while off + n <= size {
+                            let z = self.b.ins().iconst(ty, 0);
+                            self.b.ins().store(mf(), z, a, off as i32);
+                            off += n;
+                        }
+                    }
+                    (Some(a), t)
+                } else {
+                    let v = match clif_ty(t) {
+                        None => None,
+                        Some(ct) if ct == types::F64 => Some(self.b.ins().f64const(0.0)),
+                        Some(ct) if ct == types::F32 => Some(self.b.ins().f32const(0.0)),
+                        Some(ct) if ct == types::I128 => Some(self.int_const(Ty::I128, 0)),
+                        Some(ct) => Some(self.b.ins().iconst(ct, 0)),
+                    };
+                    (v, t)
+                }
             }
             // `core::mem::needs_drop::<T>()`: drop の glue が要る型か (定数。`Vec<u8>` の truncate で要素ごとの drop を省く)
             "needs_drop" => {
@@ -1545,7 +1573,19 @@ impl Cx<'_> {
     }
 
     pub(crate) fn path_value(&mut self, e: &Expr, _expected: Option<Ty>) -> R<V> {
-        let Expr::Path(_, p) = e else { unreachable!() };
+        let Expr::Path(q, p) = e else { unreachable!() };
+        // `<u64 as Integer>::MAX_STR_LEN`: impl の関連 const `u64::MAX_STR_LEN`
+        if let (Some(q), Some(last)) = (q, p.segs.last()) {
+            if let Ok(t) = self.parse_ty(q) {
+                let tn = self.prog.tn(t);
+                if self.prog.const_index.contains_key(&format!("{tn}::{}", last.name)) {
+                    let seg = |n: &str| crate::parse::Seg { name: n.to_string(), args: vec![], fn_args: None, text: n.to_string() };
+                    let np = crate::parse::Path { global: false, segs: vec![seg(&tn), seg(&last.name)], pos: p.pos };
+                    let ne: &Expr = self.keep_expr(Expr::Path(None, np));
+                    return self.expr(ne, _expected);
+                }
+            }
+        }
         if let Some(ci) = self.const_of(e) {
             return self.const_value(e, ci);
         }

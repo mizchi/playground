@@ -51,8 +51,27 @@ pub fn const_arg_syn(e: &Expr) -> R<TySyn> {
         Expr::Path(None, p) if single(p).is_some() => {
             Ok(TySyn::Array(Box::new(TySyn::Prim(Ty::Unit)), ArrLen::Const(single(p).unwrap().to_string())))
         }
-        _ => Err("const arguments must be a literal or a name".to_string()),
+        // (整数の定数式 `{ u128::MAX_STR_LEN - 16 }`: 式のテキストを const の名前の代わりに持つ。Program が評価する)
+        e => match const_expr_text(e) {
+            Some(t) => Ok(TySyn::Array(Box::new(TySyn::Prim(Ty::Unit)), ArrLen::Const(t))),
+            None => Err("const arguments must be a literal or a name".to_string()),
+        },
     }
+}
+
+/// 整数の定数式のテキスト (リテラル・パス・二項演算・単項の `-`・括弧・引数のないメソッド)。それ以外は None
+fn const_expr_text(e: &Expr) -> Option<String> {
+    Some(match e {
+        Expr::Lit(t, _) => t.clone(),
+        Expr::Path(None, p) if !p.global && p.segs.iter().all(|s| s.args.is_empty() && s.fn_args.is_none()) => {
+            p.segs.iter().map(|s| s.name.as_str()).collect::<Vec<&str>>().join("::")
+        }
+        Expr::Binary(op, l, r, _) => format!("({} {op} {})", const_expr_text(l)?, const_expr_text(r)?),
+        Expr::Unary(op, x, _) if op == "-" => format!("(-{})", const_expr_text(x)?),
+        Expr::Paren(x) => const_expr_text(x)?,
+        Expr::MethodCall(r, m, g, a, _) if g.is_empty() && a.is_empty() => format!("{}.{m}()", const_expr_text(r)?),
+        _ => return None,
+    })
 }
 
 /// 1 つの識別子だけのパス
@@ -115,6 +134,14 @@ pub fn tysyn(t: &PTy, self_ty: Option<&TySyn>) -> R<TySyn> {
                     let a = p.segs[0].name.clone();
                     let a = match (a.as_str(), self_ty) {
                         ("Self", Some(TySyn::Named(n))) => n.clone(),
+                        // (プリミティブ型への impl の中: `impl Sealed for u8` の `Self::MAX_STR_LEN` は `u8::MAX_STR_LEN`)
+                        ("Self", Some(TySyn::Prim(t))) => {
+                            let names = ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "bool", "char", "f32", "f64"];
+                            match names.iter().find(|n| Ty::prim(n) == Some(*t)) {
+                                Some(n) => n.to_string(),
+                                None => a,
+                            }
+                        }
                         _ => a,
                     };
                     ArrLen::Const(format!("{a}::{}", p.segs[1].name))

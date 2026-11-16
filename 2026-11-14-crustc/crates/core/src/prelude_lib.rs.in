@@ -3758,6 +3758,19 @@ fn __exr_fmt_int128<G>(f: &mut Formatter, mag: u128, neg: bool) {
 }
 
 // 整数の平方根 (2 bit ずつ決める)
+fn __exr_ilog10<G>(n: u128) -> u32 {
+    if n == 0 {
+        panic!("argument of integer logarithm must be positive");
+    }
+    let mut v = n;
+    let mut k = 0;
+    while v >= 10 {
+        v /= 10;
+        k += 1;
+    }
+    k
+}
+
 fn __exr_isqrt<G>(n: u64) -> u64 {
     let mut x = n;
     let mut r: u64 = 0;
@@ -4936,6 +4949,47 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[link_name = "fflush"]
     fn __exr_fflush(f: *mut u8) -> i32;
+}
+
+// core::mem::MaybeUninit (中身は T と同じ配置。uninit は 0 で埋める)
+#[derive(Clone, Copy)]
+pub struct MaybeUninit<T> {
+    value: T,
+}
+
+impl<T> MaybeUninit<T> {
+    pub fn uninit() -> MaybeUninit<T> {
+        unsafe { core::mem::zeroed() }
+    }
+    pub fn zeroed() -> MaybeUninit<T> {
+        unsafe { core::mem::zeroed() }
+    }
+    pub fn new(val: T) -> MaybeUninit<T> {
+        MaybeUninit { value: val }
+    }
+    pub fn write(&mut self, val: T) -> &mut T {
+        unsafe {
+            let p = &mut self.value as *mut T;
+            p.write(val);
+            &mut *p
+        }
+    }
+    pub fn as_ptr(&self) -> *const T {
+        &self.value as *const T
+    }
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        &mut self.value as *mut T
+    }
+    pub fn assume_init(self) -> T {
+        self.value
+    }
+    pub fn assume_init_ref(&self) -> &T {
+        &self.value
+    }
+}
+
+pub fn __core_unreachable_unchecked() -> ! {
+    panic!("internal error: entered unreachable code")
 }
 
 // std::io::Read / BufRead (バイト列 `&[u8]` の実装。Stdin などは固有のメソッドを持つ)

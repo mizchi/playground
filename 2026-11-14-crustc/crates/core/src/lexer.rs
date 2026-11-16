@@ -1355,7 +1355,9 @@ pub fn rename_module_collisions_fix(src: &str, crates: &[String], fix: &mut Vec<
         }
         let prev_dot = k >= 1 && is_sym(k - 1, b'.');
         let prev_path = k >= 2 && is_sym(k - 1, b':') && is_sym(k - 2, b':');
-        if prev_dot || prev_path {
+        // (impl / trait の中の関連型の定義 `type Buffer = ..;` は、同じ名前のトップレベルの型があっても変えない)
+        let assoc_def = k >= 1 && is_id(k - 1, b"type") && !def_tok[k];
+        if prev_dot || prev_path || assoc_def {
             k += 1;
             continue;
         }

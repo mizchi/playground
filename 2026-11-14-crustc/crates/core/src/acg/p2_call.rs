@@ -93,6 +93,27 @@ impl Cx<'_> {
         }
         let recv: &Expr = recv;
         let method = method.as_str();
+        if matches!(method, "unwrap" | "expect") {
+            if let (Some(t), Expr::MethodCall(_, m2, _, a2, _)) = (expected, strip_paren(recv)) {
+                if m2 == "try_into" && a2.is_empty() {
+                    self.try_into_hint = Some(t);
+                }
+            }
+        }
+        // `s.get_unchecked(i)` / `get_unchecked_mut(a..)` (配列・スライス・Vec): `&s[i]` / `&mut s[a..]` (範囲は検査する)
+        if matches!(method, "get_unchecked" | "get_unchecked_mut") && margs.len() == 1 {
+            let seq = match self.peek(recv).map(|t| self.strip_refs(t)) {
+                Some(Ty::Array(..) | Ty::Slice(_)) => true,
+                Some(Ty::Struct(sid)) => self.vec_fields(sid).is_some(),
+                _ => false,
+            };
+            if seq {
+                let ix = Expr::Index(Box::new(paren(recv.clone())), Box::new(margs[0].clone()), Default::default());
+                let ne = Expr::Ref(method == "get_unchecked_mut", Box::new(ix));
+                let ne = self.keep_expr(ne);
+                return self.expr(ne, expected);
+            }
+        }
         // `x.as_ref()` (AsRef: 文字列・Vec・配列・スライス): 先を期待型か、関数の境界 `T: AsRef<X>` で決める
         if method == "as_ref" && margs.is_empty() {
             if let Some(ne) = self.as_ref_rewrite(recv, expected) {

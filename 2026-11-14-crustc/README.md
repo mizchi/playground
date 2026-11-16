@@ -1456,7 +1456,17 @@ adler2 の内側のループ (`U32X4([u32; 4])` の `+=` と `chunks_exact`) を
 
 残り (rustc -O の約 10 倍): `a_vec.0.iter()` でアドレスが本当に漏れる、enum (`Option<&[u8]>`) のコピーが 8 byte ずつ、
 rustc は SIMD にする。
-itoa は未対応 (`MaybeUninit`・関連型・`<T as Tr>::C`)。either も未対応 (`Pin` / `Future` / io の各トレイト / `Error` / `fmt::Binary` など)。
+itoa も通る (下)。either は未対応 (`Pin` / `Future` / io の各トレイト / `Error` / `fmt::Binary` など)。
+
+itoa (`| itoa | crustc -O | 80 | 2 | 22 | 440 | 29 KiB | yes |`、rustc -O は 32 ms) のために足したもの:
+- prelude: `MaybeUninit<T>` (uninit は 0 で埋める)・`hint::unreachable_unchecked`。組み込み: `mem::zeroed`・整数の
+  `ilog2` / `ilog10` / `unsigned_abs`・`get_unchecked(_mut)` (添字にする)・スライス → `&mut [T; N]` の `try_into`
+  (行き先が型推論にないときは `.unwrap()` の期待型から)
+- 定数: `<u64 as Integer>::MAX_STR_LEN` (修飾されたパスの関連 const)・プリミティブ型への impl の中の `Self::C`・
+  const ジェネリクスの引数の式 (`enc::<{ u128::MAX_STR_LEN - 16 }>`)・static の `*b"..."`
+- モジュールを平らにするときの名前の衝突回避が、impl の中の関連型の定義 (`type Buffer = ..`) まで改名していた (トップレベルに
+  同じ名前の `struct Buffer` があると)
+- `const _` を読み飛ばしたときに、const の型を付けるループの添字がずれていた
 
 rustc-hash・cfg-if のために足したもの:
 - マクロの呼び出しの引数と macro_rules! の中の `#[cfg]` は評価しない (cfg_if! の `if #[cfg(..)] { .. }` を消していた)。

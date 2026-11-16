@@ -173,6 +173,11 @@ pub struct ConstDef {
 }
 
 /// `u32::MAX` などの関連定数
+/// `const _: () = { .. };` (名前のない const: コンパイル時の検査だけなので読み飛ばす。モジュールを平らにした `m___` も)
+fn anon_const(n: &str) -> bool {
+    n == "_" || n.ends_with("::_") || (n.len() > 3 && n.ends_with("___"))
+}
+
 pub fn prim_assoc_const(t: Ty, name: &str) -> Option<i128> {
     let bits = t.bits();
     Some(match (name, t.signed()) {
@@ -494,7 +499,7 @@ impl Program {
                 .chain(sm.statics.iter().map(|(n, t, e, m)| (n, t, e, Some(*m))));
             for (n, _, e, stat) in cs {
                 // (`const _: () = { assert!(..) };` はコンパイル時の検査だけ: 読み飛ばす)
-                if n == "_" || n.ends_with("::_") || n.ends_with("___") && n.len() > 3 && n[..n.len() - 1].ends_with("__") {
+                if anon_const(n) {
                     continue;
                 }
                 if p.const_index.contains_key(n) {
@@ -636,11 +641,17 @@ impl Program {
         // const / static の型
         let mut k = 0;
         for (it, sm) in items.iter().zip(sums) {
-            for (_, t, _) in &sm.consts {
+            for (n, t, _) in &sm.consts {
+                if anon_const(n) {
+                    continue;
+                }
                 p.consts[k].ty = p.resolve(t).map_err(|e| format!("{}:1: {e}", it.line))?;
                 k += 1;
             }
-            for (_, t, _, _) in &sm.statics {
+            for (n, t, _, _) in &sm.statics {
+                if anon_const(n) {
+                    continue;
+                }
                 p.consts[k].ty = p.resolve(t).map_err(|e| format!("{}:1: {e}", it.line))?;
                 k += 1;
             }
@@ -1294,7 +1305,13 @@ impl Program {
 
     /// 配列の長さに使う const (要約の const 表から整数の定数式として評価する)
     fn const_usize(&self, name: &str) -> R<u64> {
-        let v = self.const_int(name, 0)?;
+        // (const ジェネリクスの引数の式 `{ A - 16 }` は式のテキストで来る)
+        let v = if !self.const_index.contains_key(name) && name.bytes().any(|c| !(c.is_ascii_alphanumeric() || c == b'_' || c == b':')) {
+            let e = crate::parse::parse_expr(name)?;
+            self.eval_const(&e, 1)?
+        } else {
+            self.const_int(name, 0)?
+        };
         if v < 0 || v > u64::MAX as i128 {
             return Err(format!("constant `{name}` is negative"));
         }
@@ -1346,6 +1363,16 @@ impl Program {
             }
             Expr::Path(None, p) if !p.global && p.segs.len() == 1 && p.segs[0].args.is_empty() => {
                 self.const_int(&p.segs[0].name, depth)?
+            }
+            // `<u64 as Integer>::MAX_STR_LEN`
+            Expr::Path(Some(q), p) if matches!(&**q, crate::parse::Ty::Path(None, tp) if tp.segs.len() == 1) && !p.segs.is_empty() => {
+                let crate::parse::Ty::Path(None, tp) = &**q else { unreachable!() };
+                let full = format!("{}::{}", tp.segs[0].name, p.segs.last().unwrap().name);
+                if self.const_index.contains_key(&full) {
+                    return self.const_int(&full, depth);
+                }
+                let t = Ty::prim(&tp.segs[0].name).ok_or("unsupported path in constant")?;
+                prim_assoc_const(t, &p.segs.last().unwrap().name).ok_or("unsupported constant")?
             }
             Expr::Path(None, p) if p.segs.len() == 2 => {
                 // (impl の関連 const: `i128::MAX_STR_LEN`)

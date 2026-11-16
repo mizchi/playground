@@ -4,6 +4,13 @@ use crate::parse::GArg;
 
 impl Cx<'_> {
     /// 配列 / スライスの組み込みメソッド (len / is_empty / get / get_mut / first / last / swap / contains)
+    /// `Result<t, E>` (E は prelude の名前の型) のインスタンス
+    pub(crate) fn result_of(&self, t: Ty, e: &str) -> Option<Ty> {
+        let r = *self.prog.struct_index.get("Result")?;
+        let ei = *self.prog.struct_index.get(e)?;
+        self.prog.instantiate(r, vec![t, Ty::Struct(ei)]).ok().map(Ty::Struct)
+    }
+
     pub(crate) fn builtin_method(&mut self, mc: &Expr) -> R<Option<V>> {
         let Expr::MethodCall(mc_recv, mc_name, mc_tf, mc_args, _) = mc else { unreachable!() };
         let mc_recv: &Expr = mc_recv;
@@ -242,15 +249,19 @@ impl Cx<'_> {
             }
             // `s.try_into()`: 長さが N なら Ok([T; N]) (要素をコピー)
             "try_into" if args.is_empty() => {
-                let rt = self.lets.get(&(mc as *const Expr as usize)).copied();
+                let hint = self.try_into_hint.take();
+                let rt = self.lets.get(&(mc as *const Expr as usize)).copied().or_else(|| self.result_of(hint?, "TryFromSliceError"));
                 let Some(Ty::Struct(rs)) = rt else {
                     return err(SP, "cannot infer the target type of `try_into`");
                 };
                 let Some(&dt) = self.prog.structs[rs as usize].args.first() else {
                     return err(SP, "cannot infer the target type of `try_into`");
                 };
-                let Ty::Array(_, n) = dt else {
-                    return err(SP, "`try_into` on a slice is only supported into arrays");
+                // (`&s[..]` → `&[T; N]` / `&mut [T; N]` は参照のまま (コピーしない))
+                let (n, by_ref) = match dt {
+                    Ty::Array(_, n) => (n, false),
+                    Ty::Ref(_, Ty::Array(_, n)) => (*n, true),
+                    _ => return err(SP, "`try_into` on a slice is only supported into arrays"),
                 };
                 let (base, len, _) = self.indexable(&*mc_recv)?;
                 let out = self.temp(Ty::Struct(rs));
@@ -265,8 +276,12 @@ impl Cx<'_> {
                 self.b.ins().brif(c, yes, &[], no, &[]);
                 self.b.switch_to_block(yes);
                 self.store_tag(out, rs, okv);
-                let dst = self.addr_plus(out, off as i32);
-                self.copy(dst, base, dt);
+                if by_ref {
+                    self.b.ins().store(mf(), base, out, off as i32);
+                } else {
+                    let dst = self.addr_plus(out, off as i32);
+                    self.copy(dst, base, dt);
+                }
                 self.b.ins().jump(done, &[]);
                 self.b.switch_to_block(no);
                 self.store_tag(out, rs, errv);
@@ -663,6 +678,9 @@ impl Cx<'_> {
             "next_multiple_of",
             "next_power_of_two",
             "isqrt",
+            "ilog2",
+            "ilog10",
+            "unsigned_abs",
             "try_into",
             "checked_abs",
             "checked_neg",
@@ -770,6 +788,20 @@ impl Cx<'_> {
                     self.ovf_panic(bad, 6, expr_start(mc));
                 }
                 (Some(self.b.ins().iabs(a)), t)
+            }
+            // (MIN の絶対値も表せる: 同じ幅の符号なしとして見る)
+            "unsigned_abs" => {
+                let v = if s { self.b.ins().iabs(a) } else { a };
+                let ut = match t {
+                    Ty::I8 => Ty::U8,
+                    Ty::I16 => Ty::U16,
+                    Ty::I32 => Ty::U32,
+                    Ty::I64 => Ty::U64,
+                    Ty::I128 => Ty::U128,
+                    Ty::Isize => Ty::Usize,
+                    t => t,
+                };
+                (Some(v), ut)
             }
             "checked_abs" | "checked_neg" => {
                 let v = if name == "checked_abs" { self.b.ins().iabs(a) } else { self.b.ins().ineg(a) };
@@ -1053,6 +1085,18 @@ impl Cx<'_> {
                 let small = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, a, one);
                 (Some(self.b.ins().select(small, one, p)), t)
             }
+            // (0 と負の数は panic: 符号つきは負なら 0 として ilog の panic に任せる)
+            "ilog2" => {
+                let lz = self.b.ins().clz(a);
+                let lz = self.convert(lz, t, Ty::U32);
+                let bits = self.b.ins().iconst(types::I32, t.bits() as i64 - 1);
+                (Some(self.b.ins().isub(bits, lz)), Ty::U32)
+            }
+            "ilog10" => {
+                let w = if t.bits() == 128 { a } else { self.convert(a, t, if t.signed() { Ty::I128 } else { Ty::U128 }) };
+                let (v, _) = self.call_named("__exr_ilog10", vec![Ty::Unit], &[(w, Ty::U128)], SP)?;
+                (v, Ty::U32)
+            }
             "isqrt" if t.bits() <= 64 => {
                 let w = if ct == types::I64 { a } else { self.b.ins().uextend(types::I64, a) };
                 let (v, _) = self.call_named("__exr_isqrt", vec![Ty::Unit], &[(w, Ty::U64)], SP)?;
@@ -1062,7 +1106,8 @@ impl Cx<'_> {
             }
             "try_into" => {
                 // 型は型推論の記録 (Result<T, TryFromIntError>) から
-                let rt = self.lets.get(&(mc as *const Expr as usize)).copied().or_else(|| {
+                let hint = self.try_into_hint.take();
+                let rt = self.lets.get(&(mc as *const Expr as usize)).copied().or_else(|| self.result_of(hint?, "TryFromIntError")).or_else(|| {
                     // (pos_key の記録は自前の構文木にはないので peek で)
                     if self.in_fmt_args > 0 {
                         self.peek(mc)

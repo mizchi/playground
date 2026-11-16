@@ -152,6 +152,9 @@ fn write(prog: &Program, e: &Expr, ty: Ty, v: &mut DataVal, off: u32, depth: u32
                     v.bytes[off as usize..off as usize + bs.len()].copy_from_slice(&bs);
                     Ok(())
                 }
+                // (`*b"..."`: バイト列リテラルを配列の値として)
+                Expr::Unary(op, x, _) if op == "*" => write(prog, x, ty, v, off, depth + 1),
+                Expr::Paren(x) => write(prog, x, ty, v, off, depth + 1),
                 _ => Err("unsupported array constant".to_string()),
             }
         }
