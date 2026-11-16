@@ -1116,18 +1116,12 @@ impl Cx<'_> {
                 Ok((None, Ty::Unit))
             }
             "matches" => {
-                let parsed = (|| -> R<(Expr, Pat, Option<Expr>)> {
-                    let inner = strip_delims(g).ok_or("matches!: expected `(expr, pattern)`")?;
-                    let parts = split_top(inner, ",").ok_or("matches!: cannot tokenize the arguments")?;
-                    if parts.len() < 2 {
-                        return Err("matches!: expected `,`".to_string());
-                    }
-                    let e = crate::parse::parse_expr(&parts[0])?;
-                    let (p, g) = crate::parse::parse_pat_guard(&parts[1..].join(",")).ok_or("matches!: cannot parse the pattern")?;
-                    Ok((e, p, g))
-                })();
-                let (e, pat, guard) = parsed.or_else(|er| err(SP, er))?;
-                let e: &Expr = self.keep_expr(e);
+                let (e, pat, guard) = crate::ast_closure::matches_parts(g, self.mbase).ok_or("matches!: cannot parse `(expr, pattern)`")?;
+                // (型推論が読んだ同じ式があればそれを使う: 型の記録をアドレスで引ける)
+                let e: &Expr = match self.macro_args_of(g) {
+                    Some(v) if !v.is_empty() => v[0],
+                    _ => self.keep_expr(e),
+                };
                 let guard: Option<&Expr> = guard.map(|g| self.keep_expr(g));
                 // (parse し直した式: 型推論の記録は位置で引く)
                 self.in_fmt_args += 1;

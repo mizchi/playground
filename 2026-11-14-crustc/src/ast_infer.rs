@@ -1306,12 +1306,21 @@ impl Inf<'_> {
             return v;
         }
         if name == "matches" {
-            if let Some(first) = split_top(g, ",").first() {
-                if let Ok(x) = crate::parse::parse_expr(first) {
-                    self.pos_record += 1;
-                    self.expr_kept(x, false);
-                    self.pos_record -= 1;
+            // (コード生成も同じ構文木を使う: margs に入れて、そのアドレスで型を記録する)
+            let k = g.as_ptr() as usize;
+            if !self.margs.contains_key(&k) {
+                if let Some((x, _, _)) = ast_closure::matches_parts(g, self.mbase) {
+                    let ki = self.keep.len();
+                    self.keep.push(vec![x]);
+                    self.margs.insert(k, ki);
                 }
+            }
+            if let Some(&ki) = self.margs.get(&k) {
+                let x: *const Expr = &self.keep[ki][0];
+                self.pos_record += 1;
+                // SAFETY: keep の要素は推論の終わりまで動かさない
+                self.expr(unsafe { &*x });
+                self.pos_record -= 1;
             }
             return self.known(Ty::Bool);
         }

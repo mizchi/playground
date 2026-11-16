@@ -97,23 +97,30 @@ pub fn macro_exprs_at(g: &str, base: Pos) -> Vec<Expr> {
     }
     let Some(inner) = strip_delims(g) else { return Vec::new() };
     // (`matches!(e, PAT if guard)`: 式と guard の中のクロージャ)
-    if let Some(parts) = split_top_commas(inner) {
-        if parts.len() >= 2 {
-            if let Ok(e) = parse_expr(&parts[0]) {
-                let rest = parts[1..].join(",");
-                if let Some((_, guard)) = crate::parse::parse_pat_guard(&rest) {
-                    let mut out = vec![e];
-                    out.extend(guard);
-                    return out;
-                }
-            }
-        }
+    if let Some((e, _, guard)) = matches_parts(g, base) {
+        let mut out = vec![e];
+        out.extend(guard);
+        return out;
     }
     // (`vec![x; n]`: 配列の式として、元の位置で読む)
     match parse_expr_at(&format!("[{inner}]"), base) {
         Ok(e) => vec![e],
         Err(_) => Vec::new(),
     }
+}
+
+/// `matches!(e, PAT if guard)` の (e, PAT, guard)。型推論とコード生成が同じ構文木 (同じ位置) で読むための共通の読み方
+pub fn matches_parts(g: &str, base: Pos) -> Option<(Expr, Pat, Option<Expr>)> {
+    let inner = strip_delims(g)?;
+    let ioff = g.find(inner).unwrap_or(1);
+    let parts = split_top_commas_at(inner)?;
+    if parts.len() < 2 {
+        return None;
+    }
+    let e = parse_expr_at(&parts[0].1, pos_at(g, ioff + parts[0].0, base)).ok()?;
+    let roff = parts[1].0;
+    let (p, guard) = crate::parse::parse_pat_guard_at(&inner[roff..], pos_at(g, ioff + roff, base))?;
+    Some((e, p, guard))
 }
 
 /// `vec![x; n]` の x と n (macro_exprs_at と同じ読み方: 位置も同じになる)

@@ -496,7 +496,7 @@ pub fn parse_file(src: &str) -> R<File> {
 /// text (base の位置から始まる) の中の byte の位置 off のソース上の位置
 pub fn pos_at(text: &str, off: usize, base: Pos) -> Pos {
     let before = &text[..off.min(text.len())];
-    let nl = before.matches('\n').count() as u32;
+    let nl = before.bytes().filter(|&c| c == b'\n').count() as u32;
     if base.line == 0 {
         return Pos::default();
     }
@@ -695,7 +695,7 @@ impl Parser {
             first = false;
             s.push_str(&t.text);
             // (複数行のトークン (文字列) の後の行・桁)
-            let nl = t.text.matches('\n').count() as u32;
+            let nl = t.text.bytes().filter(|&c| c == b'\n').count() as u32;
             if nl > 0 {
                 line += nl;
                 col = t.text.rsplit('\n').next().map(|x| x.chars().count() as u32).unwrap_or(0);
