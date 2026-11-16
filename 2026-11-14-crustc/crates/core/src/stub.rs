@@ -177,6 +177,11 @@ pub struct StubItem {
     pub hash: crate::key::Key,
     /// 中の識別子すべて
     pub idents: Vec<String>,
+    /// テキストの範囲 (バイト)
+    pub start: usize,
+    pub end: usize,
+    /// `use` (名前の解決に要るので、届かなくても消さない)
+    pub is_use: bool,
 }
 
 /// src (クレートのテキスト) のアイテム。`mod m { .. }` の中も (mod 自体はアイテムにしない)
@@ -219,9 +224,19 @@ pub fn items(src: &str) -> Vec<StubItem> {
         }
         // アイテムの終わり: `;` か、本体の `}` (const / static / use / type は `;` まで)
         let semi_kind = (j..n.min(j + 4)).any(|q| id(q, b"const") && !id(q + 1, b"fn") || id(q, b"static") || id(q, b"use") || id(q, b"type"));
+        // (`#![..]` (内側の属性) はそれだけで 1 つ)
+        if sym(k, b'#') && sym(k + 1, b'!') && sym(k + 2, b'[') && close[k + 2] != usize::MAX {
+            k = close[k + 2] + 1;
+            continue;
+        }
         let mut e = j;
         while e < n {
             if sym(e, b';') {
+                break;
+            }
+            // (囲んでいるモジュールの閉じ括弧: その手前で終わる)
+            if sym(e, b'}') {
+                e = if e > k { e - 1 } else { k };
                 break;
             }
             if (sym(e, b'(') || sym(e, b'[') || sym(e, b'{')) && close[e] != usize::MAX {
@@ -261,14 +276,68 @@ pub fn items(src: &str) -> Vec<StubItem> {
                     break;
                 }
             }
-            if toks[q].0 == 0 && (w == b"impl" || w == b"use") {
-                // (impl / use はヘッダ (use は全体) の名前すべて)
+            if toks[q].0 == 0 && w == b"use" {
+                // (use は全体の名前)
                 let mut r = q + 1;
-                while r <= e && !sym(r, b'{') || (w == b"use" && r <= e) {
+                while r <= e {
                     if toks[r].0 == 0 {
                         names.push(String::from_utf8_lossy(t(r)).into_owned());
                     }
                     r += 1;
+                }
+                break;
+            }
+            if toks[q].0 == 0 && w == b"impl" {
+                // (impl はヘッダの trait と型の名前。`impl<..>` の中・`where` から後ろ・プリミティブ型・キーワードは
+                //  数えない: `impl FromHex for [u8; 4]` が、`u8` と書いたクレートすべてから届かないように)
+                let mut r = q + 1;
+                if sym(r, b'<') {
+                    let mut d = 0i32;
+                    while r <= e {
+                        if sym(r, b'<') {
+                            d += 1;
+                        } else if sym(r, b'>') && !(r > 0 && sym(r - 1, b'-')) {
+                            d -= 1;
+                            if d == 0 {
+                                r += 1;
+                                break;
+                            }
+                        }
+                        r += 1;
+                    }
+                }
+                // (trait の実装で、対象が std の型 (`Vec<u8>` / `[u8; 4]` など) なら trait の名前だけ)
+                let has_for = (r..e).take_while(|&x| !sym(x, b'{')).any(|x| id(x, b"for"));
+                let mut after_for = false;
+                let mut tr_names: Vec<String> = vec![];
+                let mut ty_names: Vec<String> = vec![];
+                while r <= e && !sym(r, b'{') && !id(r, b"where") {
+                    if id(r, b"for") {
+                        after_for = true;
+                    } else if toks[r].0 == 0 {
+                        let x = t(r);
+                        let std_ty = matches!(
+                            x,
+                            b"Vec" | b"String" | b"Option" | b"Result" | b"Box" | b"HashMap" | b"HashSet" | b"BTreeMap" | b"BTreeSet" | b"VecDeque" | b"Rc" | b"Arc" | b"Cell" | b"RefCell"
+                        );
+                        let skip = crate::types::Ty::prim(&String::from_utf8_lossy(x)).is_some()
+                            || matches!(x, b"str" | b"dyn" | b"mut" | b"const" | b"unsafe" | b"crate" | b"self" | b"super" | b"Self")
+                            || (after_for && std_ty);
+                        if !skip {
+                            let w = String::from_utf8_lossy(x).into_owned();
+                            if has_for && !after_for {
+                                tr_names.push(w);
+                            } else {
+                                ty_names.push(w);
+                            }
+                        }
+                    }
+                    r += 1;
+                }
+                names.extend(tr_names);
+                names.extend(ty_names);
+                if names.is_empty() {
+                    names.push("impl".to_string());
                 }
                 break;
             }
@@ -279,9 +348,31 @@ pub fn items(src: &str) -> Vec<StubItem> {
         }
         let mut h = crate::key::KeyHasher::new();
         h.add(&src[toks[k].1..toks[e].2]);
-        out.push(StubItem { names, hash: h.finish(), idents });
+        let is_use = (j..e.min(j + 3)).any(|q| id(q, b"use"));
+        out.push(StubItem { names, hash: h.finish(), idents, start: toks[k].1, end: toks[e].2, is_use });
         k = e + 1;
     }
+    out
+}
+
+/// src のアイテムのうち keep[k] が偽のもの (と `use` でないもの) を空白にする (改行は残す)
+pub fn prune(src: &str, its: &[StubItem], keep: &[bool]) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut last = 0;
+    for (k, it) in its.iter().enumerate() {
+        if keep.get(k).copied().unwrap_or(true) || it.is_use || it.start < last {
+            continue;
+        }
+        out.push_str(&src[last..it.start]);
+        for &c in &b[it.start..it.end] {
+            if c == b'\n' {
+                out.push('\n');
+            }
+        }
+        last = it.end;
+    }
+    out.push_str(&src[last..]);
     out
 }
 
@@ -300,7 +391,7 @@ mod tests {
         assert_eq!(o.lines().count(), src.lines().count());
         let its = items(&o);
         let names: Vec<String> = its.iter().map(|i| i.names.join("+")).collect();
-        assert_eq!(names, ["a", "g", "h", "c", "o", "S", "S", "T+W+T", "Tr", "w", "z"]);
+        assert_eq!(names, ["a", "g", "h", "c", "o", "S", "S", "W+T", "Tr", "w", "z"]);
         assert_eq!(
             norm(&o),
             norm("pub mod m { pub fn a(x: u32) -> u32 { loop {} } pub fn g<T: Copy>(x: T) -> T { x } pub fn h(x: impl Fn()) { x() } pub const fn c() -> u8 { 3 } pub fn o() -> impl Iterator<Item = u8> { 0..3 } struct S; impl S { fn m(&self) -> u8 { loop {} } } impl<T> W<T> { fn n(&self) { body() } } trait Tr { fn d(&self) -> u8 { 2 } } fn w<T>(t: T) where T: Copy { t; } mod inner { fn z() { loop {} } } }")

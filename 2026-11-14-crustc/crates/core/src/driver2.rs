@@ -450,7 +450,15 @@ impl Session2 {
                 self.put(k, b);
             }
         }
-        tm.lap("summaries", String::new());
+        tm.lap("summaries", {
+            if tm.on {
+                let ol = self.ctx.own_lines as usize;
+                let own = items[..user].iter().filter(|it| ol == 0 || it.line <= ol).count();
+                format!("{} items: own {own}, deps {}, prelude {}", items.len(), user - own, items.len() - user)
+            } else {
+                String::new()
+            }
+        });
         let mut prog = Program::build_with(&items, &sums, self.ctx.lib.is_none())?;
         tm.lap("program", String::new());
         prog.prelude_from = user as u32;
@@ -1526,6 +1534,7 @@ impl Session2 {
         crates: &[CrateSpec],
         loaded: &[Option<(String, crate::srcmap::SrcMap)>],
         dep_loaded: &[Option<(String, crate::srcmap::SrcMap)>],
+        prune: (&[Option<Vec<crate::stub::StubItem>>], Option<&[(usize, usize)]>),
         i: usize,
         deps: &[usize],
         fp: &str,
@@ -1544,8 +1553,24 @@ impl Session2 {
         let mut src = own.clone();
         let mut map = own_map.clone();
         src.push('\n');
+        let no_prune = std::env::var_os("CRUSTC_NO_DEP_PRUNE").is_some();
         for &j in deps {
-            let (t, m) = dep_loaded[j].as_ref().unwrap();
+            let (t0, m) = dep_loaded[j].as_ref().unwrap();
+            // (名前で届かないアイテムは空白にする: 平らにする・要約・Program・prelude の選択が使う分だけになる)
+            let pruned;
+            let t: &str = match (prune.1, prune.0.get(j).and_then(|x| x.as_ref())) {
+                (Some(reach), Some(its)) if !no_prune => {
+                    let mut keep = vec![false; its.len()];
+                    for &(jj, k) in reach {
+                        if jj == j {
+                            keep[k] = true;
+                        }
+                    }
+                    pruned = crate::stub::prune(t0, its, &keep);
+                    pruned.as_str()
+                }
+                _ => t0.as_str(),
+            };
             let at = n_lines(&src) + 1;
             let f0 = map.files.len() as u32;
             for &(s, f, first) in &m.segs {
@@ -1592,7 +1617,7 @@ impl Session2 {
         crates: &[CrateSpec],
         loaded: &[Option<(String, crate::srcmap::SrcMap)>],
         dep_items: &[Option<Vec<crate::stub::StubItem>>],
-    ) -> String {
+    ) -> (String, Vec<(usize, usize)>) {
         // (名前 → (クレート, アイテム))
         let mut by_name: FxMap<String, Vec<(usize, usize)>> = FxMap::default();
         for &j in deps {
@@ -1630,6 +1655,16 @@ impl Session2 {
             }
         }
         reached.sort_unstable();
+        if std::env::var_os("CRUSTC_DEBUG_REACH").is_some() {
+            let mut cnt: FxMap<String, usize> = FxMap::default();
+            for &(j, k) in &reached {
+                let it = &dep_items[j].as_ref().unwrap()[k];
+                *cnt.entry(it.names.first().cloned().unwrap_or_default()).or_default() += 1;
+            }
+            let mut v: Vec<(usize, String)> = cnt.into_iter().map(|(a, b)| (b, a)).collect();
+            v.sort_unstable_by(|a, b| b.cmp(a));
+            eprintln!("reach {}: {} items, top {:?}", c.name, reached.len(), &v[..v.len().min(12)]);
+        }
         let mut h = KeyHasher::new();
         h.add(&self.cid);
         h.add(&(self.opts.opt as u8));
@@ -1644,11 +1679,11 @@ impl Session2 {
                 h.add(f);
             }
         }
-        for (j, k) in reached {
+        for &(j, k) in &reached {
             h.add(&(j as u64));
             h.add(&dep_items[j].as_ref().unwrap()[k].hash);
         }
-        key_hex(h.finish())
+        (key_hex(h.finish()), reached)
     }
 
     /// ワークスペースをビルドする: クレートごとに .o を out_dir に作り (変わらなければ書かない)、
@@ -1748,6 +1783,9 @@ impl Session2 {
         // (使う側で依存するクレートのソース全体を展開・解析し直すと、依存が多いと推移的な依存の大きさに比例する)
         let reuse = std::env::var_os("CRUSTC_NO_DEP_STUB").is_none();
         let mut fp2s: Vec<(usize, String)> = vec![];
+        // (古いクレートごとの、依存するクレートのインターフェースのうち名前で届くアイテム: 使う側にはそれだけを渡す)
+        let mut reach_of: Vec<Option<Vec<(usize, usize)>>> = vec![None; crates.len()];
+        let mut dep_items_all: Vec<Option<Vec<crate::stub::StubItem>>> = (0..crates.len()).map(|_| None).collect();
         let mut own_v: Vec<Option<(String, crate::srcmap::SrcMap)>> = loaded.clone();
         let mut dep_v: Vec<Option<(String, crate::srcmap::SrcMap)>> = loaded.clone();
         if reuse && !stale.is_empty() {
@@ -1839,7 +1877,7 @@ impl Session2 {
                     }
                 }
                 let own = &own_v[i].as_ref().unwrap().0;
-                let fp2 = self.precise_fp(&crates[i], own, &loaded[i].as_ref().unwrap().1, &deps, crates, &loaded, &dep_items);
+                let (fp2, reached) = self.precise_fp(&crates[i], own, &loaded[i].as_ref().unwrap().1, &deps, crates, &loaded, &dep_items);
                 let p2 = out_dir.join(format!("{}.fp2", crates[i].name).as_str());
                 let op = out_dir.join(format!("{}.o", crates[i].name).as_str());
                 if !self.opts.no_cache && op.exists() && std::fs::read_to_string(p2.as_path()).is_ok_and(|old| old == fp2) {
@@ -1851,9 +1889,11 @@ impl Session2 {
                     continue;
                 }
                 fp2s.push((i, fp2));
+                reach_of[i] = Some(reached);
                 keep.push((i, fp));
             }
             stale = keep;
+            dep_items_all = dep_items;
             if self.opts.time {
                 eprintln!("  {:<12} {:>8.2} ms", "(fp2)", (now_ns() - t3) as f64 / 1e6);
             }
@@ -1879,7 +1919,7 @@ impl Session2 {
                         self.opts.jobs = inner;
                         let (i, fp) = (stale[k].0, stale[k].1.clone());
                         self.fresh.clear();
-                        let r = self.build_one(crates, &own_v, &dep_v, i, &all_deps(i), &fp, out_dir);
+                        let r = self.build_one(crates, &own_v, &dep_v, (&dep_items_all, match &reach_of[i] { Some(v) => Some(v.as_slice()), None => None }), i, &all_deps(i), &fp, out_dir);
                         let mut buf = vec![];
                         match r {
                             Ok((rp, ch, ns)) => {
@@ -1951,7 +1991,7 @@ impl Session2 {
             let (i, fp) = (stale[k].0, stale[k].1.clone());
             let r = match results[k].take() {
                 Some(r) => r,
-                None => self.build_one(crates, &own_v, &dep_v, i, &all_deps(i), &fp, out_dir),
+                None => self.build_one(crates, &own_v, &dep_v, (&dep_items_all, match &reach_of[i] { Some(v) => Some(v.as_slice()), None => None }), i, &all_deps(i), &fp, out_dir),
             };
             let (r, ch, ns) = r?;
             if !self.opts.no_cache {
