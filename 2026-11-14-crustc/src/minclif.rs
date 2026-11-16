@@ -155,9 +155,21 @@ impl FunctionBuilder {
         b.code.extend_from_slice(&[0x55, 0x48, 0x89, 0xE5, 0x48, 0x81, 0xEC, 0, 0, 0, 0]);
         // 引数をスロットへ
         const ARG_STORE: [[u8; 3]; 6] = [[0x48, 0x89, 0xBD], [0x48, 0x89, 0xB5], [0x48, 0x89, 0x95], [0x48, 0x89, 0x8D], [0x4C, 0x89, 0x85], [0x4C, 0x89, 0x8D]];
-        for (i, &t) in params.iter().enumerate() {
+        let (mut ni, mut nf) = (0usize, 0u8);
+        for (_, &t) in params.iter().enumerate() {
             let v = b.new_value(t);
             let off = b.values[v.0 as usize].0;
+            // (浮動小数点の引数は xmm0〜7)
+            if t.is_float() && nf < 8 {
+                let p = if t == Type::F32 { 0xF3 } else { 0xF2 };
+                b.code.extend_from_slice(&[p, 0x0F, 0x11, 0x85 | (nf << 3)]);
+                b.code.extend_from_slice(&off.to_le_bytes());
+                nf += 1;
+                b.entry_params.push(v);
+                continue;
+            }
+            let i = ni;
+            ni += 1;
             if i < 6 {
                 b.code.extend_from_slice(&ARG_STORE[i]);
                 b.code.extend_from_slice(&off.to_le_bytes());
@@ -577,7 +589,11 @@ impl FunctionBuilder {
 
     pub fn return_(&mut self, vals: &[Value]) {
         if let Some(&v) = vals.first() {
-            self.load_rax(v);
+            if self.value_type(v).is_float() {
+                self.xmm_load(0, v);
+            } else {
+                self.load_rax(v);
+            }
         }
         if let Some(&v) = vals.get(1) {
             // 2 つ目は rdx
@@ -595,6 +611,9 @@ impl FunctionBuilder {
     /// 関数を呼ぶ (引数は 6 個まではレジスタ、それ以降はスタック)。戻り値は 0〜2 個 (rax, rdx)
     pub fn call(&mut self, f: FuncRef, args: &[Value], rets: &[Type]) -> Vec<Value> {
         const ARG_LOAD: [[u8; 3]; 6] = [[0x48, 0x8B, 0xBD], [0x48, 0x8B, 0xB5], [0x48, 0x8B, 0x95], [0x48, 0x8B, 0x8D], [0x4C, 0x8B, 0x85], [0x4C, 0x8B, 0x8D]];
+        let fargs: Vec<Value> = args.iter().copied().filter(|&a| self.value_type(a).is_float()).collect();
+        let args: Vec<Value> = args.iter().copied().filter(|&a| !self.value_type(a).is_float()).collect();
+        let args = &args[..];
         let stack_args: Vec<Value> = args.iter().skip(6).copied().collect();
         // (スタック渡しの引数: rsp を 16 byte に揃えてから逆順に push)
         let pad = stack_args.len() % 2 == 1;
@@ -609,7 +628,12 @@ impl FunctionBuilder {
             let off = self.values[a.0 as usize].0;
             self.emit_disp(&ARG_LOAD[i], off);
         }
-        self.emit(&[0x31, 0xC0]); // xor eax, eax (可変長引数の関数のための al = 0)
+        for (k, &a) in fargs.iter().enumerate().take(8) {
+            self.xmm_load(k as u8, a);
+        }
+        // (可変長引数の関数のための al = xmm で渡した数)
+        self.emit(&[0xB8]);
+        self.emit(&(fargs.len().min(8) as u32).to_le_bytes());
         self.emit(&[0xE8]);
         let at = self.code.len() as u32;
         self.emit(&[0, 0, 0, 0]);
@@ -620,6 +644,10 @@ impl FunctionBuilder {
         }
         let mut out = vec![];
         for (i, &t) in rets.iter().enumerate() {
+            if t.is_float() {
+                out.push(self.xmm0_result(t));
+                continue;
+            }
             if i == 1 {
                 self.emit(&[0x48, 0x89, 0xD0]); // mov rax, rdx
             }
@@ -643,21 +671,684 @@ impl FunctionBuilder {
     }
 }
 
+
+// --- 浮動小数点・i128・オーバーフロー・ビット演算・間接呼び出し・アドレス ---------------
+impl FunctionBuilder {
+    fn off(&self, v: Value) -> i32 {
+        self.values[v.0 as usize].0
+    }
+
+    /// xmm0 (reg 0) / xmm1 (reg 1) に読む
+    fn xmm_load(&mut self, reg: u8, v: Value) {
+        let p = if self.value_type(v) == Type::F32 { 0xF3 } else { 0xF2 };
+        let o = self.off(v);
+        self.emit_disp(&[p, 0x0F, 0x10, 0x85 | (reg << 3)], o);
+    }
+
+    fn xmm0_result(&mut self, t: Type) -> Value {
+        let v = self.new_value(t);
+        let p = if t == Type::F32 { 0xF3 } else { 0xF2 };
+        let o = self.off(v);
+        // (スロットの上位を 0 にしてから書く: f32 も 8 byte のスロットで比べられるように)
+        self.emit(&[0x31, 0xC0]);
+        self.store_rax_at(o);
+        self.emit_disp(&[p, 0x0F, 0x11, 0x85], o);
+        v
+    }
+
+    pub fn f64const(&mut self, x: f64) -> Value {
+        self.emit(&[0x48, 0xB8]);
+        self.emit(&x.to_bits().to_le_bytes());
+        let v = self.new_value(Type::F64);
+        self.store_rax(v);
+        v
+    }
+
+    pub fn f32const(&mut self, x: f32) -> Value {
+        self.emit(&[0x48, 0xB8]);
+        self.emit(&(x.to_bits() as u64).to_le_bytes());
+        let v = self.new_value(Type::F32);
+        self.store_rax(v);
+        v
+    }
+
+    fn fop(&mut self, a: Value, b: Value, opc: u8) -> Value {
+        let t = self.value_type(a);
+        let p = if t == Type::F32 { 0xF3 } else { 0xF2 };
+        self.xmm_load(0, a);
+        let o = self.off(b);
+        self.emit_disp(&[p, 0x0F, opc, 0x85], o);
+        self.xmm0_result(t)
+    }
+
+    pub fn fadd(&mut self, a: Value, b: Value) -> Value {
+        self.fop(a, b, 0x58)
+    }
+    pub fn fsub(&mut self, a: Value, b: Value) -> Value {
+        self.fop(a, b, 0x5C)
+    }
+    pub fn fmul(&mut self, a: Value, b: Value) -> Value {
+        self.fop(a, b, 0x59)
+    }
+    pub fn fdiv(&mut self, a: Value, b: Value) -> Value {
+        self.fop(a, b, 0x5E)
+    }
+
+    pub fn sqrt(&mut self, a: Value) -> Value {
+        let t = self.value_type(a);
+        let p = if t == Type::F32 { 0xF3 } else { 0xF2 };
+        self.xmm_load(0, a);
+        self.emit(&[p, 0x0F, 0x51, 0xC0]);
+        self.xmm0_result(t)
+    }
+
+    /// 切り捨て・切り上げ・0 方向への丸め (roundsd の即値 9 / 10 / 11)
+    fn round(&mut self, a: Value, mode: u8) -> Value {
+        let t = self.value_type(a);
+        self.xmm_load(0, a);
+        let op = if t == Type::F32 { 0x0A } else { 0x0B };
+        self.emit(&[0x66, 0x0F, 0x3A, op, 0xC0, mode]);
+        self.xmm0_result(t)
+    }
+    pub fn floor(&mut self, a: Value) -> Value {
+        self.round(a, 9)
+    }
+    pub fn ceil(&mut self, a: Value) -> Value {
+        self.round(a, 10)
+    }
+    pub fn trunc(&mut self, a: Value) -> Value {
+        self.round(a, 11)
+    }
+
+    fn sign_mask(t: Type) -> i64 {
+        if t == Type::F32 { 1 << 31 } else { i64::MIN }
+    }
+
+    /// 浮動小数点のビット列をそのまま整数として扱う (I32 / I64)
+    fn bits_of(&mut self, a: Value) -> Value {
+        let t = if self.value_type(a) == Type::F32 { Type::I32 } else { Type::I64 };
+        self.bitcast(t, a)
+    }
+
+    pub fn fneg(&mut self, a: Value) -> Value {
+        let t = self.value_type(a);
+        let x = self.bits_of(a);
+        let m = self.iconst(self.value_type(x), Self::sign_mask(t));
+        let r = self.bxor(x, m);
+        self.bitcast(t, r)
+    }
+
+    pub fn fabs(&mut self, a: Value) -> Value {
+        let t = self.value_type(a);
+        let x = self.bits_of(a);
+        let m = self.iconst(self.value_type(x), !Self::sign_mask(t));
+        let r = self.band(x, m);
+        self.bitcast(t, r)
+    }
+
+    pub fn fcopysign(&mut self, a: Value, b: Value) -> Value {
+        let t = self.value_type(a);
+        let (x, y) = (self.bits_of(a), self.bits_of(b));
+        let it = self.value_type(x);
+        let m = self.iconst(it, Self::sign_mask(t));
+        let nm = self.iconst(it, !Self::sign_mask(t));
+        let x2 = self.band(x, nm);
+        let y2 = self.band(y, m);
+        let r = self.bor(x2, y2);
+        self.bitcast(t, r)
+    }
+
+    /// a * b + c (丸めは 2 回: 融合はしない)
+    pub fn fma(&mut self, a: Value, b: Value, c: Value) -> Value {
+        let m = self.fmul(a, b);
+        self.fadd(m, c)
+    }
+
+    /// 型だけを変える (ビット列はそのまま)
+    pub fn bitcast(&mut self, t: Type, a: Value) -> Value {
+        self.load_rax(a);
+        let v = self.new_value(t);
+        self.store_rax(v);
+        v
+    }
+
+    /// 比較 (NaN を含むと Equal 以外の順序の比較は偽、NotEqual は真)
+    pub fn fcmp(&mut self, cc: FloatCC, a: Value, b: Value) -> Value {
+        let t = self.value_type(a);
+        let (x, y) = match cc {
+            FloatCC::LessThan | FloatCC::LessThanOrEqual => (b, a),
+            _ => (a, b),
+        };
+        self.xmm_load(0, x);
+        let o = self.off(y);
+        if t == Type::F32 {
+            self.emit_disp(&[0x0F, 0x2E, 0x85], o);
+        } else {
+            self.emit_disp(&[0x66, 0x0F, 0x2E, 0x85], o);
+        }
+        match cc {
+            FloatCC::GreaterThan | FloatCC::LessThan => self.emit(&[0x0F, 0x97, 0xC0]),
+            FloatCC::GreaterThanOrEqual | FloatCC::LessThanOrEqual => self.emit(&[0x0F, 0x93, 0xC0]),
+            // sete al; setnp cl; and al, cl
+            FloatCC::Equal => self.emit(&[0x0F, 0x94, 0xC0, 0x0F, 0x9B, 0xC1, 0x20, 0xC8]),
+            // setne al; setp cl; or al, cl
+            FloatCC::NotEqual => self.emit(&[0x0F, 0x95, 0xC0, 0x0F, 0x9A, 0xC1, 0x08, 0xC8]),
+        }
+        self.emit(&[0x48, 0x0F, 0xB6, 0xC0]);
+        self.result(Type::I8)
+    }
+
+    pub fn fpromote(&mut self, a: Value) -> Value {
+        self.xmm_load(0, a);
+        self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]);
+        self.xmm0_result(Type::F64)
+    }
+
+    pub fn fdemote(&mut self, a: Value) -> Value {
+        self.xmm_load(0, a);
+        self.emit(&[0xF2, 0x0F, 0x5A, 0xC0]);
+        self.xmm0_result(Type::F32)
+    }
+
+    /// 符号つき整数 → 浮動小数点
+    pub fn fcvt_from_sint(&mut self, t: Type, a: Value) -> Value {
+        let st = self.value_type(a);
+        self.load_rax(a);
+        self.sext_rax(st);
+        let p = if t == Type::F32 { 0xF3 } else { 0xF2 };
+        self.emit(&[p, 0x48, 0x0F, 0x2A, 0xC0]);
+        self.xmm0_result(t)
+    }
+
+    /// 符号なし整数 → 浮動小数点 (64 bit で最上位が立っていれば半分にして 2 倍する)
+    pub fn fcvt_from_uint(&mut self, t: Type, a: Value) -> Value {
+        let p = if t == Type::F32 { 0xF3 } else { 0xF2 };
+        let add = if t == Type::F32 { 0x58 } else { 0x58 };
+        self.load_rax(a);
+        // test rax, rax; js big
+        self.emit(&[0x48, 0x85, 0xC0, 0x78, 0x07]);
+        self.emit(&[p, 0x48, 0x0F, 0x2A, 0xC0]); // 5 byte
+        self.emit(&[0xEB, 0x15]); // jmp done (2 byte)
+        // big: mov rcx, rax; shr rcx, 1; and eax, 1; or rcx, rax; cvtsi2sd xmm0, rcx; addsd xmm0, xmm0
+        self.emit(&[0x48, 0x89, 0xC1, 0x48, 0xD1, 0xE9, 0x83, 0xE0, 0x01, 0x48, 0x09, 0xC1]); // 12
+        self.emit(&[p, 0x48, 0x0F, 0x2A, 0xC1]); // 5
+        self.emit(&[p, 0x0F, add, 0xC0]); // 4
+        self.xmm0_result(t)
+    }
+
+    /// 浮動小数点 → I64 (cvttsd2si: 範囲外と NaN は i64::MIN)
+    fn cvt_raw(&mut self, a: Value) -> Value {
+        let p = if self.value_type(a) == Type::F32 { 0xF3 } else { 0xF2 };
+        self.xmm_load(0, a);
+        self.emit(&[p, 0x48, 0x0F, 0x2C, 0xC0]);
+        let v = self.new_value(Type::I64);
+        self.store_rax(v);
+        v
+    }
+
+    fn fconst_like(&mut self, a: Value, x: f64) -> Value {
+        if self.value_type(a) == Type::F32 { self.f32const(x as f32) } else { self.f64const(x) }
+    }
+
+    /// 浮動小数点 → 符号つき整数 (Rust の `as`: 飽和し、NaN は 0)
+    pub fn fcvt_to_sint_sat(&mut self, t: Type, a: Value) -> Value {
+        let n = t.bits() as i32;
+        let lo = -(2f64.powi(n - 1));
+        let hi = 2f64.powi(n - 1);
+        let raw = self.cvt_raw(a);
+        let flo = self.fconst_like(a, lo);
+        let fhi = self.fconst_like(a, hi);
+        let too_low = self.fcmp(FloatCC::LessThan, a, flo);
+        let too_high = self.fcmp(FloatCC::GreaterThanOrEqual, a, fhi);
+        let nan = self.fcmp(FloatCC::NotEqual, a, a);
+        let ilo = self.iconst(Type::I64, if n == 64 { i64::MIN } else { -(1i64 << (n - 1)) });
+        let ihi = self.iconst(Type::I64, if n == 64 { i64::MAX } else { (1i64 << (n - 1)) - 1 });
+        let z = self.iconst(Type::I64, 0);
+        let r1 = self.select(too_high, ihi, raw);
+        let r2 = self.select(too_low, ilo, r1);
+        let r3 = self.select(nan, z, r2);
+        self.ireduce(t, r3)
+    }
+
+    /// 浮動小数点 → 符号なし整数 (飽和し、NaN と負は 0)
+    pub fn fcvt_to_uint_sat(&mut self, t: Type, a: Value) -> Value {
+        let n = t.bits() as i32;
+        let hi = 2f64.powi(n);
+        let fz = self.fconst_like(a, 0.0);
+        let fhi = self.fconst_like(a, hi);
+        let f63 = self.fconst_like(a, 2f64.powi(63));
+        // (2^63 以上は 2^63 を引いて変換し、最上位を立てる)
+        let raw_small = self.cvt_raw(a);
+        let a2 = self.fsub(a, f63);
+        let raw_big0 = self.cvt_raw(a2);
+        let top = self.iconst(Type::I64, i64::MIN);
+        let raw_big = self.bxor(raw_big0, top);
+        let big = self.fcmp(FloatCC::GreaterThanOrEqual, a, f63);
+        let raw = self.select(big, raw_big, raw_small);
+        let too_low = self.fcmp(FloatCC::LessThan, a, fz);
+        let too_high = self.fcmp(FloatCC::GreaterThanOrEqual, a, fhi);
+        let nan = self.fcmp(FloatCC::NotEqual, a, a);
+        let ihi = self.iconst(Type::I64, if n == 64 { -1 } else { ((1u64 << n) - 1) as i64 });
+        let z = self.iconst(Type::I64, 0);
+        let r1 = self.select(too_high, ihi, raw);
+        let r2 = self.select(too_low, z, r1);
+        let r3 = self.select(nan, z, r2);
+        self.ireduce(t, r3)
+    }
+
+    // --- i128 ---------------------------------------------------------
+
+    /// (下位, 上位) から i128
+    pub fn iconcat(&mut self, lo: Value, hi: Value) -> Value {
+        let v = self.new_value(Type::I128);
+        let o = self.off(v);
+        self.load_rax(lo);
+        self.store_rax_at(o);
+        self.load_rax(hi);
+        self.store_rax_at(o + 8);
+        v
+    }
+
+    /// i128 の (下位, 上位)
+    pub fn isplit(&mut self, v: Value) -> (Value, Value) {
+        let o = self.off(v);
+        self.load_rax_at(o);
+        let lo = self.new_value(Type::I64);
+        self.store_rax(lo);
+        self.load_rax_at(o + 8);
+        let hi = self.new_value(Type::I64);
+        self.store_rax(hi);
+        (lo, hi)
+    }
+
+    /// 2 語の演算: rax = a.lo OP1 b.lo、rcx = a.hi OP2 b.hi (OP は [rbp + d] を取る形の 2 byte のオペコード)
+    fn wide2(&mut self, a: Value, b: Value, op_lo: [u8; 2], op_hi: [u8; 2]) -> Value {
+        let (oa, ob) = (self.off(a), self.off(b));
+        self.load_rax_at(oa);
+        self.emit_disp(&[op_lo[0], op_lo[1], 0x85], ob);
+        // (adc / sbb は上の演算のキャリーを使うので、mov は flags を変えない)
+        self.emit_disp(&[0x48, 0x8B, 0x8D], oa + 8);
+        self.emit_disp(&[op_hi[0], op_hi[1], 0x8D], ob + 8);
+        let v = self.new_value(Type::I128);
+        let o = self.off(v);
+        self.store_rax_at(o);
+        self.emit_disp(&[0x48, 0x89, 0x8D], o + 8);
+        v
+    }
+
+    pub fn iadd128(&mut self, a: Value, b: Value) -> Value {
+        self.wide2(a, b, [0x48, 0x03], [0x48, 0x13])
+    }
+    pub fn isub128(&mut self, a: Value, b: Value) -> Value {
+        self.wide2(a, b, [0x48, 0x2B], [0x48, 0x1B])
+    }
+    pub fn band128(&mut self, a: Value, b: Value) -> Value {
+        self.wide2(a, b, [0x48, 0x23], [0x48, 0x23])
+    }
+    pub fn bor128(&mut self, a: Value, b: Value) -> Value {
+        self.wide2(a, b, [0x48, 0x0B], [0x48, 0x0B])
+    }
+    pub fn bxor128(&mut self, a: Value, b: Value) -> Value {
+        self.wide2(a, b, [0x48, 0x33], [0x48, 0x33])
+    }
+
+    /// libgcc の関数 (`__multi3` など) で i128 の 2 項演算
+    fn wide_libcall(&mut self, name: &str, a: Value, b: Value) -> Value {
+        let (al, ah) = self.isplit(a);
+        let (bl, bh) = self.isplit(b);
+        let f = self.import_function(name);
+        let r = self.call(f, &[al, ah, bl, bh], &[Type::I64, Type::I64]);
+        self.iconcat(r[0], r[1])
+    }
+    pub fn imul128(&mut self, a: Value, b: Value) -> Value {
+        self.wide_libcall("__multi3", a, b)
+    }
+    pub fn udiv128(&mut self, a: Value, b: Value) -> Value {
+        self.wide_libcall("__udivti3", a, b)
+    }
+    pub fn sdiv128(&mut self, a: Value, b: Value) -> Value {
+        self.wide_libcall("__divti3", a, b)
+    }
+    pub fn urem128(&mut self, a: Value, b: Value) -> Value {
+        self.wide_libcall("__umodti3", a, b)
+    }
+    pub fn srem128(&mut self, a: Value, b: Value) -> Value {
+        self.wide_libcall("__modti3", a, b)
+    }
+
+    /// i128 の比較
+    pub fn icmp128(&mut self, cc: IntCC, a: Value, b: Value) -> Value {
+        let (oa, ob) = (self.off(a), self.off(b));
+        match cc {
+            IntCC::Equal | IntCC::NotEqual => {
+                self.load_rax_at(oa);
+                self.emit_disp(&[0x48, 0x33, 0x85], ob); // xor rax, [b]
+                self.emit_disp(&[0x48, 0x8B, 0x8D], oa + 8);
+                self.emit_disp(&[0x48, 0x33, 0x8D], ob + 8); // xor rcx, [b+8]
+                self.emit(&[0x48, 0x09, 0xC8]); // or rax, rcx
+                let set = if cc == IntCC::Equal { 0x94 } else { 0x95 };
+                self.emit(&[0x0F, set, 0xC0, 0x48, 0x0F, 0xB6, 0xC0]);
+                self.result(Type::I8)
+            }
+            _ => {
+                // x < y を sub / sbb の flags で: (a < b)、b < a、!(a < b)、!(b < a)
+                let (x, y, neg) = match cc {
+                    IntCC::SignedLessThan | IntCC::UnsignedLessThan => (oa, ob, false),
+                    IntCC::SignedGreaterThan | IntCC::UnsignedGreaterThan => (ob, oa, false),
+                    IntCC::SignedGreaterThanOrEqual | IntCC::UnsignedGreaterThanOrEqual => (oa, ob, true),
+                    _ => (ob, oa, true),
+                };
+                self.load_rax_at(x);
+                self.emit_disp(&[0x48, 0x2B, 0x85], y); // sub rax, [y]
+                self.load_rax_at(x + 8);
+                self.emit_disp(&[0x48, 0x1B, 0x85], y + 8); // sbb rax, [y+8]
+                let set = if cc.signed() { if neg { 0x9D } else { 0x9C } } else if neg { 0x93 } else { 0x92 };
+                self.emit(&[0x0F, set, 0xC0, 0x48, 0x0F, 0xB6, 0xC0]);
+                self.result(Type::I8)
+            }
+        }
+    }
+
+    /// i128 のシフト (量は下位 7 bit)
+    fn shift128(&mut self, a: Value, b: Value, kind: u8) -> Value {
+        let oa = self.off(a);
+        self.load_rax_at(oa);
+        self.emit_disp(&[0x48, 0x8B, 0x95], oa + 8); // mov rdx, [a+8]
+        self.load_rcx(b);
+        match kind {
+            // shld rdx, rax, cl; shl rax, cl; test cl, 64; jz +5; mov rdx, rax; xor eax, eax
+            0 => self.emit(&[0x48, 0x0F, 0xA5, 0xC2, 0x48, 0xD3, 0xE0, 0xF6, 0xC1, 0x40, 0x74, 0x05, 0x48, 0x89, 0xC2, 0x31, 0xC0]),
+            // shrd rax, rdx, cl; shr rdx, cl; test cl, 64; jz +5; mov rax, rdx; xor edx, edx
+            1 => self.emit(&[0x48, 0x0F, 0xAD, 0xD0, 0x48, 0xD3, 0xEA, 0xF6, 0xC1, 0x40, 0x74, 0x05, 0x48, 0x89, 0xD0, 0x31, 0xD2]),
+            // shrd rax, rdx, cl; sar rdx, cl; test cl, 64; jz +7; mov rax, rdx; sar rdx, 63
+            _ => self.emit(&[0x48, 0x0F, 0xAD, 0xD0, 0x48, 0xD3, 0xFA, 0xF6, 0xC1, 0x40, 0x74, 0x07, 0x48, 0x89, 0xD0, 0x48, 0xC1, 0xFA, 0x3F]),
+        }
+        let v = self.new_value(Type::I128);
+        let o = self.off(v);
+        self.store_rax_at(o);
+        self.emit_disp(&[0x48, 0x89, 0x95], o + 8); // mov [v+8], rdx
+        v
+    }
+    pub fn ishl128(&mut self, a: Value, b: Value) -> Value {
+        self.shift128(a, b, 0)
+    }
+    pub fn ushr128(&mut self, a: Value, b: Value) -> Value {
+        self.shift128(a, b, 1)
+    }
+    pub fn sshr128(&mut self, a: Value, b: Value) -> Value {
+        self.shift128(a, b, 2)
+    }
+
+    /// 整数 → i128 (0 拡張 / 符号拡張)
+    pub fn extend128(&mut self, a: Value, signed: bool) -> Value {
+        let st = self.value_type(a);
+        self.load_rax(a);
+        if signed {
+            self.sext_rax(st);
+        }
+        let v = self.new_value(Type::I128);
+        let o = self.off(v);
+        self.store_rax_at(o);
+        if signed {
+            self.emit(&[0x48, 0xC1, 0xF8, 0x3F]); // sar rax, 63
+        } else {
+            self.emit(&[0x31, 0xC0]);
+        }
+        self.store_rax_at(o + 8);
+        v
+    }
+
+    /// i128 の下位を型の幅に切る
+    pub fn reduce128(&mut self, t: Type, a: Value) -> Value {
+        let o = self.off(a);
+        self.load_rax_at(o);
+        self.result(t)
+    }
+
+    // --- オーバーフローつきの演算: (結果, あふれたか (I8)) -------------------------
+
+    pub fn uadd_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
+        let v = self.iadd(a, b);
+        let of = self.icmp(IntCC::UnsignedLessThan, v, a);
+        (v, of)
+    }
+
+    pub fn usub_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
+        let v = self.isub(a, b);
+        let of = self.icmp(IntCC::UnsignedLessThan, a, b);
+        (v, of)
+    }
+
+    pub fn sadd_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
+        let v = self.iadd(a, b);
+        let x = self.bxor(a, v);
+        let y = self.bxor(b, v);
+        let m = self.band(x, y);
+        let of = self.icmp_imm(IntCC::SignedLessThan, m, 0);
+        (v, of)
+    }
+
+    pub fn ssub_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
+        let v = self.isub(a, b);
+        let x = self.bxor(a, b);
+        let y = self.bxor(a, v);
+        let m = self.band(x, y);
+        let of = self.icmp_imm(IntCC::SignedLessThan, m, 0);
+        (v, of)
+    }
+
+    pub fn umul_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
+        let t = self.value_type(a);
+        if t == Type::I64 {
+            self.load_rax(a);
+            self.load_rcx(b);
+            self.emit(&[0x48, 0xF7, 0xE1]); // mul rcx (CF / OF = 上位が 0 でない)
+            self.emit(&[0x0F, 0x92, 0xC1]); // setc cl
+            let v = self.new_value(Type::I64);
+            self.store_rax(v);
+            self.emit(&[0x48, 0x0F, 0xB6, 0xC1]); // movzx rax, cl
+            let of = self.result(Type::I8);
+            return (v, of);
+        }
+        // 狭い型: 64 bit で掛けて、上の桁が残るか
+        let (xa, xb) = (self.uextend(Type::I64, a), self.uextend(Type::I64, b));
+        let p = self.imul(xa, xb);
+        let sh = self.iconst(Type::I64, t.bits() as i64);
+        let hi = self.ushr(p, sh);
+        let of = self.icmp_imm(IntCC::NotEqual, hi, 0);
+        let v = self.ireduce(t, p);
+        (v, of)
+    }
+
+    pub fn smul_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
+        let t = self.value_type(a);
+        if t == Type::I64 {
+            self.load_rax(a);
+            self.load_rcx(b);
+            self.emit(&[0x48, 0x0F, 0xAF, 0xC1]); // imul rax, rcx
+            self.emit(&[0x0F, 0x90, 0xC1]); // seto cl
+            let v = self.new_value(Type::I64);
+            self.store_rax(v);
+            self.emit(&[0x48, 0x0F, 0xB6, 0xC1]);
+            let of = self.result(Type::I8);
+            return (v, of);
+        }
+        let (xa, xb) = (self.sextend(Type::I64, a), self.sextend(Type::I64, b));
+        let p = self.imul(xa, xb);
+        let v = self.ireduce(t, p);
+        let back = self.sextend(Type::I64, v);
+        let of = self.icmp(IntCC::NotEqual, back, p);
+        (v, of)
+    }
+
+    /// 符号なしの 64 bit 掛け算の上位
+    pub fn umulhi(&mut self, a: Value, b: Value) -> Value {
+        self.load_rax(a);
+        self.load_rcx(b);
+        self.emit(&[0x48, 0xF7, 0xE1, 0x48, 0x89, 0xD0]); // mul rcx; mov rax, rdx
+        self.result(Type::I64)
+    }
+
+    // --- ビット演算・最小最大 -----------------------------------------------
+
+    /// 上位の 0 の数 (0 なら幅)
+    pub fn clz(&mut self, a: Value) -> Value {
+        let t = self.value_type(a);
+        self.load_rax(a);
+        self.emit(&[0x48, 0x0F, 0xBD, 0xC0]); // bsr rax, rax (0 なら ZF)
+        // jnz +7; mov rax, -1 (7 byte)
+        self.emit(&[0x75, 0x07, 0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF]);
+        // rax = (bits - 1) - rax
+        self.emit(&[0x48, 0xF7, 0xD8]); // neg rax
+        self.emit(&[0x48, 0x83, 0xC0, (t.bits() - 1) as u8]); // add rax, bits - 1
+        self.result(t)
+    }
+
+    /// 下位の 0 の数 (0 なら幅)
+    pub fn ctz(&mut self, a: Value) -> Value {
+        let t = self.value_type(a);
+        self.load_rax(a);
+        self.emit(&[0x48, 0x0F, 0xBC, 0xC0]); // bsf rax, rax
+        // jnz +7; mov rax, bits
+        self.emit(&[0x75, 0x07, 0x48, 0xC7, 0xC0]);
+        self.emit(&(t.bits()).to_le_bytes());
+        self.result(t)
+    }
+
+    pub fn popcnt(&mut self, a: Value) -> Value {
+        let t = self.value_type(a);
+        self.load_rax(a);
+        self.emit(&[0xF3, 0x48, 0x0F, 0xB8, 0xC0]);
+        self.result(t)
+    }
+
+    pub fn bswap(&mut self, a: Value) -> Value {
+        let t = self.value_type(a);
+        self.load_rax(a);
+        match t {
+            Type::I16 => self.emit(&[0x66, 0xC1, 0xC0, 0x08]), // rol ax, 8
+            Type::I32 => self.emit(&[0x0F, 0xC8]),
+            _ => self.emit(&[0x48, 0x0F, 0xC8]),
+        }
+        self.result(t)
+    }
+
+    fn rot(&mut self, a: Value, b: Value, ext: u8) -> Value {
+        let t = self.value_type(a);
+        self.load_rax(a);
+        self.load_rcx(b);
+        match t {
+            Type::I8 => self.emit(&[0xD2, 0xC0 | ext]),
+            Type::I16 => self.emit(&[0x66, 0xD3, 0xC0 | ext]),
+            Type::I32 => self.emit(&[0xD3, 0xC0 | ext]),
+            _ => self.emit(&[0x48, 0xD3, 0xC0 | ext]),
+        }
+        self.result(t)
+    }
+    pub fn rotl(&mut self, a: Value, b: Value) -> Value {
+        self.rot(a, b, 0x00)
+    }
+    pub fn rotr(&mut self, a: Value, b: Value) -> Value {
+        self.rot(a, b, 0x08)
+    }
+
+    fn minmax(&mut self, cc: IntCC, a: Value, b: Value) -> Value {
+        let c = self.icmp(cc, a, b);
+        self.select(c, a, b)
+    }
+    pub fn smin(&mut self, a: Value, b: Value) -> Value {
+        self.minmax(IntCC::SignedLessThan, a, b)
+    }
+    pub fn umin(&mut self, a: Value, b: Value) -> Value {
+        self.minmax(IntCC::UnsignedLessThan, a, b)
+    }
+    pub fn smax(&mut self, a: Value, b: Value) -> Value {
+        self.minmax(IntCC::SignedGreaterThan, a, b)
+    }
+    pub fn umax(&mut self, a: Value, b: Value) -> Value {
+        self.minmax(IntCC::UnsignedGreaterThan, a, b)
+    }
+
+    pub fn iabs(&mut self, a: Value) -> Value {
+        let n = self.ineg(a);
+        let c = self.icmp_imm(IntCC::SignedLessThan, a, 0);
+        self.select(c, n, a)
+    }
+
+    /// c が 0 なら (trapz) / 0 でなければ (trapnz) 止める
+    fn trap_if(&mut self, c: Value, on_zero: bool) {
+        self.load_rax(c);
+        self.emit(&[0x48, 0x85, 0xC0]);
+        self.emit(&[if on_zero { 0x75 } else { 0x74 }, 0x02, 0x0F, 0x0B]); // jnz/jz +2; ud2
+    }
+    pub fn trapz(&mut self, c: Value) {
+        self.trap_if(c, true)
+    }
+    pub fn trapnz(&mut self, c: Value) {
+        self.trap_if(c, false)
+    }
+
+    // --- 間接呼び出し・アドレス --------------------------------------------------
+
+    /// 関数ポインタ p を呼ぶ
+    pub fn call_indirect(&mut self, p: Value, args: &[Value], rets: &[Type]) -> Vec<Value> {
+        // (r11 に読んでおき、call の直前に呼ぶ: 引数のレジスタは call() の処理で埋まる)
+        let f = self.import_function("\0indirect");
+        let n = self.relocs.len();
+        let o = self.off(p);
+        self.emit_disp(&[0x4C, 0x8B, 0x9D], o); // mov r11, [p]
+        let out = self.call(f, args, rets);
+        // call() が書いた `call rel32` (E8 + 4) を `call r11` + nop に書き換える
+        let r = self.relocs.remove(n);
+        let at = r.offset as usize;
+        self.code[at - 1..at + 4].copy_from_slice(&[0x41, 0xFF, 0xD3, 0x90, 0x90]);
+        out
+    }
+
+    /// 名前 (関数かデータ) のアドレス (GOT 経由: 外部の名前でも PIE でも使える)
+    pub fn symbol_addr(&mut self, name: &str) -> Value {
+        self.emit(&[0x48, 0x8B, 0x05]); // mov rax, [rip + rel32]
+        let at = self.code.len() as u32;
+        self.emit(&[0, 0, 0, 0]);
+        self.relocs.push(Reloc { offset: at, name: name.to_string(), kind: 9, addend: -4 });
+        let v = self.new_value(Type::I64);
+        self.store_rax(v);
+        v
+    }
+}
+
 // --- ELF64 の再配置可能オブジェクト ------------------------------------------
+
+/// データ (名前, 中身, 再配置 (オフセット, 指す名前, 加数), 外から見えるか)。中のポインタは R_X86_64_64
+pub type DataDef = (String, Vec<u8>, Vec<(u32, String, i64)>, bool);
 
 /// 関数 (名前, 機械語, 再配置, 外から見えるか) を .text に並べた ELF の .o
 pub fn write_object(funcs: &[(String, Vec<u8>, Vec<Reloc>, bool)]) -> Vec<u8> {
-    // .text
+    write_object_full(funcs, &[])
+}
+
+/// 関数を .text、データを .data に置いた ELF の .o
+pub fn write_object_full(funcs: &[(String, Vec<u8>, Vec<Reloc>, bool)], datas: &[DataDef]) -> Vec<u8> {
+    let pad = |v: &mut Vec<u8>, a: usize, fill: u8| {
+        while v.len() % a != 0 {
+            v.push(fill);
+        }
+    };
     let mut text: Vec<u8> = vec![];
     let mut offs = vec![];
     for (_, code, _, _) in funcs {
-        while text.len() % 16 != 0 {
-            text.push(0xCC);
-        }
+        pad(&mut text, 16, 0xCC);
         offs.push(text.len());
         text.extend_from_slice(code);
     }
-    // 文字列表と記号表: 0 = null、1 = .text のセクション記号、ローカル関数、グローバル関数、未定義
+    let mut data: Vec<u8> = vec![];
+    let mut doffs = vec![];
+    for (_, bytes, _, _) in datas {
+        pad(&mut data, 16, 0);
+        doffs.push(data.len());
+        data.extend_from_slice(bytes);
+    }
+    // 記号: 0 = null、1 = .text、2 = .data のセクション記号、ローカル、グローバル、未定義
     let mut strtab: Vec<u8> = vec![0];
     let add_str = |s: &str, t: &mut Vec<u8>| -> u32 {
         let o = t.len() as u32;
@@ -665,120 +1356,130 @@ pub fn write_object(funcs: &[(String, Vec<u8>, Vec<Reloc>, bool)]) -> Vec<u8> {
         t.push(0);
         o
     };
-    struct Sym {
-        name: u32,
-        info: u8,
-        shndx: u16,
-        value: u64,
-        size: u64,
-    }
-    let mut syms: Vec<Sym> = vec![Sym { name: 0, info: 0, shndx: 0, value: 0, size: 0 }, Sym { name: 0, info: 3, shndx: 1, value: 0, size: 0 }];
+    // (名前, info, shndx, value, size)
+    let mut syms: Vec<(u32, u8, u16, u64, u64)> = vec![(0, 0, 0, 0, 0), (0, 3, 1, 0, 0), (0, 3, 2, 0, 0)];
     let mut index: Vec<(String, u32)> = vec![];
     for pass in 0..2 {
-        for (i, (name, code, _, global)) in funcs.iter().enumerate() {
-            if *global != (pass == 1) {
-                continue;
+        let global = pass == 1;
+        for (i, (name, code, _, g)) in funcs.iter().enumerate() {
+            if *g == global {
+                let n = add_str(name, &mut strtab);
+                syms.push((n, ((global as u8) << 4) | 2, 1, offs[i] as u64, code.len() as u64));
+                index.push((name.clone(), syms.len() as u32 - 1));
             }
-            let n = add_str(name, &mut strtab);
-            let bind = if *global { 1u8 } else { 0 };
-            syms.push(Sym { name: n, info: (bind << 4) | 2, shndx: 1, value: offs[i] as u64, size: code.len() as u64 });
-            index.push((name.clone(), syms.len() as u32 - 1));
+        }
+        for (i, (name, bytes, _, g)) in datas.iter().enumerate() {
+            if *g == global {
+                let n = add_str(name, &mut strtab);
+                syms.push((n, ((global as u8) << 4) | 1, 2, doffs[i] as u64, bytes.len() as u64));
+                index.push((name.clone(), syms.len() as u32 - 1));
+            }
         }
     }
-    let first_global = syms.iter().position(|s| s.info >> 4 == 1).unwrap_or(syms.len()) as u32;
-    // 未定義の記号 (呼ぶ外部の関数)
+    let first_global = syms.iter().position(|s| s.1 >> 4 == 1).unwrap_or(syms.len()) as u32;
+    let undefined = |name: &str, syms: &mut Vec<(u32, u8, u16, u64, u64)>, index: &mut Vec<(String, u32)>, strtab: &mut Vec<u8>| {
+        if !index.iter().any(|x| x.0 == name) {
+            let n = add_str(name, strtab);
+            syms.push((n, 1 << 4, 0, 0, 0));
+            index.push((name.to_string(), syms.len() as u32 - 1));
+        }
+    };
     for (_, _, rs, _) in funcs {
         for r in rs {
-            if !index.iter().any(|x| x.0 == r.name) {
-                let n = add_str(&r.name, &mut strtab);
-                syms.push(Sym { name: n, info: (1 << 4) | 0, shndx: 0, value: 0, size: 0 });
-                index.push((r.name.clone(), syms.len() as u32 - 1));
-            }
+            undefined(&r.name, &mut syms, &mut index, &mut strtab);
+        }
+    }
+    for (_, _, rs, _) in datas {
+        for r in rs {
+            undefined(&r.1, &mut syms, &mut index, &mut strtab);
         }
     }
     let first_global = first_global.min(syms.len() as u32);
     let mut symtab: Vec<u8> = vec![];
-    for s in &syms {
-        symtab.extend_from_slice(&s.name.to_le_bytes());
-        symtab.push(s.info);
+    for &(name, info, shndx, value, size) in &syms {
+        symtab.extend_from_slice(&name.to_le_bytes());
+        symtab.push(info);
         symtab.push(0);
-        symtab.extend_from_slice(&s.shndx.to_le_bytes());
-        symtab.extend_from_slice(&s.value.to_le_bytes());
-        symtab.extend_from_slice(&s.size.to_le_bytes());
+        symtab.extend_from_slice(&shndx.to_le_bytes());
+        symtab.extend_from_slice(&value.to_le_bytes());
+        symtab.extend_from_slice(&size.to_le_bytes());
     }
-    // .rela.text
-    let mut rela: Vec<u8> = vec![];
+    let sym_of = |name: &str| -> u64 { index.iter().find(|x| x.0 == name).unwrap().1 as u64 };
+    let rela_entry = |out: &mut Vec<u8>, off: u64, sym: u64, kind: u64, addend: i64| {
+        out.extend_from_slice(&off.to_le_bytes());
+        out.extend_from_slice(&((sym << 32) | kind).to_le_bytes());
+        out.extend_from_slice(&addend.to_le_bytes());
+    };
+    let mut rela_text: Vec<u8> = vec![];
     for (i, (_, _, rs, _)) in funcs.iter().enumerate() {
         for r in rs {
-            let si = index.iter().find(|x| x.0 == r.name).unwrap().1 as u64;
-            rela.extend_from_slice(&((offs[i] as u64) + r.offset as u64).to_le_bytes());
-            rela.extend_from_slice(&((si << 32) | r.kind as u64).to_le_bytes());
-            rela.extend_from_slice(&r.addend.to_le_bytes());
+            rela_entry(&mut rela_text, offs[i] as u64 + r.offset as u64, sym_of(&r.name), r.kind as u64, r.addend);
         }
     }
-    // (名前の位置: .text 1, .symtab 7, .strtab 15, .rela.text 23, .note.GNU-stack 34, .shstrtab 50)
-    let shstr = b"\0.text\0.symtab\0.strtab\0.rela.text\0.note.GNU-stack\0.shstrtab\0".to_vec();
-    // 配置: ヘッダ (64) → .text → .symtab → .strtab → .rela.text → .shstrtab → セクションヘッダ
-    let mut out = vec![0u8; 64];
-    let align = |o: &mut Vec<u8>, a: usize| {
-        while o.len() % a != 0 {
-            o.push(0);
+    let mut rela_data: Vec<u8> = vec![];
+    for (i, (_, _, rs, _)) in datas.iter().enumerate() {
+        for (o, name, addend) in rs {
+            rela_entry(&mut rela_data, doffs[i] as u64 + *o as u64, sym_of(name), 1, *addend);
         }
-    };
-    align(&mut out, 16);
+    }
+    // (名前の位置: .text 1, .data 7, .symtab 13, .strtab 21, .rela.text 29, .rela.data 40, .shstrtab 51, .note.GNU-stack 61)
+    let shstr = b"\0.text\0.data\0.symtab\0.strtab\0.rela.text\0.rela.data\0.shstrtab\0.note.GNU-stack\0".to_vec();
+    let mut out = vec![0u8; 64];
+    pad(&mut out, 16, 0);
     let text_off = out.len();
     out.extend_from_slice(&text);
-    align(&mut out, 8);
+    pad(&mut out, 16, 0);
+    let data_off = out.len();
+    out.extend_from_slice(&data);
+    pad(&mut out, 8, 0);
     let sym_off = out.len();
     out.extend_from_slice(&symtab);
     let str_off = out.len();
     out.extend_from_slice(&strtab);
-    align(&mut out, 8);
-    let rela_off = out.len();
-    out.extend_from_slice(&rela);
+    pad(&mut out, 8, 0);
+    let rt_off = out.len();
+    out.extend_from_slice(&rela_text);
+    let rd_off = out.len();
+    out.extend_from_slice(&rela_data);
     let shstr_off = out.len();
     out.extend_from_slice(&shstr);
-    align(&mut out, 8);
+    pad(&mut out, 8, 0);
     let sh_off = out.len();
-    // セクションヘッダ: null, .text(1), .symtab(2), .strtab(3), .rela.text(4), .shstrtab(5), .note.GNU-stack(6)
-    let sh = |name: u32, ty: u32, flags: u64, off: usize, size: usize, link: u32, info: u32, al: u64, ent: u64, o: &mut Vec<u8>| {
-        o.extend_from_slice(&name.to_le_bytes());
-        o.extend_from_slice(&ty.to_le_bytes());
-        o.extend_from_slice(&flags.to_le_bytes());
-        o.extend_from_slice(&0u64.to_le_bytes());
-        o.extend_from_slice(&(off as u64).to_le_bytes());
-        o.extend_from_slice(&(size as u64).to_le_bytes());
-        o.extend_from_slice(&link.to_le_bytes());
-        o.extend_from_slice(&info.to_le_bytes());
-        o.extend_from_slice(&al.to_le_bytes());
-        o.extend_from_slice(&ent.to_le_bytes());
+    let sh = |o: &mut Vec<u8>, name: u32, ty: u32, flags: u64, off: usize, size: usize, link: u32, info: u32, al: u64, ent: u64| {
+        for x in [name, ty] {
+            o.extend_from_slice(&x.to_le_bytes());
+        }
+        for x in [flags, 0, off as u64, size as u64] {
+            o.extend_from_slice(&x.to_le_bytes());
+        }
+        for x in [link, info] {
+            o.extend_from_slice(&x.to_le_bytes());
+        }
+        for x in [al, ent] {
+            o.extend_from_slice(&x.to_le_bytes());
+        }
     };
-    sh(0, 0, 0, 0, 0, 0, 0, 0, 0, &mut out);
-    sh(1, 1, 6, text_off, text.len(), 0, 0, 16, 0, &mut out);
-    sh(7, 2, 0, sym_off, symtab.len(), 3, first_global, 8, 24, &mut out);
-    sh(15, 3, 0, str_off, strtab.len(), 0, 0, 1, 0, &mut out);
-    sh(23, 4, 0x40, rela_off, rela.len(), 2, 1, 8, 24, &mut out);
-    sh(50, 3, 0, shstr_off, 0, 0, 0, 1, 0, &mut out);
-    sh(34, 1, 0, shstr_off, 0, 0, 0, 1, 0, &mut out);
-    // (.shstrtab の大きさを後から入れる)
-    let shstrtab_hdr = sh_off + 5 * 64;
-    out[shstrtab_hdr + 32..shstrtab_hdr + 40].copy_from_slice(&(shstr.len() as u64).to_le_bytes());
-    // ELF ヘッダ
-    let mut h: Vec<u8> = vec![0x7F, b'E', b'L', b'F', 2, 1, 1, 0];
-    h.extend_from_slice(&[0; 8]);
+    // 0 null, 1 .text, 2 .data, 3 .symtab, 4 .strtab, 5 .rela.text, 6 .rela.data, 7 .shstrtab, 8 .note.GNU-stack
+    sh(&mut out, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    sh(&mut out, 1, 1, 6, text_off, text.len(), 0, 0, 16, 0);
+    sh(&mut out, 7, 1, 3, data_off, data.len(), 0, 0, 16, 0);
+    sh(&mut out, 13, 2, 0, sym_off, symtab.len(), 4, first_global, 8, 24);
+    sh(&mut out, 21, 3, 0, str_off, strtab.len(), 0, 0, 1, 0);
+    sh(&mut out, 29, 4, 0x40, rt_off, rela_text.len(), 3, 1, 8, 24);
+    sh(&mut out, 40, 4, 0x40, rd_off, rela_data.len(), 3, 2, 8, 24);
+    sh(&mut out, 51, 3, 0, shstr_off, shstr.len(), 0, 0, 1, 0);
+    sh(&mut out, 61, 1, 0, shstr_off, 0, 0, 0, 1, 0);
+    let mut h: Vec<u8> = vec![0x7F, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     h.extend_from_slice(&1u16.to_le_bytes()); // ET_REL
     h.extend_from_slice(&62u16.to_le_bytes()); // EM_X86_64
     h.extend_from_slice(&1u32.to_le_bytes());
-    h.extend_from_slice(&0u64.to_le_bytes()); // entry
-    h.extend_from_slice(&0u64.to_le_bytes()); // phoff
+    h.extend_from_slice(&0u64.to_le_bytes());
+    h.extend_from_slice(&0u64.to_le_bytes());
     h.extend_from_slice(&(sh_off as u64).to_le_bytes());
     h.extend_from_slice(&0u32.to_le_bytes());
-    h.extend_from_slice(&64u16.to_le_bytes());
-    h.extend_from_slice(&0u16.to_le_bytes());
-    h.extend_from_slice(&0u16.to_le_bytes());
-    h.extend_from_slice(&64u16.to_le_bytes());
-    h.extend_from_slice(&7u16.to_le_bytes()); // shnum
-    h.extend_from_slice(&5u16.to_le_bytes()); // shstrndx
+    for x in [64u16, 0, 0, 64, 9, 7] {
+        h.extend_from_slice(&x.to_le_bytes());
+    }
     out[..64].copy_from_slice(&h);
     out
 }

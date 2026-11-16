@@ -183,15 +183,19 @@ for opt in "" -O; do
 done
 python3 tests/selfhost/build_minclif.py > "$out/minclif_main.rs"
 rustc --edition 2024 -O -Awarnings "$out/minclif_main.rs" -o "$out/minclif_rustc" || exit 1
-"$out/minclif_rustc" "$out/minclif.rustc.o" > /dev/null
+"$out/minclif_rustc" "$out/minclif.rustc.o" "$out/minclif2.rustc.o" > "$out/minclif2.want"
+printf 'long mc_ext(void);\nint main(){return (int)mc_ext();}\n' > "$out/minclif2_c_main.c"
 printf '#include <stdio.h>\nlong mc_sum(long);\nint mc_fib(int);\nlong mc_misc(long,long,long,long,long,long,long,long);\nint main(){printf("%%ld %%d %%ld\\n", mc_sum(10), mc_fib(20), mc_misc(1,2,3,4,5,6,7,8));return 0;}\n' > "$out/minclif_c_main.c"
 for opt in "" -O; do
   if ! target/release/crustc "$out/minclif_main.rs" -o "$out/minclif_crustc" $opt; then
     echo "FAIL minclif $opt (crustc)"; fail=1; continue
   fi
-  "$out/minclif_crustc" "$out/minclif.crustc.o" > /dev/null
-  if cmp -s "$out/minclif.rustc.o" "$out/minclif.crustc.o" && cc "$out/minclif_c_main.c" "$out/minclif.crustc.o" -o "$out/minclif_run" && [ "$("$out/minclif_run")" = "45 6765 -1005" ]; then
-    echo "ok   minclif $opt ($(wc -c < "$out/minclif.rustc.o") bytes, runs)"
+  "$out/minclif_crustc" "$out/minclif.crustc.o" "$out/minclif2.crustc.o" > "$out/minclif2.crustc.want"
+  if cmp -s "$out/minclif.rustc.o" "$out/minclif.crustc.o" && cmp -s "$out/minclif2.rustc.o" "$out/minclif2.crustc.o" \
+     && cmp -s "$out/minclif2.want" "$out/minclif2.crustc.want" \
+     && cc "$out/minclif_c_main.c" "$out/minclif.crustc.o" -o "$out/minclif_run" && [ "$("$out/minclif_run")" = "45 6765 -1005" ] \
+     && cc "$out/minclif2_c_main.c" "$out/minclif2.crustc.o" -o "$out/minclif2_run" && "$out/minclif2_run" | cmp -s - "$out/minclif2.want"; then
+    echo "ok   minclif $opt ($(wc -c < "$out/minclif.rustc.o") + $(wc -c < "$out/minclif2.rustc.o") bytes, $(wc -l < "$out/minclif2.want") checks run)"
   else
     echo "DIFF minclif $opt"; fail=1
   fi

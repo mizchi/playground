@@ -1817,6 +1817,16 @@ impl Inf<'_> {
         match n {
             "len" => self.known(Ty::Usize),
             "is_empty" | "contains" => self.known(Ty::Bool),
+            "to_vec" if self.prog.struct_index.contains_key("Vec") => {
+                let vb = self.prog.struct_index["Vec"];
+                self.adt(vb, vec![el])
+            }
+            "copy_from_slice" | "clone_from_slice" if avs.len() == 1 => {
+                if let Some(ae) = self.elem_of(avs[0]) {
+                    self.unify(ae, el);
+                }
+                self.known(Ty::Unit)
+            }
             "try_into" if self.prog.struct_index.contains_key("TryFromSliceError") => {
                 let rb = self.prog.struct_index["Result"];
                 let eb = self.prog.struct_index["TryFromSliceError"];

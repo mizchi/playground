@@ -1537,6 +1537,18 @@ impl Inf<'_> {
                 match mc.method.to_string().as_str() {
                     "len" => self.known(Ty::Usize),
                     "is_empty" | "contains" => self.known(Ty::Bool),
+                    // `a.to_vec()`: Vec<要素>
+                    "to_vec" if self.prog.struct_index.contains_key("Vec") => {
+                        let vb = self.prog.struct_index["Vec"];
+                        self.adt(vb, vec![el])
+                    }
+                    // `a[..].copy_from_slice(&[1, 2])`: 引数の要素も同じ型
+                    "copy_from_slice" | "clone_from_slice" if args.len() == 1 => {
+                        if let Some(ae) = self.elem_of(args[0]) {
+                            self.unify(ae, el);
+                        }
+                        self.known(Ty::Unit)
+                    }
                     // `s.try_into()`: Result<[T; N], TryFromSliceError> (N は使われ方から)
                     "try_into" if self.prog.struct_index.contains_key("TryFromSliceError") => {
                         let rb = self.prog.struct_index["Result"];
