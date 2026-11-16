@@ -1408,13 +1408,6 @@ pub fn const_arg_syn(e: &syn::Expr) -> R<TySyn> {
     }
 }
 
-/// 型の環境で name が const ジェネリクスの引数 (`[(); n]`) なら、その値
-pub fn const_generic_value(env: &TyEnv, name: &str) -> Option<u32> {
-    env.params.iter().find(|(n, _)| n == name).and_then(|(_, t)| match t {
-        Ty::Array(Ty::Unit, n) if *n < CONST_LEN_BASE => Some(*n),
-        _ => None,
-    })
-}
 
 
 

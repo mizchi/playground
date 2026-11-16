@@ -1054,10 +1054,17 @@ impl Cx<'_, '_> {
                         self.b.switch_to_block(cur);
                     }
                     let ob = self.owned_binds;
+                    // (`let Some(name) = name else { .. }`: 束縛が同じ名前で外の変数を隠すので、先に外の変数のフラグを取っておく)
+                    let pre = if is_place_expr(&init.expr) { self.moved_flag(&init.expr) } else { None };
                     self.pat_bind(&l.pat, place, BindMode::Move)?;
                     if self.owned_binds > ob {
-                        let f = self.last_scrut;
-                        self.release(&init.expr, f);
+                        match pre {
+                            Some(f) => self.clear_flag(f),
+                            None => {
+                                let f = self.last_scrut;
+                                self.release(&init.expr, f);
+                            }
+                        }
                     }
                     self.extend_temps(t0);
                 }
@@ -1210,9 +1217,10 @@ impl Cx<'_, '_> {
         if let Some(&t) = self.lets.get(&(e as *const Expr as usize)) {
             return Some(t);
         }
-        // (書式マクロの引数の中は位置で記録されている)
-        if self.in_fmt_args > 0 {
-            if let Some(&t) = self.lets.get(&crate::infer::pos_key(e)) {
+        // (書式マクロの引数の中と、書き換えで複製したノードは位置で引く)
+        let k = crate::infer::pos_key(e);
+        if k != 0 {
+            if let Some(&t) = self.lets.get(&k) {
                 return Some(t);
             }
         }
@@ -1597,6 +1605,16 @@ impl Cx<'_, '_> {
             }
             Expr::Field(f) => {
                 let fname = member_name(&f.member);
+                // (フィールドがなく Deref を実装した型 (`self.prog` で self: &Inf): `(*self.deref()).prog`)
+                if let Some(Ty::Struct(sid)) = self.peek(&f.base).map(|t| self.strip_refs(t)) {
+                    if self.prog.field(sid, &fname).is_none() {
+                        if let Some(d) = self.user_deref_sid(&f.base, sid) {
+                            let mut f2 = f.clone();
+                            f2.base = Box::new(syn::parse_quote!((#d)));
+                            return self.place(&Expr::Field(f2));
+                        }
+                    }
+                }
                 let (a, o, sid) = self.struct_base(&f.base)?;
                 match self.prog.field(sid, &fname) {
                     Some((ft, foff)) => Ok(Place::Mem(a, o + foff as i32, ft)),
@@ -1646,11 +1664,11 @@ impl Cx<'_, '_> {
             }
             // `d[i]` / `m[&k]` (impl Index / IndexMut、VecDeque / BTreeMap): `*x.index_mut(i)` / `*x.index(i)`
             Expr::Index(ix)
-                if matches!(self.peek(&ix.expr).map(|t| self.strip_refs(t)),
+                if matches!(self.peek_or_static(&ix.expr).map(|t| self.strip_refs(t)),
                     Some(Ty::Struct(sid)) if self.vec_fields(sid).is_none()
                         && (self.prog.method(sid, "index").is_some() || self.prog.method(sid, "index_mut").is_some())) =>
             {
-                let Some(Ty::Struct(sid)) = self.peek(&ix.expr).map(|t| self.strip_refs(t)) else { unreachable!() };
+                let Some(Ty::Struct(sid)) = self.peek_or_static(&ix.expr).map(|t| self.strip_refs(t)) else { unreachable!() };
                 let m = if self.prog.method(sid, "index_mut").is_some() { "index_mut" } else { "index" };
                 let mi = syn::Ident::new(m, ix.span());
                 let (b, k) = (&ix.expr, &ix.index);
@@ -1905,6 +1923,32 @@ impl Cx<'_, '_> {
                                     e.span(),
                                     "moving a captured value out of a closure is not supported",
                                 );
+                            }
+                        }
+                    }
+                    // 一時値のフィールドのムーブ (`f().0`): 一時値ごとの drop をやめ、残りのフィールドだけをここで drop する
+                    // (Drop を実装した型からはフィールドをムーブできないので、フィールドごとに drop してよい)
+                    if let (Expr::Field(_), Place::Mem(a, o, t), Some(v)) = (strip_paren(e), p, r.0) {
+                        if let Some(tm) = self.temps.iter().rev().find(|tm| tm.loc == Loc::Ptr(a)).map(|tm| (tm.flag, tm.ty)) {
+                            if let Ty::Struct(sid) = tm.1 {
+                                let fields = self.prog.structs[sid as usize].fields.clone();
+                                if !self.prog.structs[sid as usize].is_enum && fields.iter().any(|f| f.2 as i32 == o) {
+                                    let v = if t.is_agg() {
+                                        let tmp = self.temp(t);
+                                        self.copy(tmp, v, t);
+                                        tmp
+                                    } else {
+                                        v
+                                    };
+                                    self.clear_flag(tm.0);
+                                    for (_, ft, off) in fields {
+                                        if off as i32 != o && self.needs_drop(ft) {
+                                            let fa = self.addr_plus(a, off as i32);
+                                            self.drop_in_place(fa, ft);
+                                        }
+                                    }
+                                    return Ok((Some(v), t));
+                                }
                             }
                         }
                     }
@@ -3861,7 +3905,10 @@ impl Cx<'_, '_> {
                     base = *i;
                 }
                 let is_vec = matches!(base, Ty::Struct(sid) if self.vec_fields(sid).is_some());
-                let seq = is_vec || matches!(base, Ty::Array(..) | Ty::Ref(_, Ty::Slice(_)));
+                // (Option も 0 個か 1 個のイテレータ: `it.chain(Some(x))`)
+                let is_opt = matches!(base, Ty::Struct(sid) if self.prog.structs[self.prog.base_of(sid) as usize].name == "Option")
+                    && self.prog.index.contains_key("Option::into_iter");
+                let seq = is_vec || is_opt || matches!(base, Ty::Array(..) | Ty::Ref(_, Ty::Slice(_)));
                 if !seq {
                     return None;
                 }
@@ -5484,9 +5531,43 @@ impl Cx<'_, '_> {
         (v, of)
     }
 
+    /// 型推論の記録がなければ (codegen が作り直したノード)、変数・フィールド・deref・括弧だけの式の型を構文から求める
+    fn peek_or_static(&self, e: &Expr) -> Option<Ty> {
+        self.peek(e).or_else(|| self.static_ty(e))
+    }
+
+    fn static_ty(&self, e: &Expr) -> Option<Ty> {
+        match e {
+            Expr::Paren(p) => self.static_ty(&p.expr),
+            Expr::Group(g) => self.static_ty(&g.expr),
+            Expr::Path(p) => self.lookup(&p.path.get_ident()?.to_string()).map(|(_, t)| t),
+            Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => match self.static_ty(&u.expr)? {
+                Ty::Ref(_, i) | Ty::Box(i) | Ty::Ptr(_, i) => Some(*i),
+                _ => None,
+            },
+            Expr::Reference(r) => self.static_ty(&r.expr).map(|t| Ty::Ref(r.mutability.is_some(), intern(t))),
+            Expr::Field(f) => {
+                let Ty::Struct(sid) = self.strip_refs(self.static_ty(&f.base)?) else { return None };
+                let name = member_name(&f.member);
+                if let Some((t, _)) = self.prog.field(sid, &name) {
+                    return Some(t);
+                }
+                // (Deref の先のフィールド)
+                let d = self.prog.method(sid, "deref")?;
+                let Ty::Ref(_, Ty::Struct(ts)) = self.prog.sigs[d as usize].ret else { return None };
+                self.prog.field(*ts, &name).map(|(t, _)| t)
+            }
+            _ => None,
+        }
+    }
+
     /// e が Deref を実装した (Vec・Box・String でない) struct の値なら、`*e.deref_mut()` (なければ `*e.deref()`)
     fn user_deref(&self, e: &Expr) -> Option<Expr> {
         let Ty::Struct(sid) = self.peek(e)? else { return None };
+        self.user_deref_sid(e, sid)
+    }
+
+    fn user_deref_sid(&self, e: &Expr, sid: u32) -> Option<Expr> {
         if self.vec_fields(sid).is_some() {
             return None;
         }
@@ -6331,7 +6412,7 @@ impl Cx<'_, '_> {
                 // prelude の `__exr_str_<m>` (`s.split("ab")` は __exr_str_split_str)
                 // (パターンがクロージャなら `__exr_str_<m>_fn`)
                 let fname = format!("{m}_fn");
-                let h = if m == "split" {
+                let h = if m == "split" && !matches!(mc.args.first(), Some(Expr::Closure(_))) {
                     "split_str"
                 } else if matches!(mc.args.first(), Some(Expr::Closure(_)))
                     && self.prog.index.contains_key(&format!("__exr_str_{fname}"))
@@ -9761,6 +9842,27 @@ impl Cx<'_, '_> {
     /// ローカル変数 (の場所) の drop フラグ
     fn flag_of_loc(&self, loc: Loc) -> Option<StackSlot> {
         self.owned.iter().rev().find(|o| o.loc == loc).map(|o| o.flag)
+    }
+
+    /// mark_moved が下ろすフラグ (下ろさずに返す)
+    fn moved_flag(&self, e: &Expr) -> Option<StackSlot> {
+        let mut e = e;
+        loop {
+            match e {
+                Expr::Paren(p) => e = &p.expr,
+                Expr::Group(g) => e = &g.expr,
+                Expr::Field(f) => e = &f.base,
+                Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => e = &u.expr,
+                Expr::Path(p) => {
+                    let (loc, t) = self.lookup(&p.path.get_ident()?.to_string())?;
+                    if matches!(t, Ty::Ref(..) | Ty::Ptr(..)) {
+                        return None;
+                    }
+                    return self.flag_of_loc(loc);
+                }
+                _ => return None,
+            }
+        }
     }
 
     /// 式 e (ローカル変数か、そのフィールド) から値をムーブした: 変数のフラグを下ろす

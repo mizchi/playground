@@ -495,7 +495,7 @@ impl Inf<'_> {
             Pat::Paren(p) => self.pat(&p.pat, v, mode),
             Pat::Type(p) => self.pat(&p.pat, v, mode),
             Pat::Reference(r) => {
-                let i = self.deref(v);
+                let i = self.deref_var(v);
                 self.pat(&r.pat, i, None);
             }
             Pat::Or(o) => {
@@ -699,6 +699,11 @@ impl Inf<'_> {
         ) && self.no_record == 0
         {
             self.lets.push((e as *const Expr as usize, v));
+            // (位置でも: codegen が書き換えで複製したノード (`__exr_slice_to_vec(&a[..])` の中の式) も引けるように)
+            let k = pos_key(e);
+            if k != 0 {
+                self.lets.push((k, v));
+            }
             // (メソッド呼び出しはノード自体でも引けるようにする: codegen の helper が戻り値の型を見る)
             if let Expr::MethodCall(mc) = e {
                 self.lets.push((mc as *const syn::ExprMethodCall as usize, v));
@@ -1128,7 +1133,7 @@ impl Inf<'_> {
             Expr::Unary(u) => {
                 let v = self.expr(&u.expr);
                 match u.op {
-                    UnOp::Deref(_) => self.deref(v),
+                    UnOp::Deref(_) => self.deref_var(v),
                     _ => v,
                 }
             }
@@ -1673,9 +1678,10 @@ impl Inf<'_> {
                         base = Some(*i);
                     }
                     let vec_id = self.prog.struct_index.get("Vec").copied();
+                    let opt_id = self.prog.struct_index.get("Option").copied();
                     let seq = match base {
                         Some(Ty::Ref(_, Ty::Slice(_))) | Some(Ty::Array(..)) => true,
-                        Some(Ty::Struct(sid)) => Some(self.prog.base_of(sid)) == vec_id,
+                        Some(Ty::Struct(sid)) => Some(self.prog.base_of(sid)) == vec_id || Some(self.prog.base_of(sid)) == opt_id,
                         _ => false,
                     };
                     let syntactic_array = matches!(&mc.args[0], Expr::Array(_) | Expr::Repeat(_));
@@ -1840,7 +1846,7 @@ impl Inf<'_> {
                 if callee.is_none() {
                     if let Some(b) = sid {
                         if self.prog.structs[self.prog.base_of(b) as usize].name == "String" {
-                            let h = if n == "split" && args.first().is_some_and(|&a| self.resolve(a) != Some(Ty::Char)) {
+                            let h = if n == "split" && !matches!(mc.args.first(), Some(Expr::Closure(_))) && args.first().is_some_and(|&a| self.resolve(a) != Some(Ty::Char)) {
                                 "split_str".to_string()
                             } else if n == "split_whitespace" {
                                 "split_ws".to_string()
@@ -1884,7 +1890,7 @@ impl Inf<'_> {
             _ => None,
         };
         if let Some(pre) = pre {
-            let h = if name == "split" && pre == "__exr_str_" && args.first().is_some_and(|&a| self.resolve(a) != Some(Ty::Char)) {
+            let h = if name == "split" && pre == "__exr_str_" && !matches!(mc.args.first(), Some(Expr::Closure(_))) && args.first().is_some_and(|&a| self.resolve(a) != Some(Ty::Char)) {
                 "split_str".to_string()
             } else if name == "split_whitespace" {
                 "split_ws".to_string()

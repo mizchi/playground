@@ -966,7 +966,10 @@ pub fn rename_module_collisions(src: &str) -> Option<String> {
             depth -= 1;
         } else if toks[k].0 == 0 && scope_depth.last().is_some_and(|&(_, d)| d == depth) {
             let kw = tok(k);
-            if matches!(kw, b"fn" | b"struct" | b"enum" | b"trait" | b"type" | b"const" | b"static" | b"union") && k + 1 < toks.len() {
+            // (`*const T` の const / `&'static` の static は定義でない)
+            let after_star = k >= 1 && is_sym(k - 1, b'*');
+            let after_tick = k >= 1 && toks[k - 1].0 == 1 && s[toks[k - 1].1] == b'\'';
+            if matches!(kw, b"fn" | b"struct" | b"enum" | b"trait" | b"type" | b"const" | b"static" | b"union") && k + 1 < toks.len() && !after_star && !after_tick {
                 let nk = if kw == b"static" && is_id(k + 1, b"mut") { k + 2 } else { k + 1 };
                 // (`const fn f` は fn で数える)
                 if nk < toks.len() && toks[nk].0 == 0 && !(kw == b"const" && is_id(nk, b"fn")) && tok(nk) != b"_" {

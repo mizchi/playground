@@ -134,7 +134,7 @@ tests/selfhost.sh
 - `src/ast_closure.rs`（自前の構文木の上のクロージャ解析。closure.rs の移植）：全ファイルの関数のクロージャの自由変数と「値でキャプチャするか」が rustc 版と一致する。
 - `src/types.rs` + `src/ast_types.rs`（front.rs から分けた型の表現・intern と、自前の構文木の型 → TySyn）：全ファイルの型の変換結果と intern が rustc 版と一致する。
 - `src/ast_summary.rs`（アイテムの要約。front.rs の summarize / parse_sig / クロージャの持ち上げの移植）：全ファイルの全アイテムの要約が rustc 版と一致する。
-- `src/program.rs`（全体の表。front.rs から syn に依存しない部分を分けたもの：関数シグネチャ・struct / enum の定義とレイアウト・インスタンス化・trait 実装・const の評価）：要約までのモジュールと prelude を合わせた約 1 万 1 千行のプログラムで、probe / examples の 135 ファイルの Program を作り、関数・型（サイズ・フィールドのオフセット・128 bit の深いハッシュ）・impl・const（と `src/ast_consteval.rs` で評価した static の初期値のデータ）と、全関数の本体のパスを `fn_by_p` / `struct_by_p` / `variant_by_p` で引いた結果、`src/solver.rs`（型推論の単一化器）でジェネリックな関数を解いた結果、`src/ctors.rs` の書き換えの 7 万行の出力が、probe / examples / src の 157 ファイルで rustc 版と一致する（-O でも）。
+- `src/program.rs`（全体の表。front.rs から syn に依存しない部分を分けたもの：関数シグネチャ・struct / enum の定義とレイアウト・インスタンス化・trait 実装・const の評価）：要約までのモジュールと prelude を合わせた約 1 万 1 千行のプログラムで、probe / examples の 135 ファイルの Program を作り、関数・型（サイズ・フィールドのオフセット・128 bit の深いハッシュ）・impl・const（と `src/ast_consteval.rs` で評価した static の初期値のデータ）と、全関数の本体のパスを `fn_by_p` / `struct_by_p` / `variant_by_p` で引いた結果、`src/solver.rs`（型推論の単一化器）でジェネリックな関数を解いた結果、`src/ctors.rs` の書き換え、`src/ast_infer.rs`（型推論）でユーザの関数 552 個の let の型を推論した結果の 7 万 5 千行の出力が、probe / examples / src の 157 ファイルで rustc 版と一致する（-O でも）。
 - `src/enc.rs`（キャッシュの直列化。`enc_struct!` マクロと trait の静的呼び出し `T::dec(r)`）と `src/fxhash.rs`（FxHasher / `FxMap`）：構造体・Vec・Option・タプルを符号化して戻し、バイト列とハッシュが rustc 版と一致する（-O でも）。
 
 環境変数：`CRUSTC_DUMP_PRELUDE=1` は付けた prelude を stderr に出す。`CRUSTC_NO_STRIP=1` は出力のシンボルを残す（callgrind などで関数名を見るため）。
@@ -1064,9 +1064,26 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
     Vec のキャプチャまで値で持ち、二重に解放していた。キャプチャごとに決める（値として渡す・返すものだけ値で持つ）
   - const ジェネリクスの仮の長さで配列のサイズの掛け算があふれていた（デバッグビルドで trap）
 
-ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen / program / ast_consteval / solver / ctors）と、
+#### セルフホストの第 15 段階: 型推論を自前の構文木へ移す
+
+- `src/ast_infer.rs`：infer.rs の構文木を辿る部分（パターン・ブロック・式・メソッド呼び出し・クロージャ・書式マクロの引数など 1,900 行）を
+  自前の構文木に移植した。単一化器は solver.rs を共有する。`tests/ast_infer.rs` が probe / examples と crustc 自身のモジュール
+  （`out/selfhost/program_main.rs`）の 885 関数・2,380 個の let で syn 版と同じ型になることを確かめる
+- 推論の結果をノードのアドレスに加えてソース上の位置でも記録し、codegen が書き換えで複製したノード（`__exr_slice_to_vec(&a[..])` の中の式など）も型を引けるようにした
+- 足したもの：`DerefMut` trait、Deref 越しのフィールド（`self.prog` で self: `&mut Inf`）、`Option::iter` / `into_iter` と `it.chain(Some(x))`、
+  クロージャで `split`（`s.split(|c| ..)`）
+- 修正：
+  - `let Some(name) = name else { .. }`（外の変数を同じ名前で隠す）で、外の変数の drop をやめず二重に解放していた
+  - 一時値のフィールドのムーブ（`f().0`）で一時値を丸ごと drop していた（残りのフィールドだけ drop する）
+  - 相互再帰の型（`Ty` ↔ `FnTy`）の deep hash が同じになり、別の型のインスタンス（`HashMap::find<&FnTy>` と `<&Ty>`）のキャッシュキーがぶつかっていた
+  - 自前の構文解析で `&&T` を 3 重の参照と読んでいた
+  - `*const T` の `const` をモジュールの名前空間の定義と見ていた
+- 回避（crustc が未対応のもの）：スコープにない trait のメソッドを候補から外さない（`Solver::deref` を `deref_var` に改名）、
+  `std::mem::discriminant`（形の番号の関数にした）
+
+ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen / program / ast_consteval / solver / ctors / ast_infer）と、
 依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。
-残りの front（syn の構文木を引く検索）/ infer（syn の構文木を辿る部分）/ consteval（codegen の定数の昇格）/ closure / codegen / driver / cache は syn と cranelift の上に書かれている。
+残りの front（syn の構文木を引く検索）/ infer（syn 版。自前の構文木の版 ast_infer はある）/ consteval（codegen の定数の昇格）/ closure / codegen / driver / cache は syn と cranelift の上に書かれている。
 syn の代わりは src/parse.rs（自前の構文木）を土台にして front から順に移す。cranelift の代わり (自前のコード生成) はその後。
 
 ### 途中で分かったこと

@@ -18,7 +18,7 @@ parts = [("key", body("src/key.rs")), ("fxhash", body("src/fxhash.rs")), ("lexer
          ("prelude", prelude), ("types", body("src/types.rs")), ("parse", body("src/parse.rs")),
          ("ast_types", body("src/ast_types.rs")), ("ast_closure", body("src/ast_closure.rs")),
          ("ast_summary", body("src/ast_summary.rs")), ("program", body("src/program.rs")),
-         ("ast_consteval", body("src/ast_consteval.rs")), ("solver", body("src/solver.rs")), ("ctors", body("src/ctors.rs"))]
+         ("ast_consteval", body("src/ast_consteval.rs")), ("solver", body("src/solver.rs")), ("ctors", body("src/ctors.rs")), ("ast_infer", body("src/ast_infer.rs"))]
 out = ["// 自動生成: tests/selfhost/build_program.py (crustc の src/*.rs をそのまま含む)", "mod cache {\n    pub use crate::key::*;\n}\n"]
 for name, src in parts:
     out.append(f"mod {name} {{\n" + src + "}\n")
@@ -131,6 +131,29 @@ fn run(path: &str) -> Result<(), String> {
         solved += 1;
     }
     println!("  {solved} solved");
+    // 型推論 (ast_infer.rs): ユーザの (ジェネリックでない) 関数の let の型を前順に
+    let mut nf = 0;
+    for id in 0..p.names.len() {
+        let Some(ii) = p.item_of[id] else { continue };
+        let sig = &p.sigs[id];
+        if ii as usize >= user || sig.is_generic() || !sig.has_body || p.closures.contains_key(&(id as u32)) {
+            continue;
+        }
+        let it = &items[ii as usize];
+        let Ok(pf) = parse::parse_file(&src[it.start..it.end]) else { continue };
+        let Some(parse::ItemKind::Fn(psig, Some(body))) = pf.items.first().map(|i| &i.kind) else { continue };
+        if psig.params.iter().any(|(q, _)| !matches!(q, parse::Pat::Ident(_, _, _, None))) {
+            continue;
+        }
+        let env = program::TyEnv { self_sid: sig.impl_of, params: vec![], self_ty: sig.self_ty.filter(|t| !p.has_param(*t)) };
+        let lt = ast_infer::infer(&p, psig.recv.is_some(), &psig.params, body, sig, &env);
+        let mut ls = vec![];
+        ast_infer::lets_in_order(body, &mut ls);
+        let ts: Vec<String> = ls.iter().map(|&l| lt.get(&(l as usize)).map(|&t| p.tn(t)).unwrap_or("?".into())).collect();
+        println!("  infer {} [{}]", p.names[id], ts.join(", "));
+        nf += 1;
+    }
+    println!("  {nf} inferred");
     // パスの検索 (program.rs の fn_by_p / struct_by_p / variant_by_p): 全関数の本体のパスを引く
     if let Ok(f) = parse::parse_file(&src) {
         let mut n = 0;

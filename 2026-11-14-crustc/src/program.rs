@@ -611,6 +611,10 @@ impl Program {
                 hs.sort_unstable();
                 let mut h = KeyHasher::new();
                 h.add(&hs);
+                // (相互再帰の型 (`Ty` ↔ `FnTy`) は届く定義の集合が同じなので、自分の名前も入れて区別する)
+                if id < n_defs {
+                    h.add(&sdefs[id].1);
+                }
                 h.finish()
             })
             .collect();
@@ -2023,25 +2027,6 @@ impl Program {
     /// アイテム内の識別子のうち関数名に一致するもの (ソート済み) と struct 名に一致するもの。
     /// ローカル変数による shadowing は無視した過大近似だが、
     /// キャッシュキーと到達可能性の両方にとって安全側である。
-    /// 識別子のうち const / static に一致するもの
-    pub fn const_refs(&self, src: &str, it: &SrcItem) -> Vec<u32> {
-        let mut v: Vec<u32> = it
-            .idents
-            .iter()
-            .flat_map(|&(a, b)| {
-                let s = &src[a as usize..b as usize];
-                self.const_index
-                    .get(s)
-                    .copied()
-                    .into_iter()
-                    .chain(self.const_by_last.get(s).into_iter().flatten().copied())
-            })
-            .collect();
-        v.sort_unstable();
-        v.dedup();
-        v
-    }
-
     /// (関数, struct / enum, const / static) の参照。識別子を 1 回だけ走査する
     pub fn refs(&self, src: &str, it: &SrcItem) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
         let mut fns = vec![];
@@ -2460,4 +2445,12 @@ impl Program {
             _ => None,
         }
     }
+}
+
+/// 型の環境で name が const ジェネリクスの引数 (`[(); n]`) なら、その値
+pub fn const_generic_value(env: &TyEnv, name: &str) -> Option<u32> {
+    env.params.iter().find(|(n, _)| n == name).and_then(|(_, t)| match t {
+        Ty::Array(Ty::Unit, n) if *n < CONST_LEN_BASE => Some(*n),
+        _ => None,
+    })
 }

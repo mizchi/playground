@@ -23,6 +23,7 @@ pub mod ast_closure;
 pub mod ast_types;
 pub mod ast_summary;
 pub mod ast_consteval;
+pub mod ast_infer;
 pub mod prelude;
 pub mod program;
 #[doc(hidden)]

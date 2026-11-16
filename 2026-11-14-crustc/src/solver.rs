@@ -197,7 +197,7 @@ impl Solver<'_> {
                 _ => None,
             }
         };
-        let same_kind = std::mem::discriminant(&self.shape[fa as usize]) == std::mem::discriminant(&self.shape[fb as usize]);
+        let same_kind = shape_tag(&self.shape[fa as usize]) == shape_tag(&self.shape[fb as usize]);
         match (elem(self, fa), elem(self, fb)) {
             (Some(x), Some(y)) if !same_kind || matches!(self.shape[fa as usize], Some(Shape::Adt(..) | Shape::Known(Ty::Struct(_)))) => {
                 // (要素どうしも型が違ってよい (`Vec<String> == [&str]`): 片方が分からないときだけ決める)
@@ -588,7 +588,7 @@ impl Solver<'_> {
             None => None,
         }
     }
-    pub fn deref(&mut self, v: u32) -> u32 {
+    pub fn deref_var(&mut self, v: u32) -> u32 {
         let r = self.find(v);
         match self.shape[r as usize] {
             Some(Shape::Ref(_, i)) | Some(Shape::Ptr(_, i)) | Some(Shape::Bx(i)) => i,
@@ -608,7 +608,14 @@ impl Solver<'_> {
         let vars = self.adt_view(v, b);
         match self.prog.field(b, name) {
             Some((ft, _)) => self.field_var(ft, &vars),
-            None => self.var(),
+            // (フィールドがなく Deref を実装した型 (`self.prog` で self: &Inf → Solver): deref の先のフィールド)
+            None => match self.prog.method(sid, "deref").map(|d| self.prog.sigs[d as usize].ret) {
+                Some(Ty::Ref(_, t)) if !self.prog.has_param(*t) && !matches!(t, Ty::Str | Ty::Slice(_) | Ty::Dyn(_)) => {
+                    let k = self.known(*t);
+                    self.field(k, name)
+                }
+                _ => self.var(),
+            },
         }
     }
 
@@ -936,4 +943,19 @@ impl Solver<'_> {
             .map(|&(_, v)| v)
     }
 
+}
+
+/// 形の種類の番号 (`std::mem::discriminant` の代わり)
+pub fn shape_tag(s: &Option<Shape>) -> u8 {
+    match s {
+        None => 0,
+        Some(Shape::Known(_)) => 1,
+        Some(Shape::Ref(..)) => 2,
+        Some(Shape::Adt(..)) => 3,
+        Some(Shape::Arr(..)) => 4,
+        Some(Shape::Slc(_)) => 5,
+        Some(Shape::Ptr(..)) => 6,
+        Some(Shape::Clo(..)) => 7,
+        Some(Shape::Bx(_)) => 8,
+    }
 }

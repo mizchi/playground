@@ -792,9 +792,10 @@ impl Parser {
         if self.is_punct("&") {
             // `&&T` は & を 2 つ
             if self.punct_at(0, "&&") {
+                // (1 つ目の & を読み、2 つ目の & からを内側の参照型として読む)
                 self.i += 1;
                 self.toks[self.i].joint = false;
-                let inner = self.ty_ref_rest()?;
+                let inner = self.ty_inner(plus)?;
                 return Ok(Ty::Ref(None, false, Box::new(inner)));
             }
             self.i += 1;
