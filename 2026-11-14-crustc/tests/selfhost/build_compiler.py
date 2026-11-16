@@ -62,6 +62,16 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // (`include_str!` / `include!` はここで展開する: main.rs と同じ)
+    let dir = std::path::Path::new(&input).parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+    let src = match macros::expand_includes(&src, dir.as_path()) {
+        Ok(Some(s)) => s,
+        Ok(None) => src,
+        Err(e) => {
+            eprintln!("error: {input}: {e}");
+            std::process::exit(1);
+        }
+    };
     let out = output.unwrap_or_else(|| input.trim_end_matches(".rs").to_string());
     if let Err(e) = driver2::build(&src, std::path::Path::new(&out), opt, None) {
         eprintln!("error: {input}: {e}");

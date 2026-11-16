@@ -1123,6 +1123,19 @@ crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfh
   - 同じ文字列のクロージャ (`|x| x.1.clone()` が 2 か所) が同じ番号になっていた。本体のクロージャはアドレスで引く
   - 自前の構文解析の誤り (`&&x` のパターン、パターンの `true` / `false`)、整数の `clone()` の型推論の誤り (syn 版にもあった) も直した
 
+#### セルフホストの第 19 段階: crustc で crustc (syn・Cranelift を使わない経路) をコンパイルする
+
+- `tests/selfhost/build_compiler.py`：driver2 + acg + minclif と、それが使うモジュール全部 (lexer / macros / prelude / types / parse /
+  ast_* / program / solver / ctors / ast_infer / ast_consteval / link) を 1 ファイル (約 3 万 1 千行) のコンパイラにまとめる
+  (`compiler <in.rs> -o <out> [-O]`)
+- これを crustc (driver2) でコンパイルしたものが、実際にプログラムをコンパイルして動かせる (crustc が自分自身をコンパイルした)
+- `tests/selfhost_compiler.sh`：rustc 版と crustc 版の 2 つのコンパイラで probe / examples / acg をコンパイルし、.o と実行結果を比べる。
+  さらに crustc 版で自分自身をもう一度コンパイルする (2 段目)
+- そこまでに直したこと: モジュールを平らにするときの名前 (`std::path::Path` と同名の定義、`use super::*` で見える use、`&'static`)、
+  型推論 (受け手の型が分からない `len`、注釈つきの let、`x.clone()` の整数)、acg の deref の強制変換 (`&&T` → `&T`、`&String` → `&str`)、
+  範囲の添字の受け手の自動参照、`matches!` の guard の中のクロージャ、minclif の bitcast の 0 拡張。crustc がまだ扱えない書き方
+  (分解代入・`collect::<Option<Vec<_>>>`・クロージャから fn ポインタへの変換・`std::f64::consts` の値など) はソースを書き換えた
+
 ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen / program / ast_consteval / solver / ctors / ast_infer / minclif / ast_codegen）と、
 依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。
 残りの front（syn の構文木を引く検索）/ infer（syn 版。自前の構文木の版 ast_infer はある）/ consteval（codegen の定数の昇格）/ closure / codegen / driver / cache は syn と cranelift の上に書かれている。
