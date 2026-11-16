@@ -166,14 +166,14 @@ const FIELD_BASE: u32 = 1 << 29;
 #[derive(Default)]
 pub struct Track {
     /// (vreg, 命令の番号, 書き込みか)
-    ev: Vec<(u32, u32, bool)>,
+    pub(crate) ev: Vec<(u32, u32, bool)>,
     /// スロットとして直接使う (アドレス・幅の違う読み書き) か、整数でない: レジスタに置けない
     mem_only: Vec<bool>,
     var_mem_only: Vec<bool>,
     /// 浮動小数点か (xmm に置く)
     vfloat: Vec<bool>,
     varfloat: Vec<bool>,
-    segs: Vec<Seg>,
+    pub(crate) segs: Vec<Seg>,
     /// 関数を呼ぶ命令の番号
     calls: Vec<u32>,
     /// 値ごとの、スロットのアドレスとして load / store / iadd_imm に使った回数
@@ -183,9 +183,9 @@ pub struct Track {
 }
 
 #[derive(Clone, Default)]
-struct Seg {
-    block: u32,
-    start: u32,
+pub(crate) struct Seg {
+    pub(crate) block: u32,
+    pub(crate) start: u32,
     end: u32,
     /// jump / brif の飛び先のブロック
     succ: Vec<u32>,
@@ -2676,7 +2676,7 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize, paddr: &[Option<(u32, i32)>]
 
 /// FunctionBuilder の命令 (呼ばれた順に記録し、割り当てを決めてから本番の Emitter でもう一度呼ぶ)
 #[derive(Clone)]
-enum Op {
+pub(crate) enum Op {
     CreateBlock,
     AppendBlockParam(Block, Type),
     SwitchToBlock(Block),
@@ -2786,19 +2786,21 @@ enum Op {
 /// 1 関数分の組み立て。命令は記録しながら解析用の Emitter で組み立て (値の番号と型を決める)、
 /// finish で値・変数をレジスタに割り当ててから、本番の Emitter で記録した命令を同じ順にもう一度組み立てる
 pub struct FunctionBuilder {
-    params: Vec<Type>,
-    rets: Vec<Type>,
+    pub(crate) params: Vec<Type>,
+    pub(crate) rets: Vec<Type>,
     dry: Emitter,
-    ops: Vec<Op>,
+    pub(crate) ops: Vec<Op>,
     real: Option<Emitter>,
     /// 入口で 0 にするスロット (finish_zeroing に渡すもの。変数にしない)
-    zero: Vec<u32>,
+    pub(crate) zero: Vec<u32>,
+    /// 命令ごとの戻り値 (値・ブロック・変数・スロット・関数の番号。clif_backend が使う)
+    pub(crate) res: Vec<Vec<u32>>,
 }
 
 impl FunctionBuilder {
     pub fn new(params: Vec<Type>, rets: Vec<Type>) -> FunctionBuilder {
         let dry = Emitter::new(params.clone(), rets.clone(), None);
-        FunctionBuilder { params, rets, dry, ops: vec![], real: None, zero: vec![] }
+        FunctionBuilder { params, rets, dry, ops: vec![], real: None, zero: vec![], res: vec![] }
     }
     pub fn func_params(&self) -> Vec<Value> {
         self.dry.func_params()
@@ -2812,6 +2814,14 @@ impl FunctionBuilder {
     pub fn current_block(&self) -> Option<Block> {
         self.dry.current_block()
     }
+    /// 解析の記録 (clif_backend が使う)
+    pub(crate) fn track(&self) -> Option<&Track> {
+        match &self.dry.track {
+            Some(t) => Some(&**t),
+            None => None,
+        }
+    }
+
     /// finish_zeroing で 0 にするスロットを先に教える (traps / finish の前)
     pub fn set_zero(&mut self, z: &[StackSlot]) {
         self.zero = z.iter().map(|s| s.0).collect();
@@ -2835,7 +2845,7 @@ impl FunctionBuilder {
                 reads[id as usize] += 1;
             }
         }
-        let ops = std::mem::take(&mut self.ops);
+        let ops = std::mem::replace(&mut self.ops, vec![]);
         let mut i = 0;
         while i < ops.len() {
             e.op = i as u32;
@@ -2883,522 +2893,718 @@ impl FunctionBuilder {
     pub fn create_block(&mut self) -> Block {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::CreateBlock);
-        self.dry.create_block()
+        let r = self.dry.create_block();
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn append_block_param(&mut self, b: Block, t: Type) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::AppendBlockParam(b, t));
-        self.dry.append_block_param(b, t)
+        let r = self.dry.append_block_param(b, t);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn switch_to_block(&mut self, b: Block) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::SwitchToBlock(b));
-        self.dry.switch_to_block(b)
+        self.dry.switch_to_block(b);
+        self.res.push(vec![]);
     }
     pub fn declare_var(&mut self, t: Type) -> Variable {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::DeclareVar(t));
-        self.dry.declare_var(t)
+        let r = self.dry.declare_var(t);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn def_var(&mut self, var: Variable, v: Value) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::DefVar(var, v));
-        self.dry.def_var(var, v)
+        self.dry.def_var(var, v);
+        self.res.push(vec![]);
     }
     pub fn use_var(&mut self, var: Variable) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::UseVar(var));
-        self.dry.use_var(var)
+        let r = self.dry.use_var(var);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn create_stack_slot(&mut self, size: u32, align: u32) -> StackSlot {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::CreateStackSlot(size, align));
-        self.dry.create_stack_slot(size, align)
+        let r = self.dry.create_stack_slot(size, align);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn import_function(&mut self, name: &str) -> FuncRef {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::ImportFunction(name.to_string()));
-        self.dry.import_function(name)
+        let r = self.dry.import_function(name);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn iconst(&mut self, t: Type, x: i64) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Iconst(t, x));
-        self.dry.iconst(t, x)
+        let r = self.dry.iconst(t, x);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn iadd(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Iadd(a, b));
-        self.dry.iadd(a, b)
+        let r = self.dry.iadd(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn isub(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Isub(a, b));
-        self.dry.isub(a, b)
+        let r = self.dry.isub(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn imul(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Imul(a, b));
-        self.dry.imul(a, b)
+        let r = self.dry.imul(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn band(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Band(a, b));
-        self.dry.band(a, b)
+        let r = self.dry.band(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn bor(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Bor(a, b));
-        self.dry.bor(a, b)
+        let r = self.dry.bor(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn bxor(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Bxor(a, b));
-        self.dry.bxor(a, b)
+        let r = self.dry.bxor(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn iadd_imm(&mut self, a: Value, x: i64) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::IaddImm(a, x));
-        self.dry.iadd_imm(a, x)
+        let r = self.dry.iadd_imm(a, x);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn udiv(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Udiv(a, b));
-        self.dry.udiv(a, b)
+        let r = self.dry.udiv(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn sdiv(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Sdiv(a, b));
-        self.dry.sdiv(a, b)
+        let r = self.dry.sdiv(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn urem(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Urem(a, b));
-        self.dry.urem(a, b)
+        let r = self.dry.urem(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn srem(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Srem(a, b));
-        self.dry.srem(a, b)
+        let r = self.dry.srem(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn ishl(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Ishl(a, b));
-        self.dry.ishl(a, b)
+        let r = self.dry.ishl(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn ushr(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Ushr(a, b));
-        self.dry.ushr(a, b)
+        let r = self.dry.ushr(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn sshr(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Sshr(a, b));
-        self.dry.sshr(a, b)
+        let r = self.dry.sshr(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn ineg(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Ineg(a));
-        self.dry.ineg(a)
+        let r = self.dry.ineg(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn bnot(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Bnot(a));
-        self.dry.bnot(a)
+        let r = self.dry.bnot(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn icmp(&mut self, cc: IntCC, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Icmp(cc, a, b));
-        self.dry.icmp(cc, a, b)
+        let r = self.dry.icmp(cc, a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn icmp_imm(&mut self, cc: IntCC, a: Value, x: i64) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::IcmpImm(cc, a, x));
-        self.dry.icmp_imm(cc, a, x)
+        let r = self.dry.icmp_imm(cc, a, x);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn select(&mut self, c: Value, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Select(c, a, b));
-        self.dry.select(c, a, b)
+        let r = self.dry.select(c, a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn uextend(&mut self, t: Type, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Uextend(t, a));
-        self.dry.uextend(t, a)
+        let r = self.dry.uextend(t, a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn sextend(&mut self, t: Type, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Sextend(t, a));
-        self.dry.sextend(t, a)
+        let r = self.dry.sextend(t, a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn ireduce(&mut self, t: Type, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Ireduce(t, a));
-        self.dry.ireduce(t, a)
+        let r = self.dry.ireduce(t, a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn load(&mut self, t: Type, addr: Value, off: i32) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Load(t, addr, off));
-        self.dry.load(t, addr, off)
+        let r = self.dry.load(t, addr, off);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn store(&mut self, v: Value, addr: Value, off: i32) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Store(v, addr, off));
-        self.dry.store(v, addr, off)
+        self.dry.store(v, addr, off);
+        self.res.push(vec![]);
     }
     pub fn stack_addr(&mut self, s: StackSlot, off: i32) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::StackAddr(s, off));
-        self.dry.stack_addr(s, off)
+        let r = self.dry.stack_addr(s, off);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn jump(&mut self, b: Block, args: &[Value]) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Jump(b, args.to_vec()));
-        self.dry.jump(b, args)
+        self.dry.jump(b, args);
+        self.res.push(vec![]);
     }
     pub fn brif(&mut self, c: Value, then_b: Block, then_args: &[Value], else_b: Block, else_args: &[Value]) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Brif(c, then_b, then_args.to_vec(), else_b, else_args.to_vec()));
-        self.dry.brif(c, then_b, then_args, else_b, else_args)
+        self.dry.brif(c, then_b, then_args, else_b, else_args);
+        self.res.push(vec![]);
     }
     pub fn return_(&mut self, vals: &[Value]) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Return_(vals.to_vec()));
-        self.dry.return_(vals)
+        self.dry.return_(vals);
+        self.res.push(vec![]);
     }
     pub fn trap(&mut self) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Trap);
-        self.dry.trap()
+        self.dry.trap();
+        self.res.push(vec![]);
     }
     pub fn call(&mut self, f: FuncRef, args: &[Value], rets: &[Type]) -> Vec<Value> {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Call(f, args.to_vec(), rets.to_vec()));
-        self.dry.call(f, args, rets)
+        let r = self.dry.call(f, args, rets);
+        self.res.push(r.iter().map(|v| v.0).collect());
+        r
     }
     pub fn f64const(&mut self, x: f64) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::F64const(x));
-        self.dry.f64const(x)
+        let r = self.dry.f64const(x);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn f32const(&mut self, x: f32) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::F32const(x));
-        self.dry.f32const(x)
+        let r = self.dry.f32const(x);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fadd(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Fadd(a, b));
-        self.dry.fadd(a, b)
+        let r = self.dry.fadd(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fsub(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Fsub(a, b));
-        self.dry.fsub(a, b)
+        let r = self.dry.fsub(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fmul(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Fmul(a, b));
-        self.dry.fmul(a, b)
+        let r = self.dry.fmul(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fdiv(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Fdiv(a, b));
-        self.dry.fdiv(a, b)
+        let r = self.dry.fdiv(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn sqrt(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Sqrt(a));
-        self.dry.sqrt(a)
+        let r = self.dry.sqrt(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn floor(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Floor(a));
-        self.dry.floor(a)
+        let r = self.dry.floor(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn ceil(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Ceil(a));
-        self.dry.ceil(a)
+        let r = self.dry.ceil(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn trunc(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Trunc(a));
-        self.dry.trunc(a)
+        let r = self.dry.trunc(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fneg(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Fneg(a));
-        self.dry.fneg(a)
+        let r = self.dry.fneg(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fabs(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Fabs(a));
-        self.dry.fabs(a)
+        let r = self.dry.fabs(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fcopysign(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Fcopysign(a, b));
-        self.dry.fcopysign(a, b)
+        let r = self.dry.fcopysign(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fma(&mut self, a: Value, b: Value, c: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Fma(a, b, c));
-        self.dry.fma(a, b, c)
+        let r = self.dry.fma(a, b, c);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn bitcast(&mut self, t: Type, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Bitcast(t, a));
-        self.dry.bitcast(t, a)
+        let r = self.dry.bitcast(t, a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fcmp(&mut self, cc: FloatCC, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Fcmp(cc, a, b));
-        self.dry.fcmp(cc, a, b)
+        let r = self.dry.fcmp(cc, a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fpromote(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Fpromote(a));
-        self.dry.fpromote(a)
+        let r = self.dry.fpromote(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fdemote(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Fdemote(a));
-        self.dry.fdemote(a)
+        let r = self.dry.fdemote(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fcvt_from_sint(&mut self, t: Type, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::FcvtFromSint(t, a));
-        self.dry.fcvt_from_sint(t, a)
+        let r = self.dry.fcvt_from_sint(t, a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fcvt_from_uint(&mut self, t: Type, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::FcvtFromUint(t, a));
-        self.dry.fcvt_from_uint(t, a)
+        let r = self.dry.fcvt_from_uint(t, a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fcvt_to_sint_sat(&mut self, t: Type, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::FcvtToSintSat(t, a));
-        self.dry.fcvt_to_sint_sat(t, a)
+        let r = self.dry.fcvt_to_sint_sat(t, a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn fcvt_to_uint_sat(&mut self, t: Type, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::FcvtToUintSat(t, a));
-        self.dry.fcvt_to_uint_sat(t, a)
+        let r = self.dry.fcvt_to_uint_sat(t, a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn iconcat(&mut self, lo: Value, hi: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Iconcat(lo, hi));
-        self.dry.iconcat(lo, hi)
+        let r = self.dry.iconcat(lo, hi);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn isplit(&mut self, v: Value) -> (Value, Value) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Isplit(v));
-        self.dry.isplit(v)
+        let r = self.dry.isplit(v);
+        self.res.push(vec![r.0 .0, r.1 .0]);
+        r
     }
     pub fn iadd128(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Iadd128(a, b));
-        self.dry.iadd128(a, b)
+        let r = self.dry.iadd128(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn isub128(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Isub128(a, b));
-        self.dry.isub128(a, b)
+        let r = self.dry.isub128(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn band128(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Band128(a, b));
-        self.dry.band128(a, b)
+        let r = self.dry.band128(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn bor128(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Bor128(a, b));
-        self.dry.bor128(a, b)
+        let r = self.dry.bor128(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn bxor128(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Bxor128(a, b));
-        self.dry.bxor128(a, b)
+        let r = self.dry.bxor128(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn imul128(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Imul128(a, b));
-        self.dry.imul128(a, b)
+        let r = self.dry.imul128(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn udiv128(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Udiv128(a, b));
-        self.dry.udiv128(a, b)
+        let r = self.dry.udiv128(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn sdiv128(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Sdiv128(a, b));
-        self.dry.sdiv128(a, b)
+        let r = self.dry.sdiv128(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn urem128(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Urem128(a, b));
-        self.dry.urem128(a, b)
+        let r = self.dry.urem128(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn srem128(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Srem128(a, b));
-        self.dry.srem128(a, b)
+        let r = self.dry.srem128(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn icmp128(&mut self, cc: IntCC, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Icmp128(cc, a, b));
-        self.dry.icmp128(cc, a, b)
+        let r = self.dry.icmp128(cc, a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn ishl128(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Ishl128(a, b));
-        self.dry.ishl128(a, b)
+        let r = self.dry.ishl128(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn ushr128(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Ushr128(a, b));
-        self.dry.ushr128(a, b)
+        let r = self.dry.ushr128(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn sshr128(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Sshr128(a, b));
-        self.dry.sshr128(a, b)
+        let r = self.dry.sshr128(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn extend128(&mut self, a: Value, signed: bool) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Extend128(a, signed));
-        self.dry.extend128(a, signed)
+        let r = self.dry.extend128(a, signed);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn reduce128(&mut self, t: Type, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Reduce128(t, a));
-        self.dry.reduce128(t, a)
+        let r = self.dry.reduce128(t, a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn uadd_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::UaddOverflow(a, b));
-        self.dry.uadd_overflow(a, b)
+        let r = self.dry.uadd_overflow(a, b);
+        self.res.push(vec![r.0 .0, r.1 .0]);
+        r
     }
     pub fn usub_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::UsubOverflow(a, b));
-        self.dry.usub_overflow(a, b)
+        let r = self.dry.usub_overflow(a, b);
+        self.res.push(vec![r.0 .0, r.1 .0]);
+        r
     }
     pub fn sadd_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::SaddOverflow(a, b));
-        self.dry.sadd_overflow(a, b)
+        let r = self.dry.sadd_overflow(a, b);
+        self.res.push(vec![r.0 .0, r.1 .0]);
+        r
     }
     pub fn ssub_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::SsubOverflow(a, b));
-        self.dry.ssub_overflow(a, b)
+        let r = self.dry.ssub_overflow(a, b);
+        self.res.push(vec![r.0 .0, r.1 .0]);
+        r
     }
     pub fn umul_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::UmulOverflow(a, b));
-        self.dry.umul_overflow(a, b)
+        let r = self.dry.umul_overflow(a, b);
+        self.res.push(vec![r.0 .0, r.1 .0]);
+        r
     }
     pub fn smul_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::SmulOverflow(a, b));
-        self.dry.smul_overflow(a, b)
+        let r = self.dry.smul_overflow(a, b);
+        self.res.push(vec![r.0 .0, r.1 .0]);
+        r
     }
     pub fn umulhi(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Umulhi(a, b));
-        self.dry.umulhi(a, b)
+        let r = self.dry.umulhi(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn clz(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Clz(a));
-        self.dry.clz(a)
+        let r = self.dry.clz(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn ctz(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Ctz(a));
-        self.dry.ctz(a)
+        let r = self.dry.ctz(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn popcnt(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Popcnt(a));
-        self.dry.popcnt(a)
+        let r = self.dry.popcnt(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn bswap(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Bswap(a));
-        self.dry.bswap(a)
+        let r = self.dry.bswap(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn rotl(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Rotl(a, b));
-        self.dry.rotl(a, b)
+        let r = self.dry.rotl(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn rotr(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Rotr(a, b));
-        self.dry.rotr(a, b)
+        let r = self.dry.rotr(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn smin(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Smin(a, b));
-        self.dry.smin(a, b)
+        let r = self.dry.smin(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn umin(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Umin(a, b));
-        self.dry.umin(a, b)
+        let r = self.dry.umin(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn smax(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Smax(a, b));
-        self.dry.smax(a, b)
+        let r = self.dry.smax(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn umax(&mut self, a: Value, b: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Umax(a, b));
-        self.dry.umax(a, b)
+        let r = self.dry.umax(a, b);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn iabs(&mut self, a: Value) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Iabs(a));
-        self.dry.iabs(a)
+        let r = self.dry.iabs(a);
+        self.res.push(vec![r.0]);
+        r
     }
     pub fn trap_code(&mut self, code: u8) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::TrapCode(code));
-        self.dry.trap_code(code)
+        self.dry.trap_code(code);
+        self.res.push(vec![]);
     }
     pub fn trapz_code(&mut self, c: Value, code: u8) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::TrapzCode(c, code));
-        self.dry.trapz_code(c, code)
+        self.dry.trapz_code(c, code);
+        self.res.push(vec![]);
     }
     pub fn trapnz_code(&mut self, c: Value, code: u8) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::TrapnzCode(c, code));
-        self.dry.trapnz_code(c, code)
+        self.dry.trapnz_code(c, code);
+        self.res.push(vec![]);
     }
     pub fn trapz(&mut self, c: Value) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Trapz(c));
-        self.dry.trapz(c)
+        self.dry.trapz(c);
+        self.res.push(vec![]);
     }
     pub fn trapnz(&mut self, c: Value) {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::Trapnz(c));
-        self.dry.trapnz(c)
+        self.dry.trapnz(c);
+        self.res.push(vec![]);
     }
     pub fn call_indirect(&mut self, p: Value, args: &[Value], rets: &[Type]) -> Vec<Value> {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::CallIndirect(p, args.to_vec(), rets.to_vec()));
-        self.dry.call_indirect(p, args, rets)
+        let r = self.dry.call_indirect(p, args, rets);
+        self.res.push(r.iter().map(|v| v.0).collect());
+        r
     }
     pub fn symbol_addr(&mut self, name: &str) -> Value {
         self.dry.op = self.ops.len() as u32;
         self.ops.push(Op::SymbolAddr(name.to_string()));
-        self.dry.symbol_addr(name)
+        let r = self.dry.symbol_addr(name);
+        self.res.push(vec![r.0]);
+        r
     }
 }
 

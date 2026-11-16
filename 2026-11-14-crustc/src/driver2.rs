@@ -124,11 +124,13 @@ pub struct Options2 {
     pub no_cache: bool,
     /// 段階ごとの時間を stderr に出す
     pub time: bool,
+    /// minclif の代わりのバックエンド (Cranelift: crate::clif_backend::compile)
+    pub backend: Option<acg::ClBackend>,
 }
 
 impl Default for Options2 {
     fn default() -> Self {
-        Options2 { opt: false, jobs: cpu_count(), linker: None, no_cache: false, time: false }
+        Options2 { opt: false, jobs: cpu_count(), linker: None, no_cache: false, time: false, backend: None }
     }
 }
 
@@ -436,9 +438,11 @@ impl Session2 {
         }
         tm.lap("refs", String::new());
         let mut a = Analysis { src, items, prog, refs, srefs, crefs, n_parsed, ext_items, inl: acg::Inline::default() };
+        let cl = self.opts.backend;
         if self.opts.opt && std::env::var_os("CRUSTC_NO_INLINE").is_none() {
             a.inl = inline_bodies(&a);
         }
+        a.inl.cl = cl;
         Ok(a)
     }
 }
@@ -648,6 +652,7 @@ impl Session2 {
         h.add(&self.cid);
         h.add(&1u8);
         h.add(&(self.opts.opt as u8));
+        h.add(&(self.opts.backend.is_some() as u8));
         h.add(&a.items[ii].hash);
         if a.prog.closures.contains_key(&(id as u32)) {
             h.add(&a.prog.names[id]);
@@ -1150,7 +1155,12 @@ fn emit_object(a: &Analysis, ctx: &CrateCtx, insts: &Insts, user_live: &[u32], b
                     Target::Vtable(k) => vt_names[k as usize].clone(),
                     Target::Sym(ref n) => n.clone(),
                 },
-                kind: if r.kind == 5 { 9 } else { 4 },
+                kind: match r.kind {
+                    5 => 9,
+                    6 => 2,
+                    7 => 1,
+                    _ => 4,
+                },
                 addend: match r.target {
                     Target::SelfOffset(o) => r.addend + o as i64,
                     _ => r.addend,

@@ -11,6 +11,8 @@ CONFIGS = [
     ("crustc -O", lambda s, o: [CRUSTC, s, "-o", o, "-O", "--no-cache"]),
     ("driver2 -O (割り当てなし)", lambda s, o: ["env", "CRUSTC_DRIVER2=1", "MINCLIF_NO_REGALLOC=1", CRUSTC, s, "-o", o, "-O", "--no-cache"]),
     ("driver2 -O", lambda s, o: ["env", "CRUSTC_DRIVER2=1", CRUSTC, s, "-o", o, "-O", "--no-cache"]),
+    ("driver2 + Cranelift", lambda s, o: ["env", "CRUSTC_DRIVER2=1", "CRUSTC_BACKEND=cranelift", CRUSTC, s, "-o", o, "--no-cache"]),
+    ("driver2 + Cranelift -O", lambda s, o: ["env", "CRUSTC_DRIVER2=1", "CRUSTC_BACKEND=cranelift", CRUSTC, s, "-o", o, "-O", "--no-cache"]),
     ("rustc (debug)", lambda s, o: ["rustc", "--edition", "2021", "-Awarnings", s, "-o", o]),
     ("rustc -O", lambda s, o: ["rustc", "--edition", "2021", "-Awarnings", "-O", s, "-o", o]),
 ]

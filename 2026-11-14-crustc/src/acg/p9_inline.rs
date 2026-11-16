@@ -20,7 +20,12 @@ pub struct Inline {
     pub user_lines: crate::fxhash::FxMap<u32, u32>,
     /// 呼び先 (インスタンス) ごとの型推論の結果 (呼ぶ側に依らないので 1 回だけ)
     pub inferred: Mutex<crate::fxhash::FxMap<u32, Inferred>>,
+    /// minclif の代わりに使うバックエンド (driver2 の Cranelift バックエンド: crate::clif_backend::compile)
+    pub cl: Option<ClBackend>,
 }
+
+/// 記録した命令の列から (機械語, 再配置, trap) を作るバックエンド (引数: 記録, 入口で 0 にするスロット, -O か)
+pub type ClBackend = fn(&crate::minclif::FunctionBuilder, &[crate::minclif::StackSlot], bool) -> Result<(Vec<u8>, Vec<crate::minclif::Reloc>, Vec<(u32, u8)>), String>;
 
 type Inferred = (crate::ast_infer::LetTypes, crate::ast_infer::MacroArgs, crate::ast_infer::TextTypes);
 

@@ -78,7 +78,10 @@ fn main() {
             }
         };
         let out_dir = if output.as_os_str().is_empty() { input.parent().map(|d| d.join("target")).unwrap_or("target".into()) } else { output.clone() };
-        let opts = crustc::driver2::Options2 { opt: o.opt, jobs: o.jobs, linker: o.linker.clone(), no_cache: o.no_cache, time: o.time };
+        let mut opts = crustc::driver2::Options2 { opt: o.opt, jobs: o.jobs, linker: o.linker.clone(), no_cache: o.no_cache, time: o.time, backend: None };
+        if std::env::var("CRUSTC_BACKEND").is_ok_and(|b| b == "cranelift") {
+            opts.backend = Some(crustc::clif_backend::compile);
+        }
         let mut s = crustc::driver2::Session2::new(opts);
         // (キャッシュはクレートごとに out_dir/<名前>.crcache2)
         match s.build_workspace(&crates, &out_dir) {
@@ -110,7 +113,11 @@ fn main() {
     #[cfg(feature = "acg")]
     if std::env::var_os("CRUSTC_DRIVER2").is_some() && mode != "check" {
         let output = if output.as_os_str().is_empty() { input.with_extension("") } else { output.clone() };
-        let opts = crustc::driver2::Options2 { opt: o.opt, jobs: o.jobs, linker: o.linker.clone(), no_cache: o.no_cache, time: o.time };
+        let mut opts = crustc::driver2::Options2 { opt: o.opt, jobs: o.jobs, linker: o.linker.clone(), no_cache: o.no_cache, time: o.time, backend: None };
+        // (CRUSTC_BACKEND=cranelift: minclif の代わりに Cranelift で機械語を作る)
+        if std::env::var("CRUSTC_BACKEND").is_ok_and(|b| b == "cranelift") {
+            opts.backend = Some(crustc::clif_backend::compile);
+        }
         let mut s = crustc::driver2::Session2::new(opts);
         let mut cp = output.as_os_str().to_owned();
         cp.push(".crcache2");

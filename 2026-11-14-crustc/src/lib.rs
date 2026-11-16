@@ -13,6 +13,8 @@ pub mod driver2;
 pub mod cache2;
 #[cfg(feature = "acg")]
 pub mod srcmap;
+#[cfg(feature = "acg")]
+pub mod clif_backend;
 pub mod elfz;
 pub mod enc;
 pub mod front;

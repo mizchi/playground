@@ -28,7 +28,7 @@ mod p6_match_drop;
 mod p7_fmt_hash_cmp;
 mod p8_misc;
 mod p9_inline;
-pub use p9_inline::{inline_candidate, Inline};
+pub use p9_inline::{inline_candidate, ClBackend, Inline};
 #[allow(unused_imports)]
 pub use p1_expr::*;
 #[allow(unused_imports)]
@@ -325,13 +325,26 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
     let infos = std::mem::take(&mut cx.traps);
     let loc_used = cx.loc_used;
     let mut b = cx.b;
-    b.set_zero(&late);
-    let traps_raw = b.traps();
-    let (code, relocs) = b.finish_zeroing(&late);
+    let (code, relocs, traps_raw) = match inl.cl {
+        // (Cranelift のバックエンド: 記録した命令の列を Cranelift の IR にしてコンパイルする)
+        Some(cl) => cl(&b.m, &late, prog.opt)?,
+        None => {
+            b.set_zero(&late);
+            let t = b.traps();
+            let (c, r) = b.finish_zeroing(&late);
+            (c, r, t)
+        }
+    };
     let mut out = vec![];
     for r in relocs {
         let target = target_of(&r.name).unwrap_or_else(|| Target::Sym(r.name.clone()));
-        let kind = if r.kind == 9 { 5 } else { 4 };
+        // (ELF の種類 → Blob の番号: PLT32 4、GOTPCREL 5、PC32 6、64 7)
+        let kind = match r.kind {
+            9 => 5,
+            2 => 6,
+            1 => 7,
+            _ => 4,
+        };
         out.push(BlobReloc { offset: r.offset, kind, addend: r.addend, target });
     }
     let mut traps = vec![];
