@@ -2,7 +2,8 @@
 モジュール (lexer / prelude / types / parse / ast_types / ast_closure / ast_summary) と一緒に 1 ファイルのプログラムにまとめる。
 usage: python3 tests/selfhost/build_program.py > out/selfhost/program_main.rs
 main は引数のファイルごとに、driver と同じ手順 (モジュールを平らに・入れ子のアイテムを外へ・prelude を後ろに付ける) で
-アイテムを作り、全部を要約して Program::build し、関数・型 (サイズ・配置・フィールドのオフセット)・trait 実装・const を出す。
+アイテムを作り、全部を要約して Program::build し、関数・型 (サイズ・配置・フィールドのオフセット)・trait 実装・const
+(と src/ast_consteval.rs で評価した初期値のデータ) を出す。
 (macro_rules! の展開はしない: マクロを使うファイルは展開前のまま扱う)"""
 import glob, os
 
@@ -16,7 +17,8 @@ prelude = (body("src/prelude.rs")
 parts = [("key", body("src/key.rs")), ("fxhash", body("src/fxhash.rs")), ("lexer", body("src/lexer.rs")),
          ("prelude", prelude), ("types", body("src/types.rs")), ("parse", body("src/parse.rs")),
          ("ast_types", body("src/ast_types.rs")), ("ast_closure", body("src/ast_closure.rs")),
-         ("ast_summary", body("src/ast_summary.rs")), ("program", body("src/program.rs"))]
+         ("ast_summary", body("src/ast_summary.rs")), ("program", body("src/program.rs")),
+         ("ast_consteval", body("src/ast_consteval.rs"))]
 out = ["// 自動生成: tests/selfhost/build_program.py (crustc の src/*.rs をそのまま含む)", "mod cache {\n    pub use crate::key::*;\n}\n"]
 for name, src in parts:
     out.append(f"mod {name} {{\n" + src + "}\n")
@@ -89,6 +91,17 @@ fn run(path: &str) -> Result<(), String> {
     println!("  impls {}", im.join("; "));
     for c in &p.consts {
         println!("  const {}: {:?} = {}", c.name, c.ty, c.expr);
+        // (ast_consteval: 初期値のデータ)
+        match ast_consteval::eval_src(&p, &c.expr, c.ty) {
+            Ok(dv) => {
+                let mut ls = vec![];
+                ast_consteval::dump(&dv, 4, &mut ls);
+                for l in ls {
+                    println!("{l}");
+                }
+            }
+            Err(e) => println!("    error {e}"),
+        }
     }
     Ok(())
 }

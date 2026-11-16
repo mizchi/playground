@@ -1736,6 +1736,13 @@ impl Cx<'_, '_> {
     /// 式を評価し、期待型への暗黙の変換 (`&[T; N]` → `&[T]`) をする
     fn expr(&mut self, e: &Expr, expected: Option<Ty>) -> R<V> {
         let (v, t) = self.expr_inner(e, expected)?;
+        // `&Box<T>` → `&T` (deref の強制変換: `e = x;` で x: &Box<Expr>)
+        if let (Some(want @ Ty::Ref(m2, we)), Some(val), Ty::Ref(m1, Ty::Box(bi))) = (expected, v, t) {
+            if *we == **bi && !bi.is_fat() && (m1 || !m2) {
+                let p = self.b.ins().load(PTR, mf(), val, 0);
+                return Ok((Some(p), want));
+            }
+        }
         // `&T` / `&mut T` → `*const T` / `*mut T`
         if let (Some(want @ Ty::Ptr(m2, pe)), Ty::Ref(m1, re)) = (expected, t) {
             if pe == re && (m1 || !m2) {

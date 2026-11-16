@@ -822,7 +822,7 @@ impl Session {
 /// ユーザのソースの後ろに、使われうる prelude のアイテム (Option / Result など) を付ける。
 /// 後ろに付けるのでユーザのコードの行番号は変わらない。ユーザのコードの字句解析はここで 1 回だけ行い、
 /// prelude の分だけ追加で字句解析して結合する
-fn with_prelude<'a>(
+pub fn with_prelude<'a>(
     src: &'a str,
     cache: &mut crate::prelude::SelectCache,
 ) -> Result<(std::borrow::Cow<'a, str>, Vec<SrcItem>), String> {
@@ -1274,14 +1274,23 @@ fn emit_object(
             trap_table = Some(id);
             continue;
         }
-        let e: syn::Expr = syn::parse_str(&c.expr).map_err(|e| e.to_string())?;
-        let dv = crate::consteval::eval(prog, &e, c.ty)
-            .map_err(|e| format!("in static `{}`: {e}", c.name))?;
-        fn statics_in(dv: &crate::consteval::DataVal, out: &mut Vec<u32>) {
+        // (自前の構文木で評価する。失敗したら場所つきのメッセージを syn 版で作る)
+        let dv = match crate::ast_consteval::eval_src(prog, &c.expr, c.ty) {
+            Ok(dv) => dv,
+            Err(e0) => {
+                let e: syn::Expr = syn::parse_str(&c.expr).map_err(|e| e.to_string())?;
+                let msg = match crate::consteval::eval(prog, &e, c.ty) {
+                    Err(e) => e.to_string(),
+                    Ok(_) => e0,
+                };
+                return Err(format!("in static `{}`: {msg}", c.name));
+            }
+        };
+        fn statics_in(dv: &crate::ast_consteval::DataVal, out: &mut Vec<u32>) {
             for (_, r) in &dv.relocs {
                 match r {
-                    crate::consteval::DRef::Static(c) => out.push(*c),
-                    crate::consteval::DRef::Anon(inner) => statics_in(inner, out),
+                    crate::ast_consteval::DRef::Static(c) => out.push(*c),
+                    crate::ast_consteval::DRef::Anon(inner) => statics_in(inner, out),
                 }
             }
         }
@@ -1293,7 +1302,7 @@ fn emit_object(
     fn define_val(
         m: &mut ObjectModule,
         id: cranelift_module::DataId,
-        dv: crate::consteval::DataVal,
+        dv: crate::ast_consteval::DataVal,
         anon: &mut HashMap<Vec<u8>, cranelift_module::DataId>,
         statics: &HashMap<u32, cranelift_module::DataId>,
     ) -> Result<(), String> {
@@ -1302,11 +1311,11 @@ fn emit_object(
         desc.set_align(dv.align as u64);
         for (off, r) in dv.relocs {
             let target = match r {
-                crate::consteval::DRef::Static(c) => statics[&c],
-                crate::consteval::DRef::Anon(inner) if inner.relocs.is_empty() => {
+                crate::ast_consteval::DRef::Static(c) => statics[&c],
+                crate::ast_consteval::DRef::Anon(inner) if inner.relocs.is_empty() => {
                     anon_data(m, inner.bytes, inner.align, anon)?
                 }
-                crate::consteval::DRef::Anon(inner) => {
+                crate::ast_consteval::DRef::Anon(inner) => {
                     let nid = m
                         .declare_anonymous_data(false, false)
                         .map_err(|e| e.to_string())?;

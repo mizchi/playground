@@ -470,6 +470,27 @@ impl Inf<'_> {
                             || (slc(self, y) && seqish(self, x))
                             || (is_str(self, x) && is_string(self, y))
                             || (is_str(self, y) && is_string(self, x));
+                        // (`&Box<T>` を `&T` に: 中身の T どうしを単一化する。参照どうしはつながない)
+                        let bx = |s: &mut Self, v: u32| {
+                            let r = s.find(v);
+                            match s.shape[r as usize] {
+                                Some(Shape::Bx(i)) => Some(i),
+                                _ => None,
+                            }
+                        };
+                        let known_non_box = |s: &mut Self, v: u32| {
+                            let r = s.find(v);
+                            matches!(s.shape[r as usize], Some(Shape::Adt(..)))
+                                || matches!(s.shape[r as usize], Some(Shape::Known(t)) if !matches!(t, Ty::Box(_)))
+                        };
+                        if let (Some(i), true) = (bx(self, x), known_non_box(self, y)) {
+                            self.unify(i, y);
+                            return;
+                        }
+                        if let (Some(i), true) = (bx(self, y), known_non_box(self, x)) {
+                            self.unify(x, i);
+                            return;
+                        }
                         if !coerce {
                             self.link(a, b);
                         }
