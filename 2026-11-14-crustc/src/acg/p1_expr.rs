@@ -251,7 +251,7 @@ impl Cx<'_> {
                 m
             } else {
                 let d = format!("{e:?}");
-                format!("{m} (at `{}`)", d.chars().take(160).collect::<String>())
+                format!("{m} (at `{}`)", d.chars().take(if std::env::var_os("ACG_FULL_AT").is_some() { 100000 } else { 160 }).collect::<String>())
             }
         })?;
         // `&Box<T>` → `&T` (deref の強制変換: `e = x;` で x: &Box<Expr>)

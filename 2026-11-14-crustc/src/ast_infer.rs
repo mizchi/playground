@@ -349,6 +349,13 @@ pub fn infer_ctx_margs(
             margs.insert(g, v);
         }
     }
+    // (残りも返す: 型の記録はこれらのアドレスも指すので、コード生成の間に同じアドレスが別の式に使われないようにする。
+    //  キーは小さい番号 (アドレスにはならない))
+    for (i, v) in keep.into_iter().enumerate() {
+        if let Some(v) = v {
+            margs.insert(i, v);
+        }
+    }
     ((out, r, ps), margs, texts)
 }
 
