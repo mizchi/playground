@@ -25,6 +25,7 @@ pub mod prelude;
 pub mod program;
 pub mod solver;
 pub mod srcmap;
+pub mod stub;
 #[doc(hidden)]
 pub mod testgen;
 pub mod types;

@@ -522,6 +522,32 @@ pub fn expand(src: &str) -> Result<Option<String>, String> {
     expand_cfg(src, None)
 }
 
+/// ソースの中の macro_rules! の定義のテキスト (`macro_rules! m { .. }` を改行で並べたもの)。
+/// ワークスペースで、依存するクレートのマクロを使う側の展開に渡す
+pub fn macro_defs(src: &str) -> String {
+    let mut out = String::new();
+    if !src.contains("macro_rules!") {
+        return out;
+    }
+    let b = src.as_bytes();
+    let toks = crate::lexer::tokenize(b);
+    let (close, _) = brackets(b, &toks);
+    let tk = |k: usize| -> &[u8] { &b[toks[k].1..toks[k].2] };
+    let sym = |k: usize, c: u8| k < toks.len() && toks[k].0 == 1 && b[toks[k].1] == c;
+    let mut i = 0;
+    while i + 3 < toks.len() {
+        if toks[i].0 == 0 && tk(i) == b"macro_rules" && sym(i + 1, b'!') && toks[i + 2].0 == 0 && close[i + 3] != usize::MAX {
+            let ge = close[i + 3];
+            out.push_str(&src[toks[i].1..toks[ge].2]);
+            out.push('\n');
+            i = ge + 1;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
 /// expand と同じだが、展開した後のソースの `#[cfg(..)]` を周ごとに評価する (`#[cfg(p)] m! { .. }` を展開する前に)
 pub fn expand_cfg(src: &str, cfg: Option<&crate::cfg::CfgSet>) -> Result<Option<String>, String> {
     if !src.contains("macro_rules!") {

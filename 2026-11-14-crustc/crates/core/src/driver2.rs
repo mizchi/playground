@@ -1520,6 +1520,7 @@ impl Session2 {
         &mut self,
         crates: &[CrateSpec],
         loaded: &[Option<(String, crate::srcmap::SrcMap)>],
+        dep_loaded: &[Option<(String, crate::srcmap::SrcMap)>],
         i: usize,
         deps: &[usize],
         fp: &str,
@@ -1539,7 +1540,7 @@ impl Session2 {
         let mut map = own_map.clone();
         src.push('\n');
         for &j in deps {
-            let (t, m) = loaded[j].as_ref().unwrap();
+            let (t, m) = dep_loaded[j].as_ref().unwrap();
             let at = n_lines(&src) + 1;
             let f0 = map.files.len() as u32;
             for &(s, f, first) in &m.segs {
@@ -1666,6 +1667,60 @@ impl Session2 {
             }
             stale.push((i, fp));
         }
+        // 古いクレートが使うソース: 自分は依存するクレートのマクロだけを添えて展開したもの、依存するクレートは
+        // 展開して総称でない関数の本体を消したもの (stub::interface_text)。どちらもクレートごとに 1 回だけ作る
+        // (使う側で依存するクレートのソース全体を展開・解析し直すと、依存が多いと推移的な依存の大きさに比例する)
+        let reuse = std::env::var_os("CRUSTC_NO_DEP_STUB").is_none();
+        let mut own_v: Vec<Option<(String, crate::srcmap::SrcMap)>> = loaded.clone();
+        let mut dep_v: Vec<Option<(String, crate::srcmap::SrcMap)>> = loaded.clone();
+        if reuse && !stale.is_empty() {
+            let t2 = now_ns();
+            let mut need = vec![false; crates.len()];
+            let mut need_dep = vec![false; crates.len()];
+            for &(i, _) in &stale {
+                need[i] = true;
+                for j in all_deps(i) {
+                    need[j] = true;
+                    need_dep[j] = true;
+                }
+            }
+            let defs: Vec<String> = (0..crates.len())
+                .map(|i| if need[i] { crate::macros::macro_defs(&loaded[i].as_ref().unwrap().0) } else { String::new() })
+                .collect();
+            for &i in &order {
+                if !need[i] {
+                    continue;
+                }
+                let (text, map) = loaded[i].clone().unwrap();
+                let mut dd = String::new();
+                for j in all_deps(i) {
+                    dd.push_str(&defs[j]);
+                }
+                let marker = "\n// __crustc_dep_macros__\n";
+                let exp = if dd.is_empty() && !text.contains("macro_rules!") {
+                    text.clone()
+                } else {
+                    let mut full = text.clone();
+                    full.push_str(marker);
+                    full.push_str(&dd);
+                    let cfg = self.opts.cfg_with(&crates[i].features);
+                    match crate::macros::expand_cfg(&full, Some(&cfg)).map_err(|e| format!("crate `{}`: {}", crates[i].name, map.relocate_err(&e)))? {
+                        Some(t) => match t.find(marker) {
+                            Some(k) => t[..k].to_string(),
+                            None => t,
+                        },
+                        None => text.clone(),
+                    }
+                };
+                if need_dep[i] {
+                    dep_v[i] = Some((crate::stub::interface_text(&exp), map.clone()));
+                }
+                own_v[i] = Some((exp, map));
+            }
+            if self.opts.time {
+                eprintln!("  {:<12} {:>8.2} ms", "(prepare)", (now_ns() - t2) as f64 / 1e6);
+            }
+        }
         // (クレートは互いのソースしか使わない (.o は使わない) ので、古いものを fork して同時にコンパイルする)
         let par = self.opts.jobs.min(stale.len()).max(1);
         let mut results: Vec<Option<R<(Report2, bool, u64)>>> = vec![None; stale.len()];
@@ -1686,7 +1741,7 @@ impl Session2 {
                         unsafe { c_close(fds[0]) };
                         self.opts.jobs = inner;
                         let (i, fp) = (stale[k].0, stale[k].1.clone());
-                        let r = self.build_one(crates, &loaded, i, &all_deps(i), &fp, out_dir);
+                        let r = self.build_one(crates, &own_v, &dep_v, i, &all_deps(i), &fp, out_dir);
                         let mut buf = vec![];
                         match r {
                             Ok((rp, ch, ns)) => {
@@ -1740,7 +1795,7 @@ impl Session2 {
             let (i, fp) = (stale[k].0, stale[k].1.clone());
             let r = match results[k].take() {
                 Some(r) => r,
-                None => self.build_one(crates, &loaded, i, &all_deps(i), &fp, out_dir),
+                None => self.build_one(crates, &own_v, &dep_v, i, &all_deps(i), &fp, out_dir),
             };
             let (r, ch, ns) = r?;
             changed[i] = ch;
