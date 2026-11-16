@@ -6,8 +6,14 @@ use crate::minclif::{Block, IntCC, StackSlot, Value};
 use lit::Lit;
 
 /// 式がこの種類のリテラルか
-fn lit_kind(e: &Expr, f: fn(&Lit) -> bool) -> bool {
-    matches!(e, Expr::Lit(t) if lit::lit(t).is_some_and(|l| f(&l)))
+fn lit_kind<F: Fn(&Lit) -> bool>(e: &Expr, f: F) -> bool {
+    match e {
+        Expr::Lit(t) => match lit::lit(t) {
+            Some(l) => f(&l),
+            None => false,
+        },
+        _ => false,
+    }
 }
 
 /// ループのラベル (syn の `l.name.ident` と同じく `'` を除く)
@@ -614,7 +620,7 @@ impl Cx<'_> {
                             tys = Some(tl);
                         }
                         Some(t0) => {
-                            if t0.iter().map(|x| x.1).ne(tl.iter().map(|x| x.1)) {
+                            if t0.len() != tl.len() || t0.iter().zip(tl.iter()).any(|(a, b)| a.1 != b.1) {
                                 return err(SP, "`|` alternatives bind different types");
                             }
                         }

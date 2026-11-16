@@ -405,7 +405,7 @@ impl Cx<'_> {
                 let iv = self.b.use_var(i);
                 let c = self.b.ins().icmp(IntCC::UnsignedLessThan, iv, len);
                 let f0 = self.b.ins().iconst(types::I8, 0);
-                self.b.ins().brif(c, body, &[], done, &[f0.into()]);
+                self.b.ins().brif(c, body, &[], done, &[f0]);
                 self.b.switch_to_block(body);
                 let addr = self.elem_addr(base, iv, elem);
                 let ev = self.b.ins().load(clif_ty(elem).unwrap(), mf(), addr, 0);
@@ -413,7 +413,7 @@ impl Cx<'_> {
                 let nx = self.b.ins().iadd_imm_s(iv, 1);
                 self.b.def_var(i, nx);
                 let t1 = self.b.ins().iconst(types::I8, 1);
-                self.b.ins().brif(eq, done, &[t1.into()], head, &[]);
+                self.b.ins().brif(eq, done, &[t1], head, &[]);
                 self.b.switch_to_block(done);
                 Ok(Some((Some(res), Ty::Bool)))
             }

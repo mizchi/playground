@@ -40,6 +40,22 @@ pub fn macro_exprs(m: &syn::Macro) -> Vec<Expr> {
     if let Ok(es) = m.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated) {
         return es.into_iter().collect();
     }
+    // (`matches!(e, PAT if guard)`: 式と guard の中のクロージャ)
+    let mg = m.parse_body_with(|input: syn::parse::ParseStream| -> syn::Result<Vec<Expr>> {
+        let e: Expr = input.parse()?;
+        input.parse::<syn::Token![,]>()?;
+        let _ = Pat::parse_multi_with_leading_vert(input)?;
+        let mut out = vec![e];
+        if input.peek(syn::Token![if]) {
+            input.parse::<syn::Token![if]>()?;
+            out.push(input.parse()?);
+        }
+        let _ = input.parse::<Option<syn::Token![,]>>()?;
+        Ok(out)
+    });
+    if let Ok(es) = mg {
+        return es;
+    }
     let ts = &m.tokens;
     match syn::parse2::<Expr>(quote::quote!([#ts])) {
         Ok(e) => vec![e],

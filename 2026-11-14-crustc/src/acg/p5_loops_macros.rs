@@ -306,6 +306,12 @@ impl Cx<'_> {
             }
         }
         adapters.reverse();
+        // (`for x in v[1..].iter()`: 範囲の添字は参照にする (メソッド呼び出しの自動参照))
+        if let Expr::Index(_, ix) = e {
+            if matches!(&**ix, Expr::Range(..)) && !adapters.is_empty() {
+                e = self.keep_expr(Expr::Ref(false, Box::new(e.clone())));
+            }
+        }
         let rev = adapters.iter().any(|a| a == "rev");
         let enumerate = adapters.iter().any(|a| a == "enumerate");
         if let Expr::Range(..) = e {
@@ -1079,7 +1085,7 @@ impl Cx<'_> {
                     let op = if name.ends_with("_eq") { "==" } else { "!=" };
                     let (l, c) = if self.caller_loc { (0u32, 0u32) } else { self.loc(SP) };
                     let deref = |n: &str| Expr::Unary("*".into(), Box::new(path_expr(n)));
-                    let cmp = Expr::Binary(op.into(), Box::new(deref("__exr_l")), Box::new(deref("__exr_r")));
+                    let cmp = Expr::Binary(op.to_string(), Box::new(deref("__exr_l")), Box::new(deref("__exr_r")));
                     let fail_src = if args.len() > 2 {
                         let fmt = format!("assertion `left {op} right` failed: {{}}\n  left: {{:?}}\n right: {{:?}}");
                         let rest = macro_arg_texts(g)[2..].join(",");
@@ -1105,7 +1111,7 @@ impl Cx<'_> {
                     return Ok((None, Ty::Unit));
                 }
                 let op = if name.ends_with("_eq") { "==" } else { "!=" };
-                let e: &Expr = self.keep_expr(Expr::Binary(op.into(), Box::new(paren(a)), Box::new(paren(b))));
+                let e: &Expr = self.keep_expr(Expr::Binary(op.to_string(), Box::new(paren(a)), Box::new(paren(b))));
                 let (c, ct) = self.expr(e, Some(Ty::Bool))?;
                 self.same(SP, ct, Ty::Bool)?;
                 if let Some(c) = c {

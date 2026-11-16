@@ -591,7 +591,7 @@ impl Cx<'_> {
                 lp.breaks += 1;
                 let (t, d, tt) = (lp.brk, lp.depth, lp.temps);
                 self.drop_for_exit(d, tt);
-                let args: Vec<Value> = args.into_iter().map(|v| v.into()).collect();
+                let args: Vec<Value> = args;
                 self.b.ins().jump(t, &args);
                 Ok(self.dead())
             }

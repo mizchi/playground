@@ -80,6 +80,16 @@ impl Cx<'_> {
     /// メソッドの self 型に合わせて自動参照 (`&self` / `&mut self`) かコピー (`self`) で渡す
     pub(crate) fn method_call(&mut self, e: &Expr, expected: Option<Ty>) -> R<V> {
         let Expr::MethodCall(recv, method, gargs, margs) = e else { unreachable!() };
+        // (`v[1..].iter()`: 範囲の添字の受け手は参照にする (自動参照)。文字列は str のメソッドが受ける)
+        if let Expr::Index(b, ix) = strip_paren(recv) {
+            let bt = self.peek(b).map(|t| self.strip_refs(t));
+            let is_text = bt.is_some_and(|t| t == Ty::Str || matches!(t, Ty::Struct(sid) if self.prog.structs[sid as usize].name == "String"));
+            if matches!(&**ix, Expr::Range(..)) && !is_text && method != "try_into" {
+                let ne = Expr::MethodCall(Box::new(Expr::Ref(false, Box::new(strip_paren(recv).clone()))), method.clone(), gargs.clone(), margs.clone());
+                let ne = self.keep_expr(ne);
+                return self.method_call(ne, expected);
+            }
+        }
         let recv: &Expr = recv;
         let method = method.as_str();
         let tf: Option<&[GArg]> = (!gargs.is_empty()).then_some(&gargs[..]);

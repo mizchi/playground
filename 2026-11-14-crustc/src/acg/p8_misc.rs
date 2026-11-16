@@ -163,7 +163,7 @@ pub(crate) fn slice_parts(sp: &Pat) -> (Vec<&Pat>, Option<&Pat>, Vec<&Pat>) {
     for e in elems {
         let is_rest = match e {
             Pat::Rest => true,
-            Pat::Ident(_, _, _, sub) => matches!(sub.as_deref(), Some(Pat::Rest)),
+            Pat::Ident(_, _, _, Some(sub)) => matches!(&**sub, Pat::Rest),
             _ => false,
         };
         if is_rest && rest.is_none() {
@@ -953,7 +953,6 @@ impl Cx<'_> {
 impl Cx<'_> {
     /// `use std::f64::consts::PI;` で取り込んだ定数の名前 (ローカル変数でも const でもないとき)
     pub(crate) fn float_const_name(&self, p: &Expr) -> Option<f64> {
-        use std::f64::consts as c;
         let Expr::Path(_, path) = p else { return None };
         let id = ident_of(path)?;
         // (速い判定から: 名前は大文字だけ)
@@ -965,19 +964,19 @@ impl Cx<'_> {
             return None;
         }
         Some(match n.as_str() {
-            "PI" => c::PI,
-            "E" => c::E,
-            "TAU" => c::TAU,
-            "SQRT_2" => c::SQRT_2,
-            "LN_2" => c::LN_2,
-            "LN_10" => c::LN_10,
-            "FRAC_PI_2" => c::FRAC_PI_2,
-            "FRAC_PI_3" => c::FRAC_PI_3,
-            "FRAC_PI_4" => c::FRAC_PI_4,
-            "FRAC_PI_6" => c::FRAC_PI_6,
-            "FRAC_1_SQRT_2" => c::FRAC_1_SQRT_2,
-            "LOG2_E" => c::LOG2_E,
-            "LOG10_E" => c::LOG10_E,
+            "PI" => 3.141592653589793_f64,
+            "E" => 2.718281828459045_f64,
+            "TAU" => 6.283185307179586_f64,
+            "SQRT_2" => 1.4142135623730951_f64,
+            "LN_2" => 0.6931471805599453_f64,
+            "LN_10" => 2.302585092994046_f64,
+            "FRAC_PI_2" => 1.5707963267948966_f64,
+            "FRAC_PI_3" => 1.0471975511965979_f64,
+            "FRAC_PI_4" => 0.7853981633974483_f64,
+            "FRAC_PI_6" => 0.5235987755982989_f64,
+            "FRAC_1_SQRT_2" => 0.7071067811865476_f64,
+            "LOG2_E" => 1.4426950408889634_f64,
+            "LOG10_E" => 0.4342944819032518_f64,
             _ => return None,
         })
     }

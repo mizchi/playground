@@ -129,7 +129,7 @@ fn resolve_opaque(prog: &mut Program, src: &str, items: &[SrcItem]) -> R<()> {
             break;
         }
     }
-    if let Some(k) = done.iter().position(|d| !d) {
+    if let Some(k) = done.iter().position(|d| !*d) {
         return Err(format!("cannot infer the `impl Trait` return type of `{}`", prog.names[ids[k] as usize]));
     }
     Ok(())
@@ -259,7 +259,7 @@ pub fn build(src: &str, output: &std::path::Path, opt: bool, linker: Option<&str
     let obj = build_object(src, opt)?;
     let obj_path = output.with_extension("o");
     std::fs::write(&obj_path, &obj).map_err(|e| e.to_string())?;
-    crate::link::link(linker, &obj_path, output)?;
+    crate::link::link(linker, obj_path.as_path(), output)?;
     Ok(())
 }
 
@@ -386,7 +386,7 @@ fn emit_object(prog: &Program, insts: &Insts, user_live: &[u32], blobs: &FxMap<u
     let mut datas: Vec<DataDef> = vec![];
     let mut anon: HashMap<Vec<u8>, String> = HashMap::new();
     let mut anon_data = |bytes: &[u8], datas: &mut Vec<DataDef>| -> String {
-        if let Some(n) = anon.get(bytes) {
+        if let Some(n) = anon.get(&bytes.to_vec()) {
             return n.clone();
         }
         let n = format!(".Lxd{}", anon.len());
@@ -395,7 +395,14 @@ fn emit_object(prog: &Program, insts: &Insts, user_live: &[u32], blobs: &FxMap<u
         n
     };
     let static_name = |ci: u32| format!("_xS{}", prog.consts[ci as usize].name);
-    let mut todo: Vec<u32> = placed.iter().flat_map(|u| blobs[u].relocs.iter().filter_map(|r| if let Target::Static(c) = r.target { Some(c) } else { None })).collect();
+    let mut todo: Vec<u32> = vec![];
+    for u in &placed {
+        for r in &blobs[u].relocs {
+            if let Target::Static(c) = r.target {
+                todo.push(c);
+            }
+        }
+    }
     todo.sort_unstable();
     todo.dedup();
     let mut done_static: FxSet<u32> = FxSet::default();
@@ -460,7 +467,8 @@ fn emit_object(prog: &Program, insts: &Insts, user_live: &[u32], blobs: &FxMap<u
                     rs.push((8 * i as u32, fname(f), 0));
                 }
             }
-            datas.push((n.clone(), vec![0u8; 8 * vt.len().max(1)], rs, false));
+            let size: usize = 8 * vt.len().max(1);
+            datas.push((n.clone(), vec![0u8; size], rs, false));
             vts.insert(vt.clone(), n.clone());
             vt_names.push(n);
         }
@@ -486,7 +494,7 @@ fn emit_object(prog: &Program, insts: &Insts, user_live: &[u32], blobs: &FxMap<u
             .collect();
         let s = &prog.sigs.get(uid as usize);
         let global = insts.get(uid).is_none() && s.is_some_and(|s| s.is_main || s.export);
-        text_end = text_end.div_ceil(16) * 16;
+        text_end = (text_end + 15) / 16 * 16;
         fn_off.push((uid, text_end));
         text_end += blob.code.len() as u64;
         funcs.push((sym_of(uid).to_string(), blob.code.clone(), relocs, global));

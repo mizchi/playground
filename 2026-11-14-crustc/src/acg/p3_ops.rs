@@ -255,11 +255,13 @@ impl Cx<'_> {
             }
             if let (Ty::Struct(sid), true) = (lt, rt == str_ref) {
                 if let Some((f, ft)) = self.deref_to_slice(l, sid, false) {
-                    (l, lt) = (f, ft);
+                    l = f;
+                    lt = ft;
                 }
             } else if let (true, Ty::Struct(sid)) = (lt == str_ref, rt) {
                 if let Some((f, ft)) = self.deref_to_slice(r, sid, false) {
-                    (r, rt) = (f, ft);
+                    r = f;
+                    rt = ft;
                 }
             }
         }

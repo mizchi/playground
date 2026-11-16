@@ -797,10 +797,15 @@ impl Inf<'_> {
                         Some(init) => self.expr(init),
                         None => self.var(),
                     };
-                    if let Some(t) = ann {
-                        let k = self.known(t);
-                        self.unify(v, k);
-                    }
+                    // (注釈が完全な型なら変数はその型: `let s: &[T] = &v;` の強制変換で初期値の型と違ってよい)
+                    let v = match ann {
+                        Some(t) => {
+                            let k = self.known(t);
+                            self.unify(v, k);
+                            if self.prog.has_param(t) { v } else { k }
+                        }
+                        None => v,
+                    };
                     if self.no_record == 0 {
                         self.lets.push((stmt_key(st), v));
                     }

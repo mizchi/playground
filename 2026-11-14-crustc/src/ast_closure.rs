@@ -63,6 +63,19 @@ pub fn macro_exprs(g: &str) -> Vec<Expr> {
         return es;
     }
     let Some(inner) = strip_delims(g) else { return Vec::new() };
+    // (`matches!(e, PAT if guard)`: 式と guard の中のクロージャ)
+    if let Some(parts) = split_top_commas(inner) {
+        if parts.len() >= 2 {
+            if let Ok(e) = parse_expr(&parts[0]) {
+                let rest = parts[1..].join(",");
+                if let Some((_, guard)) = crate::parse::parse_pat_guard(&rest) {
+                    let mut out = vec![e];
+                    out.extend(guard);
+                    return out;
+                }
+            }
+        }
+    }
     match parse_expr(&format!("[{inner}]")) {
         Ok(e) => vec![e],
         Err(_) => Vec::new(),

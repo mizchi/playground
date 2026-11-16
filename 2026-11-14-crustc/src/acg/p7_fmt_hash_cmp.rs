@@ -964,10 +964,10 @@ impl Cx<'_> {
                             let v = self.hash_call(a, ft)?;
                             h = self.mix(h, v);
                         }
-                        self.b.ins().jump(done, &[h.into()]);
+                        self.b.ins().jump(done, &[h]);
                         self.b.switch_to_block(next);
                     }
-                    self.b.ins().jump(done, &[h0.into()]);
+                    self.b.ins().jump(done, &[h0]);
                     self.b.switch_to_block(done);
                     res
                 } else {
@@ -1087,7 +1087,7 @@ impl Cx<'_> {
     /// 0 でなければ done へ (その値で)、0 なら次のブロックへ進む
     pub(crate) fn cmp_chain(&mut self, c: Value, done: Block) {
         let next = self.b.create_block();
-        self.b.ins().brif(c, done, &[c.into()], next, &[]);
+        self.b.ins().brif(c, done, &[c], next, &[]);
         self.b.switch_to_block(next);
     }
 
@@ -1115,10 +1115,10 @@ impl Cx<'_> {
         let c = self.cmp_call(xa, xb, e)?;
         let nx = self.b.ins().iadd_imm_s(iv, 1);
         self.b.def_var(i, nx);
-        self.b.ins().brif(c, done, &[c.into()], head, &[]);
+        self.b.ins().brif(c, done, &[c], head, &[]);
         self.b.switch_to_block(tail);
         let c = self.cmp_scalar(la, lb, false);
-        self.b.ins().jump(done, &[c.into()]);
+        self.b.ins().jump(done, &[c]);
         self.b.switch_to_block(done);
         Ok(res)
     }
@@ -1221,7 +1221,7 @@ impl Cx<'_> {
                             self.cmp_chain(c, done);
                         }
                         let z = self.b.ins().iconst(types::I32, 0);
-                        self.b.ins().jump(done, &[z.into()]);
+                        self.b.ins().jump(done, &[z]);
                         self.b.switch_to_block(next);
                     }
                 } else {
@@ -1232,7 +1232,7 @@ impl Cx<'_> {
                     }
                 }
                 let z = self.b.ins().iconst(types::I32, 0);
-                self.b.ins().jump(done, &[z.into()]);
+                self.b.ins().jump(done, &[z]);
                 self.b.switch_to_block(done);
                 res
             }
