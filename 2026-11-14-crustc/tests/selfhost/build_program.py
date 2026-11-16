@@ -103,7 +103,50 @@ fn run(path: &str) -> Result<(), String> {
             Err(e) => println!("    error {e}"),
         }
     }
+    // パスの検索 (program.rs の fn_by_p / struct_by_p / variant_by_p): 全関数の本体のパスを引く
+    if let Ok(f) = parse::parse_file(&src) {
+        let mut n = 0;
+        for it in &f.items {
+            lookups(&p, it, None, &mut n);
+        }
+        println!("  {n} paths");
+    }
     Ok(())
+}
+
+fn walk(e: &parse::Expr, f: &mut dyn FnMut(&parse::Expr)) {
+    f(e);
+    ast_closure::each_child_pub(e, &mut |c| walk(c, f));
+}
+
+fn lookups(p: &program::Program, it: &parse::Item, self_sid: Option<u32>, n: &mut usize) {
+    match &it.kind {
+        parse::ItemKind::Fn(_, Some(b)) => {
+            let e = parse::Expr::Block(None, false, b.clone());
+            walk(&e, &mut |x| {
+                let path = match x {
+                    parse::Expr::Path(None, q) | parse::Expr::Struct(q, _, _) => Some(q),
+                    _ => None,
+                };
+                if let Some(q) = path {
+                    let pp = program::PPath::of(q);
+                    let r = (p.fn_by_p(&pp, self_sid), p.struct_by_p(&pp, self_sid), p.variant_by_p(&pp, self_sid));
+                    if r != (None, None, None) {
+                        let names: Vec<&str> = pp.segs.iter().map(|s| s.name.as_str()).collect();
+                        println!("    {} {:?}", names.join("::"), r);
+                    }
+                    *n += 1;
+                }
+            });
+        }
+        parse::ItemKind::Impl(_, _, parse::Ty::Path(None, q), items) => {
+            let sid = p.struct_by_p(&program::PPath::of(q), None);
+            for i in items {
+                lookups(p, i, sid, n);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn main() {

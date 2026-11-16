@@ -2245,3 +2245,215 @@ pub const TYS: [Ty; 18] = [
 pub fn ty_code(t: Ty) -> u8 {
     TYS.iter().position(|&x| x == t).unwrap() as u8
 }
+
+/// パスの 1 セグメント (名前と、型引数 `<..>` / `(..)` があるか)。syn のパスも自前の構文木のパスもこれにして引く
+#[derive(Clone, Debug, PartialEq)]
+pub struct PSeg {
+    pub name: String,
+    pub args: bool,
+}
+
+/// 名前のパス (`::a::b` の先頭の `::` と、セグメント)
+#[derive(Clone, Debug, PartialEq)]
+pub struct PPath {
+    pub global: bool,
+    pub segs: Vec<PSeg>,
+}
+
+impl PPath {
+    /// 自前の構文木のパス
+    pub fn of(p: &crate::parse::Path) -> PPath {
+        PPath {
+            global: p.global,
+            segs: p.segs.iter().map(|s| PSeg { name: s.name.clone(), args: !s.args.is_empty() || s.fn_args.is_some() }).collect(),
+        }
+    }
+    fn tail(&self, k: usize) -> PPath {
+        PPath { global: false, segs: self.segs[k..].to_vec() }
+    }
+    fn ident(&self) -> Option<&str> {
+        if !self.global && self.segs.len() == 1 && !self.segs[0].args {
+            Some(&self.segs[0].name)
+        } else {
+            None
+        }
+    }
+}
+
+// --- パスで struct / enum のバリアント / 関数を引く (front.rs の syn 版はこれを呼ぶ) ---
+impl Program {
+    /// 先頭のモジュールの部分 (`crate::` / `self::` / `super::` / 小文字のモジュール名) を外したパス
+    pub fn strip_mods_p(&self, p: &PPath) -> Option<PPath> {
+        let mut k = 0;
+        let n = p.segs.len();
+        while k + 1 < n {
+            let s = p.segs[k].name.as_str();
+            let module = matches!(s, "crate" | "self" | "super")
+                || (s.starts_with(|c: char| c.is_ascii_lowercase())
+                    && !matches!(s, "std" | "core" | "alloc" | "str" | "char" | "bool")
+                    && Ty::prim(s).is_none()
+                    && !self.struct_index.contains_key(s)
+                    && !p.segs[k].args);
+            if !module {
+                break;
+            }
+            k += 1;
+        }
+        if k == 0 {
+            return None;
+        }
+        Some(p.tail(k))
+    }
+
+    pub fn variant_by_p(&self, p: &PPath, self_sid: Option<u32>) -> Option<(u32, usize)> {
+        if let Some(r) = self.variant_by_p_inner(p, self_sid) {
+            return Some(r);
+        }
+        let q = self.strip_mods_p(p)?;
+        self.variant_by_p_inner(&q, self_sid)
+    }
+
+    fn variant_by_p_inner(&self, p: &PPath, self_sid: Option<u32>) -> Option<(u32, usize)> {
+        // `core::option::Option::Some` などは最後の 2 つで見る
+        let segs: &[PSeg] = if p.segs.len() > 2 && matches!(p.segs[0].name.as_str(), "core" | "crate" | "std") {
+            &p.segs[p.segs.len() - 2..]
+        } else {
+            &p.segs
+        };
+        if segs.len() == 1 {
+            let n = segs[0].name.as_str();
+            let en = match n {
+                "Some" | "None" => "Option",
+                "Ok" | "Err" => "Result",
+                // `use Expr::*;` したバリアント (大文字で始まり、ほかの enum と名前が重ならないもの)
+                // (同じ名前の struct があればそちら: `TokenTree::Punct(Punct { .. })`)
+                _ if n.starts_with(|c: char| c.is_ascii_uppercase()) => {
+                    if self.struct_index.get(n).is_some_and(|&id| !self.structs[id as usize].is_enum) {
+                        return None;
+                    }
+                    return self.variant_names.get(n).copied().flatten();
+                }
+                _ => return None,
+            };
+            let sid = *self.struct_index.get(en)?;
+            let vi = self.structs[sid as usize].variants.iter().position(|v| v.name == n)?;
+            return Some((sid, vi));
+        }
+        if segs.len() != 2 || segs[1].args {
+            return None;
+        }
+        let tn = segs[0].name.as_str();
+        let sid = if tn == "Self" { self_sid? } else { *self.struct_index.get(tn)? };
+        let sd = &self.structs[sid as usize];
+        if !sd.is_enum {
+            return None;
+        }
+        let vn = &segs[1].name;
+        sd.variants.iter().position(|v| &v.name == vn).map(|vi| (sid, vi))
+    }
+
+    pub fn struct_by_p(&self, p: &PPath, self_sid: Option<u32>) -> Option<u32> {
+        // `std::cmp::Reverse` / `core::cmp::Ordering` などは最後のセグメント (prelude の型)
+        if p.segs.len() > 1 && matches!(p.segs[0].name.as_str(), "std" | "core" | "alloc") {
+            return self.struct_index.get(&p.segs.last().unwrap().name).copied();
+        }
+        if p.segs.len() > 1 {
+            return self.struct_by_p(&self.strip_mods_p(p)?, self_sid);
+        }
+        let id = p.ident()?;
+        if id == "Self" {
+            return self_sid;
+        }
+        self.struct_index.get(id).copied()
+    }
+
+    pub fn fn_by_p(&self, p: &PPath, self_sid: Option<u32>) -> Option<u32> {
+        if let Some(r) = self.fn_by_p_inner(p, self_sid) {
+            return Some(r);
+        }
+        let q = self.strip_mods_p(p)?;
+        self.fn_by_p_inner(&q, self_sid)
+    }
+
+    fn fn_by_p_inner(&self, p: &PPath, self_sid: Option<u32>) -> Option<u32> {
+        // 最後のセグメントの turbofish (`f::<T>`) は呼び出し側で読む
+        let n = p.segs.len();
+        // (`Buf::<8>::new`: 型のセグメントの型引数も呼び出し側で読む)
+        if n == 2 && p.segs[0].args && !p.global {
+            let mut q = p.clone();
+            q.segs[0].args = false;
+            return self.fn_by_p_inner(&q, self_sid);
+        }
+        if p.global || p.segs.iter().take(n.saturating_sub(1)).any(|s| s.args) {
+            return None;
+        }
+        let name = |k: usize| p.segs[k].name.as_str();
+        // `std::collections::HashMap::new` などは `HashMap::new`
+        if n >= 3 && matches!(name(0), "core" | "std" | "alloc") {
+            let ty = name(n - 2);
+            if self.struct_index.contains_key(ty) {
+                return self.index.get(&format!("{ty}::{}", name(n - 1))).copied();
+            }
+        }
+        // `std::process::exit` / `process::exit` (ユーザの `exit` と名前がぶつからないように別の名前)
+        // `fs::read_to_string` / `fs::write` / `env::args` などは prelude の `__core_*`
+        if n >= 2 {
+            let core = match (name(n - 2), name(n - 1)) {
+                ("fs", "read_to_string") => Some("__exr_fs_read_to_string"),
+                ("fs", "read") => Some("__exr_fs_read"),
+                ("fs", "write") => Some("__exr_fs_write"),
+                ("env", "args") => Some("__exr_env_args"),
+                ("env", "var") => Some("__exr_env_var"),
+                ("env", "var_os") => Some("__exr_env_var_os"),
+                ("env", "split_paths") => Some("__exr_env_split_paths"),
+                ("fs", "remove_file") => Some("__exr_fs_remove_file"),
+                ("Path", "new") => Some("__exr_path_new"),
+                ("ptr", "eq") => Some("__exr_ptr_eq"),
+                _ => None,
+            };
+            if let Some(c) = core {
+                return self.index.get(c).copied();
+            }
+        }
+        if n >= 2 && name(n - 2) == "process" && name(n - 1) == "exit" {
+            return self.index.get("__core_process_exit").copied();
+        }
+        // `core::cmp::max` / `core::mem::swap` などは prelude の `__core_*` へ
+        if n >= 2 && matches!(name(0), "core" | "std") {
+            return self.index.get(&format!("__core_{}", name(n - 1))).copied();
+        }
+        match n {
+            1 => {
+                let f = name(0);
+                // `use core::cmp::max;` してからの `max(..)`: ユーザの関数がなければ core のもの
+                self.index.get(f).or_else(|| self.index.get(&format!("__core_{f}"))).copied()
+            }
+            2 => {
+                let (ty, m) = (name(0), name(1));
+                // `f64::max` / `f64::sqrt` (関数として): prelude の `__exr_f64_*`、`i32::max` は core::cmp::max
+                if ty == "f64" || ty == "f32" {
+                    return self.index.get(&format!("__exr_{ty}_{m}")).copied();
+                }
+                if Ty::from_suffix(ty).is_some() && matches!(m, "max" | "min") {
+                    return self.index.get(&format!("__core_{m}")).copied();
+                }
+                // `char::from_digit(d, 10)` / `char::from_u32(x)` / `char::from(b)`: prelude の `__exr_char_*`
+                if ty == "char" {
+                    let m = match m {
+                        "from_u32" => "from_u32_checked",
+                        "from" => "from_u8",
+                        _ => m,
+                    };
+                    return self
+                        .index
+                        .get(&format!("__exr_char_{m}"))
+                        .or_else(|| self.index.get(&format!("__exr_charfn_{m}")))
+                        .copied();
+                }
+                let ty = if ty == "Self" { self.structs[self.base_of(self_sid?) as usize].name.clone() } else { ty.to_string() };
+                self.index.get(&format!("{ty}::{m}")).copied()
+            }
+            _ => None,
+        }
+    }
+}

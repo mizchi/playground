@@ -944,69 +944,6 @@ impl Program {
         Ok(())
     }
 
-    /// `E::V` / `Self::V` → (enum id, バリアント番号)
-    /// `Some` / `None` / `Ok` / `Err` は (prelude の) Option / Result のバリアント。
-    /// ジェネリックな enum なら、返る id はジェネリックな定義 (呼び出し側でインスタンスにする)
-    pub fn variant_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<(u32, usize)> {
-        if let Some(r) = self.variant_by_path_inner(p, self_sid) {
-            return Some(r);
-        }
-        let q = self.strip_mods(p)?;
-        self.variant_by_path_inner(&q, self_sid)
-    }
-
-    fn variant_by_path_inner(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<(u32, usize)> {
-        let segs: Vec<&syn::PathSegment> = p.segments.iter().collect();
-        // `core::option::Option::Some` などは最後の 2 つで見る
-        let segs = if segs.len() > 2
-            && matches!(segs[0].ident.to_string().as_str(), "core" | "crate" | "std")
-        {
-            segs[segs.len() - 2..].to_vec()
-        } else {
-            segs
-        };
-        if segs.len() == 1 {
-            let n = segs[0].ident.to_string();
-            let en = match n.as_str() {
-                "Some" | "None" => "Option",
-                "Ok" | "Err" => "Result",
-                // `use Expr::*;` したバリアント (大文字で始まり、ほかの enum と名前が重ならないもの)
-                // (同じ名前の struct があればそちら: `TokenTree::Punct(Punct { .. })`)
-                _ if n.starts_with(|c: char| c.is_ascii_uppercase()) => {
-                    if self.struct_index.get(&n).is_some_and(|&id| !self.structs[id as usize].is_enum) {
-                        return None;
-                    }
-                    return self.variant_names.get(&n).copied().flatten();
-                }
-                _ => return None,
-            };
-            let sid = *self.struct_index.get(en)?;
-            let vi = self.structs[sid as usize]
-                .variants
-                .iter()
-                .position(|v| v.name == n)?;
-            return Some((sid, vi));
-        }
-        if segs.len() != 2 || !segs[1].arguments.is_none() {
-            return None;
-        }
-        let tn = segs[0].ident.to_string();
-        let sid = if tn == "Self" {
-            self_sid?
-        } else {
-            *self.struct_index.get(&tn)?
-        };
-        let sd = &self.structs[sid as usize];
-        if !sd.is_enum {
-            return None;
-        }
-        let vn = segs[1].ident.to_string();
-        sd.variants
-            .iter()
-            .position(|v| v.name == vn)
-            .map(|vi| (sid, vi))
-    }
-
     /// 関数本体の中の型を解決する (`Self` と型パラメータは env から)
     pub fn parse_ty(&self, t: &syn::Type, env: &TyEnv) -> R<Ty> {
         let ts = parse_tysyn(t, Some(&TySyn::Named("Self".into())))?;
@@ -1039,24 +976,6 @@ impl Program {
         q.leading_colon = None;
         q.segments = p.segments.iter().skip(k).cloned().collect();
         Some(q)
-    }
-
-    pub fn struct_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
-        // `std::cmp::Reverse` / `core::cmp::Ordering` などは最後のセグメント (prelude の型)
-        if p.segments.len() > 1
-            && matches!(p.segments[0].ident.to_string().as_str(), "std" | "core" | "alloc")
-        {
-            let last = p.segments.last().unwrap().ident.to_string();
-            return self.struct_index.get(&last).copied();
-        }
-        if p.segments.len() > 1 {
-            return self.struct_by_path(&self.strip_mods(p)?, self_sid);
-        }
-        let id = p.get_ident()?.to_string();
-        if id == "Self" {
-            return self_sid;
-        }
-        self.struct_index.get(&id).copied()
     }
 
     /// `i32::pow(2, 10)` / `u64::count_ones(x)` / `f64::abs(x)`: プリミティブのメソッドを関数の形で呼んだもの。
@@ -1146,115 +1065,19 @@ impl Program {
         Some(syn::parse_quote!(#recv.#m(#(#rest),*)))
     }
 
-    /// 関数として書かれたパス (`f` / `S::f` / `Self::f`) → 関数 ID
+
+
+    pub fn variant_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<(u32, usize)> {
+        self.variant_by_p(&ppath(p), self_sid)
+    }
+
+    pub fn struct_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
+        self.struct_by_p(&ppath(p), self_sid)
+    }
+
     pub fn fn_by_path(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
-        if let Some(r) = self.fn_by_path_inner(p, self_sid) {
-            return Some(r);
-        }
-        let q = self.strip_mods(p)?;
-        self.fn_by_path_inner(&q, self_sid)
+        self.fn_by_p(&ppath(p), self_sid)
     }
-
-    fn fn_by_path_inner(&self, p: &syn::Path, self_sid: Option<u32>) -> Option<u32> {
-        // 最後のセグメントの turbofish (`f::<T>`) は呼び出し側で読む
-        let n = p.segments.len();
-        // (`Buf::<8>::new`: 型のセグメントの型引数も呼び出し側で読む)
-        if n == 2 && !p.segments[0].arguments.is_none() && p.leading_colon.is_none() {
-            let mut q = p.clone();
-            q.segments[0].arguments = syn::PathArguments::None;
-            return self.fn_by_path_inner(&q, self_sid);
-        }
-        if p.leading_colon.is_some()
-            || p.segments
-                .iter()
-                .take(n.saturating_sub(1))
-                .any(|s| !s.arguments.is_none())
-        {
-            return None;
-        }
-        // `std::collections::HashMap::new` などは `HashMap::new`
-        if n >= 3 && matches!(p.segments[0].ident.to_string().as_str(), "core" | "std" | "alloc") {
-            let ty = p.segments[n - 2].ident.to_string();
-            if self.struct_index.contains_key(&ty) {
-                return self.index.get(&format!("{ty}::{}", p.segments[n - 1].ident)).copied();
-            }
-        }
-        // `std::process::exit` / `process::exit` (ユーザの `exit` と名前がぶつからないように別の名前)
-        // `fs::read_to_string` / `fs::write` / `env::args` などは prelude の `__core_*`
-        if n >= 2 {
-            let (m, f) = (p.segments[n - 2].ident.to_string(), p.segments[n - 1].ident.to_string());
-            let core = match (m.as_str(), f.as_str()) {
-                ("fs", "read_to_string") => Some("__exr_fs_read_to_string"),
-                ("fs", "read") => Some("__exr_fs_read"),
-                ("fs", "write") => Some("__exr_fs_write"),
-                ("env", "args") => Some("__exr_env_args"),
-                ("env", "var") => Some("__exr_env_var"),
-                ("env", "var_os") => Some("__exr_env_var_os"),
-                ("env", "split_paths") => Some("__exr_env_split_paths"),
-                ("fs", "remove_file") => Some("__exr_fs_remove_file"),
-                ("Path", "new") => Some("__exr_path_new"),
-                ("ptr", "eq") => Some("__exr_ptr_eq"),
-                _ => None,
-            };
-            if let Some(c) = core {
-                return self.index.get(c).copied();
-            }
-        }
-        if n >= 2 && p.segments[n - 2].ident == "process" && p.segments[n - 1].ident == "exit" {
-            return self.index.get("__core_process_exit").copied();
-        }
-        // `core::cmp::max` / `core::mem::swap` などは prelude の `__core_*` へ
-        if n >= 2 && matches!(p.segments[0].ident.to_string().as_str(), "core" | "std") {
-            return self
-                .index
-                .get(&format!("__core_{}", p.segments[n - 1].ident))
-                .copied();
-        }
-        match p.segments.len() {
-            1 => {
-                let name = p.segments[0].ident.to_string();
-                // `use core::cmp::max;` してからの `max(..)`: ユーザの関数がなければ core のもの
-                self.index
-                    .get(&name)
-                    .or_else(|| self.index.get(&format!("__core_{name}")))
-                    .copied()
-            }
-            2 => {
-                let ty = p.segments[0].ident.to_string();
-                // `f64::max` / `f64::sqrt` (関数として): prelude の `__exr_f64_*`、`i32::max` は core::cmp::max
-                if ty == "f64" || ty == "f32" {
-                    return self.index.get(&format!("__exr_{ty}_{}", p.segments[1].ident)).copied();
-                }
-                if Ty::from_suffix(&ty).is_some() && matches!(p.segments[1].ident.to_string().as_str(), "max" | "min") {
-                    return self.index.get(&format!("__core_{}", p.segments[1].ident)).copied();
-                }
-                // `char::from_digit(d, 10)` / `char::from_u32(x)` / `char::from(b)`: prelude の `__exr_char_*`
-                if ty == "char" {
-                    let m = p.segments[1].ident.to_string();
-                    let m = match m.as_str() {
-                        "from_u32" => "from_u32_checked".to_string(),
-                        "from" => "from_u8".to_string(),
-                        _ => m,
-                    };
-                    return self
-                        .index
-                        .get(&format!("__exr_char_{m}"))
-                        .or_else(|| self.index.get(&format!("__exr_charfn_{m}")))
-                        .copied();
-                }
-                let ty = if ty == "Self" {
-                    self.structs[self.base_of(self_sid?) as usize].name.clone()
-                } else {
-                    ty
-                };
-                self.index
-                    .get(&format!("{ty}::{}", p.segments[1].ident))
-                    .copied()
-            }
-            _ => None,
-        }
-    }
-
 }
 
 // --- Summary のシリアライズ ------------------------------------------------
@@ -1714,4 +1537,12 @@ fn local_ty_syn(b: &syn::Block, n: &str, int_hint: Option<Ty>) -> Option<TySyn> 
         };
     }
     found
+}
+
+/// syn のパスを (program.rs の検索に渡す) PPath にする
+pub fn ppath(p: &syn::Path) -> PPath {
+    PPath {
+        global: p.leading_colon.is_some(),
+        segs: p.segments.iter().map(|s| PSeg { name: s.ident.to_string(), args: !s.arguments.is_none() }).collect(),
+    }
 }

@@ -605,10 +605,18 @@ pub fn hoist_nested_items(src: &str) -> Option<String> {
     // 入れ子のアイテムの名前と、それを含む関数の本体 (開き括弧のトークン位置)。閉じた本体の (開き, 閉じ)
     let mut nested_names: Vec<(Vec<u8>, usize)> = vec![];
     let mut bodies: Vec<(usize, usize)> = vec![];
+    // トップレベルのアイテムの名前 (入れ子のアイテムを外に出すとぶつかるもの)
+    let mut top_names: Vec<Vec<u8>> = vec![];
     let mut k = 0;
     while k < toks.len() {
         let t = tok(k);
         if toks[k].0 == 0 {
+            if depth == 0 && matches!(t, b"fn" | b"struct" | b"enum" | b"const" | b"static" | b"union" | b"trait" | b"type") && k + 1 < toks.len() {
+                let nk = if t == b"static" && tok(k + 1) == b"mut" { k + 2 } else { k + 1 };
+                if nk < toks.len() && toks[nk].0 == 0 {
+                    top_names.push(tok(nk).to_vec());
+                }
+            }
             let in_body = fn_bodies.last().is_some_and(|&(d, _)| depth > d);
             let stmt_start = k == 0 || is_sym(k - 1, b"{") || is_sym(k - 1, b"}") || is_sym(k - 1, b";") || is_sym(k - 1, b"]");
             let item_kw = matches!(t, b"fn" | b"struct" | b"enum" | b"const" | b"use" | b"static");
@@ -720,7 +728,7 @@ pub fn hoist_nested_items(src: &str) -> Option<String> {
     //  その関数の本体の中でだけ `TABLE__h1` などに名前を変えてからやり直す)
     let mut renames: Vec<(usize, usize, Vec<u8>, Vec<u8>)> = vec![];
     for (i, (n, b)) in nested_names.iter().enumerate() {
-        let dup = nested_names.iter().enumerate().any(|(j, (m, c))| j != i && m == n && c != b);
+        let dup = nested_names.iter().enumerate().any(|(j, (m, c))| j != i && m == n && c != b) || top_names.contains(n);
         if !dup {
             continue;
         }
