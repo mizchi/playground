@@ -795,6 +795,13 @@ impl Inf<'_> {
                 | Expr::Try(_)
                 | Expr::Index(..)
                 | Expr::Field(..)
+                | Expr::Array(_)
+                | Expr::Repeat(..)
+                | Expr::Tuple(_)
+                | Expr::Ref(..)
+                | Expr::Unary(..)
+                | Expr::Binary(..)
+                | Expr::Cast(..)
         ) && self.no_record == 0
         {
             self.lets.push((e as *const Expr as usize, v));

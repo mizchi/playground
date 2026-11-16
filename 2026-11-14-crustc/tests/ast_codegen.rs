@@ -5,6 +5,10 @@ fn acg_like_rustc() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut files: Vec<std::path::PathBuf> = std::fs::read_dir("tests/acg").unwrap().map(|e| e.unwrap().path()).collect();
     files.sort();
+    // (ACG_FILE=path で 1 ファイルだけ試す)
+    if let Ok(f) = std::env::var("ACG_FILE") {
+        files = vec![std::path::PathBuf::from(f)];
+    }
     let mut bad = vec![];
     for p in &files {
         let name = p.file_stem().unwrap().to_string_lossy().to_string();
