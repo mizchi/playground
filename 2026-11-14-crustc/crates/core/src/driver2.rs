@@ -1458,10 +1458,12 @@ fn emit_object(a: &Analysis, ctx: &CrateCtx, insts: &Insts, user_live: &[u32], b
         funcs.push((sym_of(uid).to_string(), blob.code.clone(), relocs, global));
     }
     // panic の trap の表 (driver.rs と同じ形式)
-    if trap_table.is_some() || ctx.lib.is_some() {
+    // (依存するクレートのある実行ファイルは、自分が使わなくても表を置く: 依存するクレートの .o が `_xT__exe` を引く)
+    if trap_table.is_some() || ctx.lib.is_some() || !ctx.deps.is_empty() {
         let tname = match (trap_table, &ctx.lib) {
             (Some(ci), _) => static_name(ci),
-            (None, l) => format!("_xT_{}", l.clone().unwrap_or_default()),
+            (None, Some(l)) => format!("_xT_{l}"),
+            (None, None) => "_xT__exe".to_string(),
         };
         let mut bytes: Vec<u8> = vec![0; 16];
         let uv = |out: &mut Vec<u8>, mut v: u64| {
