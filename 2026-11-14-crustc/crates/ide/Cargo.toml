@@ -1,0 +1,8 @@
+[package]
+name = "crustc-ide"
+version = "0.1.0"
+edition = "2024"
+description = "エディタ向けの解析 (LSP が使う): 字句の列からのシンボル (symbols) と、定義・参照・hover・補完 (navigate)。コンパイラ本体は使わない"
+
+[dependencies]
+crustc-syntax = { path = "../syntax" }

@@ -2,7 +2,6 @@
 //!   crustc <input.rs> [-o out] [...]   ビルド (自前のフロントエンド + Cranelift。`--backend=minclif` で minclif)
 //!   crustc build <workspace> [-o dir]   ワークスペース (複数のクレート) をビルド
 //!   crustc check <input.rs>            型検査だけ (全診断を表示)
-//!   crustc lsp                         LSP サーバ (stdio)
 
 use std::path::PathBuf;
 
@@ -10,7 +9,7 @@ use crustc::driver2::{Options2, Session2};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: crustc <input.rs> [-o out] [-O] [--backend=cranelift|minclif] [--linker=NAME] [--features=a,b] [--time] [-j N] [--no-cache]\n       crustc build <workspace-file> [-o out-dir] [-O] [--backend=..] [-j N] [--time] [--no-cache]\n       crustc check <input.rs>\n       crustc lsp"
+        "usage: crustc <input.rs> [-o out] [-O] [--backend=cranelift|minclif] [--linker=NAME] [--features=a,b] [--time] [-j N] [--no-cache]\n       crustc build <workspace-file> [-o out-dir] [-O] [--backend=..] [-j N] [--time] [--no-cache]\n       crustc check <input.rs>"
     );
     std::process::exit(2)
 }
@@ -38,13 +37,8 @@ fn main() {
             args.next();
         }
         Some("lsp") => {
-            std::process::exit(match crustc::lsp::run(std::io::stdin().lock(), std::io::stdout().lock()) {
-                Ok(()) => 0,
-                Err(e) => {
-                    eprintln!("crustc lsp: {e}");
-                    1
-                }
-            });
+            eprintln!("crustc: LSP サーバは別のバイナリ crustc-lsp になった (cargo build --release -p crustc-lsp)");
+            std::process::exit(2);
         }
         _ => {}
     }

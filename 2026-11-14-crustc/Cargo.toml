@@ -7,7 +7,7 @@ autoexamples = false
 
 # 他の実験と干渉しないよう、このディレクトリ単独のワークスペースにする
 [workspace]
-members = ["crates/ir", "crates/minclif", "crates/base", "crates/syntax", "crates/sema", "crates/typeck", "crates/codegen", "crates/core", "crates/clif", "crates/lsp"]
+members = ["crates/ir", "crates/minclif", "crates/base", "crates/syntax", "crates/sema", "crates/typeck", "crates/codegen", "crates/core", "crates/clif", "crates/ide", "crates/lsp"]
 
 [features]
 # (以前は driver2 を有効にする feature。今は常に入っている: テストの cfg のために残す)
@@ -17,11 +17,11 @@ acg = []
 [dependencies]
 crustc-core = { path = "crates/core" }
 crustc-clif = { path = "crates/clif" }
-crustc-lsp = { path = "crates/lsp" }
 minclif = { path = "crates/minclif" }
 
 [dev-dependencies]
-# (LSP のテストとベンチが JSON を組み立てる)
+# (ベンチの lsp/* が LSP サーバを in-process で動かす。crustc 本体は LSP に依存しない)
+crustc-lsp = { path = "crates/lsp" }
 serde_json = "1"
 # (テストが syn 版と比べるのに使う)
 syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "visit", "clone-impls"] }
