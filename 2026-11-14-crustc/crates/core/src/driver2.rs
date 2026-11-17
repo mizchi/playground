@@ -33,6 +33,8 @@ pub struct FrontMemo {
     pub sel: crate::prelude::SelectCache,
     /// 前回の split の入力と結果
     pub split: Option<(String, Vec<SrcItem>)>,
+    /// 前処理のチャンクごとの結果
+    pub prep: crate::prep::PrepMemo,
 }
 
 fn clone_item(it: &SrcItem) -> SrcItem {
@@ -158,27 +160,9 @@ fn split_diff(old: &str, items: &[SrcItem], new: &str) -> Option<Vec<SrcItem>> {
 
 pub fn with_prelude_in(src: &str, crates: &[String], fix: &mut Vec<(u32, u32, i32)>, cfg: Option<&crate::cfg::CfgSet>, cache: &mut FrontMemo) -> R<(String, Vec<SrcItem>, usize, usize)> {
     let mut tm = Timer { on: std::env::var_os("CRUSTC_PROF").is_some(), last: now_ns(), start: now_ns() };
-    let tl = lexer::expand_thread_local(src);
-    let src: &str = tl.as_deref().unwrap_or(src);
-    let expanded = crate::macros::expand_cfg(src, cfg)?.or(tl.clone());
-    let src: &str = expanded.as_deref().unwrap_or(src);
-    tm.lap("macros", String::new());
-    if let Some(p) = std::env::var_os("CRUSTC_DUMP_PRE") {
-        let _ = std::fs::write(p, src);
-    }
-    let flat = lexer::flatten_modules_fix(src, crates, fix).or(expanded.clone());
-    let src: &str = flat.as_deref().unwrap_or(src);
-    tm.lap("flatten", String::new());
-    if tm.on {
-        let n = lexer::tokenize(src.as_bytes()).len();
-        tm.lap("(tokenize)", format!("{n} tokens"));
-    }
-    let hoisted = lexer::hoist_nested_items(src).or(flat.clone());
-    let src: &str = hoisted.as_deref().unwrap_or(src);
-    tm.lap("hoist", String::new());
-    let cv = crate::ctors::rewrite_ctor_values(src);
-    let src: &str = cv.as_deref().unwrap_or(src);
-    tm.lap("ctor", String::new());
+    let pre = crate::prep::prep(src, crates, fix, cfg, &mut cache.prep)?;
+    let src: &str = &pre;
+    tm.lap("prep", String::new());
     let mut items = split_inc(src, &mut cache.split)?;
     let user = items.len();
     tm.lap("split", String::new());

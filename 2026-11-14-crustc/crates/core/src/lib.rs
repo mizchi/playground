@@ -18,6 +18,7 @@ pub mod enc;
 pub mod fxhash;
 pub mod key;
 pub mod lexer;
+pub mod prep;
 pub mod link;
 pub mod macros;
 pub mod parse;

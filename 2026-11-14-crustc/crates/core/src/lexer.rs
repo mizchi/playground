@@ -616,6 +616,28 @@ pub fn tokenize(s: &[u8]) -> Vec<(u8, usize, usize)> {
 /// 関数の本体の中に書いたアイテム (`fn helper() {..}` / `struct` / `enum` / `const` / `use`) をファイルの末尾へ移す。
 /// 元の場所は空白にして (改行は残す)、後ろの行番号を変えない
 pub fn hoist_nested_items(src: &str) -> Option<String> {
+    let (body, moves) = hoist_nested_items_parts(src)?;
+    if moves.is_empty() {
+        return Some(body);
+    }
+    let mut out = body.into_bytes();
+    for (_, t) in &moves {
+        out.push(b'\n');
+        out.extend_from_slice(t.as_bytes());
+    }
+    out.push(b'\n');
+    String::from_utf8(out).ok()
+}
+
+/// hoist_nested_items を、(元の場所を空白にした本文 (長さと改行は入力と同じ。名前を変えたときは改行だけ同じ),
+/// 移したアイテム (本文での開始位置, テキスト) の列) で返す。末尾に `\n` + テキストを順に並べ、最後に `\n` を付けたものが
+/// hoist_nested_items の結果 (列が空なら本文だけ)
+pub fn hoist_nested_items_parts(src: &str) -> Option<(String, Vec<(usize, String)>)> {
+    hoist_parts_at(src, 0)
+}
+
+/// depth: 名前を変えてやり直した回数 (壊れたソースで名前の変更が止まらないときは 8 回で止める)
+fn hoist_parts_at(src: &str, redo: u32) -> Option<(String, Vec<(usize, String)>)> {
     // (速く飛ばす: 字下げした行頭の `fn ` などがなければ入れ子のアイテムはない)
     let indented = src.split('\n').any(|l| {
         let t = l.trim_start();
@@ -795,22 +817,31 @@ pub fn hoist_nested_items(src: &str) -> Option<String> {
         }
         out.extend_from_slice(&s[last..]);
         let renamed = String::from_utf8(out).ok()?;
-        return hoist_nested_items(&renamed).or(Some(renamed));
+        // (名前を変えるトークンが無ければ (変えても同じなら) やり直さない: 同じ入力で回り続ける)
+        if renamed.as_str() == src || redo >= 8 {
+            return hoist_plain(s, &moves);
+        }
+        return match hoist_parts_at(&renamed, redo + 1) {
+            Some(r) => Some(r),
+            None => Some((renamed, vec![])),
+        };
     }
+    hoist_plain(s, &moves)
+}
+
+/// 移すものを空白にした本文と、移したもの
+fn hoist_plain(s: &[u8], moves: &[(usize, usize)]) -> Option<(String, Vec<(usize, String)>)> {
     let mut out = s.to_vec();
-    let mut tail = Vec::new();
-    for &(a, b) in &moves {
-        tail.push(b'\n');
-        tail.extend_from_slice(&s[a..b]);
+    let mut parts: Vec<(usize, String)> = vec![];
+    for &(a, b) in moves {
+        parts.push((a, String::from_utf8(s[a..b].to_vec()).ok()?));
         for x in &mut out[a..b] {
             if *x != b'\n' {
                 *x = b' ';
             }
         }
     }
-    out.extend_from_slice(&tail);
-    out.push(b'\n');
-    String::from_utf8(out).ok()
+    Some((String::from_utf8(out).ok()?, parts))
 }
 
 /// `thread_local! { static N: T = init; }` を、遅延初期化する `static mut` と `N.with(|v| ..)` を持つ unit struct にする
