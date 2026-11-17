@@ -236,16 +236,7 @@ pub type MacroArgs = crate::fxhash::FxMap<usize, Vec<Expr>>;
 /// 式の構文木のハッシュ → 型 (同じ形の式で型が違うものは None)。コード生成が複製した式の型を引くため
 pub type TextTypes = crate::fxhash::FxMap<u64, Option<Ty>>;
 
-/// 式の形のハッシュ (Debug の表示をハッシュする)
-pub fn expr_hash(e: &Expr) -> u64 {
-    // (FNV-1a: crustc でもコンパイルできるよう trait を使わずに書く)
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in format!("{e:?}").as_bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    h
-}
+pub use crate::ast_closure::{expr_hash, expr_hash_memo};
 
 #[allow(clippy::too_many_arguments)]
 pub fn infer_ctx(
@@ -335,11 +326,12 @@ pub fn infer_ctx_margs(
         }
     }
     let recs = dedup;
+    let mut memo = crate::fxhash::FxMap::default();
     for (e, v) in recs {
         let Some(t) = s.resolve(v) else { continue };
         let t = Some(t);
         // SAFETY: 記録した式は本体か keep の中にあり、まだ生きている
-        let h = expr_hash(unsafe { &*e });
+        let h = expr_hash_memo(unsafe { &*e }, &mut memo);
         match texts.get(&h) {
             Some(&old) if old != t => {
                 texts.insert(h, None);
@@ -1662,7 +1654,7 @@ impl Inf<'_> {
                 self.clo_ctx = Some((r, m));
             }
         }
-        let k = self.clo_keys.as_ref().and_then(|ks| ks.get(&format!("@{}", c as *const Expr as usize)).or_else(|| ks.get(&format!("{c:?}"))).copied());
+        let k = self.clo_keys.as_ref().and_then(|ks| ks.get(&format!("@{}", c as *const Expr as usize)).or_else(|| ks.get(&ast_closure::closure_key(c))).copied());
         if let (Some((root, _)), Some(k)) = (&self.clo_ctx, k) {
             if let Some(&fid) = self.prog.closure_by.get(&(*root, k)) {
                 if let Some(cd) = self.prog.closures.get(&fid) {

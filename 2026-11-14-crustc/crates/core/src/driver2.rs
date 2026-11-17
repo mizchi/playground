@@ -103,6 +103,10 @@ pub struct Analysis {
     pub prelude_line0: usize,
     /// 読んだ関数の本体 (関数 id → 構文木)
     pub asts: Mutex<FxMap<u32, ItemFn>>,
+    /// 囲む関数 (アイテム番号) ごとのクロージャの式 (クロージャの本体を引くたびに囲む関数を読み直さない)
+    pub encl: Mutex<FxMap<u32, Vec<Expr>>>,
+    /// 関数ごとのシグネチャのハッシュ (0 はまだ: キーを作るたびに参照先のシグネチャをたどり直さない)
+    pub sig_keys: Mutex<Vec<Key>>,
     /// 依存するクレートのテキストの範囲と、そこから見えるクレート (CrateCtx::dep_ranges)
     pub dep_ranges: Vec<(u32, u32, Vec<usize>, u32)>,
 }
@@ -122,6 +126,23 @@ pub const PRELUDE_LINE: u32 = 49152;
 
 impl Analysis {
     /// アイテム ii が依存するクレートのものなら、その dep_ranges の番号
+    /// シグネチャのハッシュ (覚えておく)
+    pub fn sig_key(&self, id: u32) -> Key {
+        let mut ks = self.sig_keys.lock().unwrap();
+        if ks.is_empty() {
+            ks.resize(self.prog.names.len(), 0);
+        }
+        let k = ks[id as usize];
+        if k != 0 {
+            return k;
+        }
+        let mut h = KeyHasher::new();
+        self.prog.hash_sig(id, &mut h);
+        let k = h.finish() | 1;
+        ks[id as usize] = k;
+        k
+    }
+
     pub fn crate_of_item(&self, ii: usize) -> Option<usize> {
         if ii >= self.prog.prelude_from as usize || !self.ext_items.get(ii).copied().unwrap_or(false) {
             return None;
@@ -599,7 +620,7 @@ impl Session2 {
             crefs.push(c);
         }
         tm.lap("refs", String::new());
-        let mut a = Analysis { src, items, prog, refs, srefs, crefs, n_parsed, ext_items, inl: acg::Inline::default(), prelude_line0, dep_ranges: self.ctx.dep_ranges.clone(), asts: Mutex::new(FxMap::default()) };
+        let mut a = Analysis { src, items, prog, refs, srefs, crefs, n_parsed, ext_items, inl: acg::Inline::default(), prelude_line0, dep_ranges: self.ctx.dep_ranges.clone(), asts: Mutex::new(FxMap::default()), encl: Mutex::new(FxMap::default()), sig_keys: Mutex::new(Vec::new()) };
         let cl = self.opts.backend;
         if self.opts.opt && std::env::var_os("CRUSTC_NO_INLINE").is_none() {
             a.inl = inline_bodies(&a);
@@ -715,15 +736,18 @@ pub fn synth_closure(c: &Expr) -> ItemFn {
 fn fn_ast(a: &Analysis, body: u32) -> R<ItemFn> {
     let ii = a.prog.item_of[body as usize].ok_or("internal: no item")?;
     let it = &a.items[ii as usize];
-    let f = parse_fn(&a.src, it)?.ok_or_else(|| format!("`{}` has no body", a.prog.names[body as usize]))?;
-    match a.prog.closures.get(&body) {
-        Some(cd) => {
-            let cs = crate::ast_closure::closures_of(&f.block);
-            let c = cs.get(cd.k as usize).ok_or("internal: closure not found")?;
-            Ok(synth_closure(c))
+    if let Some(cd) = a.prog.closures.get(&body) {
+        let mut encl = a.encl.lock().unwrap();
+        if !encl.contains_key(&ii) {
+            let f = parse_fn(&a.src, it)?.ok_or_else(|| format!("`{}` has no body", a.prog.names[body as usize]))?;
+            encl.insert(ii, crate::ast_closure::closures_of(&f.block));
         }
-        None => Ok(f),
+        let cs = encl.get(&ii).unwrap();
+        let c = cs.get(cd.k as usize).ok_or("internal: closure not found")?;
+        return Ok(synth_closure(c));
     }
+    let f = parse_fn(&a.src, it)?.ok_or_else(|| format!("`{}` has no body", a.prog.names[body as usize]))?;
+    Ok(f)
 }
 
 /// 展開してよい関数: prelude の (クロージャでも特別な本体でもない) 小さい関数
@@ -850,10 +874,10 @@ impl Session2 {
             h.add(&(self.opts.opt as u8));
             h.add(&(self.opts.backend.is_some() as u8));
             h.add(&a.items[ii].hash);
-            a.prog.hash_sig(id as u32, &mut h);
+            h.add(&a.sig_key(id as u32));
             for &r in &a.refs[id] {
                 if in_u(a.prog.item_of[r as usize]) {
-                    a.prog.hash_sig(r, &mut h);
+                    h.add(&a.sig_key(r));
                 }
             }
             for &st in &a.srefs[id] {
@@ -887,7 +911,7 @@ impl Session2 {
             h.add(&(self.opts.opt as u8));
             h.add(&(self.opts.backend.is_some() as u8));
             h.add(&a.items[ii].hash);
-            a.prog.hash_sig(id as u32, &mut h);
+            h.add(&a.sig_key(id as u32));
             match a.prog.panic_handler {
                 Some(p) => h.add(&a.prog.names[p as usize]),
                 None => h.add(&0u8),
@@ -903,12 +927,12 @@ impl Session2 {
         if a.prog.closures.contains_key(&(id as u32)) {
             h.add(&a.prog.names[id]);
         }
-        a.prog.hash_sig(id as u32, &mut h);
+        h.add(&a.sig_key(id as u32));
         for &r in &a.refs[id] {
             if closed && a.prog.item_of[r as usize].is_some_and(|ri| (ri as usize) < pf) {
                 continue;
             }
-            a.prog.hash_sig(r, &mut h);
+            h.add(&a.sig_key(r));
             // (展開しうるユーザの関数は、本体と行も効く)
             if let Some(&lb) = a.inl.user_lines.get(&r) {
                 if let Some(ri) = a.prog.item_of[r as usize] {

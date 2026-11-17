@@ -11,7 +11,7 @@ a = cache.index("pub type Key = u128;")
 b = len(cache)
 hasher = cache[a:b]
 parts = [("types", "crates/core/src/types.rs"), ("parse", "crates/core/src/parse.rs"), ("ast_types", "crates/core/src/ast_types.rs"),
-         ("ast_closure", "crates/core/src/ast_closure.rs"), ("ast_summary", "crates/core/src/ast_summary.rs"), ("lexer", "crates/core/src/lexer.rs")]
+         ("ast_closure", "crates/core/src/ast_closure.rs"), ("ast_summary", "crates/core/src/ast_summary.rs"), ("lexer", "crates/core/src/lexer.rs"), ("fxhash", "crates/core/src/fxhash.rs")]
 out = ["// 自動生成: tests/selfhost/build_ast_summary.py (crustc の src/*.rs をそのまま含む)",
        "mod cache {\nuse std::hash::{Hash, Hasher};\n" + hasher + "}\n"]
 for name, path in parts:

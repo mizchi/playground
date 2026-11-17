@@ -3,7 +3,7 @@
 //! キャプチャを値として使うか。tests/ast_closure.rs が syn 版と同じ結果になることを確かめる。
 //! 外部クレートに依存しないので crustc 自身でもコンパイルできる。
 
-use crate::parse::{Block, Expr, Pat, Pos, Stmt, TokKind, parse_expr, parse_expr_at, pos_at, tokenize};
+use crate::parse::{Block, Expr, Pat, Path, Pos, Stmt, TokKind, Ty, parse_expr, parse_expr_at, pos_at, tokenize};
 
 /// マクロの引数 (`( a , b )` のテキスト) を `,` 区切りの式の列として読む。読めなければ None
 pub fn macro_args(g: &str) -> Option<Vec<Expr>> {
@@ -247,6 +247,11 @@ fn collect_closures(e: &Expr, out: &mut Vec<Expr>) {
     each_child(e, &mut |c| collect_closures(c, out));
 }
 
+/// クロージャを式の形で引くときのキー (式の形のハッシュ)
+pub fn closure_key(e: &Expr) -> String {
+    format!("#{:x}", expr_hash(e))
+}
+
 /// closures_of と同じ順の、クロージャの場所: 本体に書かれたものはアドレス (Some)、マクロの引数の中のもの
 /// (読み直すのでアドレスが決まらない) は None と式の Debug の文字列
 pub fn closure_slots(b: &Block) -> Vec<(Option<usize>, String)> {
@@ -257,7 +262,7 @@ pub fn closure_slots(b: &Block) -> Vec<(Option<usize>, String)> {
 
 fn collect_slots(e: &Expr, out: &mut Vec<(Option<usize>, String)>) {
     if let Expr::Closure(..) = e {
-        out.push((Some(e as *const Expr as usize), format!("{e:?}")));
+        out.push((Some(e as *const Expr as usize), closure_key(e)));
     }
     if let Expr::Macro(_, g, sp) = e {
         let mut v = Vec::new();
@@ -265,7 +270,7 @@ fn collect_slots(e: &Expr, out: &mut Vec<(Option<usize>, String)>) {
             collect_closures(&x, &mut v);
         }
         for c in v {
-            out.push((None, format!("{c:?}")));
+            out.push((None, closure_key(&c)));
         }
         return;
     }
@@ -577,4 +582,335 @@ fn assigns_in(e: &Expr, caps: &[String]) -> bool {
 pub fn assigns_capture(c: &Expr, caps: &[String]) -> bool {
     let Expr::Closure(_, _, _, body) = c else { return false };
     assigns_in(body, caps)
+}
+
+/// 式の形のハッシュ (式の木の形と位置。Debug の表示が同じなら同じになる)
+pub fn expr_hash(e: &Expr) -> u64 {
+    let mut h = EHash { h: 0xcbf2_9ce4_8422_2325, memo: false };
+    let mut m = crate::fxhash::FxMap::default();
+    h.expr_in(e, &mut m);
+    h.h
+}
+
+/// 部分式のハッシュをアドレスで覚えながら引く (式が生きている間だけ使う)
+pub fn expr_hash_memo(e: &Expr, memo: &mut crate::fxhash::FxMap<usize, u64>) -> u64 {
+    let mut h = EHash { h: 0xcbf2_9ce4_8422_2325, memo: true };
+    h.expr_in(e, memo);
+    h.h
+}
+
+/// 木をたどって混ぜるハッシュ (部分式は自分のハッシュの値で混ぜる。式でない葉は Debug の文字列で)
+/// (FNV 風: crustc でもコンパイルできるよう trait を使わずに書く)
+struct EHash {
+    h: u64,
+    /// 部分式のハッシュをアドレスで覚えるか
+    memo: bool,
+}
+
+impl EHash {
+    fn n(&mut self, x: u64) {
+        self.h = (self.h ^ x).wrapping_mul(0x0100_0000_01b3);
+        self.h ^= self.h >> 29;
+    }
+    fn s(&mut self, s: &str) {
+        for &b in s.as_bytes() {
+            self.h = (self.h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+        self.n(0xfe);
+    }
+    fn pos(&mut self, p: &crate::parse::Pos) {
+        self.n(((p.line as u64) << 32) | p.col as u64);
+    }
+    fn span(&mut self, sp: &crate::parse::Span) {
+        self.pos(&sp.start);
+        self.pos(&sp.at);
+    }
+    fn ty(&mut self, t: &Ty) {
+        let d = format!("{t:?}");
+        self.s(&d);
+    }
+    fn pat(&mut self, p: &Pat) {
+        let d = format!("{p:?}");
+        self.s(&d);
+    }
+    fn path(&mut self, p: &Path) {
+        self.n(p.global as u64);
+        self.pos(&p.pos);
+        self.n(p.segs.len() as u64);
+        for sg in &p.segs {
+            self.s(&sg.name);
+            if !sg.args.is_empty() || sg.fn_args.is_some() {
+                let d = format!("{:?}{:?}", sg.args, sg.fn_args);
+                self.s(&d);
+            }
+        }
+    }
+    fn opt_s(&mut self, s: &Option<String>) {
+        match s {
+            Some(s) => self.s(s),
+            None => self.n(0xfd),
+        }
+    }
+    fn sub(&mut self, e: &Expr, memo: &mut crate::fxhash::FxMap<usize, u64>) {
+        let k = e as *const Expr as usize;
+        if self.memo {
+            if let Some(&v) = memo.get(&k) {
+                self.n(v);
+                return;
+            }
+        }
+        let mut c = EHash { h: 0xcbf2_9ce4_8422_2325, memo: self.memo };
+        c.expr_in(e, memo);
+        if self.memo {
+            memo.insert(k, c.h);
+        }
+        self.n(c.h);
+    }
+    fn opt_e(&mut self, e: &Option<Box<Expr>>, memo: &mut crate::fxhash::FxMap<usize, u64>) {
+        match e {
+            Some(e) => self.sub(e, memo),
+            None => self.n(0xfd),
+        }
+    }
+    fn block(&mut self, b: &Block, memo: &mut crate::fxhash::FxMap<usize, u64>) {
+        self.n(0xb0 + b.stmts.len() as u64);
+        for st in &b.stmts {
+            match st {
+                Stmt::Let(p, t, e, els) => {
+                    self.n(1);
+                    self.pat(p);
+                    match t {
+                        Some(t) => self.ty(t),
+                        None => self.n(0xfd),
+                    }
+                    match e {
+                        Some(e) => self.sub(e, memo),
+                        None => self.n(0xfd),
+                    }
+                    match els {
+                        Some(b) => self.block(b, memo),
+                        None => self.n(0xfd),
+                    }
+                }
+                Stmt::Expr(e, semi) => {
+                    self.n(2 + *semi as u64);
+                    self.sub(e, memo);
+                }
+                Stmt::Item(it) => {
+                    let d = format!("{it:?}");
+                    self.s(&d);
+                }
+            }
+        }
+    }
+    fn expr_in(&mut self, e: &Expr, memo: &mut crate::fxhash::FxMap<usize, u64>) {
+        match e {
+            Expr::Lit(l, p) => {
+                self.n(1);
+                self.s(l);
+                self.pos(p);
+            }
+            Expr::Path(q, p) => {
+                self.n(2);
+                match q {
+                    Some(t) => self.ty(t),
+                    None => self.n(0xfd),
+                }
+                self.path(p);
+            }
+            Expr::Unary(o, x, sp) => {
+                self.n(3);
+                self.s(o);
+                self.sub(x, memo);
+                self.span(sp);
+            }
+            Expr::Binary(o, l, r, sp) => {
+                self.n(4);
+                self.s(o);
+                self.sub(l, memo);
+                self.sub(r, memo);
+                self.span(sp);
+            }
+            Expr::Assign(l, r) => {
+                self.n(5);
+                self.sub(l, memo);
+                self.sub(r, memo);
+            }
+            Expr::AssignOp(o, l, r, sp) => {
+                self.n(6);
+                self.s(o);
+                self.sub(l, memo);
+                self.sub(r, memo);
+                self.span(sp);
+            }
+            Expr::Call(f, xs) => {
+                self.n(7);
+                self.sub(f, memo);
+                self.n(xs.len() as u64);
+                for x in xs {
+                    self.sub(x, memo);
+                }
+            }
+            Expr::MethodCall(r, m, ga, xs, sp) => {
+                self.n(8);
+                self.sub(r, memo);
+                self.s(m);
+                if !ga.is_empty() {
+                    let d = format!("{ga:?}");
+                    self.s(&d);
+                }
+                self.n(xs.len() as u64);
+                for x in xs {
+                    self.sub(x, memo);
+                }
+                self.span(sp);
+            }
+            Expr::Field(x, f, sp) => {
+                self.n(9);
+                self.sub(x, memo);
+                self.s(f);
+                self.span(sp);
+            }
+            Expr::Index(x, i, sp) => {
+                self.n(10);
+                self.sub(x, memo);
+                self.sub(i, memo);
+                self.span(sp);
+            }
+            Expr::Range(a, b, inc) => {
+                self.n(11 + ((*inc as u64) << 8));
+                self.opt_e(a, memo);
+                self.opt_e(b, memo);
+            }
+            Expr::Ref(m, x) => {
+                self.n(12 + ((*m as u64) << 8));
+                self.sub(x, memo);
+            }
+            Expr::RawRef(m, x) => {
+                self.n(13 + ((*m as u64) << 8));
+                self.sub(x, memo);
+            }
+            Expr::Cast(x, t) => {
+                self.n(14);
+                self.sub(x, memo);
+                self.ty(t);
+            }
+            Expr::Block(l, u, b) => {
+                self.n(15 + ((*u as u64) << 8));
+                self.opt_s(l);
+                self.block(b, memo);
+            }
+            Expr::Const(b) => {
+                self.n(16);
+                self.block(b, memo);
+            }
+            Expr::If(c, t, f) => {
+                self.n(17);
+                self.sub(c, memo);
+                self.block(t, memo);
+                self.opt_e(f, memo);
+            }
+            Expr::Let(p, x) => {
+                self.n(18);
+                self.pat(p);
+                self.sub(x, memo);
+            }
+            Expr::Match(x, arms) => {
+                self.n(19);
+                self.sub(x, memo);
+                self.n(arms.len() as u64);
+                for a in arms {
+                    self.pat(&a.pat);
+                    match &a.guard {
+                        Some(g) => self.sub(g, memo),
+                        None => self.n(0xfd),
+                    }
+                    self.sub(&a.body, memo);
+                }
+            }
+            Expr::While(l, c, b) => {
+                self.n(20);
+                self.opt_s(l);
+                self.sub(c, memo);
+                self.block(b, memo);
+            }
+            Expr::Loop(l, b) => {
+                self.n(21);
+                self.opt_s(l);
+                self.block(b, memo);
+            }
+            Expr::For(l, p, x, b) => {
+                self.n(22);
+                self.opt_s(l);
+                self.pat(p);
+                self.sub(x, memo);
+                self.block(b, memo);
+            }
+            Expr::Break(l, x) => {
+                self.n(23);
+                self.opt_s(l);
+                self.opt_e(x, memo);
+            }
+            Expr::Continue(l) => {
+                self.n(24);
+                self.opt_s(l);
+            }
+            Expr::Return(x) => {
+                self.n(25);
+                self.opt_e(x, memo);
+            }
+            Expr::Closure(mv, ps, rt, body) => {
+                self.n(26 + ((*mv as u64) << 8));
+                self.n(ps.len() as u64);
+                for (p, t) in ps {
+                    self.pat(p);
+                    match t {
+                        Some(t) => self.ty(t),
+                        None => self.n(0xfd),
+                    }
+                }
+                match rt {
+                    Some(t) => self.ty(t),
+                    None => self.n(0xfd),
+                }
+                self.sub(body, memo);
+            }
+            Expr::Tuple(xs) | Expr::Array(xs) => {
+                self.n(if matches!(e, Expr::Tuple(..)) { 27 } else { 28 });
+                self.n(xs.len() as u64);
+                for x in xs {
+                    self.sub(x, memo);
+                }
+            }
+            Expr::Repeat(x, n) => {
+                self.n(29);
+                self.sub(x, memo);
+                self.sub(n, memo);
+            }
+            Expr::Struct(p, fs, rest) => {
+                self.n(30);
+                self.path(p);
+                self.n(fs.len() as u64);
+                for (f, x) in fs {
+                    self.s(f);
+                    self.sub(x, memo);
+                }
+                self.opt_e(rest, memo);
+            }
+            Expr::Macro(p, g, sp) => {
+                self.n(31);
+                self.path(p);
+                self.s(g);
+                self.span(sp);
+            }
+            Expr::Try(x) => {
+                self.n(32);
+                self.sub(x, memo);
+            }
+            Expr::Paren(x) => {
+                self.n(33);
+                self.sub(x, memo);
+            }
+        }
+    }
 }

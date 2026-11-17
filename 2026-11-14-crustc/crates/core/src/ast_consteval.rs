@@ -62,11 +62,19 @@ pub fn str_lit(t: &str) -> Option<(bool, Vec<u8>)> {
         return Some((byte, body.as_bytes().to_vec()));
     }
     let body = rest.strip_prefix('"')?.strip_suffix('"')?;
-    let mut out = Vec::new();
+    // (エスケープのない文字列はそのまま: 大きな文字列で 1 文字ずつ文字列を作らない)
+    if !body.as_bytes().contains(&b'\\') {
+        return Some((byte, body.as_bytes().to_vec()));
+    }
+    let mut out = Vec::with_capacity(body.len());
     let mut cs = body.chars().peekable();
     while let Some(c) = cs.next() {
         if c != '\\' {
-            out.extend_from_slice(c.to_string().as_bytes());
+            if (c as u32) < 0x80 {
+                out.push(c as u8);
+            } else {
+                out.extend_from_slice(c.to_string().as_bytes());
+            }
             continue;
         }
         match cs.next()? {

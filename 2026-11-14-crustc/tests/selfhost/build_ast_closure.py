@@ -4,12 +4,16 @@ main は引数のファイルごとに、関数の本体のクロージャの自
 
 parse = open("crates/core/src/parse.rs").read()
 clo = open("crates/core/src/ast_closure.rs").read()
+fx = open("crates/core/src/fxhash.rs").read()
 print("""// 自動生成: tests/selfhost/build_ast_closure.py (crustc の crates/core/src/parse.rs と crates/core/src/ast_closure.rs をそのまま含む)
 mod parse {
 """ + parse + """}
 
 mod ast_closure {
 """ + clo + """}
+
+mod fxhash {
+""" + fx + """}
 
 use parse::{Block, Item, ItemKind, parse_file};
 
