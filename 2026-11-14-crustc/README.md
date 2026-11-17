@@ -179,16 +179,16 @@ bench/regress.sh
 
 | ベンチ（`benches/compile.rs`、N=1000） | 何を見るか | 現在値 |
 |---|---|---:|
-| `lsp/did_change_1fn` | LSP 応答性：1 関数編集の didChange から publishDiagnostics まで | 10.0 ms |
-| `lsp/did_change_noop` | 内容が同じ didChange（保存など） | 0.28 ms |
-| `cold/lsp_did_open` | 初めて開いたとき（全関数を検査） | 166 ms |
+| `lsp/did_change_1fn` | LSP 応答性：1 関数編集の didChange から publishDiagnostics まで | 8.0 ms |
+| `lsp/did_change_noop` | 内容が同じ didChange（保存など） | 0.26 ms |
+| `cold/lsp_did_open` | 初めて開いたとき（全関数を検査） | 115 ms |
 | `build/noop` | 無変更ビルド（リンク省略） | 12.7 ms |
 | `build/edit_1fn` | 1 関数編集ビルド（リンク込み、wild） | 20.7 ms |
 | `cold/build` | キャッシュなしのビルド (Cranelift) | 188 ms |
 | `front/lex` | 字句解析だけ（no-op の下限） | 2.3 ms |
 
-(2026-11-16、driver2 に移した後の値。最初のドライバの check は型検査だけで 1 関数編集 3.9 ms / didOpen 41 ms だった。
-driver2 の check はコード生成までするので遅い: 型検査だけで止める経路は次の課題)
+(2026-11-17、check を型検査で止めた後の値。driver2 に移した直後は 10.0 ms / 0.28 ms / 166 ms だった。
+最初のドライバの check は型検査だけで 1 関数編集 3.9 ms / didOpen 41 ms だった)
 
 （値はマシンの状態で変わる。比べるときは同じ時間帯に、ベースラインのコミットと並べて測る。`build/edit_1fn` はリンク（この環境では ld.lld）が大半を占める）
 
@@ -1608,6 +1608,30 @@ Program を作り直している (クレートごとに選ぶ prelude が違う�
 - 調べるための環境変数: `CRUSTC_CLIF_STATS=1` (命令の種類ごとの数)、`CRUSTC_CLIF_DUMP=1` (IR)、`CRUSTC_CLIF_TIME=1`
   (関数ごとの compile の時間)。それぞれの変更は `CRUSTC_NO_FRESH` / `CRUSTC_NO_RET_DST` / `CRUSTC_CLIF_NO_REMAT` /
   `CRUSTC_CLIF_LATE_SEAL` / `CRUSTC_CLIF_NO_FOLD_BR` で切れる。
+
+### check を型検査で止めて LSP を速くする (2026-11-17)
+
+- check (`crustc check` と LSP) は、acg のコード生成 (型の検査はここで出る) までにして、機械語 (Cranelift / minclif) を作らない
+  (`Inline::check_only`)。検査済みの印は「要求した総称関数のインスタンスへの再配置だけを持つ空の Blob」で、ビルドの Blob と別の
+  キー (`CHECK_SALT`) に覚える (ビルドの Blob があればそれも検査済みとして使う)。`CRUSTC_CHECK_CODEGEN=1` で機械語まで作る。
+- prelude の選択 (`select_with`) がソースの全体を 80 回あまり `contains` で調べていたのを、アイテムごとに調べてアイテムの
+  ハッシュで覚える形にした (`PreludeScan`)。それまで `SelectCache` を呼ぶたびに作り直していて、アイテムごとの記憶が効いて
+  いなかったので Session2 に持たせた (`FrontMemo`)。
+- `lexer::split` を差分にした (`split_inc`): 前回の入力と結果を覚え、前後の変わっていない部分のアイテムはそのまま (後ろは位置と
+  行をずらして) 使い、間だけを split し直す。区切りは空白の後から始まるトップレベルのアイテム (impl / trait は丸ごと)。間の
+  終わりがコメント・文字列の途中かもしれないときと、split が失敗するときは全体を split する。tests/split_inc.rs は実際のソースに
+  乱数の編集を続けて加え、毎回全体の split と比べる。`CRUSTC_SPLIT_VERIFY=1` で毎回比べる、`CRUSTC_NO_SPLIT_INC=1` で切る。
+
+| | 前 | 後 |
+|---|---:|---:|
+| `crustc check` compiler_main.rs (38886 行) | 3.6 s | 1.6 s |
+| LSP didOpen / didChange、生成した 1000 関数 (17019 行、stdio 越し) | 135 / 12.2 ms | 122 / 9.6 ms |
+| LSP didOpen / didChange、compiler_main.rs (1 関数の編集) | 2.09 s / 523 ms | 1.63 s / 476 ms |
+| split (生成した 1000 関数の didChange) | 2.0 ms | 0.6 ms |
+
+残り (compiler_main.rs の didChange 476 ms の内訳): ファイル全体を書き換える前処理 (マクロの展開 97 ms・`mod` の平らにする 63 ms・
+入れ子のアイテムの移動 47 ms・コンストラクタの書き換え 33 ms。それぞれがファイル全体を字句解析し直す)、Program と参照 47 ms、
+全関数 (9115) のキャッシュのキーと読み戻し 100 ms。どれも全体を作り直しているので、次はアイテムごとの差分にする。
 
 ### 途中で分かったこと
 

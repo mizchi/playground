@@ -471,7 +471,7 @@ fn owner(h: usize) -> Option<&'static str> {
                     .find_map(|w| match w {
                         "Vec" | "String" | "HashMap" | "Reverse" | "BinaryHeap" | "SplitStr" | "RSplitStr" | "FlattenRef" | "MatchIndices" | "CharIndices"
                         | "Bytes" | "ToCase" | "ParseIntError" | "IntErrorKind" | "Rev" | "StepBy" | "Peekable"
-                        | "SkipWhile" | "Scan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks" | "ChunksExact" | "Iter" | "IterMut" | "MaybeUninit"
+                        | "SkipWhile" | "PreludeScan" | "Inspect" | "FlatMap" | "Flatten" | "Cloned" | "Windows" | "Chunks" | "ChunksExact" | "Iter" | "IterMut" | "MaybeUninit"
                         | "HashSet" | "SetIntoIter" | "BTreeMap" | "BTreeSet" | "BtEntry" | "BtIter" | "BtIterMut"
                         | "BtIntoIter" | "VecDeque" | "DqIter" | "DqIntoIter" | "f64" | "f32" | "ParseFloatError" | "i128" | "u128" | "FromUtf8Error" | "Utf8Error" | "Rc" | "RefCell" | "Cell" | "OnceLock" | "Mutex" | "MutexGuard" | "RangeFrom" | "TryFromIntError" | "TryFromSliceError" | "Stdin" | "StdinLock" | "StdinLines" | "Stdout" | "StdoutLock"
                         | "BufWriter" | "IoError" | "__DynError" | "Args" | "DefaultHasher" | "VarError"
@@ -506,8 +506,74 @@ pub fn select(user_src: &str, user_items: &[SrcItem]) -> String {
 #[derive(Default)]
 pub struct SelectCache {
     map: crate::fxhash::FxMap<crate::key::Key, (Vec<&'static str>, bool)>,
+    /// (アイテムのハッシュ, 調べ方のハッシュ) → アイテムの本文に当たるか (PreludeScan)
+    scan: crate::fxhash::FxMap<(crate::key::Key, u64), bool>,
     /// 直前の選択でのユーザのアイテムの数 (これより後ろのアイテムは prelude)
     pub user_items: usize,
+}
+
+/// ユーザのソースの全体を調べる (`contains` など) 代わりに、アイテムごとに調べて結果をアイテムのハッシュで覚える。
+/// アイテムの外 (ファイルの先頭の `#![no_std]` など) はそのまま調べる。LSP で変わっていないアイテムを読み直さない
+struct PreludeScan<'a> {
+    src: &'a str,
+    spans: Vec<(usize, usize, crate::key::Key)>,
+    /// アイテムの外の本文 (改行でつなぐ)
+    gaps: String,
+    memo: &'a mut crate::fxhash::FxMap<(crate::key::Key, u64), bool>,
+}
+
+impl<'a> PreludeScan<'a> {
+    fn new(src: &'a str, user_items: &[SrcItem], memo: &'a mut crate::fxhash::FxMap<(crate::key::Key, u64), bool>) -> PreludeScan<'a> {
+        let mut spans: Vec<(usize, usize, crate::key::Key)> = user_items.iter().map(|it| (it.start, it.end, it.hash)).collect();
+        spans.sort_by_key(|x| x.0);
+        let mut gaps = String::new();
+        let mut at = 0;
+        for &(a, b, _) in &spans {
+            if a > at && !src[at..a].trim().is_empty() {
+                gaps.push_str(&src[at..a]);
+                gaps.push('\n');
+            }
+            at = at.max(b);
+        }
+        if at < src.len() {
+            gaps.push_str(&src[at..]);
+        }
+        // (古い記録が溜まりすぎたら捨てる)
+        if memo.len() > 1 << 20 {
+            memo.clear();
+        }
+        PreludeScan { src, spans, gaps, memo }
+    }
+
+    /// どこかのアイテム (かアイテムの外) で f が真か。key は f の名前 (結果を覚えるキー)
+    fn any(&mut self, key: &str, f: &dyn Fn(&str) -> bool) -> bool {
+        let mut kh: u64 = 0xcbf2_9ce4_8422_2325;
+        for &c in key.as_bytes() {
+            kh = (kh ^ c as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+        if !self.gaps.is_empty() && f(&self.gaps) {
+            return true;
+        }
+        for &(a, b, h) in &self.spans {
+            let hit = match self.memo.get(&(h, kh)) {
+                Some(&x) => x,
+                None => {
+                    let x = f(&self.src[a..b]);
+                    self.memo.insert((h, kh), x);
+                    x
+                }
+            };
+            if hit {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn has(&mut self, pat: &str) -> bool {
+        let key = format!("contains:{pat}");
+        self.any(&key, &|t: &str| t.contains(pat))
+    }
 }
 
 pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCache) -> String {
@@ -594,8 +660,9 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         chain |= c;
         cache.map.insert(it.hash, (names, c));
     }
+    let mut sc = PreludeScan::new(user_src, user_items, &mut cache.scan);
     // (std のプログラムは panic のハンドラを必ず使うので、何も使わなくても prelude を付ける)
-    if need.is_empty() && user_src.contains("no_std") {
+    if need.is_empty() && sc.has("no_std") {
         return String::new();
     }
     // (`a.zip(&v)` / `a.chain([x])`: 引数の Vec / 配列は codegen が `.iter()` / `.into_iter()` にする)
@@ -607,10 +674,10 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     if ["format", "print", "println", "eprint", "eprintln", "write", "writeln", "fmt", "Formatter"]
         .iter()
         .any(|n| need.contains(n))
-        || nonliteral_to_string(user_src)
-        || panic_with_args(user_src)
+        || sc.any("nonliteral_to_string", &nonliteral_to_string)
+        || sc.any("panic_with_args", &panic_with_args)
         // (assert_eq! / assert_ne! は失敗したとき left / right を {:?} で出す。no_std は panic_handler を呼ぶだけ)
-        || ((user_src.contains("assert_eq!(") || user_src.contains("assert_ne!(")) && !user_src.contains("no_std"))
+        || ((sc.has("assert_eq!(") || sc.has("assert_ne!(")) && !sc.has("no_std"))
     {
         need.extend(FMT_NAMES.iter().copied());
     }
@@ -626,16 +693,16 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     // (イテレータの列は必ず作るもの (iter / into_iter / chars / 範囲 / 自前の impl Iterator) から始まる。
     //  Option::map や自分の型の fold だけでは付けない)
     let producer = ["iter", "iter_mut", "into_iter"].iter().any(|n| need.contains(n));
-    if user_src.contains("ptr::eq") {
+    if sc.has("ptr::eq") {
         need.insert("__exr_ptr_eq");
     }
-    if user_src.contains("Cow") {
+    if sc.has("Cow") {
         need.extend(["Cow", "__CowStr", "Deref", "deref", "into_owned", "to_vec", "__exr_slice_to_vec", "Vec", "String"]);
     }
     // std::path / std::process::Command / env::var_os / split_paths / fs::remove_file
     if ["std::path", "PathBuf", "Path::", "&Path", "process::Command", "Command::new", "var_os", "split_paths", "remove_file", "OsStr"]
         .iter()
-        .any(|n| user_src.contains(n))
+        .any(|n| sc.has(n))
     {
         need.extend([
             "Path", "OsStr", "OsString", "PathBuf", "__PathExt", "__AsPathStr", "__AsBytes", "__exr_path_new", "__exr_path_mode",
@@ -686,8 +753,8 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     let hs = helper_suffixes();
     // (整数・Option・イテレータにも同じ名前のメソッドがあるものは、文字列を使っていそうなときだけ:
     //  String が現れるか、文字列リテラルが受け手 (`"ab".repeat(3)`))
-    let str_evidence = |n: &str| -> bool {
-        need.contains("String") || user_src.contains(&format!("\".{n}("))
+    let mut str_evidence = |n: &str| -> bool {
+        need.contains("String") || sc.has(&format!("\".{n}("))
     };
     let found: Vec<&'static str> = need
         .iter()
@@ -716,7 +783,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     }
     // `s.split("ab")` (char 以外の区切り)
     if need.contains("split")
-        && user_src.match_indices(".split(").any(|(i, m)| user_src.as_bytes().get(i + m.len()) != Some(&b'\''))
+        && sc.any("split_str", &|user_src: &str| user_src.match_indices(".split(").any(|(i, m)| user_src.as_bytes().get(i + m.len()) != Some(&b'\'')))
     {
         need.extend(["__exr_str_split_str", "Iterator"]);
     }
@@ -782,11 +849,11 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         }
     }
     // checked_* は Option を返す
-    if user_src.contains("checked_") || user_src.contains("overflowing_") {
+    if sc.has("checked_") || sc.has("overflowing_") {
         need.insert("Option");
     }
     // `vec![x; n]` で x が Copy でなさそうなら (リテラルでない) resize で並べる
-    if need.contains("vec") && vec_repeat_nonliteral(user_src) {
+    if need.contains("vec") && sc.any("vec_repeat_nonliteral", &vec_repeat_nonliteral) {
         need.extend(["resize", "new", "__exr_clone"]);
     }
     // String への collect は要素が &str / String なら push_str を使う
@@ -798,11 +865,11 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         need.insert("deref");
     }
     // `char::is_ascii_digit` を関数の値として
-    if user_src.contains("char::is_ascii") || user_src.contains("char::to_ascii") {
+    if sc.has("char::is_ascii") || sc.has("char::to_ascii") {
         for (_, name, _) in items() {
             if let Some(n) = name.as_deref() {
                 if let Some(m) = n.strip_prefix("__exr_charfn_") {
-                    if user_src.contains(&format!("char::{m}")) {
+                    if sc.has(&format!("char::{m}")) {
                         need.insert(n);
                     }
                 }
@@ -810,88 +877,88 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         }
     }
     // Box を通した再帰型の `==` は glue 関数で (その場で展開すると止まらない)
-    if (need.contains("Box") || user_src.contains("&'")) && user_src.contains("PartialEq") {
+    if (need.contains("Box") || sc.has("&'")) && sc.has("PartialEq") {
         need.insert("__exr_eq");
     }
-    if need.contains("BTreeMap") && user_src.contains(".range(") {
+    if need.contains("BTreeMap") && sc.has(".range(") {
         need.extend(["range", "__bt_span", "Range", "RangeInclusive"]);
-        if open_range(user_src) || user_src.contains("..))") {
+        if sc.any("open_range", &open_range) || sc.has("..))") {
             need.insert("RangeFrom");
         }
     }
     if need.contains("rotate_left") || need.contains("rotate_right") {
         need.extend(["rotate_left", "__rev_range", "swap"]);
     }
-    if user_src.contains(".or_default()") {
+    if sc.has(".or_default()") {
         need.extend(["or_default", "__exr_default"]);
     }
     // (Formatter のビルダーの entries はイテレータを受け取る)
-    if user_src.contains(".entries(") {
+    if sc.has(".entries(") {
         need.extend(["Iterator", "iter", "next", "into_iter"]);
     }
     // `HashMap::from([..])` は vec![..] にする
-    if user_src.contains("::from([") {
+    if sc.has("::from([") {
         need.extend(["from", "vec", "reverse", "pop", "insert"]);
     }
     if need.contains("extend") && need.contains("String") {
         need.extend(["push_str", "as_str", "push"]);
     }
-    if user_src.contains("].into_iter()") {
+    if sc.has("].into_iter()") {
         need.extend(["vec", "into_iter", "IntoIter", "Iterator", "next"]);
     }
     if need.contains("cycle") {
         need.extend(["Cycle", "__exr_clone"]);
     }
     // 算術の検査の panic (no_std で panic_handler を持つプログラムは使わない)
-    if !user_src.contains("no_std") {
+    if !sc.has("no_std") {
         need.extend(["__exr_err_str", "__exr_fflush", "__exr_write", "__exr_exit"]);
         need.extend(["__exr_rt_init", "__exr_on_trap", "__exr_sigaction", "__EXR_TRAP_TABLE", "__EXR_KIND_MSG", "__EXR_KIND_OFF", "__EXR_SA", "__exr_err_num", "__exr_panic_index", "__exr_tab_uv", "__EXR_CALLER", "__exr_tab_file", "__exr_panic_head_at", "__exr_trap_search"]);
 
     }
     // (`42u128` の接尾辞は識別子として現れない)
     for t in ["u128", "i128"] {
-        if user_src.contains(t) {
+        if sc.has(t) {
             need.insert(t);
         }
     }
-    if user_src.contains("fs::") {
+    if sc.has("fs::") {
         need.extend(["__exr_fs_read", "__exr_fs_read_to_string", "__exr_fs_write", "IoError", "Result", "String", "__AsBytes", "Debug", "Display"]);
     }
-    if user_src.contains("env::") {
+    if sc.has("env::") {
         need.extend(["__exr_env_args", "Args", "__exr_env_var", "VarError", "Iterator", "next", "String", "__AsBytes", "Result", "Option"]);
     }
-    if user_src.contains("process::exit") {
+    if sc.has("process::exit") {
         need.insert("process_exit");
     }
-    if user_src.contains("dbg!") {
+    if sc.has("dbg!") {
         need.extend(FMT_NAMES.iter().copied());
         need.extend(["eprintln", "Debug", "__exr_eprint"]);
     }
     // 標準入出力
-    if user_src.contains("stdin") {
+    if sc.has("stdin") {
         need.extend(["Stdin", "StdinLock", "StdinLines", "__core_stdin", "IoError", "Result", "Option", "next"]);
     }
-    if user_src.contains("stdout") || need.contains("BufWriter") {
+    if sc.has("stdout") || need.contains("BufWriter") {
         need.extend(["Stdout", "StdoutLock", "__core_stdout", "IoError", "Result", "write_str", "flush", "as_str"]);
     }
-    if user_src.contains("try_into") {
+    if sc.has("try_into") {
         need.extend(["TryFromIntError", "TryFromSliceError", "Result"]);
     }
-    if open_range(user_src) {
+    if sc.any("open_range", &open_range) {
         need.insert("RangeFrom");
     }
     // `{:e}` / `{:.3E}`: 指数表記
-    if fmt_uses_exp(user_src) {
+    if sc.any("fmt_uses_exp", &fmt_uses_exp) {
         need.extend(["__exr_fmt_exp", "__exr_fmt_exp_int", "__exr_udiv128", "__exr_fmt_float"]);
     }
     // `x.into()` は期待型の from を呼ぶ
-    if user_src.contains(".into()") {
+    if sc.has(".into()") {
         need.insert("from");
     }
-    if user_src.contains("ilog10") {
+    if sc.has("ilog10") {
         need.insert("__exr_ilog10");
     }
-    if user_src.contains("isqrt") {
+    if sc.has("isqrt") {
         need.insert("__exr_isqrt");
     }
     // 128 bit 整数: 除算と書式化
@@ -900,7 +967,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     }
     // 浮動小数点: 書式化・powi・libm の宣言 (f64 / f32 の名前か、`1.5` のようなリテラルがあるとき)
     // (`fn f64(..)` のような関数の名前は数えない: 型の位置 (`: f64` / `as f64` / `f64::` など) だけ)
-    let float_named = (need.contains("f64") || need.contains("f32")) && {
+    let float_named = (need.contains("f64") || need.contains("f32")) && sc.any("float_named", &|user_src: &str| {
         let b = user_src.as_bytes();
         ["f64", "f32"].iter().any(|w| {
             user_src.match_indices(w).any(|(i, _)| {
@@ -915,8 +982,8 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
                 !before_ident && !after_ident && after != b'(' && !after_fn
             })
         })
-    };
-    let float_lit = !float_named && {
+    });
+    let float_lit = !float_named && sc.any("float_lit", &|user_src: &str| {
         let b = user_src.as_bytes();
         // (文字列リテラルの中 (`"{:8.3}"` など) は数えない)
         let mut in_str = false;
@@ -932,16 +999,16 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
             }
         }
         found
-    };
+    });
     if float_named || float_lit {
         need.extend(["__exr_fmt_float", "__exr_powi", "__exr_powif", "__exr_ordering"]);
         // (`f64::max` などのパス: 名前の後ろが一致する wrapper)
         for (a, bb) in [("f64", "__exr_f64_"), ("f32", "__exr_f32_")] {
-            if user_src.contains(&format!("{a}::")) {
+            if sc.has(&format!("{a}::")) {
                 for (_, name, _) in items() {
                     if let Some(n) = name.as_deref() {
                         if let Some(m) = n.strip_prefix(bb) {
-                            if user_src.contains(&format!("{a}::{m}")) {
+                            if sc.has(&format!("{a}::{m}")) {
                                 need.insert(n);
                             }
                         }
@@ -970,16 +1037,16 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         need.insert("next");
     }
     // `Box<dyn Error>` と `impl Error for E {}`、`fn main() -> Result<..>`
-    if user_src.contains("dyn Error") || user_src.contains("error::Error") || user_src.contains("Error for") {
+    if sc.has("dyn Error") || sc.has("error::Error") || sc.has("Error for") {
         need.extend(["__DynError", "__exr_dyn_error", "__err_mark", "String", "format", "Display", "Debug"]);
         need.extend(FMT_NAMES.iter().copied());
     }
-    if user_src.contains("fn main() -> Result") {
+    if sc.has("fn main() -> Result") {
         need.extend(["__exr_main_err", "process_exit", "eprintln", "__exr_eprint", "Debug"]);
         need.extend(FMT_NAMES.iter().copied());
     }
     // (`impl IntoIterator for &Coll` の into_iter はイテレータを返す)
-    if user_src.contains("IntoIterator for") {
+    if sc.has("IntoIterator for") {
         need.extend(["__into_iter_mark", "Iterator", "next", "iter"]);
     }
     let iter_lib = need.contains("Iterator")
@@ -1027,7 +1094,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     // (trait の名前は prelude の名前の候補にないので、derive(Ord) はソースの文字列で見る)
     if ORD_NAMES.iter().any(|n| need.contains(n))
         || (iter_lib && (need.contains("max") || need.contains("min")))
-        || (user_src.contains("Ord)") || user_src.contains("Ord,") || user_src.contains("Ord for"))
+        || (sc.has("Ord)") || sc.has("Ord,") || sc.has("Ord for"))
             && (need.contains("max") || need.contains("min") || need.contains("clamp"))
     {
         need.insert("__exr_cmp");
@@ -1035,7 +1102,7 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         if cmp_impl || need.contains("Ordering") {
             need.extend(["__exr_ord_i32", "__exr_pord_i32"]);
         }
-        if user_src.contains("PartialOrd<") || user_src.contains("PartialOrd for") {
+        if sc.has("PartialOrd<") || sc.has("PartialOrd for") {
             need.extend(["__exr_ord_i32", "__exr_pord_code"]);
         }
         if need.contains("Reverse") {
@@ -1083,14 +1150,14 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     }
     let mut chosen = vec![false; all.len()];
     // (配列・スライスと Vec の型の違う比較: `v == [1, 2]`)
-    if !user_src.contains("no_std")
-        && user_src.contains('[')
-        && (user_src.contains("==") || user_src.contains("!=") || user_src.contains("assert_eq!") || user_src.contains("assert_ne!"))
+    if !sc.has("no_std")
+        && sc.has("[")
+        && (sc.has("==") || sc.has("!=") || sc.has("assert_eq!") || sc.has("assert_ne!"))
     {
         need.insert("__exr_seq_eq");
     }
     // (書式つきの panic は書式化を使うプログラムだけ: String と Vec を引き込むため)
-    if !user_src.contains("no_std") && need.contains("__exr_formatter") {
+    if !sc.has("no_std") && need.contains("__exr_formatter") {
         need.insert("__exr_panic_fmt");
     }
     loop {

@@ -329,6 +329,10 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
     let infos = std::mem::take(&mut cx.traps);
     let loc_used = cx.loc_used;
     let mut b = cx.b;
+    if inl.check_only {
+        let _ = (late, datas, vtables, infos, loc_used, &mut b);
+        return Ok((Blob { align: 16, code: vec![], relocs: vec![], datas: vec![], vtables: vec![], traps: vec![], line_base: None, code_ref: None }, requested));
+    }
     let (code, relocs, traps_raw) = match inl.cl {
         // (Cranelift のバックエンド: 記録した命令の列を Cranelift の IR にしてコンパイルする)
         Some(cl) => cl(&b.m, &late, prog.opt)?,

@@ -22,6 +22,8 @@ pub struct Inline {
     pub inferred: Mutex<crate::fxhash::FxMap<u32, Inferred>>,
     /// minclif の代わりに使うバックエンド (driver2 の Cranelift バックエンド: crate::clif_backend::compile)
     pub cl: Option<ClBackend>,
+    /// 検査だけ (check / LSP): 命令の列は作るが機械語にしない (空の Blob を返す)
+    pub check_only: bool,
 }
 
 /// 記録した命令の列から (機械語, 再配置, trap) を作るバックエンド (引数: 記録, 入口で 0 にするスロット, -O か)
