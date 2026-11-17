@@ -1,0 +1,577 @@
+== lib/alloc/src/string.rs
+Struct String [40..79] name 51..57 
+  Field vec [64..76] name 64..67 Vec<u8>
+Impl impl String [81..279] name 86..92 
+  Method new [99..151] name 112..115 fn new() -> String
+  Method push_str [156..220] name 163..171 fn push_str(&mut self, string: &str)
+  Method as_str [225..277] name 232..238 fn as_str(&self) -> &str
+Impl impl Deref for String [281..381] name 286..302 
+  TypeAlias Target [309..327] name 314..320 str
+  Method deref [332..379] name 335..340 fn deref(&self) -> &str
+Impl impl Clone for String [383..460] name 388..404 
+  Method clone [411..458] name 414..419 fn clone(&self) -> Self
+Trait ToString [462..519] name 472..480 
+  Method to_string [487..517] name 490..499 fn to_string(&self) -> String
+Impl impl ToString for T [521..623] name 547..561 
+  Method to_string [568..621] name 571..580 fn to_string(&self) -> String
+flat String in "" lsp=23
+flat vec in "String" lsp=8
+flat impl String in "" lsp=19
+flat new in "impl String" lsp=6
+flat push_str in "impl String" lsp=6
+flat as_str in "impl String" lsp=6
+flat impl Deref for String in "" lsp=19
+flat Target in "impl Deref for String" lsp=26
+flat deref in "impl Deref for String" lsp=6
+flat impl Clone for String in "" lsp=19
+flat clone in "impl Clone for String" lsp=6
+flat ToString in "" lsp=11
+flat to_string in "ToString" lsp=6
+flat impl ToString for T in "" lsp=19
+flat to_string in "impl ToString for T" lsp=6
+== lib/alloc/src/vec/mod.rs
+Struct Vec [38..95] name 49..52 
+  Field buf [62..76] name 62..65 RawVec<T>
+  Field len [82..92] name 82..85 usize
+Impl impl Vec<T> [97..420] name 105..111 
+  Method new [118..168] name 131..134 fn new() -> Self
+  Method push [173..229] name 180..184 fn push(&mut self, value: T)
+  Method pop [234..292] name 241..244 fn pop(&mut self) -> Option<T>
+  Method len [297..353] name 310..313 fn len(&self) -> usize
+  Method is_empty [358..418] name 371..379 fn is_empty(&self) -> bool
+Impl impl Deref for Vec<T> [422..525] name 430..446 
+  TypeAlias Target [453..471] name 458..464 [T]
+  Method deref [476..523] name 479..484 fn deref(&self) -> &[T]
+Impl impl Clone for Vec<T> [527..614] name 542..558 
+  Method clone [565..612] name 568..573 fn clone(&self) -> Self
+flat Vec in "" lsp=23
+flat buf in "Vec" lsp=8
+flat len in "Vec" lsp=8
+flat impl Vec<T> in "" lsp=19
+flat new in "impl Vec<T>" lsp=6
+flat push in "impl Vec<T>" lsp=6
+flat pop in "impl Vec<T>" lsp=6
+flat len in "impl Vec<T>" lsp=6
+flat is_empty in "impl Vec<T>" lsp=6
+flat impl Deref for Vec<T> in "" lsp=19
+flat Target in "impl Deref for Vec<T>" lsp=26
+flat deref in "impl Deref for Vec<T>" lsp=6
+flat impl Clone for Vec<T> in "" lsp=19
+flat clone in "impl Clone for Vec<T>" lsp=6
+== lib/core/src/fmt/macros.rs
+Macro Debug [58..117] name 68..73 macro
+Macro Clone [118..177] name 128..133 macro
+Macro Default [178..239] name 188..195 macro
+Macro PartialEq [240..303] name 250..259 macro
+flat Debug in "" lsp=12
+flat Clone in "" lsp=12
+flat Default in "" lsp=12
+flat PartialEq in "" lsp=12
+== lib/core/src/iter/adapters/enumerate.rs
+Struct Enumerate [0..58] name 11..20 
+  Field iter [30..37] name 30..34 I
+  Field count [43..55] name 43..48 usize
+Impl impl Iterator for Enumerate<I> [60..257] name 68..93 
+  TypeAlias Item [123..166] name 128..132 (usize, <I as Iterator>::Item)
+  Method next [171..255] name 174..178 fn next(&mut self) -> Option<(usize, <I as Iterator>::Item)>
+flat Enumerate in "" lsp=23
+flat iter in "Enumerate" lsp=8
+flat count in "Enumerate" lsp=8
+flat impl Iterator for Enumerate<I> in "" lsp=19
+flat Item in "impl Iterator for Enumerate<I>" lsp=26
+flat next in "impl Iterator for Enumerate<I>" lsp=6
+== lib/core/src/iter/traits.rs
+Trait Iterator [0..370] name 10..18 
+  TypeAlias Item [25..35] name 30..34 
+  Method next [40..81] name 43..47 fn next(&mut self) -> Option<Self::Item>
+  Method count [86..168] name 89..94 fn count(self) -> usize where Self: Sized,
+  Method enumerate [173..269] name 176..185 fn enumerate(self) -> Enumerate<Self> where Self: Sized,
+  Method last [274..368] name 277..281 fn last(self) -> Option<Self::Item> where Self: Sized,
+flat Iterator in "" lsp=11
+flat Item in "Iterator" lsp=26
+flat next in "Iterator" lsp=6
+flat count in "Iterator" lsp=6
+flat enumerate in "Iterator" lsp=6
+flat last in "Iterator" lsp=6
+== lib/core/src/ops/deref.rs
+Trait Deref [0..82] name 10..15 
+  TypeAlias Target [22..42] name 27..33 
+  Method deref [47..80] name 50..55 fn deref(&self) -> &Self::Target
+flat Deref in "" lsp=11
+flat Target in "Deref" lsp=26
+flat deref in "Deref" lsp=6
+== lib/core/src/option.rs
+Enum Option [45..140] name 54..60 
+  Variant None [88..92] name 88..92 
+  Variant Some [130..137] name 130..134 
+Impl impl Option<T> [173..607] name 181..190 
+  Method is_some [253..329] name 266..273 fn is_some(&self) -> bool
+  Method unwrap [334..382] name 341..347 fn unwrap(self) -> T
+  Method unwrap_or [387..450] name 394..403 fn unwrap_or(self, default: T) -> T
+  Method map [455..536] name 462..465 fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Option<U>
+  Method as_ref [541..605] name 554..560 fn as_ref(&self) -> Option<&T>
+flat Option in "" lsp=10
+flat None in "Option" lsp=22
+flat Some in "Option" lsp=22
+flat impl Option<T> in "" lsp=19
+flat is_some in "impl Option<T>" lsp=6
+flat unwrap in "impl Option<T>" lsp=6
+flat unwrap_or in "impl Option<T>" lsp=6
+flat map in "impl Option<T>" lsp=6
+flat as_ref in "impl Option<T>" lsp=6
+== lib/core/src/result.rs
+Enum Result [125..173] name 134..140 
+  Variant Ok [153..158] name 153..155 
+  Variant Err [164..170] name 164..167 
+Impl impl Result<T, E> [175..468] name 186..198 
+  Method unwrap [205..253] name 212..218 fn unwrap(self) -> T
+  Method ok [258..310] name 265..267 fn ok(self) -> Option<T>
+  Method map_err [315..404] name 322..329 fn map_err<F, O: FnOnce(E) -> F>(self, op: O) -> Result<T, F>
+  Method is_ok [409..466] name 422..427 fn is_ok(&self) -> bool
+flat Result in "" lsp=10
+flat Ok in "Result" lsp=22
+flat Err in "Result" lsp=22
+flat impl Result<T, E> in "" lsp=19
+flat unwrap in "impl Result<T, E>" lsp=6
+flat ok in "impl Result<T, E>" lsp=6
+flat map_err in "impl Result<T, E>" lsp=6
+flat is_ok in "impl Result<T, E>" lsp=6
+== lib/core/src/slice/iter.rs
+Struct Iter [0..68] name 11..15 
+  Field ptr [33..46] name 33..36 *const T
+  Field end [52..65] name 52..55 *const T
+Impl impl Iterator for Iter<'a, T> [70..197] name 82..106 
+  TypeAlias Item [113..131] name 118..122 &'a T
+  Method next [136..195] name 139..143 fn next(&mut self) -> Option<&'a T>
+flat Iter in "" lsp=23
+flat ptr in "Iter" lsp=8
+flat end in "Iter" lsp=8
+flat impl Iterator for Iter<'a, T> in "" lsp=19
+flat Item in "impl Iterator for Iter<'a, T>" lsp=26
+flat next in "impl Iterator for Iter<'a, T>" lsp=6
+== lib/core/src/slice/mod.rs
+Module iter [0..13] name 8..12 
+Impl impl [T] [35..315] name 43..46 
+  Method len [53..109] name 66..69 fn len(&self) -> usize
+  Method iter [114..171] name 121..125 fn iter(&self) -> Iter<'_, T>
+  Method first [176..239] name 189..194 fn first(&self) -> Option<&T>
+  Method get [244..313] name 251..254 fn get(&self, index: usize) -> Option<&T>
+flat iter in "" lsp=2
+flat impl [T] in "" lsp=19
+flat len in "impl [T]" lsp=6
+flat iter in "impl [T]" lsp=6
+flat first in "impl [T]" lsp=6
+flat get in "impl [T]" lsp=6
+== lib/core/src/str/mod.rs
+Impl impl str [0..201] name 5..8 
+  Method len [15..71] name 28..31 fn len(&self) -> usize
+  Method trim [76..126] name 83..87 fn trim(&self) -> &str
+  Method starts_with [131..199] name 138..149 fn starts_with(&self, pat: &str) -> bool
+flat impl str in "" lsp=19
+flat len in "impl str" lsp=6
+flat trim in "impl str" lsp=6
+flat starts_with in "impl str" lsp=6
+== lib/std/src/collections/hash/map.rs
+Struct HashMap [16..72] name 27..34 
+  Field base [47..69] name 47..51 RawTable<(K, V)>
+Impl impl HashMap<K, V> [74..360] name 85..98 
+  Method new [105..158] name 112..115 fn new() -> HashMap<K, V>
+  Method insert [163..236] name 170..176 fn insert(&mut self, k: K, v: V) -> Option<V>
+  Method get [241..303] name 248..251 fn get(&self, k: &K) -> Option<&V>
+  Method len [308..358] name 315..318 fn len(&self) -> usize
+flat HashMap in "" lsp=23
+flat base in "HashMap" lsp=8
+flat impl HashMap<K, V> in "" lsp=19
+flat new in "impl HashMap<K, V>" lsp=6
+flat insert in "impl HashMap<K, V>" lsp=6
+flat get in "impl HashMap<K, V>" lsp=6
+flat len in "impl HashMap<K, V>" lsp=6
+== lib/std/src/collections/mod.rs
+Module hash [35..44] name 39..43 
+flat hash in "" lsp=2
+== lib/std/src/sync/mod.rs
+Module nonpoison [56..74] name 64..73 
+Module poison [75..86] name 79..85 
+flat nonpoison in "" lsp=2
+flat poison in "" lsp=2
+== lib/std/src/sync/nonpoison/mutex.rs
+Struct Mutex [0..56] name 11..16 
+  Field data [34..53] name 34..38 UnsafeCell<T>
+Impl impl Mutex<T> [58..154] name 74..82 
+  Method lock [89..152] name 96..100 fn lock(&self) -> MutexGuard<'_, T>
+flat Mutex in "" lsp=23
+flat data in "Mutex" lsp=8
+flat impl Mutex<T> in "" lsp=19
+flat lock in "impl Mutex<T>" lsp=6
+== lib/std/src/sync/poison/mod.rs
+Module mutex [43..53] name 47..52 
+TypeAlias LockResult [55..106] name 64..74 <T> = Result<T, PoisonError<T>>
+Struct PoisonError [108..150] name 119..130 
+  Field data [140..147] name 140..144 T
+flat mutex in "" lsp=2
+flat LockResult in "" lsp=26
+flat PoisonError in "" lsp=23
+flat data in "PoisonError" lsp=8
+== lib/std/src/sync/poison/mutex.rs
+Struct Mutex [34..113] name 45..50 
+  Field inner [68..85] name 68..73 sys::Mutex
+  Field data [91..110] name 91..95 UnsafeCell<T>
+Struct MutexGuard [115..184] name 126..136 
+  Field lock [163..181] name 163..167 &'a Mutex<T>
+Impl impl Mutex<T> [186..269] name 194..202 
+  Method new [209..267] name 222..225 fn new(t: T) -> Mutex<T>
+Impl impl Mutex<T> [271..379] name 287..295 
+  Method lock [302..377] name 309..313 fn lock(&self) -> LockResult<MutexGuard<'_, T>>
+Impl impl Deref for MutexGuard<'_, T> [381..499] name 397..424 
+  TypeAlias Target [431..447] name 436..442 T
+  Method deref [452..497] name 455..460 fn deref(&self) -> &T
+flat Mutex in "" lsp=23
+flat inner in "Mutex" lsp=8
+flat data in "Mutex" lsp=8
+flat MutexGuard in "" lsp=23
+flat lock in "MutexGuard" lsp=8
+flat impl Mutex<T> in "" lsp=19
+flat new in "impl Mutex<T>" lsp=6
+flat impl Mutex<T> in "" lsp=19
+flat lock in "impl Mutex<T>" lsp=6
+flat impl Deref for MutexGuard<'_, T> in "" lsp=19
+flat Target in "impl Deref for MutexGuard<'_, T>" lsp=26
+flat deref in "impl Deref for MutexGuard<'_, T>" lsp=6
+== lib/std/src/sys/sync/mutex.rs
+Struct Mutex [0..36] name 11..16 
+  Field futex [23..33] name 23..28 u32
+Impl impl Mutex [38..134] name 43..48 
+  Method new [55..106] name 68..71 fn new() -> Mutex
+  Method lock [111..132] name 118..122 fn lock(&self)
+flat Mutex in "" lsp=23
+flat futex in "Mutex" lsp=8
+flat impl Mutex in "" lsp=19
+flat new in "impl Mutex" lsp=6
+flat lock in "impl Mutex" lsp=6
+== sym/broken.rs
+Struct Ok1 [71..100] name 82..85 
+  Field a [92..97] name 92..93 u8
+Function half [102..165] name 105..109 fn half(x: u8
+Function after_open [167..198] name 170..180 fn after_open() -> u8
+Impl impl Ok1 [200..254] name 205..208 
+  Method m [215..252] name 218..219 fn m(&self)
+Enum Done [256..274] name 261..265 
+  Variant A [268..269] name 268..269 
+  Variant B [271..272] name 271..272 
+Const C [275..305] name 281..282 u8
+flat Ok1 in "" lsp=23
+flat a in "Ok1" lsp=8
+flat half in "" lsp=12
+flat after_open in "" lsp=12
+flat impl Ok1 in "" lsp=19
+flat m in "impl Ok1" lsp=6
+flat Done in "" lsp=10
+flat A in "Done" lsp=22
+flat B in "Done" lsp=22
+flat C in "" lsp=14
+== sym/odd.rs
+Function cfn [52..157] name 117..120 fn cfn<const N: usize>() -> usize
+Function cufn [158..187] name 178..182 fn cufn()
+Function cabi [188..242] name 213..217 fn cabi(x: i32) -> i32
+Function cabi2 [243..267] name 257..262 fn cabi2()
+Function later [268..287] name 277..282 fn later()
+Function scoped [288..321] name 310..316 fn scoped()
+Function ext_a [340..362] name 343..348 fn ext_a(x: u8) -> u8
+Static EXT_B [367..385] name 374..379 u32
+Function ext_c [401..412] name 404..409 fn ext_c()
+Union U [479..522] name 489..490 
+  Field a [497..507] name 501..502 u32
+  Field b [513..519] name 513..514 f32
+Struct Tuple [524..565] name 546..551 
+Struct Unit [566..582] name 577..581 
+Struct Gen [583..809] name 594..597 
+  Field r [661..706] name 693..694 &'a [T; N]
+  Field f [712..733] name 712..713 fn(u8) -> (u8, u8)
+  Field m [739..761] name 739..740 Vec<Vec<(u8, u16)>>
+  Field c [767..806] name 767..768 Option<Box<dyn Fn(i32) -> i32 + 'a>>
+Enum E [811..922] name 820..821 
+  Variant A [828..854] name 849..850 
+  Variant B [860..877] name 860..861 
+  Variant C [883..912] name 883..884 
+    Field x [887..897] name 887..888 [u8; 4]
+    Field y [899..910] name 899..900 Vec<i32>
+  Variant D [918..919] name 918..919 
+Trait Tr [924..1091] name 934..936 
+  TypeAlias Out [972..981] name 977..980 
+  Const K [986..1005] name 992..993 usize
+  Method req [1010..1037] name 1013..1016 fn req(&self) -> Self::Out
+  Method prov [1042..1089] name 1045..1049 fn prov(&self) -> usize
+Impl impl Send for Unit [1093..1121] name 1105..1118 
+Impl impl Gen<'a, T, N> [1122..1293] name 1167..1180 
+  Method r [1201..1253] name 1208..1209 fn r(&self) -> &'a [T
+  Const C [1258..1274] name 1264..1265 u8
+  TypeAlias X [1279..1291] name 1284..1285 u8
+Impl impl Tr<T> for Unit [1294..1385] name 1302..1316 
+  TypeAlias Out [1342..1356] name 1347..1350 ()
+  Method req [1361..1383] name 1364..1367 fn req(&self) -> ()
+Impl impl !Sync for Tuple [1386..1409] name 1391..1406 
+Impl impl Clone for Unit [1410..1482] name 1415..1429 
+  Method clone [1436..1480] name 1439..1444 fn clone(&self) -> Self
+Static COUNTER [1501..1529] name 1512..1519 u64
+TypeAlias Alias [1530..1590] name 1539..1544 <K, V> = std::collections::HashMap<K, Vec<V>>
+TypeAlias Fnp [1591..1633] name 1596..1599 fn(&str) -> Result<(), String>
+TypeAlias Short [1634..1650] name 1639..1644 u8
+Macro mac [1652..1709] name 1665..1668 macro_rules!
+Macro paren_mac [1710..1743] name 1723..1732 macro_rules!
+Macro brack_mac [1744..1777] name 1757..1766 macro_rules!
+Macro m2 [1778..1810] name 1788..1790 macro
+Macro m3 [1811..1840] name 1821..1823 macro
+Module outer [1891..2017] name 1895..1900 
+  Module mid [1907..1999] name 1915..1918 
+    Function leaf [1929..1993] name 1936..1940 fn leaf<'a>(s: &'a str) -> &'a str
+  Function sib [2004..2015] name 2007..2010 fn sib()
+Module external [2018..2031] name 2022..2030 
+flat cfn in "" lsp=12
+flat cufn in "" lsp=12
+flat cabi in "" lsp=12
+flat cabi2 in "" lsp=12
+flat later in "" lsp=12
+flat scoped in "" lsp=12
+flat ext_a in "" lsp=12
+flat EXT_B in "" lsp=13
+flat ext_c in "" lsp=12
+flat U in "" lsp=23
+flat a in "U" lsp=8
+flat b in "U" lsp=8
+flat Tuple in "" lsp=23
+flat Unit in "" lsp=23
+flat Gen in "" lsp=23
+flat r in "Gen" lsp=8
+flat f in "Gen" lsp=8
+flat m in "Gen" lsp=8
+flat c in "Gen" lsp=8
+flat E in "" lsp=10
+flat A in "E" lsp=22
+flat B in "E" lsp=22
+flat C in "E" lsp=22
+flat x in "C" lsp=8
+flat y in "C" lsp=8
+flat D in "E" lsp=22
+flat Tr in "" lsp=11
+flat Out in "Tr" lsp=26
+flat K in "Tr" lsp=14
+flat req in "Tr" lsp=6
+flat prov in "Tr" lsp=6
+flat impl Send for Unit in "" lsp=19
+flat impl Gen<'a, T, N> in "" lsp=19
+flat r in "impl Gen<'a, T, N>" lsp=6
+flat C in "impl Gen<'a, T, N>" lsp=14
+flat X in "impl Gen<'a, T, N>" lsp=26
+flat impl Tr<T> for Unit in "" lsp=19
+flat Out in "impl Tr<T> for Unit" lsp=26
+flat req in "impl Tr<T> for Unit" lsp=6
+flat impl !Sync for Tuple in "" lsp=19
+flat impl Clone for Unit in "" lsp=19
+flat clone in "impl Clone for Unit" lsp=6
+flat COUNTER in "" lsp=13
+flat Alias in "" lsp=26
+flat Fnp in "" lsp=26
+flat Short in "" lsp=26
+flat mac in "" lsp=12
+flat paren_mac in "" lsp=12
+flat brack_mac in "" lsp=12
+flat m2 in "" lsp=12
+flat m3 in "" lsp=12
+flat outer in "" lsp=2
+flat mid in "outer" lsp=2
+flat leaf in "mid" lsp=12
+flat sib in "outer" lsp=12
+flat external in "" lsp=2
+== ws/src/lib.rs
+Module shapes [44..89] name 82..88 
+Module util [90..103] name 98..102 
+Module inner [105..384] name 109..114 
+  Function deep [121..159] name 128..132 fn deep() -> u32
+  Module more [164..382] name 172..176 
+    Struct Hidden [215..268] name 226..232 
+      Field v [247..257] name 251..252 i32
+    Impl impl Hidden [277..376] name 282..288 
+      Method get [303..366] name 310..313 fn get(&self) -> i32
+Struct Counter [578..710] name 633..640 
+  Field count [647..661] name 651..656 u64
+  Field name [667..683] name 671..675 String
+  Field items [689..707] name 693..698 Vec<Pt>
+TypeAlias Pair [712..738] name 721..725 <T> = (T, T)
+TypeAlias Res [739..774] name 748..751 <T> = Result<T, Error>
+TypeAlias Points [775..801] name 784..790 Vec<Pt>
+TypeAlias Table [802..841] name 811..816 <V> = HashMap<String, V>
+Enum Error [843..927] name 869..874 
+  Variant Empty [881..886] name 881..886 
+  Variant Bad [892..903] name 892..895 
+  Variant Code [909..924] name 909..913 
+    Field n [916..922] name 916..917 i32
+Const LIMIT [929..957] name 939..944 usize
+Static ORIGIN [958..1000] name 969..975 Pt
+Static HITS [1001..1026] name 1012..1016 u32
+Trait Describe [1028..1181] name 1038..1046 
+  Method describe [1053..1082] name 1056..1064 fn describe(&self) -> String
+  Method twice [1087..1179] name 1090..1095 fn twice(&self) -> String
+Impl impl Describe for Counter [1183..1279] name 1188..1208 
+  Method describe [1215..1277] name 1218..1226 fn describe(&self) -> String
+Impl impl Counter [1281..2176] name 1286..1293 
+  Method new [1300..1410] name 1307..1310 fn new(name: &str) -> Self
+  Method bump [1416..1497] name 1423..1427 fn bump(&mut self) -> &mut Self
+  Method first [1503..1572] name 1510..1515 fn first(&self) -> Option<&Pt>
+  Method total [1578..1916] name 1585..1590 fn total(&self) -> Res<i64>
+  Method points [1922..1987] name 1929..1935 fn points(&self) -> Points
+  Method checked [1993..2174] name 1996..2003 fn checked(&self) -> Res<u64>
+Function make_pair [2178..2234] name 2185..2194 fn make_pair(a: i64) -> Pair<i64>
+Function tally [2236..2511] name 2243..2248 fn tally(words: &[&str]) -> Table<usize>
+Function locked [2513..2666] name 2520..2526 fn locked(m: &Mutex<Counter>) -> u64
+Function shapes_demo [2668..3061] name 2675..2686 fn shapes_demo() -> f64
+Function closures [3063..3344] name 3070..3078 fn closures(xs: Vec<i64>) -> i64
+Function matching [3346..3506] name 3353..3361 fn matching(e: Error) -> i32
+Function shadow [3508..3774] name 3515..3521 fn shadow(x: i32) -> i32
+Function with_std [3776..3896] name 3807..3815 fn with_std() -> Counter
+Function with_std [3898..3985] name 3934..3942 fn with_std() -> Counter
+Function extra_only [3987..4070] name 4042..4052 fn extra_only() -> u8
+Function extra_or_test [4072..4147] name 4116..4129 fn extra_or_test() -> u8
+Function platform [4149..4210] name 4169..4177 fn platform() -> &'static str
+Function platform [4212..4279] name 4235..4243 fn platform() -> &'static str
+Function os_name [4281..4357] name 4316..4323 fn os_name() -> &'static str
+Function under_miri [4359..4394] name 4379..4389 fn under_miri()
+Macro square [4396..4461] name 4409..4415 macro_rules!
+Function use_macro [4463..4565] name 4470..4479 fn use_macro(n: i64) -> i64
+Function texts [4567..4683] name 4574..4579 fn texts() -> usize
+Module tests [4685..4902] name 4702..4707 
+  Function counter_works [4733..4900] name 4748..4761 fn counter_works()
+flat shapes in "" lsp=2
+flat util in "" lsp=2
+flat inner in "" lsp=2
+flat deep in "inner" lsp=12
+flat more in "inner" lsp=2
+flat Hidden in "more" lsp=23
+flat v in "Hidden" lsp=8
+flat impl Hidden in "more" lsp=19
+flat get in "impl Hidden" lsp=6
+flat Counter in "" lsp=23
+flat count in "Counter" lsp=8
+flat name in "Counter" lsp=8
+flat items in "Counter" lsp=8
+flat Pair in "" lsp=26
+flat Res in "" lsp=26
+flat Points in "" lsp=26
+flat Table in "" lsp=26
+flat Error in "" lsp=10
+flat Empty in "Error" lsp=22
+flat Bad in "Error" lsp=22
+flat Code in "Error" lsp=22
+flat n in "Code" lsp=8
+flat LIMIT in "" lsp=14
+flat ORIGIN in "" lsp=13
+flat HITS in "" lsp=13
+flat Describe in "" lsp=11
+flat describe in "Describe" lsp=6
+flat twice in "Describe" lsp=6
+flat impl Describe for Counter in "" lsp=19
+flat describe in "impl Describe for Counter" lsp=6
+flat impl Counter in "" lsp=19
+flat new in "impl Counter" lsp=6
+flat bump in "impl Counter" lsp=6
+flat first in "impl Counter" lsp=6
+flat total in "impl Counter" lsp=6
+flat points in "impl Counter" lsp=6
+flat checked in "impl Counter" lsp=6
+flat make_pair in "" lsp=12
+flat tally in "" lsp=12
+flat locked in "" lsp=12
+flat shapes_demo in "" lsp=12
+flat closures in "" lsp=12
+flat matching in "" lsp=12
+flat shadow in "" lsp=12
+flat with_std in "" lsp=12
+flat with_std in "" lsp=12
+flat extra_only in "" lsp=12
+flat extra_or_test in "" lsp=12
+flat platform in "" lsp=12
+flat platform in "" lsp=12
+flat os_name in "" lsp=12
+flat under_miri in "" lsp=12
+flat square in "" lsp=12
+flat use_macro in "" lsp=12
+flat texts in "" lsp=12
+flat tests in "" lsp=2
+flat counter_works in "tests" lsp=12
+== ws/src/shapes.rs
+Struct Point [35..137] name 96..101 
+  Field x [108..118] name 112..113 i32
+  Field y [124..134] name 128..129 i32
+Enum Shape [139..238] name 172..177 
+  Variant Circle [184..195] name 184..190 
+  Variant Rect [201..224] name 201..205 
+    Field w [208..214] name 208..209 f64
+    Field h [216..222] name 216..217 f64
+  Variant Empty [230..235] name 230..235 
+Impl impl Point [240..604] name 245..250 
+  Const ZERO [257..302] name 267..271 Point
+  Method new [308..374] name 315..318 fn new(x: i32, y: i32) -> Point
+  Method dist2 [380..513] name 387..392 fn dist2(&self, o: &Point) -> i32
+  Method moved [519..602] name 526..531 fn moved(self, by: i32) -> Self
+Impl impl Describe for Point [606..750] name 611..629 
+  Method describe [636..748] name 639..647 fn describe(&self) -> String
+Impl impl Shape [752..965] name 757..762 
+  Method name [769..963] name 776..780 fn name(&self) -> &'static str
+Function area [988..1150] name 995..999 fn area(s: &Shape) -> f64
+Function origin [1152..1208] name 1166..1172 fn origin() -> Point
+flat Point in "" lsp=23
+flat x in "Point" lsp=8
+flat y in "Point" lsp=8
+flat Shape in "" lsp=10
+flat Circle in "Shape" lsp=22
+flat Rect in "Shape" lsp=22
+flat w in "Rect" lsp=8
+flat h in "Rect" lsp=8
+flat Empty in "Shape" lsp=22
+flat impl Point in "" lsp=19
+flat ZERO in "impl Point" lsp=14
+flat new in "impl Point" lsp=6
+flat dist2 in "impl Point" lsp=6
+flat moved in "impl Point" lsp=6
+flat impl Describe for Point in "" lsp=19
+flat describe in "impl Describe for Point" lsp=6
+flat impl Shape in "" lsp=19
+flat name in "impl Shape" lsp=6
+flat area in "" lsp=12
+flat origin in "" lsp=12
+== ws/src/util/mod.rs
+Module text [0..13] name 8..12 
+Function scale [61..107] name 68..73 fn scale(v: f64) -> f64
+Const FACTOR [109..133] name 115..121 f64
+Struct Wrapper [135..178] name 146..153 
+  Field inner [163..175] name 167..172 T
+Impl impl Wrapper<T> [180..271] name 195..205 
+  Method get [212..269] name 219..222 fn get(&self) -> T
+Function wrapped [273..420] name 280..287 fn wrapped() -> i32
+flat text in "" lsp=2
+flat scale in "" lsp=12
+flat FACTOR in "" lsp=14
+flat Wrapper in "" lsp=23
+flat inner in "Wrapper" lsp=8
+flat impl Wrapper<T> in "" lsp=19
+flat get in "impl Wrapper<T>" lsp=6
+flat wrapped in "" lsp=12
+== ws/src/util/text.rs
+Struct Word [31..72] name 42..46 
+  Field text [53..69] name 57..61 String
+Impl impl Word [74..360] name 79..83 
+  Method new [90..162] name 97..100 fn new(s: &str) -> Word
+  Method len [167..225] name 174..177 fn len(&self) -> usize
+  Method upper [230..358] name 237..242 fn upper(&self) -> String
+Function shout_len [362..483] name 369..378 fn shout_len(s: &str) -> usize
+flat Word in "" lsp=23
+flat text in "Word" lsp=8
+flat impl Word in "" lsp=19
+flat new in "impl Word" lsp=6
+flat len in "impl Word" lsp=6
+flat upper in "impl Word" lsp=6
+flat shout_len in "" lsp=12
+== ws/tests/it.rs
+Function helper [35..84] name 38..44 fn helper() -> Counter
+Function integration [86..224] name 97..108 fn integration()
+flat helper in "" lsp=12
+flat integration in "" lsp=12
