@@ -1,8 +1,12 @@
-//! crustc のドライバ。driver2 (Session2) がキャッシュ・並列化・ワークスペースのビルドと check (LSP の診断) をまとめる。
-//! 層: base (部品) → syntax (字句・構文・前処理・要約) → sema (Program・型推論) → codegen (acg・リンク) → core (ここ)。
-//! LSP は crustc-lsp、Cranelift のバックエンドは crustc-clif。下の層のモジュールはここからも `crustc_core::lexer` のように引ける
+//! crustc のドライバ。driver2 (Session2) が解析・check (LSP の診断)・キャッシュと、feature `build` (既定) のときは
+//! ワークスペースのビルド (並列化・機械語・リンク) をまとめる。
+//! 層: base → syntax → sema → typeck (型の検査・命令の記録) → codegen (機械語・リンク: build のときだけ) → core (ここ)。
+//! LSP は crustc-lsp (build なしで使う)、Cranelift のバックエンドは crustc-clif。下の層のモジュールはここからも
+//! `crustc_core::lexer` のように引ける
 
-pub use crustc_codegen::*;
+pub use crustc_typeck::*;
+#[cfg(feature = "build")]
+pub use crustc_codegen::{link, lower, minclif};
 
 pub mod driver2;
 #[doc(hidden)]

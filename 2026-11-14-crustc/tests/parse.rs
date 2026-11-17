@@ -78,7 +78,7 @@ impl<'a> Visit<'a> for SynCounts {
 #[test]
 fn parses_like_syn() {
     let mut files: Vec<std::path::PathBuf> = vec![];
-    for d in ["tests/probe", "examples", "crates/base/src", "crates/syntax/src", "crates/sema/src", "crates/codegen/src", "crates/codegen/src/acg", "crates/core/src", "crates/lsp/src", "crates/minclif/src", "crates/clif/src"] {
+    for d in ["tests/probe", "examples", "crates/base/src", "crates/syntax/src", "crates/sema/src", "crates/ir/src", "crates/typeck/src", "crates/typeck/src/acg", "crates/codegen/src", "crates/core/src", "crates/core/src/driver2", "crates/lsp/src", "crates/minclif/src", "crates/clif/src"] {
         for e in std::fs::read_dir(d).unwrap() {
             let p = e.unwrap().path();
             if p.extension().is_some_and(|x| x == "rs") {

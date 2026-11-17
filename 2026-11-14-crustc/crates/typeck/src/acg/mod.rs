@@ -28,7 +28,7 @@ mod p6_match_drop;
 mod p7_fmt_hash_cmp;
 mod p8_misc;
 mod p9_inline;
-pub use p9_inline::{inline_candidate, ClBackend, Inline, MAX_TOKENS};
+pub use p9_inline::{inline_candidate, Inline, MAX_TOKENS};
 #[allow(unused_imports)]
 pub use p1_expr::*;
 #[allow(unused_imports)]
@@ -50,8 +50,8 @@ use crate::fxhash::{FxMap as HashMap, FxSet as HashSet};
 use std::sync::Mutex;
 
 use crate::acg::clif::{AbiParam, FuncRef, FunctionBuilder, Signature, TrapCode, types};
-use crate::minclif::{Block, IntCC, StackSlot, Type, Value, Variable};
-pub use crate::minclif::FloatCC;
+use crate::ir::{Block, IntCC, StackSlot, Type, Value, Variable};
+pub use crate::ir::FloatCC;
 use lit::Lit;
 
 use crate::parse::{Expr, Pat, Path, Stmt};
@@ -199,7 +199,7 @@ pub const TRAP_SITE_BASE: u8 = 5;
 pub const TRAP_SITE_MAX: usize = 245;
 
 /// 1 関数をコンパイルする。返り値は (Blob, 要求したインスタンス)
-pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_base: u32, inl: &Inline) -> R<(Blob, Vec<u32>)> {
+pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_base: u32, inl: &Inline) -> R<(Compiled, Vec<u32>)> {
     let (sig, env, body_id) = {
         let g = insts.lock().unwrap();
         (g.sig(prog, id).clone(), g.env(prog, id), g.body_of(id))
@@ -328,45 +328,54 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
     let vtables = std::mem::take(&mut cx.vtables);
     let infos = std::mem::take(&mut cx.traps);
     let loc_used = cx.loc_used;
-    let mut b = cx.b;
-    if inl.check_only {
-        let _ = (late, datas, vtables, infos, loc_used, &mut b);
-        return Ok((Blob { align: 16, code: vec![], relocs: vec![], datas: vec![], vtables: vec![], traps: vec![], line_base: None, code_ref: None }, requested));
+    let b = cx.b;
+    Ok((Compiled { rec: b.m, late, datas, vtables, infos, loc_used, line_base }, requested))
+}
+
+/// コード生成の結果: 記録した命令の列と、Blob を作るのに要るもの。機械語にするのはバックエンド
+/// (codegen の lower)、check はしない (empty_blob)
+pub struct Compiled {
+    pub rec: crate::ir::Recorder,
+    /// 入口で 0 にする drop フラグのスロット
+    pub late: Vec<StackSlot>,
+    pub datas: Vec<Vec<u8>>,
+    pub vtables: Vec<Vec<u32>>,
+    infos: Vec<(u32, u32)>,
+    loc_used: bool,
+    line_base: u32,
+}
+
+impl Compiled {
+    /// 機械語なしの Blob (check の検査済みの印)
+    pub fn empty_blob() -> Blob {
+        Blob { align: 16, code: vec![], relocs: vec![], datas: vec![], vtables: vec![], traps: vec![], line_base: None, code_ref: None }
     }
-    let (code, relocs, traps_raw) = match inl.cl {
-        // (Cranelift のバックエンド: 記録した命令の列を Cranelift の IR にしてコンパイルする)
-        Some(cl) => cl(&b.m, &late, prog.opt)?,
-        None => {
-            b.set_zero(&late);
-            let t = b.traps();
-            let (c, r) = b.finish_zeroing(&late);
-            (c, r, t)
+
+    /// バックエンドが作った (機械語, 再配置, trap) から Blob を作る
+    pub fn into_blob(self, code: Vec<u8>, relocs: Vec<crate::ir::Reloc>, traps_raw: Vec<(u32, u8)>) -> Blob {
+        let Compiled { datas, vtables, infos, loc_used, line_base, .. } = self;
+        let mut out = vec![];
+        for r in relocs {
+            let target = target_of(&r.name).unwrap_or_else(|| Target::Sym(r.name.clone()));
+            // (ELF の種類 → Blob の番号: PLT32 4、GOTPCREL 5、PC32 6、64 7)
+            let kind = match r.kind {
+                9 => 5,
+                2 => 6,
+                1 => 7,
+                _ => 4,
+            };
+            out.push(BlobReloc { offset: r.offset, kind, addend: r.addend, target });
         }
-    };
-    let mut out = vec![];
-    for r in relocs {
-        let target = target_of(&r.name).unwrap_or_else(|| Target::Sym(r.name.clone()));
-        // (ELF の種類 → Blob の番号: PLT32 4、GOTPCREL 5、PC32 6、64 7)
-        let kind = match r.kind {
-            9 => 5,
-            2 => 6,
-            1 => 7,
-            _ => 4,
-        };
-        out.push(BlobReloc { offset: r.offset, kind, addend: r.addend, target });
-    }
-    let mut traps = vec![];
-    for (off, c) in traps_raw {
-        let c = c as usize;
-        if (TRAP_SITE_BASE as usize..TRAP_SITE_BASE as usize + infos.len()).contains(&c) && off < 1 << 20 {
-            let (info, msg) = infos[c - TRAP_SITE_BASE as usize];
-            traps.push((off, info, msg));
+        let mut traps = vec![];
+        for (off, c) in traps_raw {
+            let c = c as usize;
+            if (TRAP_SITE_BASE as usize..TRAP_SITE_BASE as usize + infos.len()).contains(&c) && off < 1 << 20 {
+                let (info, msg) = infos[c - TRAP_SITE_BASE as usize];
+                traps.push((off, info, msg));
+            }
         }
+        Blob { align: 16, code, relocs: out, datas, vtables, traps, line_base: loc_used.then_some(line_base), code_ref: None }
     }
-    Ok((
-        Blob { align: 16, code, relocs: out, datas, vtables, traps, line_base: loc_used.then_some(line_base), code_ref: None },
-        requested,
-    ))
 }
 
 /// `&x` / `&mut x.f` などでアドレスを取られるローカル変数名 (shadowing は無視した過大近似)

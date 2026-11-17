@@ -1,12 +1,13 @@
-//! Cranelift の FunctionBuilder / InstBuilder と同じ形の API を minclif の上に作る薄い層。
+//! Cranelift の FunctionBuilder / InstBuilder と同じ形の API を、命令を記録するだけの crustc_ir::Recorder の上に作る薄い層
+//! (機械語にするのはバックエンド: codegen の lower が記録を minclif / Cranelift で組み立て直す)。
 //! codegen.rs (Cranelift 版) のコードをほぼそのまま移せるようにするためのもの。
 //! 型による命令の振り分け (i128 / 浮動小数点) もここでする。
 
-pub use crate::minclif::{Block, FloatCC, IntCC, StackSlot, Type, Value, Variable};
-use crate::minclif::{FuncRef as MFuncRef, FunctionBuilder as M, Reloc};
+pub use crate::ir::{Block, FloatCC, IntCC, StackSlot, Type, Value, Variable};
+use crate::ir::{FuncRef as MFuncRef, Recorder as M};
 
 pub mod types {
-    use crate::minclif::Type;
+    use crate::ir::Type;
     pub const I8: Type = Type::I8;
     pub const I16: Type = Type::I16;
     pub const I32: Type = Type::I32;
@@ -154,15 +155,6 @@ impl FunctionBuilder {
     }
     pub fn set_zero(&mut self, z: &[StackSlot]) {
         self.m.set_zero(z)
-    }
-    pub fn traps(&mut self) -> Vec<(u32, u8)> {
-        self.m.traps()
-    }
-    pub fn finish(self) -> (Vec<u8>, Vec<Reloc>) {
-        self.m.finish()
-    }
-    pub fn finish_zeroing(self, zero: &[StackSlot]) -> (Vec<u8>, Vec<Reloc>) {
-        self.m.finish_zeroing(zero)
     }
     fn push_results(&mut self, v: Vec<Value>) -> Inst {
         self.results.push(v);

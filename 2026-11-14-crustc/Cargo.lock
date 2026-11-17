@@ -342,9 +342,8 @@ dependencies = [
 name = "crustc-codegen"
 version = "0.1.0"
 dependencies = [
- "crustc-sema",
+ "crustc-typeck",
  "minclif",
- "proc-macro2",
 ]
 
 [[package]]
@@ -352,7 +351,12 @@ name = "crustc-core"
 version = "0.1.0"
 dependencies = [
  "crustc-codegen",
+ "crustc-typeck",
 ]
+
+[[package]]
+name = "crustc-ir"
+version = "0.1.0"
 
 [[package]]
 name = "crustc-lsp"
@@ -374,6 +378,15 @@ name = "crustc-syntax"
 version = "0.1.0"
 dependencies = [
  "crustc-base",
+ "proc-macro2",
+]
+
+[[package]]
+name = "crustc-typeck"
+version = "0.1.0"
+dependencies = [
+ "crustc-ir",
+ "crustc-sema",
  "proc-macro2",
 ]
 
@@ -509,6 +522,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "minclif"
 version = "0.1.0"
+dependencies = [
+ "crustc-ir",
+]
 
 [[package]]
 name = "num-traits"

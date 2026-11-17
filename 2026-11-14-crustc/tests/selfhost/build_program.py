@@ -10,7 +10,7 @@ import glob, os
 def body(p):
     return open(p).read()
 
-items = max(glob.glob("target/release/build/crustc-core*/**/prelude_items.rs", recursive=True), key=os.path.getmtime)
+items = max(glob.glob("target/release/build/crustc-syntax*/**/prelude_items.rs", recursive=True), key=os.path.getmtime)
 prelude = (body("crates/syntax/src/prelude.rs")
     .replace('include_str!("prelude_lib.rs.in")', 'include_str!("../../crates/syntax/src/prelude_lib.rs.in")')
     .replace('include!(concat!(env!("OUT_DIR"), "/prelude_items.rs"));', open(items).read()))

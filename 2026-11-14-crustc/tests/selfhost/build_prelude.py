@@ -8,7 +8,7 @@ import glob, os
 
 lexer = open("crates/syntax/src/lexer.rs").read()
 fx = open("crates/base/src/fxhash.rs").read()
-items = max(glob.glob("target/release/build/crustc-core*/**/prelude_items.rs", recursive=True), key=os.path.getmtime)
+items = max(glob.glob("target/release/build/crustc-syntax*/**/prelude_items.rs", recursive=True), key=os.path.getmtime)
 prelude = (open("crates/syntax/src/prelude.rs").read()
     .replace('include_str!("prelude_lib.rs.in")', 'include_str!("../../crates/syntax/src/prelude_lib.rs.in")')
     .replace('include!(concat!(env!("OUT_DIR"), "/prelude_items.rs"));', open(items).read()))

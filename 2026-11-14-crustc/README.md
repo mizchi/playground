@@ -13,27 +13,34 @@ Cranelift (既定) か自前の minclif でコード生成する。crustc 自身
 
 ### crate の構成 (このディレクトリの Cargo ワークスペース)
 
-層は base → syntax → sema → codegen → core (driver) の順で、LSP とコンパイラ (CLI) は core を使う。syntax と sema が
-コンパイラと LSP・解析で共有する部分 (型の検査は今は acg の中で出るので、check も codegen まで使う: 機械語は作らない)。
+層は base → syntax → sema → typeck → codegen → core (driver) の順。syntax・sema・typeck がコンパイラと LSP・解析で
+共有する部分で、LSP は core を feature `build` なしで使い、バックエンド (codegen / minclif / Cranelift) に依存しない。
 
 | crate | 中身 | 依存 |
 |---|---|---|
 | `crates/base` (`crustc-base`) | fxhash (FxMap / FxSet)・key (キャッシュのキー)・prof (段ごとの時間) | なし |
 | `crates/syntax` (`crustc-syntax`) | front (前処理 → アイテムへの分割 (差分) → prelude を付ける、の流れと編集をまたぐ記憶 FrontMemo) / lexer / parse (自前の構文木) / cfg / macros / ctors / prep (前処理の差分) / srcmap / stub / types (要約の型)・types_enc / enc (直列化) / ast_types / ast_closure / ast_summary (アイテムの要約) / prelude (選択と prelude_lib.rs.in、build.rs) | base、proc-macro2 |
 | `crates/sema` (`crustc-sema`) | program (名前・型・トレイト・impl の表、インスタンス) / solver / ast_infer (型推論) / ast_consteval | syntax |
-| `crates/codegen` (`crustc-codegen`) | acg (構文木 → minclif の命令の列、型の検査) / cache2 (Blob の直列化) / link | sema、minclif、proc-macro2 |
-| `crates/core` (`crustc-core`) | driver2 (Session2: キャッシュ・fork の並列化・複数クレート・リンク・check) と testgen。下の層を公開し直す (`crustc_core::lexer` などで引ける) | codegen |
-| `crates/lsp` (`crustc-lsp`) | LSP サーバ (診断。driver2 の check を使う) | core、serde_json |
-| `crates/minclif` | Cranelift に似た API の小さな x86-64 バックエンド (命令の記録・レジスタ割り当て・スタックの struct のフィールドの変数化・ELF の .o) | なし |
-| `crates/clif` (`crustc-clif`) | driver2 の Cranelift バックエンド: minclif が記録した命令の列を Cranelift の IR にしてコンパイルする | cranelift |
+| `crates/ir` (`crustc-ir`) | 命令の列の型 (Type / Value / Block / Op …) と、命令を記録するだけの Recorder (値の型を覚える) | なし |
+| `crates/typeck` (`crustc-typeck`) | acg (構文木 → 命令の列の記録。型の検査はここで出る) / cache2 (Blob の直列化) | sema、ir、proc-macro2 |
+| `crates/codegen` (`crustc-codegen`) | lower (記録を minclif に組み立て直して機械語にする。Cranelift なら crustc-clif に渡す) / link | typeck、minclif |
+| `crates/core` (`crustc-core`) | driver2 (Session2: 解析・check・キャッシュ) と、feature `build` (既定) の driver2/build.rs (機械語・fork の並列化・オブジェクト・リンク・ワークスペース)。下の層を公開し直す | typeck、(build なら) codegen |
+| `crates/lsp` (`crustc-lsp`) | LSP サーバ (診断。driver2 の check を使う) | core (build なし)、serde_json |
+| `crates/minclif` | Cranelift に似た API の小さな x86-64 バックエンド (レジスタ割り当て・スタックの struct のフィールドの変数化・ELF の .o)。`from_recording` で記録を組み立て直す | ir |
+| `crates/clif` (`crustc-clif`) | driver2 の Cranelift バックエンド: minclif が組み立てた命令の列を Cranelift の IR にしてコンパイルする | minclif、cranelift |
 | `.` (`crustc`) | CLI と、上のものの再輸出 (テスト・ベンチ。`crustc::lsp` は crustc-lsp) | 上のもの |
 
 各 crate の lib.rs は下の層のモジュールを公開し直す (`pub use crustc_syntax::*;` など)。ファイルの中は `crate::lexer` の
 ように書き、どの crate に置いても、セルフホストで全部を 1 つのクレートのモジュールに並べても同じパスで引ける。
 
+型の検査とバックエンドの分け方: acg は命令を crustc_ir::Recorder に記録するだけ (値・ブロックなどに番号を振り、値の型を
+minclif と同じ決め方で覚える)。check はそこで止め、ビルドは codegen の lower が記録を minclif の FunctionBuilder に同じ順で
+組み立て直してから機械語にする (minclif は命令の中で値やスロットを作るので番号は組み立て直す側で振り直す。
+`CRUSTC_IR_VERIFY=1` で値の型が記録と同じかを確かめる)。出力の機械語は分ける前とバイト単位で同じ。
+
 経路は **driver2** だけ (`crustc x.rs` は Cranelift、`--backend=minclif` で minclif)。build / check / LSP のすべてが driver2 を使う。
 最初のドライバ (syn + Cranelift、`crates/legacy`) は 2026-11-16 に削除した (git の履歴にある)。
-セルフホスト (tests/selfhost*.sh) は base / syntax / sema / codegen / core と minclif のソースを 1 ファイルにまとめて crustc でコンパイルする。
+セルフホスト (tests/selfhost*.sh) は base / syntax / sema / ir / typeck / codegen / core と minclif のソースを 1 ファイルにまとめて crustc でコンパイルする。
 
 ## 現状（2026-11-15、`python3 bench/vs_rustc.py`）
 
@@ -689,7 +696,7 @@ src.rs ──srcmap (mod x; のファイル)──▶ macros (macro_rules!) ─�
 | `crates/syntax/src/macros.rs` / `srcmap.rs` | macro_rules! の展開・include_str!、`mod x;` のファイルの読み込みと行の対応 |
 | `crates/syntax/src/parse.rs` / `ast_*.rs` | 自前の構文木・要約・型推論・クロージャ解析・定数評価 |
 | `crates/sema/src/program.rs` | 全体の表 (シグネチャ・レイアウト・trait 実装・インスタンス) |
-| `crates/codegen/src/acg/` | 構文木から minclif の FunctionBuilder への 1 パスの lowering と型検査。-O で小さい関数をインライン展開 |
+| `crates/typeck/src/acg/` | 構文木から命令の列 (crustc_ir::Recorder) への 1 パスの lowering と型検査。-O で小さい関数をインライン展開 |
 | `crates/core/src/driver2.rs` / `cache2.rs` | `Session2`：キャッシュ (ディスク + メモリ)、build / check / ワークスペース、fork の並列化、.o の書き出し |
 | `crates/codegen/src/link.rs` | `cc -###` からリンク行を取り出して保存し、リンカを直接起動する |
 | `crates/minclif` | 命令の記録・レジスタ割り当て・x86-64 の機械語・ELF の .o |

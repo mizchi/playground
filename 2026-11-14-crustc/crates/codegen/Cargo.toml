@@ -2,9 +2,8 @@
 name = "crustc-codegen"
 version = "0.1.0"
 edition = "2024"
-description = "crustc のコード生成: acg (構文木 → minclif の命令の列。型の検査もここ)、Blob の直列化、リンク"
+description = "crustc のバックエンド側: 記録した命令の列を minclif / Cranelift で機械語にする (lower)、リンク"
 
 [dependencies]
-crustc-sema = { path = "../sema" }
+crustc-typeck = { path = "../typeck" }
 minclif = { path = "../minclif" }
-proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }

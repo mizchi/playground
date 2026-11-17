@@ -2,7 +2,13 @@
 name = "crustc-core"
 version = "0.1.0"
 edition = "2024"
-description = "crustc のドライバ (driver2: キャッシュ・並列化・ワークスペース・check)。下の層 (base / syntax / sema / codegen) を公開し直す。syn と Cranelift に依存しない"
+description = "crustc のドライバ (driver2: 解析・check・キャッシュ。feature build でビルド・並列化・ワークスペース)。下の層を公開し直す。syn と Cranelift に依存しない"
+
+[features]
+# ビルド (機械語・オブジェクト・リンク)。LSP・解析は default-features = false で使い、バックエンドに依存しない
+default = ["build"]
+build = ["dep:crustc-codegen"]
 
 [dependencies]
-crustc-codegen = { path = "../codegen" }
+crustc-typeck = { path = "../typeck" }
+crustc-codegen = { path = "../codegen", optional = true }

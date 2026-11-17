@@ -39,110 +39,7 @@ pub type FMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefa
 pub type FSet<K> = std::collections::HashSet<K, std::hash::BuildHasherDefault<FxHasher>>;
 
 /// 値の型
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Type {
-    I8,
-    I16,
-    I32,
-    I64,
-    I128,
-    F32,
-    F64,
-}
-
-impl Type {
-    pub fn bytes(self) -> u32 {
-        match self {
-            Type::I8 => 1,
-            Type::I16 => 2,
-            Type::I32 => 4,
-            Type::I64 | Type::F64 => 8,
-            Type::I128 => 16,
-            Type::F32 => 4,
-        }
-    }
-    pub fn is_float(self) -> bool {
-        matches!(self, Type::F32 | Type::F64)
-    }
-    pub fn bits(self) -> u32 {
-        self.bytes() * 8
-    }
-}
-
-/// 浮動小数点の比較
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum FloatCC {
-    Equal,
-    NotEqual,
-    LessThan,
-    LessThanOrEqual,
-    GreaterThan,
-    GreaterThanOrEqual,
-    /// どちらかが NaN
-    Unordered,
-}
-
-/// 整数の比較
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum IntCC {
-    Equal,
-    NotEqual,
-    SignedLessThan,
-    SignedLessThanOrEqual,
-    SignedGreaterThan,
-    SignedGreaterThanOrEqual,
-    UnsignedLessThan,
-    UnsignedLessThanOrEqual,
-    UnsignedGreaterThan,
-    UnsignedGreaterThanOrEqual,
-}
-
-impl IntCC {
-    fn signed(self) -> bool {
-        matches!(
-            self,
-            IntCC::SignedLessThan | IntCC::SignedLessThanOrEqual | IntCC::SignedGreaterThan | IntCC::SignedGreaterThanOrEqual
-        )
-    }
-    /// setcc の 2 byte 目
-    fn setcc(self) -> u8 {
-        match self {
-            IntCC::Equal => 0x94,
-            IntCC::NotEqual => 0x95,
-            IntCC::SignedLessThan => 0x9C,
-            IntCC::SignedLessThanOrEqual => 0x9E,
-            IntCC::SignedGreaterThan => 0x9F,
-            IntCC::SignedGreaterThanOrEqual => 0x9D,
-            IntCC::UnsignedLessThan => 0x92,
-            IntCC::UnsignedLessThanOrEqual => 0x96,
-            IntCC::UnsignedGreaterThan => 0x97,
-            IntCC::UnsignedGreaterThanOrEqual => 0x93,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct Value(pub u32);
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct Block(pub u32);
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct Variable(pub u32);
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct StackSlot(pub u32);
-/// 呼び出す関数 (外部の名前)
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct FuncRef(pub u32);
-
-/// コードの中の再配置 (call の rel32 など)
-#[derive(Clone, Debug, PartialEq)]
-pub struct Reloc {
-    pub offset: u32,
-    /// 参照する名前 (FuncRef の番号の名前)
-    pub name: String,
-    /// R_X86_64_PLT32 (4) / R_X86_64_PC32 (2)
-    pub kind: u32,
-    pub addend: i64,
-}
+pub use crustc_ir::{Block, FloatCC, FuncRef, IntCC, Op, Reloc, StackSlot, Type, Value, Variable};
 
 /// 1 関数分の機械語の組み立て (FunctionBuilder が 2 回使う: 解析 (track) と、割り当てを使った本番)
 pub struct Emitter {
@@ -2772,114 +2669,6 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize, paddr: &[Option<(u32, i32)>]
 
 // --- 記録して 2 回組み立てる FunctionBuilder ---------------------------------------------
 
-/// FunctionBuilder の命令 (呼ばれた順に記録し、割り当てを決めてから本番の Emitter でもう一度呼ぶ)
-#[derive(Clone)]
-pub enum Op {
-    CreateBlock,
-    AppendBlockParam(Block, Type),
-    SwitchToBlock(Block),
-    DeclareVar(Type),
-    DefVar(Variable, Value),
-    UseVar(Variable),
-    CreateStackSlot(u32, u32),
-    ImportFunction(String),
-    Iconst(Type, i64),
-    Iadd(Value, Value),
-    Isub(Value, Value),
-    Imul(Value, Value),
-    Band(Value, Value),
-    Bor(Value, Value),
-    Bxor(Value, Value),
-    IaddImm(Value, i64),
-    Udiv(Value, Value),
-    Sdiv(Value, Value),
-    Urem(Value, Value),
-    Srem(Value, Value),
-    Ishl(Value, Value),
-    Ushr(Value, Value),
-    Sshr(Value, Value),
-    Ineg(Value),
-    Bnot(Value),
-    Icmp(IntCC, Value, Value),
-    IcmpImm(IntCC, Value, i64),
-    Select(Value, Value, Value),
-    Uextend(Type, Value),
-    Sextend(Type, Value),
-    Ireduce(Type, Value),
-    Load(Type, Value, i32),
-    Store(Value, Value, i32),
-    StackAddr(StackSlot, i32),
-    Jump(Block, Vec<Value>),
-    Brif(Value, Block, Vec<Value>, Block, Vec<Value>),
-    Return_(Vec<Value>),
-    Trap,
-    Call(FuncRef, Vec<Value>, Vec<Type>),
-    F64const(f64),
-    F32const(f32),
-    Fadd(Value, Value),
-    Fsub(Value, Value),
-    Fmul(Value, Value),
-    Fdiv(Value, Value),
-    Sqrt(Value),
-    Floor(Value),
-    Ceil(Value),
-    Trunc(Value),
-    Fneg(Value),
-    Fabs(Value),
-    Fcopysign(Value, Value),
-    Fma(Value, Value, Value),
-    Bitcast(Type, Value),
-    Fcmp(FloatCC, Value, Value),
-    Fpromote(Value),
-    Fdemote(Value),
-    FcvtFromSint(Type, Value),
-    FcvtFromUint(Type, Value),
-    FcvtToSintSat(Type, Value),
-    FcvtToUintSat(Type, Value),
-    Iconcat(Value, Value),
-    Isplit(Value),
-    Iadd128(Value, Value),
-    Isub128(Value, Value),
-    Band128(Value, Value),
-    Bor128(Value, Value),
-    Bxor128(Value, Value),
-    Imul128(Value, Value),
-    Udiv128(Value, Value),
-    Sdiv128(Value, Value),
-    Urem128(Value, Value),
-    Srem128(Value, Value),
-    Icmp128(IntCC, Value, Value),
-    Ishl128(Value, Value),
-    Ushr128(Value, Value),
-    Sshr128(Value, Value),
-    Extend128(Value, bool),
-    Reduce128(Type, Value),
-    UaddOverflow(Value, Value),
-    UsubOverflow(Value, Value),
-    SaddOverflow(Value, Value),
-    SsubOverflow(Value, Value),
-    UmulOverflow(Value, Value),
-    SmulOverflow(Value, Value),
-    Umulhi(Value, Value),
-    Clz(Value),
-    Ctz(Value),
-    Popcnt(Value),
-    Bswap(Value),
-    Rotl(Value, Value),
-    Rotr(Value, Value),
-    Smin(Value, Value),
-    Umin(Value, Value),
-    Smax(Value, Value),
-    Umax(Value, Value),
-    Iabs(Value),
-    TrapCode(u8),
-    TrapzCode(Value, u8),
-    TrapnzCode(Value, u8),
-    Trapz(Value),
-    Trapnz(Value),
-    CallIndirect(Value, Vec<Value>, Vec<Type>),
-    SymbolAddr(String),
-}
 
 /// 1 関数分の組み立て。命令は記録しながら解析用の Emitter で組み立て (値の番号と型を決める)、
 /// finish で値・変数をレジスタに割り当ててから、本番の Emitter で記録した命令を同じ順にもう一度組み立てる
@@ -3718,6 +3507,463 @@ impl FunctionBuilder {
 }
 
 /// 記録した命令を本番の Emitter で組み立てる (戻り値は解析のときと同じ番号になる)
+/// 記録 (crustc_ir::Recorder) を同じ順に組み立て直す。記録の番号 (値・ブロック・変数・スロット・関数) はここで振り直す
+/// (minclif は命令の中で値やスロットを作ることがあるので番号が違う)。2 つ目は記録のスロットの番号 → minclif のスロットの番号。
+/// CRUSTC_IR_VERIFY=1 で、値の型が記録と同じかを確かめる
+pub fn from_recording(rec: &crustc_ir::Recorder) -> (FunctionBuilder, Vec<u32>) {
+    fn put(m: &mut Vec<u32>, i: u32, x: u32) {
+        let i = i as usize;
+        if m.len() <= i {
+            m.resize(i + 1, u32::MAX);
+        }
+        m[i] = x;
+    }
+    fn mv(m: &[u32], v: Value) -> Value {
+        Value(m[v.0 as usize])
+    }
+    let mut fb = FunctionBuilder::new(rec.params.clone(), rec.rets.clone());
+    let verify = std::env::var_os("CRUSTC_IR_VERIFY").is_some();
+    let mut vm: Vec<u32> = vec![];
+    let mut bm: Vec<u32> = vec![];
+    let mut varm: Vec<u32> = vec![];
+    let mut sm: Vec<u32> = vec![];
+    let mut fm: Vec<u32> = vec![];
+    let ps = fb.func_params();
+    for (i, p) in ps.iter().enumerate() {
+        put(&mut vm, i as u32, p.0);
+    }
+    for (i, op) in rec.ops.iter().enumerate() {
+        let out = &rec.res[i];
+        match op {
+            Op::CreateBlock => {
+                let r = fb.create_block();
+                put(&mut bm, out[0], r.0);
+            }
+            Op::AppendBlockParam(f0, f1) => {
+                let r = fb.append_block_param(Block(bm[f0.0 as usize]), *f1);
+                put(&mut vm, out[0], r.0);
+            }
+            Op::SwitchToBlock(f0) => {
+                fb.switch_to_block(Block(bm[f0.0 as usize]));
+            }
+            Op::DeclareVar(f0) => {
+                let r = fb.declare_var(*f0);
+                put(&mut varm, out[0], r.0);
+            }
+            Op::DefVar(f0, f1) => {
+                fb.def_var(Variable(varm[f0.0 as usize]), mv(&vm, *f1));
+            }
+            Op::UseVar(f0) => {
+                let r = fb.use_var(Variable(varm[f0.0 as usize]));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::CreateStackSlot(f0, f1) => {
+                let r = fb.create_stack_slot(*f0, *f1);
+                put(&mut sm, out[0], r.0);
+            }
+            Op::ImportFunction(f0) => {
+                let r = fb.import_function(f0.as_str());
+                put(&mut fm, out[0], r.0);
+            }
+            Op::Iconst(f0, f1) => {
+                let r = fb.iconst(*f0, *f1);
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Iadd(f0, f1) => {
+                let r = fb.iadd(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Isub(f0, f1) => {
+                let r = fb.isub(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Imul(f0, f1) => {
+                let r = fb.imul(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Band(f0, f1) => {
+                let r = fb.band(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Bor(f0, f1) => {
+                let r = fb.bor(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Bxor(f0, f1) => {
+                let r = fb.bxor(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::IaddImm(f0, f1) => {
+                let r = fb.iadd_imm(mv(&vm, *f0), *f1);
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Udiv(f0, f1) => {
+                let r = fb.udiv(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Sdiv(f0, f1) => {
+                let r = fb.sdiv(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Urem(f0, f1) => {
+                let r = fb.urem(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Srem(f0, f1) => {
+                let r = fb.srem(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Ishl(f0, f1) => {
+                let r = fb.ishl(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Ushr(f0, f1) => {
+                let r = fb.ushr(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Sshr(f0, f1) => {
+                let r = fb.sshr(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Ineg(f0) => {
+                let r = fb.ineg(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Bnot(f0) => {
+                let r = fb.bnot(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Icmp(f0, f1, f2) => {
+                let r = fb.icmp(*f0, mv(&vm, *f1), mv(&vm, *f2));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::IcmpImm(f0, f1, f2) => {
+                let r = fb.icmp_imm(*f0, mv(&vm, *f1), *f2);
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Select(f0, f1, f2) => {
+                let r = fb.select(mv(&vm, *f0), mv(&vm, *f1), mv(&vm, *f2));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Uextend(f0, f1) => {
+                let r = fb.uextend(*f0, mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Sextend(f0, f1) => {
+                let r = fb.sextend(*f0, mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Ireduce(f0, f1) => {
+                let r = fb.ireduce(*f0, mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Load(f0, f1, f2) => {
+                let r = fb.load(*f0, mv(&vm, *f1), *f2);
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Store(f0, f1, f2) => {
+                fb.store(mv(&vm, *f0), mv(&vm, *f1), *f2);
+            }
+            Op::StackAddr(f0, f1) => {
+                let r = fb.stack_addr(StackSlot(sm[f0.0 as usize]), *f1);
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Jump(f0, f1) => {
+                fb.jump(Block(bm[f0.0 as usize]), &f1.iter().map(|x| mv(&vm, *x)).collect::<Vec<Value>>());
+            }
+            Op::Brif(f0, f1, f2, f3, f4) => {
+                fb.brif(mv(&vm, *f0), Block(bm[f1.0 as usize]), &f2.iter().map(|x| mv(&vm, *x)).collect::<Vec<Value>>(), Block(bm[f3.0 as usize]), &f4.iter().map(|x| mv(&vm, *x)).collect::<Vec<Value>>());
+            }
+            Op::Return_(f0) => {
+                fb.return_(&f0.iter().map(|x| mv(&vm, *x)).collect::<Vec<Value>>());
+            }
+            Op::Trap => {
+                fb.trap();
+            }
+            Op::Call(f0, f1, f2) => {
+                let r = fb.call(FuncRef(fm[f0.0 as usize]), &f1.iter().map(|x| mv(&vm, *x)).collect::<Vec<Value>>(), &f2[..]);
+                for (k, x) in r.iter().enumerate() {
+                    put(&mut vm, out[k], x.0);
+                }
+            }
+            Op::F64const(f0) => {
+                let r = fb.f64const(*f0);
+                put(&mut vm, out[0], r.0);
+            }
+            Op::F32const(f0) => {
+                let r = fb.f32const(*f0);
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Fadd(f0, f1) => {
+                let r = fb.fadd(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Fsub(f0, f1) => {
+                let r = fb.fsub(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Fmul(f0, f1) => {
+                let r = fb.fmul(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Fdiv(f0, f1) => {
+                let r = fb.fdiv(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Sqrt(f0) => {
+                let r = fb.sqrt(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Floor(f0) => {
+                let r = fb.floor(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Ceil(f0) => {
+                let r = fb.ceil(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Trunc(f0) => {
+                let r = fb.trunc(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Fneg(f0) => {
+                let r = fb.fneg(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Fabs(f0) => {
+                let r = fb.fabs(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Fcopysign(f0, f1) => {
+                let r = fb.fcopysign(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Fma(f0, f1, f2) => {
+                let r = fb.fma(mv(&vm, *f0), mv(&vm, *f1), mv(&vm, *f2));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Bitcast(f0, f1) => {
+                let r = fb.bitcast(*f0, mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Fcmp(f0, f1, f2) => {
+                let r = fb.fcmp(*f0, mv(&vm, *f1), mv(&vm, *f2));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Fpromote(f0) => {
+                let r = fb.fpromote(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Fdemote(f0) => {
+                let r = fb.fdemote(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::FcvtFromSint(f0, f1) => {
+                let r = fb.fcvt_from_sint(*f0, mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::FcvtFromUint(f0, f1) => {
+                let r = fb.fcvt_from_uint(*f0, mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::FcvtToSintSat(f0, f1) => {
+                let r = fb.fcvt_to_sint_sat(*f0, mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::FcvtToUintSat(f0, f1) => {
+                let r = fb.fcvt_to_uint_sat(*f0, mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Iconcat(f0, f1) => {
+                let r = fb.iconcat(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Isplit(f0) => {
+                let r = fb.isplit(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0 .0);
+                put(&mut vm, out[1], r.1 .0);
+            }
+            Op::Iadd128(f0, f1) => {
+                let r = fb.iadd128(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Isub128(f0, f1) => {
+                let r = fb.isub128(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Band128(f0, f1) => {
+                let r = fb.band128(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Bor128(f0, f1) => {
+                let r = fb.bor128(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Bxor128(f0, f1) => {
+                let r = fb.bxor128(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Imul128(f0, f1) => {
+                let r = fb.imul128(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Udiv128(f0, f1) => {
+                let r = fb.udiv128(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Sdiv128(f0, f1) => {
+                let r = fb.sdiv128(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Urem128(f0, f1) => {
+                let r = fb.urem128(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Srem128(f0, f1) => {
+                let r = fb.srem128(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Icmp128(f0, f1, f2) => {
+                let r = fb.icmp128(*f0, mv(&vm, *f1), mv(&vm, *f2));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Ishl128(f0, f1) => {
+                let r = fb.ishl128(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Ushr128(f0, f1) => {
+                let r = fb.ushr128(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Sshr128(f0, f1) => {
+                let r = fb.sshr128(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Extend128(f0, f1) => {
+                let r = fb.extend128(mv(&vm, *f0), *f1);
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Reduce128(f0, f1) => {
+                let r = fb.reduce128(*f0, mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::UaddOverflow(f0, f1) => {
+                let r = fb.uadd_overflow(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0 .0);
+                put(&mut vm, out[1], r.1 .0);
+            }
+            Op::UsubOverflow(f0, f1) => {
+                let r = fb.usub_overflow(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0 .0);
+                put(&mut vm, out[1], r.1 .0);
+            }
+            Op::SaddOverflow(f0, f1) => {
+                let r = fb.sadd_overflow(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0 .0);
+                put(&mut vm, out[1], r.1 .0);
+            }
+            Op::SsubOverflow(f0, f1) => {
+                let r = fb.ssub_overflow(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0 .0);
+                put(&mut vm, out[1], r.1 .0);
+            }
+            Op::UmulOverflow(f0, f1) => {
+                let r = fb.umul_overflow(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0 .0);
+                put(&mut vm, out[1], r.1 .0);
+            }
+            Op::SmulOverflow(f0, f1) => {
+                let r = fb.smul_overflow(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0 .0);
+                put(&mut vm, out[1], r.1 .0);
+            }
+            Op::Umulhi(f0, f1) => {
+                let r = fb.umulhi(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Clz(f0) => {
+                let r = fb.clz(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Ctz(f0) => {
+                let r = fb.ctz(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Popcnt(f0) => {
+                let r = fb.popcnt(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Bswap(f0) => {
+                let r = fb.bswap(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Rotl(f0, f1) => {
+                let r = fb.rotl(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Rotr(f0, f1) => {
+                let r = fb.rotr(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Smin(f0, f1) => {
+                let r = fb.smin(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Umin(f0, f1) => {
+                let r = fb.umin(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Smax(f0, f1) => {
+                let r = fb.smax(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Umax(f0, f1) => {
+                let r = fb.umax(mv(&vm, *f0), mv(&vm, *f1));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::Iabs(f0) => {
+                let r = fb.iabs(mv(&vm, *f0));
+                put(&mut vm, out[0], r.0);
+            }
+            Op::TrapCode(f0) => {
+                fb.trap_code(*f0);
+            }
+            Op::TrapzCode(f0, f1) => {
+                fb.trapz_code(mv(&vm, *f0), *f1);
+            }
+            Op::TrapnzCode(f0, f1) => {
+                fb.trapnz_code(mv(&vm, *f0), *f1);
+            }
+            Op::Trapz(f0) => {
+                fb.trapz(mv(&vm, *f0));
+            }
+            Op::Trapnz(f0) => {
+                fb.trapnz(mv(&vm, *f0));
+            }
+            Op::CallIndirect(f0, f1, f2) => {
+                let r = fb.call_indirect(mv(&vm, *f0), &f1.iter().map(|x| mv(&vm, *x)).collect::<Vec<Value>>(), &f2[..]);
+                for (k, x) in r.iter().enumerate() {
+                    put(&mut vm, out[k], x.0);
+                }
+            }
+            Op::SymbolAddr(f0) => {
+                let r = fb.symbol_addr(f0.as_str());
+                put(&mut vm, out[0], r.0);
+            }
+        }
+        if verify && !matches!(op, Op::CreateBlock | Op::DeclareVar(_) | Op::CreateStackSlot(..) | Op::ImportFunction(_)) {
+            for &x in out {
+                let (a, b) = (rec.value_type(Value(x)), fb.value_type(Value(vm[x as usize])));
+                if a != b {
+                    panic!("crustc_ir: the type of v{x} is {a:?} in the recording but {b:?} in minclif (op {i})");
+                }
+            }
+        }
+    }
+    fb.zero = rec.zero.iter().map(|&z| sm[z as usize]).collect();
+    (fb, sm)
+}
+
 fn replay(e: &mut Emitter, op: &Op) {
     match op {
         Op::CreateBlock => {
