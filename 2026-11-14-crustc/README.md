@@ -19,16 +19,17 @@ Cranelift (既定) か自前の minclif でコード生成する。crustc 自身
 | crate | 中身 | 依存 |
 |---|---|---|
 | `crates/base` (`crustc-base`) | fxhash (FxMap / FxSet)・key (キャッシュのキー)・prof (段ごとの時間) | なし |
-| `crates/syntax` (`crustc-syntax`) | front (前処理 → アイテムへの分割 (差分) → prelude を付ける、の流れと編集をまたぐ記憶 FrontMemo) / lexer / parse (自前の構文木) / cfg / macros / ctors / prep (前処理の差分) / srcmap / stub / symbols (LSP のシンボル) / navigate (LSP の定義・参照・hover・補完。字句の列と定義の表からの軽い型の推定) / types (要約の型)・types_enc / enc (直列化) / ast_types / ast_closure / ast_summary (アイテムの要約) / prelude (選択と prelude_lib.rs.in、build.rs) | base、proc-macro2 |
+| `crates/syntax` (`crustc-syntax`) | front (前処理 → アイテムへの分割 (差分) → prelude を付ける、の流れと編集をまたぐ記憶 FrontMemo) / lexer / parse (自前の構文木) / cfg / macros / ctors / prep (前処理の差分) / srcmap / stub / types (要約の型)・types_enc / enc (直列化) / ast_types / ast_closure / ast_summary (アイテムの要約) / prelude (選択と prelude_lib.rs.in、build.rs) | base、proc-macro2 |
 | `crates/sema` (`crustc-sema`) | program (名前・型・トレイト・impl の表、インスタンス) / solver / ast_infer (型推論) / ast_consteval | syntax |
 | `crates/ir` (`crustc-ir`) | 命令の列の型 (Type / Value / Block / Op …) と、命令を記録するだけの Recorder (値の型を覚える) | なし |
 | `crates/typeck` (`crustc-typeck`) | acg (構文木 → 命令の列の記録。型の検査はここで出る) / cache2 (Blob の直列化) | sema、ir、proc-macro2 |
 | `crates/codegen` (`crustc-codegen`) | lower (記録を minclif に組み立て直して機械語にする。Cranelift なら crustc-clif に渡す) / link | typeck、minclif |
 | `crates/core` (`crustc-core`) | driver2 (Session2: 解析・check・キャッシュ) と、feature `build` (既定) の driver2/build.rs (機械語・fork の並列化・オブジェクト・リンク・ワークスペース)。下の層を公開し直す | typeck、(build なら) codegen |
-| `crates/lsp` (`crustc-lsp`) | LSP サーバ (診断は driver2 の check、documentSymbol / workspace/symbol は syntax の symbols、definition / references / hover / completion は syntax の navigate。ワークスペースの本文はメモリの上限まで) | core (build なし)、serde_json |
+| `crates/ide` (`crustc-ide`) | エディタ向けの解析: symbols (documentSymbol / workspace/symbol のシンボル) / navigate (定義・参照・hover・補完。字句の列と定義の表からの軽い型の推定)。コンパイラ本体からは使わない | syntax |
+| `crates/lsp` (`crustc-lsp`) | LSP サーバ (バイナリ `crustc-lsp`)。診断は driver2 の check、それ以外は ide。ワークスペースの本文はメモリの上限まで | core (build なし)、ide、serde_json |
 | `crates/minclif` | Cranelift に似た API の小さな x86-64 バックエンド (レジスタ割り当て・スタックの struct のフィールドの変数化・ELF の .o)。`from_recording` で記録を組み立て直す | ir |
 | `crates/clif` (`crustc-clif`) | driver2 の Cranelift バックエンド: minclif が組み立てた命令の列を Cranelift の IR にしてコンパイルする | minclif、cranelift |
-| `.` (`crustc`) | CLI と、上のものの再輸出 (テスト・ベンチ。`crustc::lsp` は crustc-lsp) | 上のもの |
+| `.` (`crustc`) | CLI と、上のものの再輸出 (テスト・ベンチ)。ide と lsp には依存しない (ベンチの lsp/* だけが dev-dependency で使う) | 上のもの (ide・lsp を除く) |
 
 各 crate の lib.rs は下の層のモジュールを公開し直す (`pub use crustc_syntax::*;` など)。ファイルの中は `crate::lexer` の
 ように書き、どの crate に置いても、セルフホストで全部を 1 つのクレートのモジュールに並べても同じパスで引ける。
@@ -107,10 +108,14 @@ cargo build --release
 コード生成までして minclif でエラーを集める。結果はキャッシュに入る)。
 
 ```bash
-./target/release/crustc lsp
+cargo build --release -p crustc-lsp
+./target/release/crustc-lsp
 ```
 
-LSP サーバ（stdio）。対応は initialize / didOpen / didChange（全文同期）/ didClose / shutdown で、publishDiagnostics を返す。
+LSP サーバ（stdio、crustc とは別のバイナリ）。対応は initialize / didOpen / didChange（全文同期）/ didClose / shutdown /
+documentSymbol / workspace/symbol / definition / references / hover / completion で、publishDiagnostics を返す。
+`CRUSTC_LSP_MEM_MB` (本文を持つ上限、既定 4)・`CRUSTC_LSP_NO_STD` (std の索引を作らない)・`CRUSTC_LSP_SYSROOT`。
+bench/lsp_compare.py と bench/lsp_parity.py は `target/release/crustc-lsp` を使う (`cargo build --release --workspace`)。
 
 | オプション | 意味 |
 |---|---|
@@ -701,8 +706,9 @@ src.rs ──srcmap (mod x; のファイル)──▶ macros (macro_rules!) ─�
 | `crates/codegen/src/link.rs` | `cc -###` からリンク行を取り出して保存し、リンカを直接起動する |
 | `crates/minclif` | 命令の記録・レジスタ割り当て・x86-64 の機械語・ELF の .o |
 | `crates/clif` | 記録した命令の列 → Cranelift の IR → 機械語 |
-| `crates/lsp/src/lib.rs` | 最小の LSP サーバ (ドキュメントごとに `Session2` を持ち、`check` の診断を返す) |
-| `src/main.rs` | CLI (build / check / lsp / ワークスペースの build) |
+| `crates/lsp/src/lib.rs` | LSP サーバ (ドキュメントごとに `Session2` を持ち `check` の診断を返す。ワークスペースと std の索引) |
+| `crates/ide/src/navigate.rs` / `symbols.rs` | 定義・参照・hover・補完の名前解決と、シンボルの一覧 |
+| `src/main.rs` | CLI (build / check / ワークスペースの build) |
 
 ### インクリメンタル性の要点
 
@@ -1949,6 +1955,14 @@ hover・references の数、`.` の直後 (`x.|name`) と識別子の途中 (`na
     std の索引を小さくした分で相殺)。
   - big: 55 MB (`CRUSTC_LSP_MEM_MB=0` で 28 MB)。
   - rust-analyzer は 0.6〜1.6 GB。rust-glancer は本体 16〜30 MB だが、子プロセスを足すと 0.9〜1.8 GB。
+
+### LSP を crustc から分ける (2026-11-17)
+
+- symbols と navigate を crustc-syntax から新しいクレート crustc-ide に移した (コンパイラの層にエディタ向けのコードを
+  置かない。crustc 自身でコンパイルする層 (base〜core) にも入らない)。
+- crustc-lsp をバイナリ `crustc-lsp` にした。`crustc lsp` は無くし、案内を出して終わる。crustc (CLI とライブラリ) は
+  crustc-ide / crustc-lsp に依存しない (`cargo tree -p crustc` に出ない)。ベンチの lsp/* だけが dev-dependency で使う。
+- LSP のテストは crates/lsp/tests/lsp.rs に移した。
 
 ### 途中で分かったこと
 

@@ -1,15 +1,14 @@
-//! `crustc lsp` を実際に起動し、stdio 越しに診断が返ることを確かめる。
+//! `crustc-lsp` を実際に起動し、stdio 越しに診断が返ることを確かめる。
 
 use std::io::{BufReader, Write};
 use std::process::{Command, Stdio};
 
-use crustc::lsp::{read_msg, write_msg};
+use crustc_lsp::{read_msg, write_msg};
 use serde_json::{Value, json};
 
 #[test]
 fn diagnostics_roundtrip() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_crustc"))
-        .arg("lsp")
+    let mut child = Command::new(env!("CARGO_BIN_EXE_crustc-lsp"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -61,7 +60,7 @@ fn diagnostics_roundtrip() {
 /// documentSymbol (開いたドキュメントの木) と workspace/symbol (開いたドキュメントとワークスペースの .rs から名前で探す)
 #[test]
 fn symbols() {
-    use crustc::lsp::Server;
+    use crustc_lsp::Server;
     let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lsp_symbols");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -140,7 +139,7 @@ fn definition_and_references_slim() {
 }
 
 fn nav(budget: usize, dir: &str) {
-    use crustc::lsp::Server;
+    use crustc_lsp::Server;
     let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(dir);
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -193,7 +192,7 @@ fn nav(budget: usize, dir: &str) {
 /// hover と completion: シグネチャ・doc コメント・ローカルの型、`x.|` (受け手の型のメンバ)、`Q::|`、名前の途中
 #[test]
 fn hover_and_completion() {
-    use crustc::lsp::Server;
+    use crustc_lsp::Server;
     let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lsp_hover");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("src")).unwrap();

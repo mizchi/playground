@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""LSP サーバの比較: crustc lsp / rust-analyzer / rust-glancer を同じ手順で動かして測る。
+"""LSP サーバの比較: crustc-lsp / rust-analyzer / rust-glancer を同じ手順で動かして測る。
 
 usage: python3 bench/lsp_compare.py [--servers crustc,rust-analyzer,rust-glancer] [--targets synth,crustc]
                                     [--out bench/lsp_compare_result.md] [--reps 10] [--timeout 300]
-(このディレクトリで実行。事前に cargo build --release。rust-glancer は RUST_GLANCER=<バイナリ> か PATH から)
+(このディレクトリで実行。事前に cargo build --release --workspace (target/release/crustc-lsp を作る)。rust-glancer は RUST_GLANCER=<バイナリ> か PATH から)
 
 測るもの (サーバごと・対象ごと):
 - init: initialize の応答までの時間
@@ -330,7 +330,7 @@ def main():
     a = ap.parse_args()
     glancer = os.environ.get("RUST_GLANCER") or shutil.which("rust-glancer") or "/home/user/rust-glancer/target/release/rust-glancer"
     servers = {
-        "crustc": [os.path.join(HERE, "target/release/crustc"), "lsp"],
+        "crustc": [os.path.join(HERE, "target/release/crustc-lsp")],
         "rust-analyzer": [os.environ.get("RUST_ANALYZER") or "rust-analyzer"],
         "rust-glancer": [glancer, "lsp"],
     }

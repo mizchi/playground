@@ -5,9 +5,9 @@
 //!
 //! ドキュメントごとに Session2 を 1 つ持ち、キャッシュはメモリ上だけに置く。
 //! 変わっていない関数は「検査済み」の印で飛ばすので、応答時間は変更量に比例する。
-//! シンボルは crustc_syntax::symbols で字句の列から読む (構文が壊れていても読める所まで)。workspace/symbol・定義・参照は
+//! シンボルは crustc_ide::symbols で字句の列から読む (構文が壊れていても読める所まで)。workspace/symbol・定義・参照は
 //! 開いているドキュメントと、ワークスペースの根の下の .rs ファイル (更新時刻と大きさで覚える) の索引
-//! (crustc_syntax::navigate::FileIndex) から引く。ワークスペースの本文と字句の列は `CRUSTC_LSP_MEM_MB` (既定 4) MB の分だけ
+//! (crustc_ide::navigate::FileIndex) から引く。ワークスペースの本文と字句の列は `CRUSTC_LSP_MEM_MB` (既定 4) MB の分だけ
 //! 持ち、超えた分のファイルは定義と名前の集合だけにする (参照・hover で要るときに読み直し、同じだけの大きさの LRU で覚える)。
 
 use std::cell::RefCell;
@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crustc_core::driver2::{Options2, Session2};
-use crustc_core::navigate::{self, FileIndex, Loc};
-use crustc_core::symbols::{self, LineIndex, Symbol};
+use crustc_ide::navigate::{self, FileIndex, Loc};
+use crustc_ide::symbols::{self, LineIndex, Symbol};
 
 /// 開いているドキュメント
 struct Doc {

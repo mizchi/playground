@@ -5,7 +5,7 @@
 //! 出すもの: mod / struct / enum / union / trait / impl / fn / const / static / type / macro_rules!、
 //! struct のフィールド、enum のバリアント、impl / trait / mod / extern の中のアイテム。関数の本体の中は読まない。
 
-use crate::lexer::tokenize;
+use crustc_syntax::lexer::tokenize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymKind {

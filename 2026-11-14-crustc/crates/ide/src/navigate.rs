@@ -16,8 +16,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use crate::fxhash::FxMap;
-use crate::lexer::tokenize;
+use crustc_syntax::fxhash::FxMap;
+use crustc_syntax::lexer::tokenize;
 use crate::symbols::{SymKind, Symbol, document_symbols};
 
 /// 定義 (シンボルを平らにして、持ち主とモジュールを付けたもの)

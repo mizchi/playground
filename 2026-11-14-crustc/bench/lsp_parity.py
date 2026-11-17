@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""LSP の機能の比較: crustc lsp / rust-analyzer / rust-glancer が、同じ問い合わせに同じ答えを返すか。
+"""LSP の機能の比較: crustc-lsp / rust-analyzer / rust-glancer が、同じ問い合わせに同じ答えを返すか。
 速さの比較 (lsp_compare.py) は「何を返すか」を見ないので、機能の不足と答えの違いをここで見る。rust-analyzer を正解とする。
 
+(事前に cargo build --release --workspace: target/release/crustc-lsp を使う)
 usage: python3 bench/lsp_parity.py [--servers crustc,rust-analyzer,rust-glancer] [--targets synth,crustc]
                                    [--points 40] [--out bench/lsp_parity_result.md]
 
@@ -270,7 +271,7 @@ def main():
     ap.add_argument("--detail", action="store_true", help="rust-analyzer と違った所を stderr に出す")
     a = ap.parse_args()
     glancer = os.environ.get("RUST_GLANCER") or shutil.which("rust-glancer") or "/home/user/rust-glancer/target/release/rust-glancer"
-    allsv = {"crustc": [os.path.join(HERE, "target/release/crustc"), "lsp"], "rust-analyzer": [os.environ.get("RUST_ANALYZER") or "rust-analyzer"], "rust-glancer": [glancer, "lsp"]}
+    allsv = {"crustc": [os.path.join(HERE, "target/release/crustc-lsp")], "rust-analyzer": [os.environ.get("RUST_ANALYZER") or "rust-analyzer"], "rust-glancer": [glancer, "lsp"]}
     servers = {k: allsv[k] for k in a.servers.split(",") if os.path.exists(allsv[k][0]) or shutil.which(allsv[k][0])}
     tmp = tempfile.mkdtemp(prefix="lsp_parity_")
     parts = []

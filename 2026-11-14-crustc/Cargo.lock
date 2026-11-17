@@ -355,6 +355,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "crustc-ide"
+version = "0.1.0"
+dependencies = [
+ "crustc-syntax",
+]
+
+[[package]]
 name = "crustc-ir"
 version = "0.1.0"
 
@@ -363,6 +370,7 @@ name = "crustc-lsp"
 version = "0.1.0"
 dependencies = [
  "crustc-core",
+ "crustc-ide",
  "serde_json",
 ]
 

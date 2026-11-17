@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use crustc::lsp::Server;
+use crustc_lsp::Server;
 use crustc::testgen::program;
 use crustc::{Options2, Session2};
 use serde_json::json;
