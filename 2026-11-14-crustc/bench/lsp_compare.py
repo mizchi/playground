@@ -167,11 +167,10 @@ def flat_names(syms):
 # ---------------------------------------------------------------- 対象
 
 
-def make_synth(dir):
-    """生成した Cargo のクレート: src/main.rs + src/m{k}.rs (40 個)"""
+def make_synth(dir, mods=40):
+    """生成した Cargo のクレート: src/main.rs + src/m{k}.rs (mods 個。既定 40、big は 1000)"""
     os.makedirs(os.path.join(dir, "src"), exist_ok=True)
     open(os.path.join(dir, "Cargo.toml"), "w").write('[package]\nname = "synth"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n')
-    mods = 40
     for k in range(mods):
         lines = [f"//! module {k}", "", f"pub struct Point{k} {{ pub x: i64, pub y: i64 }}", "",
                  f"pub enum Shape{k} {{ Circle(i64), Rect {{ w: i64, h: i64 }}, Empty }}", "",
@@ -192,6 +191,7 @@ def make_synth(dir):
         "queries": ["norm1", "Point2", "f39_24", "Shape", "rect"],
         "expect_doc": "norm7",
         "edit_after": "pub enum Shape7",
+        "refs": "Point7",
     }
 
 
@@ -203,6 +203,7 @@ def crustc_target():
         "queries": ["Session2", "check", "split_inc", "Recorder", "lower"],
         "expect_doc": "check",
         "edit_after": "pub struct Diagnostic",
+        "refs": "Session2",
     }
 
 
@@ -287,6 +288,21 @@ def bench(name, cmd, t, reps, timeout, env=None):
             r["edit_diag_ms"] = (hit[0][0] - a) * 1000
             break
         time.sleep(0.01)
+    # 参照 (ワークスペース全体を引く): 開いたファイルの中の名前の最初の位置。初回と 2 回目
+    r["refs_ms"], r["refs_n"] = None, None
+    if t.get("refs") and "referencesProvider" in str((init.get("result") or {}).get("capabilities", {})):
+        i = new.find(t["refs"])
+        li = new.count("\n", 0, i)
+        col = i - (new.rfind("\n", 0, i) + 1)
+        ts = []
+        for _ in range(2):
+            a = time.time()
+            m = s.request("textDocument/references", {"textDocument": {"uri": u}, "position": {"line": li, "character": col + 1},
+                                                      "context": {"includeDeclaration": True}}, timeout=timeout)
+            ts.append((time.time() - a) * 1000)
+            res = (m or {}).get("result")
+            r["refs_n"] = len(res) if isinstance(res, list) else None
+        r["refs_ms"] = ts
     r["peak_rss_mb"] = s.peak_rss_mb()
     r["tree_rss_mb"] = s.tree_peak / 1024
     s.close()
@@ -306,7 +322,7 @@ def fmt(x, unit=""):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--servers", default="crustc,rust-analyzer,rust-glancer")
-    ap.add_argument("--targets", default="synth,crustc")
+    ap.add_argument("--targets", default="synth,crustc,big")
     ap.add_argument("--reps", type=int, default=10)
     ap.add_argument("--timeout", type=float, default=300)
     ap.add_argument("--out", default=None)
@@ -323,10 +339,12 @@ def main():
     for t in a.targets.split(","):
         if t == "synth":
             targets["synth"] = make_synth(os.path.join(tmp, "synth"))
+        elif t == "big":
+            targets["big"] = make_synth(os.path.join(tmp, "big"), 1000)
         elif t == "crustc":
             targets["crustc"] = crustc_target()
-    out = ["| 対象 | サーバ | init | ready | docsym (数) | wsym (見つかった) | edit→docsym | edit→diag | peak RSS (子も) |",
-           "|---|---|---:|---:|---:|---:|---:|---:|---:|"]
+    out = ["| 対象 | サーバ | init | ready | docsym (数) | wsym (見つかった) | edit→docsym | edit→diag | references 1 回目 / 2 回目 (数) | peak RSS (子も) |",
+           "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for tn, t in targets.items():
         for sn in a.servers.split(","):
             cmd = servers[sn]
@@ -343,8 +361,9 @@ def main():
                 continue
             ds = f"{fmt(r['docsym_ms'], ' ms')} ({fmt(r['docsym_n'])}{'' if r['docsym_ok'] else ', 期待の名前なし'})"
             ed = f"{fmt(r['edit_docsym_ms'], ' ms')}{'' if r['edit_docsym_ok'] else ' (足した関数なし)'}"
+            rf = "-" if not r.get("refs_ms") else f"{fmt(r['refs_ms'][0], ' ms')} / {fmt(r['refs_ms'][1], ' ms')} ({fmt(r['refs_n'])})"
             out.append(f"| {tn} | {sn} | {fmt(r['init_ms'], ' ms')} | {fmt(r['ready_ms'], ' ms')} | {ds} | {fmt(r['wsym_ms'], ' ms')} ({r['wsym_found']}) | "
-                       f"{ed} | {fmt(r['edit_diag_ms'], ' ms')} | {fmt(r['peak_rss_mb'], ' MB')} ({fmt(r['tree_rss_mb'], ' MB')}) |")
+                       f"{ed} | {fmt(r['edit_diag_ms'], ' ms')} | {rf} | {fmt(r['peak_rss_mb'], ' MB')} ({fmt(r['tree_rss_mb'], ' MB')}) |")
     print("\n".join(out))
     if a.out:
         open(a.out, "w").write("\n".join(out) + "\n")

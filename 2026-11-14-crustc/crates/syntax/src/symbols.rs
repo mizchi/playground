@@ -199,7 +199,7 @@ impl Scan<'_> {
                     if self.sym(j, b'(') {
                         j = self.close(j, end) + 1;
                     }
-                } else if self.is(j, b"unsafe") || self.is(j, b"async") || self.is(j, b"default") || (self.is(j, b"const") && self.is(j + 1, b"fn")) {
+                } else if self.is(j, b"unsafe") || self.is(j, b"async") || self.is(j, b"default") || (self.is(j, b"const") && (self.is(j + 1, b"fn") || self.is(j + 1, b"unsafe") || self.is(j + 1, b"extern") || self.is(j + 1, b"async") || self.is(j + 1, b"impl") || self.is(j + 1, b"trait"))) {
                     j += 1;
                 } else if self.is(j, b"extern") && j + 1 < end && self.t[j + 1].0 == 2 && self.is(j + 2, b"fn") {
                     j += 2;
@@ -370,7 +370,31 @@ impl Scan<'_> {
                 }
                 b"type" if self.ident(j + 1) => {
                     let e = self.item_end(j, end, false);
-                    out.push(named(SymKind::TypeAlias, j + 1, e, String::new(), vec![]));
+                    // (detail: `=` の右の型。型引数があれば `<K, V> = 右`)
+                    let mut q = j + 2;
+                    let mut generics = String::new();
+                    if self.sym(q, b'<') {
+                        let g0 = q;
+                        let mut d = 0;
+                        while q < e {
+                            if self.sym(q, b'<') {
+                                d += 1;
+                            } else if self.sym(q, b'>') && !self.sym(q - 1, b'-') {
+                                d -= 1;
+                                if d == 0 {
+                                    break;
+                                }
+                            }
+                            q += 1;
+                        }
+                        generics = self.join(g0, q);
+                    }
+                    while q < e && !self.sym(q, b'=') {
+                        q += 1;
+                    }
+                    let rhs = if q + 1 < e { self.join(q + 1, e - 1) } else { String::new() };
+                    let detail = if generics.is_empty() || rhs.is_empty() { rhs } else { format!("{generics} = {rhs}") };
+                    out.push(named(SymKind::TypeAlias, j + 1, e, detail, vec![]));
                     e + 1
                 }
                 b"macro_rules" if self.sym(j + 1, b'!') && self.ident(j + 2) => {

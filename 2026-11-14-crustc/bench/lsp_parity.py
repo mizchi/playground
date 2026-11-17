@@ -169,16 +169,18 @@ def run(servers, t, npts, timeout):
             r["hover"].append(bool(h) and name in hv)
             rf = req(s, "textDocument/references", dict(p, context={"includeDeclaration": True}), times)
             r["refs"].append(len(rf) if isinstance(rf, list) else None)
-        r["dot"], r["pre"], r["dot_n"], r["pre_n"] = [], [], [], []
+        r["dot"], r["pre"], r["dot_n"], r["pre_n"], r["dot_at"], r["pre_at"] = [], [], [], [], [], []
         for (li, col, name) in dpts:
             c = comp_labels(req(s, "textDocument/completion", {"textDocument": {"uri": u}, "position": {"line": li, "character": col}}, times))
             r["dot"].append(name in c)
+            r["dot_at"].append((li, col, name))
             r["dot_n"].append(len(c))
         for (li, col, name) in pts:
             if len(name) < 4:
                 continue
             c = comp_labels(req(s, "textDocument/completion", {"textDocument": {"uri": u}, "position": {"line": li, "character": col + 2}}, times))
             r["pre"].append(name in c)
+            r["pre_at"].append((li, col, name))
             r["pre_n"].append(len(c))
         s.close()
         res[sn] = r
@@ -202,6 +204,13 @@ def detail(tn, res, pts):
             ra, rb = r["refs"][i], ref["refs"][i]
             if (b and a != b) or (rb is not None and ra != rb):
                 print(f"[{tn}/{sn}] {li + 1}:{col + 1} {name}: def {sorted(a)} vs ra {sorted(b)}; refs {ra} vs ra {rb}", file=sys.stderr)
+            if ref["hover"][i] and not r["hover"][i]:
+                print(f"[{tn}/{sn}] {li + 1}:{col + 1} {name}: hover なし", file=sys.stderr)
+        # (completion: rust-analyzer は候補に入れたが、こちらは入れなかった所)
+        for key in ["dot", "pre"]:
+            for i, (li, col, name) in enumerate(r.get(key + "_at", [])):
+                if i < len(ref[key]) and ref[key][i] and not r[key][i]:
+                    print(f"[{tn}/{sn}] {li + 1}:{col + 1} {name}: completion ({key}) に入らない (候補 {r[key + '_n'][i]})", file=sys.stderr)
 
 
 def report(tn, res, npts, ndots):

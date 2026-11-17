@@ -130,13 +130,24 @@ fn symbols() {
 /// definition / references: ローカル・メソッド (受け手の型から)・`use` したアイテム・ファイルをまたぐ参照
 #[test]
 fn definition_and_references() {
+    nav(usize::MAX, "lsp_nav");
+}
+
+/// 同じことを、ワークスペースのファイルを全部 slim にして (本文を捨て、参照のときに読み直す)
+#[test]
+fn definition_and_references_slim() {
+    nav(0, "lsp_nav_slim");
+}
+
+fn nav(budget: usize, dir: &str) {
     use crustc::lsp::Server;
-    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lsp_nav");
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(dir);
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/geom.rs"), "pub struct Point { pub x: f64 }\nimpl Point {\n    pub fn new() -> Point { Point { x: 0.0 } }\n    pub fn norm(&self) -> f64 { self.x }\n}\npub fn norm() {}\n").unwrap();
     let uri_root = format!("file://{}", root.display());
     let mut srv = Server::new();
+    srv.set_mem_budget(budget);
     let r = srv.handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": uri_root}}).to_string());
     let r: Value = serde_json::from_str(&r[0]).unwrap();
     assert_eq!(r["result"]["capabilities"]["definitionProvider"], true);
@@ -177,4 +188,57 @@ fn definition_and_references() {
     assert!(refs.is_empty(), "{refs:?}"); // (`mod geom` の geom はモジュール: 参照は返さない)
     let refs = ask("textDocument/references", 1, 11);
     assert_eq!(refs, [at("geom.rs", 0, 11), at("geom.rs", 1, 5), at("geom.rs", 2, 20), at("geom.rs", 2, 28), at("main.rs", 1, 10), at("main.rs", 3, 12)]);
+}
+
+/// hover と completion: シグネチャ・doc コメント・ローカルの型、`x.|` (受け手の型のメンバ)、`Q::|`、名前の途中
+#[test]
+fn hover_and_completion() {
+    use crustc::lsp::Server;
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lsp_hover");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/geom.rs"), "/// 平面の点\npub struct Point { pub x: f64, pub y: f64 }\nimpl Point {\n    /// 原点\n    pub fn origin() -> Point { Point { x: 0.0, y: 0.0 } }\n    pub fn norm(&self) -> f64 { self.x }\n    pub fn shifted(&self) -> Option<Point> { None }\n}\n").unwrap();
+    let uri_root = format!("file://{}", root.display());
+    let mut srv = Server::new();
+    let r = srv.handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": uri_root}}).to_string());
+    let r: Value = serde_json::from_str(&r[0]).unwrap();
+    assert_eq!(r["result"]["capabilities"]["hoverProvider"], true);
+    assert!(r["result"]["capabilities"]["completionProvider"].is_object());
+    let uri = format!("{uri_root}/src/main.rs");
+    let text = "mod geom;\nuse geom::Point;\nfn main() {\n    let p = Point::origin();\n    let q = p.shifted().unwrap();\n    let n = q.norm();\n    let v: Vec<Point> = vec![];\n    v.\n    Point::\n    no\n}\n";
+    srv.handle(&json!({"jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": uri, "languageId": "rust", "version": 1, "text": text}}}).to_string());
+    let mut id = 10;
+    let mut ask = |method: &str, line: u32, ch: u32| -> Value {
+        id += 1;
+        let r = srv.handle(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": {"textDocument": {"uri": uri},
+            "position": {"line": line, "character": ch}}}).to_string());
+        let r: Value = serde_json::from_str(&r[0]).unwrap();
+        r["result"].clone()
+    };
+    let hover = |v: Value| v["contents"]["value"].as_str().unwrap_or("").to_string();
+    let labels = |v: Value| -> Vec<String> { v["items"].as_array().unwrap().iter().map(|x| x["label"].as_str().unwrap().to_string()).collect() };
+    // 定義のシグネチャと doc コメント
+    let h = hover(ask("textDocument/hover", 3, 20));
+    assert!(h.contains("pub fn origin() -> Point") && h.contains("原点") && h.contains("impl Point"), "{h}");
+    let h = hover(ask("textDocument/hover", 1, 11));
+    assert!(h.contains("pub struct Point") && h.contains("平面の点"), "{h}");
+    // ローカルの型: Option<Point>::unwrap → Point
+    assert!(hover(ask("textDocument/hover", 4, 8)).contains("q: Point"));
+    assert!(hover(ask("textDocument/hover", 5, 8)).contains("n: f64"));
+    // q.norm() は Point::norm
+    assert!(hover(ask("textDocument/hover", 5, 15)).contains("pub fn norm(&self) -> f64"));
+    // `p.|`: Point のメンバ、`v.|`: Vec (とスライス) のメソッド
+    let c = labels(ask("textDocument/completion", 4, 14));
+    assert!(c.contains(&"shifted".to_string()) && c.contains(&"x".to_string()) && !c.contains(&"push".to_string()), "{c:?}");
+    let c = labels(ask("textDocument/completion", 7, 6));
+    if std::env::var_os("CRUSTC_LSP_NO_STD").is_none() && c.iter().any(|x| x == "len") {
+        assert!(c.contains(&"push".to_string()) && c.contains(&"iter".to_string()), "{c:?}");
+    }
+    // `Point::|`: 関連関数とフィールドでないもの
+    let c = labels(ask("textDocument/completion", 8, 11));
+    assert!(c.contains(&"origin".to_string()), "{c:?}");
+    // 名前の途中 `no|`: ローカルの n ではなく、n で始まる / 含むもの (norm は Point のメンバなので出ない)
+    let c = labels(ask("textDocument/completion", 9, 6));
+    assert!(!c.is_empty() && c.iter().all(|x| x.to_lowercase().contains('n')), "{c:?}");
 }

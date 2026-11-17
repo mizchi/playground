@@ -1,14 +1,18 @@
 //! 最小の LSP サーバ (stdio)。対応: initialize / didOpen / didChange (全文同期) / didClose /
-//! shutdown / exit / textDocument/documentSymbol / workspace/symbol / textDocument/definition / textDocument/references。
+//! shutdown / exit / textDocument/documentSymbol / workspace/symbol / textDocument/definition / textDocument/references /
+//! textDocument/hover / textDocument/completion。
 //! 開く・変更するたびに [`Session2::check`] を走らせて publishDiagnostics を返す。
 //!
 //! ドキュメントごとに Session2 を 1 つ持ち、キャッシュはメモリ上だけに置く。
 //! 変わっていない関数は「検査済み」の印で飛ばすので、応答時間は変更量に比例する。
 //! シンボルは crustc_syntax::symbols で字句の列から読む (構文が壊れていても読める所まで)。workspace/symbol・定義・参照は
 //! 開いているドキュメントと、ワークスペースの根の下の .rs ファイル (更新時刻と大きさで覚える) の索引
-//! (crustc_syntax::navigate::FileIndex) から引く。
+//! (crustc_syntax::navigate::FileIndex) から引く。ワークスペースの本文と字句の列は `CRUSTC_LSP_MEM_MB` (既定 4) MB の分だけ
+//! 持ち、超えた分のファイルは定義と名前の集合だけにする (参照・hover で要るときに読み直し、同じだけの大きさの LRU で覚える)。
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -46,6 +50,10 @@ pub struct Server {
     lib: Vec<(String, FileIndex)>,
     /// ワークスペースのファイルの並び (パス, モジュール, クレート, 本体か)。ドキュメントの変更・ファイルの変更で作り直す
     layout: Option<Vec<(PathBuf, Vec<String>, u32, bool)>>,
+    /// 本文を持つワークスペースのファイルの大きさの上限 (byte)。超えた分は slim にする
+    budget: usize,
+    /// slim なファイルを読み直したもの (uri, 索引)。新しいものが後ろ。本文の合計が budget を超えたら古いものから捨てる
+    cache: RefCell<Vec<(String, Rc<FileIndex>)>>,
     pub exit: bool,
     shutdown: bool,
 }
@@ -65,9 +73,16 @@ impl Server {
             lib_job: None,
             lib: vec![],
             layout: None,
+            budget: std::env::var("CRUSTC_LSP_MEM_MB").ok().and_then(|v| v.parse::<f64>().ok()).map(|m| (m * 1048576.0) as usize).unwrap_or(4 << 20),
+            cache: RefCell::new(vec![]),
             exit: false,
             shutdown: false,
         }
+    }
+
+    /// 本文を持つワークスペースのファイルの大きさの上限 (byte。既定は `CRUSTC_LSP_MEM_MB`、なければ 4 MB)
+    pub fn set_mem_budget(&mut self, bytes: usize) {
+        self.budget = bytes;
     }
 
     /// 1 メッセージを処理し、送り返すメッセージ (JSON 文字列) を返す
@@ -92,7 +107,8 @@ impl Server {
                     self.lib_job = Some(std::thread::spawn(index_std));
                 }
                 vec![reply(json!({
-                    "capabilities": { "textDocumentSync": 1, "documentSymbolProvider": true, "workspaceSymbolProvider": true, "definitionProvider": true, "referencesProvider": true },
+                    "capabilities": { "textDocumentSync": 1, "documentSymbolProvider": true, "workspaceSymbolProvider": true, "definitionProvider": true, "referencesProvider": true,
+                        "hoverProvider": true, "completionProvider": { "triggerCharacters": [".", ":"] } },
                     "serverInfo": { "name": "crustc", "version": env!("CARGO_PKG_VERSION") }
                 }))]
             }
@@ -110,6 +126,12 @@ impl Server {
                 let refs = method == "textDocument/references";
                 let decl = p["context"]["includeDeclaration"].as_bool().unwrap_or(true);
                 vec![reply(self.navigate(&uri, line, ch, refs, decl))]
+            }
+            "textDocument/hover" | "textDocument/completion" => {
+                let uri = p["textDocument"]["uri"].as_str().unwrap_or("").to_string();
+                let (line, ch) = (p["position"]["line"].as_u64().unwrap_or(0) as u32, p["position"]["character"].as_u64().unwrap_or(0) as u32);
+                let r = if method == "textDocument/hover" { self.hover(&uri, line, ch) } else { self.complete(&uri, line, ch) };
+                vec![reply(r)]
             }
             "shutdown" => {
                 self.shutdown = true;
@@ -224,6 +246,53 @@ impl Server {
 
     /// ドキュメントとワークスペースのファイルの索引を新しくし、(uri, 索引) の列を返す (開いているものが先)
     fn workspace(&mut self, with_lib: bool) -> Vec<(String, &FileIndex)> {
+        self.refresh(with_lib);
+        self.view(with_lib)
+    }
+
+    /// 開いているドキュメント → ワークスペースのファイル (パスの順) → (with_lib なら) std の索引
+    fn view(&self, with_lib: bool) -> Vec<(String, &FileIndex)> {
+        let mut out: Vec<(String, &FileIndex)> = vec![];
+        for (uri, d) in &self.docs {
+            if let Some(ix) = d.idx.as_ref() {
+                out.push((uri.clone(), ix));
+            }
+        }
+        let mut fs: Vec<(&PathBuf, &WsFile)> = self.files.iter().collect();
+        fs.sort_by(|a, b| a.0.cmp(b.0));
+        for (p, f) in fs {
+            out.push((path_uri(p), &f.idx));
+        }
+        if with_lib {
+            for (u, f) in &self.lib {
+                out.push((u.clone(), f));
+            }
+        }
+        out
+    }
+
+    /// ws[i] が slim なら本文から作り直す (LRU で覚える)
+    fn load(&self, ws: &[(String, &FileIndex)], i: usize) -> Option<Rc<FileIndex>> {
+        let uri = &ws.get(i)?.0;
+        let mut c = self.cache.borrow_mut();
+        if let Some(j) = c.iter().position(|x| &x.0 == uri) {
+            let e = c.remove(j);
+            let r = e.1.clone();
+            c.push(e);
+            return Some(r);
+        }
+        let text = std::fs::read_to_string(uri_path(uri)?).ok()?;
+        let r = Rc::new(ws[i].1.reload(text));
+        c.push((uri.clone(), r.clone()));
+        let mut total: usize = c.iter().map(|x| x.1.text_len()).sum();
+        while total > self.budget && c.len() > 1 {
+            total -= c[0].1.text_len();
+            c.remove(0);
+        }
+        Some(r)
+    }
+
+    fn refresh(&mut self, with_lib: bool) {
         if with_lib {
             if let Some(j) = self.lib_job.take() {
                 self.lib = j.join().unwrap_or_default();
@@ -268,6 +337,8 @@ impl Server {
         if root.is_some() {
             let paths = layout.clone();
             let mut changed = false;
+            // (本文を持つファイルの大きさの合計: budget を超えたら、そこからのファイルは slim)
+            let mut full: usize = self.files.values().filter(|f| !f.idx.slim).map(|f| f.idx.text_len()).sum();
             let mut keep: HashMap<PathBuf, WsFile> = HashMap::new();
             for (p, pm, kr, main) in paths {
                 if open.contains(&p) {
@@ -287,6 +358,14 @@ impl Server {
                         let mut ix = FileIndex::new(text, pm.clone());
                         ix.in_src = main;
                         ix.krate = kr;
+                        if full + ix.text_len() > self.budget {
+                            ix.make_slim();
+                        } else {
+                            full += ix.text_len();
+                        }
+                        // (前に読み直したものは古い)
+                        let u = path_uri(&p);
+                        self.cache.get_mut().retain(|x| x.0 != u);
                         WsFile { stamp, idx: ix }
                     }
                 };
@@ -297,21 +376,6 @@ impl Server {
                 self.layout = None;
             }
         }
-        let mut out: Vec<(String, &FileIndex)> = vec![];
-        for (uri, d) in &self.docs {
-            out.push((uri.clone(), d.idx.as_ref().unwrap()));
-        }
-        let mut fs: Vec<(&PathBuf, &WsFile)> = self.files.iter().collect();
-        fs.sort_by(|a, b| a.0.cmp(b.0));
-        for (p, f) in fs {
-            out.push((path_uri(p), &f.idx));
-        }
-        if with_lib {
-            for (u, f) in &self.lib {
-                out.push((u.clone(), f));
-            }
-        }
-        out
     }
 
     /// workspace/symbol: 名前が問い合わせに合うシンボル (SymbolInformation)。合い方の良い順に 256 個まで
@@ -325,7 +389,7 @@ impl Server {
             for d in &f.defs {
                 if let Some(sc) = symbols::match_score(q, &d.name) {
                     let ((l0, c0), (l1, c1)) = ends(f, &mut li, d.start, d.end);
-                    hits.push((sc, d.name.clone(), d.kind.lsp(), uri.clone(), [l0, c0, l1, c1], d.container.clone()));
+                    hits.push((sc, d.name.clone(), d.kind.lsp(), uri.clone(), [l0, c0, l1, c1], d.container.to_string()));
                 }
             }
         }
@@ -347,24 +411,106 @@ impl Server {
             .collect::<Vec<_>>())
     }
 
-    /// textDocument/definition (refs = false) と textDocument/references (refs = true)
-    fn navigate(&mut self, uri: &str, line: u32, ch: u32, refs: bool, decl: bool) -> Value {
-        let ws = self.workspace(true);
+    /// uri の (line, ch) で f を呼ぶ: (サーバ, ws, 索引の列, ファイルの番号, byte の位置)
+    fn at<R>(&mut self, uri: &str, line: u32, ch: u32, f: impl FnOnce(&Self, &[(String, &FileIndex)], &[&FileIndex], usize, usize) -> R) -> Option<R> {
+        self.refresh(true);
+        let ws = self.view(true);
         // (開いているドキュメントか、ワークスペースのファイル。uri の書き方の違いはパスで比べる)
         let want = uri_path(uri);
-        let Some(fi) = ws.iter().position(|(u, _)| u == uri || (want.is_some() && uri_path(u) == want)) else { return Value::Null };
-        let Some(off) = offset(&ws[fi].1.text, line, ch) else { return Value::Null };
-        let idx: Vec<&FileIndex> = ws.iter().map(|x| x.1).collect();
-        let locs: Vec<Loc> = if refs { navigate::references(&idx, fi, off, decl) } else { navigate::definition(&idx, fi, off) };
-        let mut lis: HashMap<usize, Option<LineIndex>> = HashMap::new();
-        let out: Vec<Value> = locs
-            .iter()
-            .map(|l| {
-                let ((l0, c0), (l1, c1)) = ends(idx[l.file], lis.entry(l.file).or_default(), l.start, l.end);
-                json!({ "uri": ws[l.file].0, "range": { "start": {"line": l0, "character": c0}, "end": {"line": l1, "character": c1} } })
-            })
-            .collect();
-        if refs || out.len() != 1 { json!(out) } else { out.into_iter().next().unwrap() }
+        let fi = ws.iter().position(|(u, _)| u == uri || (want.is_some() && uri_path(u) == want))?;
+        let held = if ws[fi].1.slim { Some(self.load(&ws, fi)?) } else { None };
+        let mut idx: Vec<&FileIndex> = ws.iter().map(|x| x.1).collect();
+        if let Some(h) = held.as_ref() {
+            idx[fi] = h;
+        }
+        let off = offset(&idx[fi].text, line, ch)?;
+        Some(f(self, &ws, &idx, fi, off))
+    }
+
+    /// textDocument/definition (refs = false) と textDocument/references (refs = true)
+    fn navigate(&mut self, uri: &str, line: u32, ch: u32, refs: bool, decl: bool) -> Value {
+        self.at(uri, line, ch, |srv, ws, idx, fi, off| {
+            let load = |i: usize| srv.load(ws, i);
+            let locs: Vec<Loc> = if refs { navigate::references(idx, fi, off, decl, &load) } else { navigate::definition(idx, fi, off) };
+            let mut lis: HashMap<usize, Option<LineIndex>> = HashMap::new();
+            // (slim なファイルの中の位置は、読み直した本文で行と桁にする。定義の名前の位置は索引が覚えている)
+            let mut held: HashMap<usize, Rc<FileIndex>> = HashMap::new();
+            let out: Vec<Value> = locs
+                .iter()
+                .map(|l| {
+                    let mut f = idx[l.file];
+                    if f.slim && !f.lib && f.lib_pos(l.start).is_none() {
+                        if !held.contains_key(&l.file) {
+                            if let Some(r) = srv.load(ws, l.file) {
+                                held.insert(l.file, r);
+                            }
+                        }
+                        if let Some(r) = held.get(&l.file) {
+                            f = r;
+                        }
+                    }
+                    let ((l0, c0), (l1, c1)) = ends(f, lis.entry(l.file).or_default(), l.start, l.end);
+                    json!({ "uri": ws[l.file].0, "range": { "start": {"line": l0, "character": c0}, "end": {"line": l1, "character": c1} } })
+                })
+                .collect();
+            if refs || out.len() != 1 { json!(out) } else { out.into_iter().next().unwrap() }
+        })
+        .unwrap_or(Value::Null)
+    }
+
+    /// textDocument/hover: 定義のシグネチャ (markdown)
+    fn hover(&mut self, uri: &str, line: u32, ch: u32) -> Value {
+        self.at(uri, line, ch, |srv, ws, idx, fi, off| {
+            let load = |i: usize| srv.load(ws, i);
+            match navigate::hover(idx, fi, off, &load) {
+                Some(md) => json!({ "contents": { "kind": "markdown", "value": md } }),
+                None => Value::Null,
+            }
+        })
+        .unwrap_or(Value::Null)
+    }
+
+    /// textDocument/completion
+    fn complete(&mut self, uri: &str, line: u32, ch: u32) -> Value {
+        self.at(uri, line, ch, |_, _, idx, fi, off| {
+            let (items, cut) = navigate::complete(idx, fi, off);
+            let items: Vec<Value> = items
+                .into_iter()
+                .map(|it| {
+                    let kind = match (it.local, it.kind) {
+                        (true, _) => 6,
+                        (_, Some(k)) => completion_kind(k),
+                        (_, None) if it.detail == "keyword" => 14,
+                        _ => 7,
+                    };
+                    let mut o = json!({ "label": it.label, "kind": kind });
+                    if !it.detail.is_empty() {
+                        o["detail"] = json!(it.detail);
+                    }
+                    o
+                })
+                .collect();
+            json!({ "isIncomplete": cut, "items": items })
+        })
+        .unwrap_or(Value::Null)
+    }
+}
+
+/// シンボルの種類 → LSP の CompletionItemKind
+fn completion_kind(k: symbols::SymKind) -> u32 {
+    use symbols::SymKind as K;
+    match k {
+        K::Method => 2,
+        K::Function => 3,
+        K::Field => 5,
+        K::Module => 9,
+        K::Struct | K::Union | K::TypeAlias => 22,
+        K::Enum => 13,
+        K::Variant => 20,
+        K::Trait => 8,
+        K::Const | K::Static => 21,
+        K::Macro => 15,
+        _ => 1,
     }
 }
 
@@ -391,12 +537,30 @@ fn index_std() -> Vec<(String, FileIndex)> {
         let mut paths = vec![];
         rs_files(&dir, &mut paths, 0);
         for p in paths {
-            let Ok(text) = std::fs::read_to_string(&p) else { continue };
             let rel = p.strip_prefix(&lib).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+            // (内部の実装 (sys)・テスト・ほかの OS 向けのものは入れない: 定義の 4 割)
+            if skip_lib(&rel) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else { continue };
             out.push((path_uri(&p), FileIndex::library(text, navigate::module_of(&rel))));
         }
     }
     out
+}
+
+/// std の索引に入れないファイル (library からの相対パス)
+fn skip_lib(rel: &str) -> bool {
+    let parts: Vec<&str> = rel.split('/').collect();
+    if parts.iter().any(|p| matches!(*p, "tests" | "benches" | "sys" | "sys_common")) {
+        return true;
+    }
+    // std/src/os/<os>/: 使う OS (unix / linux) と共通のものだけ
+    if parts.len() > 4 && parts[0] == "std" && parts[2] == "os" {
+        let keep = if cfg!(target_os = "linux") { ["unix", "linux", "fd", "raw", "net"] } else { ["unix", "fd", "raw", "net", "windows"] };
+        return !keep.contains(&parts[3]);
+    }
+    false
 }
 
 /// (行, UTF-16 の桁) → byte 位置
@@ -417,7 +581,7 @@ fn offset(text: &str, line: u32, ch: u32) -> Option<usize> {
 
 /// f の a..b の両端の (行, UTF-16 の桁)。ライブラリのファイルは本文を持たないので、索引が先に計算したもの
 fn ends(f: &FileIndex, li: &mut Option<LineIndex>, a: usize, b: usize) -> ((u32, u32), (u32, u32)) {
-    if f.lib {
+    if f.slim {
         return (f.lib_pos(a).unwrap_or((0, 0)), f.lib_pos(b).unwrap_or((0, 0)));
     }
     let li = li.get_or_insert_with(|| LineIndex::new(&f.text));
