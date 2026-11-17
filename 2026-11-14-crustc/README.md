@@ -19,13 +19,13 @@ Cranelift (既定) か自前の minclif でコード生成する。crustc 自身
 | crate | 中身 | 依存 |
 |---|---|---|
 | `crates/base` (`crustc-base`) | fxhash (FxMap / FxSet)・key (キャッシュのキー)・prof (段ごとの時間) | なし |
-| `crates/syntax` (`crustc-syntax`) | front (前処理 → アイテムへの分割 (差分) → prelude を付ける、の流れと編集をまたぐ記憶 FrontMemo) / lexer / parse (自前の構文木) / cfg / macros / ctors / prep (前処理の差分) / srcmap / stub / types (要約の型)・types_enc / enc (直列化) / ast_types / ast_closure / ast_summary (アイテムの要約) / prelude (選択と prelude_lib.rs.in、build.rs) | base、proc-macro2 |
+| `crates/syntax` (`crustc-syntax`) | front (前処理 → アイテムへの分割 (差分) → prelude を付ける、の流れと編集をまたぐ記憶 FrontMemo) / lexer / parse (自前の構文木) / cfg / macros / ctors / prep (前処理の差分) / srcmap / stub / symbols (LSP のシンボル) / types (要約の型)・types_enc / enc (直列化) / ast_types / ast_closure / ast_summary (アイテムの要約) / prelude (選択と prelude_lib.rs.in、build.rs) | base、proc-macro2 |
 | `crates/sema` (`crustc-sema`) | program (名前・型・トレイト・impl の表、インスタンス) / solver / ast_infer (型推論) / ast_consteval | syntax |
 | `crates/ir` (`crustc-ir`) | 命令の列の型 (Type / Value / Block / Op …) と、命令を記録するだけの Recorder (値の型を覚える) | なし |
 | `crates/typeck` (`crustc-typeck`) | acg (構文木 → 命令の列の記録。型の検査はここで出る) / cache2 (Blob の直列化) | sema、ir、proc-macro2 |
 | `crates/codegen` (`crustc-codegen`) | lower (記録を minclif に組み立て直して機械語にする。Cranelift なら crustc-clif に渡す) / link | typeck、minclif |
 | `crates/core` (`crustc-core`) | driver2 (Session2: 解析・check・キャッシュ) と、feature `build` (既定) の driver2/build.rs (機械語・fork の並列化・オブジェクト・リンク・ワークスペース)。下の層を公開し直す | typeck、(build なら) codegen |
-| `crates/lsp` (`crustc-lsp`) | LSP サーバ (診断。driver2 の check を使う) | core (build なし)、serde_json |
+| `crates/lsp` (`crustc-lsp`) | LSP サーバ (診断は driver2 の check、documentSymbol / workspace/symbol は syntax の symbols) | core (build なし)、serde_json |
 | `crates/minclif` | Cranelift に似た API の小さな x86-64 バックエンド (レジスタ割り当て・スタックの struct のフィールドの変数化・ELF の .o)。`from_recording` で記録を組み立て直す | ir |
 | `crates/clif` (`crustc-clif`) | driver2 の Cranelift バックエンド: minclif が組み立てた命令の列を Cranelift の IR にしてコンパイルする | minclif、cranelift |
 | `.` (`crustc`) | CLI と、上のものの再輸出 (テスト・ベンチ。`crustc::lsp` は crustc-lsp) | 上のもの |
@@ -1702,6 +1702,24 @@ check は毎回、全関数 (compiler_main.rs で 9115) のキャッシュのキ
 
 残り (didChange 194 ms): 前処理 30 ms、参照 29 ms、Program 17 ms、要約 9 ms、prelude の選択 7 ms、split 6 ms、
 ほか (診断の JSON、cfg の評価など) 約 60 ms。
+
+### LSP のシンボル検索 (2026-11-17)
+
+`textDocument/documentSymbol` (ファイルのアウトライン) と `workspace/symbol` (名前で探す) に対応した。
+
+- シンボルは crustc-syntax の `symbols` で、字句の列から読む (構文木を作らない)。編集の途中で構文が壊れていても、読める所
+  までは出す (本体の `{` は波括弧だけで対応を取り、閉じていなければ次の字下げなしのアイテムの前で切る)。位置は
+  エディタのテキストそのもの (前処理の前) の UTF-16 の桁。
+- 出すもの: mod / struct / enum / union / trait / impl (`impl Tr for S<T>` の名前) / fn (impl・trait の中は Method) / const /
+  static / type / macro_rules!、struct とバリアントのフィールド、enum のバリアント、extern ブロックの中の宣言。detail に
+  fn のシグネチャやフィールドの型。関数の本体の中は読まない。
+- workspace/symbol は、開いているドキュメントと、initialize の rootUri の下の .rs ファイル (隠しディレクトリ・target・out・
+  node_modules を除く) から探す。開いていないファイルは更新時刻と大きさで覚え、変わったものだけ読み直す。
+- 合い方の順: 同じ → 前方一致 → 語の頭からの部分一致 → 部分一致 → 文字の順に含む (`nrm` → `norm`)。大文字小文字は区別しない。
+  256 個まで。containerName は囲む mod / impl / trait。
+- 速さ (このディレクトリをワークスペースにして): 1 回目 76 ms (261 ファイルを読む)、2 回目から 3 ms。
+  compiler_main.rs (2.1 MB) のシンボル 2854 個を読むのに 40 ms (結果はドキュメントの本文が変わるまで覚える)。
+- tests/lsp.rs の symbols、crates/syntax/src/symbols.rs の単体テスト。
 
 ### 途中で分かったこと
 
