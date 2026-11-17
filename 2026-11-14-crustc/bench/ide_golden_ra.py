@@ -80,6 +80,9 @@ def main():
                 print(f"def  {f}:{li}:{col} {name}: crustc {d} / ra {rd}")
         rf = (s.request("textDocument/references", dict(p, context={"includeDeclaration": True}), timeout=60) or {}).get("result")
         rn = len(rf) if isinstance(rf, list) else 0
+        if os.environ.get("SHOW") == f"{f}:{li}:{col}":
+            for x in rf or []:
+                print("  ra ref", x["uri"].rsplit("/", 1)[-1], x["range"]["start"]["line"] + 1, x["range"]["start"]["character"] + 1)
         if rn:
             st["refs"][1] += 1
             if rn == n:

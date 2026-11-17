@@ -172,7 +172,8 @@ fn nav_dump(fx: &Fx) -> String {
             let r = navigate::references(&ws, i, a, true, &load);
             let r2 = navigate::references(&ws, i, b, false, &load);
             let h = navigate::hover(&ws, i, a, &load).map(|h| esc(&h)).unwrap_or_else(|| "-".into());
-            let key = d.first().map(|l| fx.loc(l)).unwrap_or_else(|| format!("{}@{a}", fx.names[i]));
+            // (参照の一覧は行き先ごとに一度だけ。行き先のない組み込みの型は名前ごとに)
+            let key = d.first().map(|l| fx.loc(l)).unwrap_or_else(|| name.to_string());
             let _ = write!(out, "{} {name} -> {} | refs {}/{}", fx.lc(i, a), fx.locs(&d), r.len(), r2.len());
             if listed.insert(key) && !r.is_empty() {
                 let _ = write!(out, " [{}]", fx.locs(&r));
