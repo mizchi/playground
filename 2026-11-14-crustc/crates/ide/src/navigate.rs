@@ -71,6 +71,10 @@ pub struct FileIndex {
     pub slim: bool,
     /// (self 型の頭, trait の頭): `impl Tr for S` と `#[derive(Tr)] struct S`
     pub impls: Vec<(String, String)>,
+    /// cfg で外れたアイテムの byte 範囲 (apply_cfg で決める。中の定義は defs から除く)
+    inactive: Vec<(usize, usize)>,
+    /// apply_cfg に渡した有効な feature (読み直したときにもう一度当てる)
+    features: Option<Vec<String>>,
     /// slim のとき: 出てくる識別子の名前のハッシュ (整列済み。参照を探すときに読み直すファイルを選ぶ)
     names: Vec<u64>,
 }
@@ -151,7 +155,7 @@ impl FileIndex {
                 idents.entry(text[t.1 as usize..t.2 as usize].to_string()).or_default().push(i as u32);
             }
         }
-        let mut f = FileIndex { text, lib: false, in_src: true, krate: 0, module, defs, toks, idents, uses: vec![], use_at: vec![], macros: vec![], slim: false, names: vec![], impls: vec![] };
+        let mut f = FileIndex { text, lib: false, in_src: true, krate: 0, module, defs, toks, idents, uses: vec![], use_at: vec![], macros: vec![], slim: false, names: vec![], impls: vec![], inactive: vec![], features: None };
         (f.uses, f.use_at) = f.collect_uses(false).into_iter().map(|(a, b, c)| ((a, b), c)).unzip();
         f.macros = f.macro_bodies();
         f.impls = f.collect_impls();
@@ -270,7 +274,152 @@ impl FileIndex {
         f.lib = self.lib;
         f.in_src = self.in_src;
         f.krate = self.krate;
+        if let Some(fs) = &self.features {
+            f.apply_cfg(fs.clone());
+        }
         f
+    }
+
+    /// `#[cfg(..)]` で外れるアイテムを除く (features: そのクレートで有効な feature)。slim にする前に呼ぶ。
+    /// 分かるのは feature = ".." / test / debug_assertions / unix / windows / target_os と all / any / not。ほかは成り立つとする
+    pub fn apply_cfg(&mut self, features: Vec<String>) {
+        if self.toks.is_empty() && !self.text.is_empty() {
+            return;
+        }
+        let mut inactive: Vec<(usize, usize)> = vec![];
+        for d in &self.defs {
+            if inactive.iter().any(|&(a, b)| a <= d.item_start && d.item_end <= b) {
+                continue;
+            }
+            // (アイテムの始まりから名前までの属性)
+            let a = self.toks.partition_point(|t| (t.1 as usize) < d.item_start);
+            let e = self.toks.partition_point(|t| (t.1 as usize) < d.start);
+            let mut k = a;
+            while k + 3 < e {
+                if self.sym(k, b'#') && self.sym(k + 1, b'[') && self.tok(k + 2) == "cfg" && self.sym(k + 3, b'(') {
+                    let mut j = k + 4;
+                    if !self.cfg_pred(&mut j, &features) {
+                        inactive.push((d.item_start, d.item_end));
+                        break;
+                    }
+                }
+                k += 1;
+            }
+        }
+        if !inactive.is_empty() {
+            self.defs.retain(|d| !inactive.iter().any(|&(a, b)| a <= d.item_start && d.item_end <= b));
+            self.impls = self.collect_impls();
+        }
+        self.inactive = inactive;
+        self.features = Some(features);
+    }
+
+    /// cfg の述語 (トークン *j から。読んだ後へ進める)
+    fn cfg_pred(&self, j: &mut usize, fs: &[String]) -> bool {
+        if !self.ident(*j) {
+            return true;
+        }
+        let w = self.tok(*j).to_string();
+        *j += 1;
+        if self.sym(*j, b'(') {
+            *j += 1;
+            let mut vals = vec![];
+            while *j < self.toks.len() && !self.sym(*j, b')') {
+                vals.push(self.cfg_pred(j, fs));
+                if self.sym(*j, b',') {
+                    *j += 1;
+                }
+            }
+            *j += 1;
+            return match w.as_str() {
+                "all" => vals.iter().all(|&v| v),
+                "any" => vals.iter().any(|&v| v),
+                "not" => !vals.first().copied().unwrap_or(true),
+                _ => true,
+            };
+        }
+        if self.sym(*j, b'=') && *j + 1 < self.toks.len() && self.toks[*j + 1].0 == 2 {
+            let v = self.tok(*j + 1).trim_matches('"').to_string();
+            *j += 2;
+            return match w.as_str() {
+                "feature" => fs.contains(&v),
+                "target_os" => v == std::env::consts::OS,
+                "target_family" => v == std::env::consts::FAMILY,
+                _ => true,
+            };
+        }
+        match w.as_str() {
+            "unix" => cfg!(unix),
+            "windows" => cfg!(windows),
+            "miri" => false,
+            _ => true,
+        }
+    }
+
+    fn in_inactive(&self, at: usize) -> bool {
+        self.inactive.iter().any(|&(a, b)| a <= at && at < b)
+    }
+
+    /// トークン k が束縛のパターンの中の名前か (`let (a, b) =` / `for (i, x) in` / `if let Some(x) =` / `|a, b|`)
+    fn pat_binding(&self, k: usize) -> bool {
+        let w = self.tok(k);
+        if !w.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') || PRIMS.contains(&w) || matches!(w, "self" | "mut" | "ref") {
+            return false;
+        }
+        if self.sym(k + 1, b'(') || self.sym(k + 1, b'!') || (self.sym(k + 1, b':') && self.sym(k + 2, b':')) || self.after_path(k) || (k > 0 && self.sym(k - 1, b'.')) {
+            return false;
+        }
+        let mut j = k;
+        for _ in 0..64 {
+            if j == 0 {
+                return false;
+            }
+            j -= 1;
+            if self.ident(j) {
+                match self.tok(j) {
+                    "let" | "for" => return true,
+                    "in" | "if" | "match" | "return" | "else" | "while" | "fn" | "move" | "as" => return false,
+                    _ => continue,
+                }
+            }
+            if self.sym(j, b'|') {
+                return self.closure_start(j) && !(j > 0 && self.sym(j - 1, b'|'));
+            }
+            if self.toks[j].0 == 1 && matches!(self.text.as_bytes()[self.toks[j].1 as usize], b',' | b'(' | b')' | b'[' | b']' | b'&' | b'{' | b'}' | b'@') {
+                continue;
+            }
+            // (`Foo::Bar(x)` の `::`)
+            if self.sym(j, b':') && j >= 1 && self.sym(j - 1, b':') {
+                continue;
+            }
+            if self.sym(j, b':') && j + 1 < self.toks.len() && self.sym(j + 1, b':') {
+                continue;
+            }
+            return false;
+        }
+        false
+    }
+
+    /// トークン k が関数の引数の名前か (`fn f(a: T, mut b: U)`)
+    fn fn_param(&self, k: usize) -> bool {
+        if !(self.sym(k + 1, b':') && !self.sym(k + 2, b':')) || k == 0 || !(self.sym(k - 1, b'(') || self.sym(k - 1, b',') || self.tok(k - 1) == "mut") {
+            return false;
+        }
+        let Some(f) = self.enclosing_fn(self.toks[k].1 as usize) else { return false };
+        // (本体の `{` より前)
+        let mut j = self.toks.partition_point(|t| (t.1 as usize) < f.start);
+        let mut d = 0;
+        while j < self.toks.len() && j < k {
+            if self.sym(j, b'(') || self.sym(j, b'[') {
+                d += 1;
+            } else if self.sym(j, b')') || self.sym(j, b']') {
+                d -= 1;
+            } else if d == 0 && self.sym(j, b'{') {
+                return false;
+            }
+            j += 1;
+        }
+        true
     }
 
     /// name の識別子が出てくるかもしれないか (slim でなければ名前の表で、slim ならハッシュで)
@@ -836,6 +985,10 @@ fn def_at(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
     let Some(k) = f.tok_at(off) else { return vec![] };
     let name = f.tok(k).to_string();
     let start = f.toks[k].1 as usize;
+    // (cfg で外れたコードの中は答えない: rust-analyzer と同じ)
+    if f.in_inactive(start) {
+        return vec![];
+    }
     // (組み込みの型には定義がない)
     if PRIMS.contains(&name.as_str()) {
         return vec![];
@@ -886,9 +1039,15 @@ fn def_at(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
             let (qs, nc) = owner_split(ws, file, &q);
             let c: Vec<(usize, &Def)> = all().filter(|(_, d)| d.name == name && (qs.contains(&d.owner) || (d.owner.is_empty() && d.module.last() == Some(&q)))).collect();
             let c = prefer_concrete(c, &qs[..nc]);
-            // (見つからない: `use std::sync::Mutex` のように再エクスポートされた名前。下の use でたどる)
+            // (見つからない: `use std::sync::Mutex` のように再エクスポートされた名前なら、下の use でたどる。
+            // Q が知らない名前 (`syn::Pat` / `Delimiter::None` の外部クレートのもの) なら答えない)
             if !c.is_empty() {
                 return prefer_ws(ws, c, file);
+            }
+            let known = ws.iter().any(|w| w.module.contains(&q) || w.defs.iter().any(|d| d.name == q && matches!(d.kind, SymKind::Module | SymKind::Struct | SymKind::Enum | SymKind::Trait | SymKind::TypeAlias | SymKind::Union)))
+                || matches!(q.as_str(), "std" | "core" | "alloc");
+            if !known {
+                return vec![];
             }
         }
     }
@@ -912,6 +1071,10 @@ fn def_at(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
         && !f.sym(k + 1, b'{')
         && !(f.sym(k + 1, b':') && f.sym(k + 2, b':'))
     {
+        return vec![Loc { file, start, end: (f.toks[k].2 as usize) }];
+    }
+    // (パターン・引数の中の束縛の名前はそれ自身: `let (a, b)` / `fn f(x: T)`)
+    if f.pat_binding(k) || f.fn_param(k) {
         return vec![Loc { file, start, end: (f.toks[k].2 as usize) }];
     }
     // ローカル
@@ -1017,7 +1180,12 @@ fn reexport(ws: &[&FileIndex], file: usize, m: &[String], name: &str, cands: &[(
 pub fn references(ws: &[&FileIndex], file: usize, off: usize, include_decl: bool, load: Load) -> Vec<Loc> {
     clear_memo();
     let d = def_at(ws, file, off);
-    let Some(&target) = d.first() else { return vec![] };
+    let Some(&target) = d.first() else {
+        if ws[file].tok_at(off).is_some_and(|k| ws[file].in_inactive(ws[file].toks[k].1 as usize)) {
+            return vec![];
+        }
+        return prim_refs(ws, file, off, load);
+    };
     let tf = ws[target.file];
     let name = match tf.defs.iter().find(|x| x.start == target.start) {
         Some(d) if tf.slim => d.name.as_str(),
@@ -1030,11 +1198,13 @@ pub fn references(ws: &[&FileIndex], file: usize, off: usize, include_decl: bool
     if include_decl && tf.lib {
         out.push(target);
     }
+    // (型なら、その impl の中の `Self` も参照: rust-analyzer と同じ)
+    let is_type = tf.defs.iter().any(|x| x.start == target.start && matches!(x.kind, SymKind::Struct | SymKind::Enum | SymKind::Union | SymKind::TypeAlias));
     for (i, &w0) in ws.iter().enumerate() {
         if is_local && i != target.file {
             continue;
         }
-        if w0.lib || !w0.may_have(name) {
+        if w0.lib || !(w0.may_have(name) || (is_type && w0.may_have("Self"))) {
             continue;
         }
         // (メモリから外したファイル: 読み直す。そのファイルの中の識別子の解決には、読み直したものを使う)
@@ -1049,11 +1219,13 @@ pub fn references(ws: &[&FileIndex], file: usize, off: usize, include_decl: bool
         } else {
             (w0, ws)
         };
-        let Some(ks) = w.idents.get(name) else { continue };
-        for &k in ks {
+        let none: Vec<u32> = vec![];
+        let ks = w.idents.get(name).unwrap_or(&none);
+        let selfs = if is_type { w.idents.get("Self").unwrap_or(&none) } else { &none };
+        for &k in ks.iter().chain(selfs.iter()) {
             let at = w.toks[k as usize].1 as usize;
-            // (macro_rules! の本体の中は名前を解決しない: rust-analyzer と同じ)
-            if w.in_macro_body(at) {
+            // (macro_rules! の本体と、cfg で外れたアイテムの中は名前を解決しない: rust-analyzer と同じ)
+            if w.in_macro_body(at) || w.in_inactive(at) {
                 continue;
             }
             if !include_decl && i == target.file && at == target.start {
@@ -1066,6 +1238,46 @@ pub fn references(ws: &[&FileIndex], file: usize, off: usize, include_decl: bool
             if def_at(wsx, i, at).first() == Some(&target) {
                 out.push(Loc { file: i, start: at, end: (w.toks[k as usize].2 as usize) });
             }
+        }
+    }
+    out
+}
+
+/// 組み込みの型 (`u8` など) の参照: ワークスペースの同じ名前の識別子のうち、ほかの定義に解決されないもの
+fn prim_refs(ws: &[&FileIndex], file: usize, off: usize, load: Load) -> Vec<Loc> {
+    let f = ws[file];
+    let Some(k) = f.tok_at(off) else { return vec![] };
+    let name = f.tok(k).to_string();
+    if !PRIMS.contains(&name.as_str()) {
+        return vec![];
+    }
+    let mut out = vec![];
+    for (i, &w0) in ws.iter().enumerate() {
+        if w0.lib || !w0.may_have(&name) {
+            continue;
+        }
+        let held;
+        let w: &FileIndex = if w0.slim {
+            let Some(r) = load(i) else { continue };
+            held = r;
+            &held
+        } else {
+            w0
+        };
+        let Some(ks) = w.idents.get(&name) else { continue };
+        for &k in ks {
+            let k = k as usize;
+            let at = w.toks[k].1 as usize;
+            // (メソッド・フィールドの名前 `x.u8` やマクロの本体の中は除く)
+            // (`0u8` の接尾辞も除く: 数のすぐ後ろ)
+            if w.in_macro_body(at) || w.in_inactive(at) || (k > 0 && (w.sym(k - 1, b'.') || (w.toks[k - 1].2 as usize == at && w.text.as_bytes()[w.toks[k - 1].1 as usize].is_ascii_digit()))) {
+                continue;
+            }
+            // (同じ名前の定義 `fn u8(..)` の名前)
+            if w.defs.iter().any(|d| d.start == at) {
+                continue;
+            }
+            out.push(Loc { file: i, start: at, end: w.toks[k].2 as usize });
         }
     }
     out
@@ -1988,5 +2200,42 @@ mod tests {
         // (定義・use・呼び出し: rust-analyzer と同じく use も参照)
         assert_eq!(references(&ws, 0, 7, true, &|_| None).len(), 3);
         assert_eq!(module_of("crates/x/src/a/mod.rs"), vec!["a".to_string()]);
+    }
+
+    /// 参照の数え方を rust-analyzer に合わせたところ: impl の中の `Self`、パターン・引数の束縛、知らない外部のパス、
+    /// cfg で外れたアイテム、組み込みの型
+    #[test]
+    fn references_like_rust_analyzer() {
+        let src = "fn concrete() {}
+struct P { x: u8 }
+impl P {
+    fn new() -> Self { Self { x: 0u8 } }
+}
+                   fn f(concrete: bool) {
+    let (a, concrete) = (1, 2);
+    let _ = syn::P;
+    let _ = Delimiter::None;
+}
+                   #[cfg(feature = \"off\")]
+fn g() -> P { P::new() }
+#[cfg(not(feature = \"off\"))]
+fn g() -> u8 { 1 }
+                   fn u8() {}
+";
+        let mut fi = FileIndex::new(src.to_string(), vec![]);
+        fi.apply_cfg(vec![]);
+        let ws = [&fi];
+        let no = &|_: usize| None;
+        // P: 定義・impl の名前・`Self` 2 つ (cfg で外れた g の中の 2 つは数えない。`syn::P` は外部のもの)
+        assert_eq!(references(&ws, 0, at(src, "P {", 0), true, no).len(), 4);
+        // `fn f(concrete: ..)` と `let (a, concrete)` は束縛そのもの: 関数 concrete の参照ではない
+        assert_eq!(references(&ws, 0, 3, true, no).len(), 1);
+        assert_eq!(def_text(&ws, 0, at(src, "concrete) =", 0)).map(|x| x.2), Some(at(src, "concrete) =", 0)));
+        // `Delimiter::None` は Option の None ではない (Delimiter を知らない)
+        assert!(definition(&ws, 0, at(src, "None", 0)).is_empty());
+        // cfg で外れた g には答えない
+        assert!(definition(&ws, 0, at(src, "new()", 1)).is_empty());
+        // u8: 型の位置だけ (`0u8` の接尾辞と `fn u8` の名前は除く)
+        assert_eq!(references(&ws, 0, at(src, "u8 }", 0), true, no).len(), 2);
     }
 }
