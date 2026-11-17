@@ -1,0 +1,7 @@
+[package]
+name = "crustc-ir"
+version = "0.1.0"
+edition = "2024"
+description = "crustc の命令の列 (IR) の型と、命令を記録するだけの Recorder (バックエンドに依存しない)"
+
+[dependencies]

@@ -1,0 +1,10 @@
+[package]
+name = "crustc-typeck"
+version = "0.1.0"
+edition = "2024"
+description = "crustc の型の検査とコード生成の前半: acg (構文木 → 命令の列の記録。型のエラーはここで出る)、Blob の直列化 (cache2)。バックエンド (minclif / Cranelift) に依存しない"
+
+[dependencies]
+crustc-sema = { path = "../sema" }
+crustc-ir = { path = "../ir" }
+proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }

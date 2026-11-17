@@ -2,7 +2,7 @@ use super::*;
 use crate::parse::{Block as PBlock, Expr, Pat, Path};
 use crate::types::{Ty, intern};
 use crate::acg::clif::{AbiParam, Signature, TrapCode, types};
-use crate::minclif::{Block, IntCC, StackSlot, Value};
+use crate::ir::{Block, IntCC, StackSlot, Value};
 use lit::Lit;
 
 /// 式がこの種類のリテラルか

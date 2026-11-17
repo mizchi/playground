@@ -2,7 +2,7 @@
 //! driver2 (syn・Cranelift を使わないドライバ) も使え、crustc 自身でもコンパイルできる。
 
 use crate::enc::{Enc, Rd};
-use crate::program::TYS;
+use crate::types::TYS;
 use crate::types::*;
 
 impl Enc for TySyn {

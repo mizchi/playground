@@ -13,16 +13,34 @@ Cranelift (既定) か自前の minclif でコード生成する。crustc 自身
 
 ### crate の構成 (このディレクトリの Cargo ワークスペース)
 
-| crate | 中身 | 外部の依存 |
+層は base → syntax → sema → typeck → codegen → core (driver) の順。syntax・sema・typeck がコンパイラと LSP・解析で
+共有する部分で、LSP は core を feature `build` なしで使い、バックエンド (codegen / minclif / Cranelift) に依存しない。
+
+| crate | 中身 | 依存 |
 |---|---|---|
-| `crates/minclif` | Cranelift に似た API の小さな x86-64 バックエンド (命令の記録・レジスタ割り当て・スタックの struct のフィールドの変数化・ELF の .o) | なし |
-| `crates/core` (`crustc-core`) | lexer / parse / macros / prelude / ast_* (要約・型推論) / program / acg (コード生成) / driver2 (キャッシュ・fork の並列化・複数クレート・リンク) | proc-macro2 だけ |
-| `crates/clif` (`crustc-clif`) | driver2 の Cranelift バックエンド: minclif が記録した命令の列を Cranelift の IR にしてコンパイルする | cranelift |
-| `.` (`crustc`) | CLI・LSP サーバ (`src/lsp.rs`) と、上のものの再輸出 (テスト・ベンチ) | serde_json |
+| `crates/base` (`crustc-base`) | fxhash (FxMap / FxSet)・key (キャッシュのキー)・prof (段ごとの時間) | なし |
+| `crates/syntax` (`crustc-syntax`) | front (前処理 → アイテムへの分割 (差分) → prelude を付ける、の流れと編集をまたぐ記憶 FrontMemo) / lexer / parse (自前の構文木) / cfg / macros / ctors / prep (前処理の差分) / srcmap / stub / types (要約の型)・types_enc / enc (直列化) / ast_types / ast_closure / ast_summary (アイテムの要約) / prelude (選択と prelude_lib.rs.in、build.rs) | base、proc-macro2 |
+| `crates/sema` (`crustc-sema`) | program (名前・型・トレイト・impl の表、インスタンス) / solver / ast_infer (型推論) / ast_consteval | syntax |
+| `crates/ir` (`crustc-ir`) | 命令の列の型 (Type / Value / Block / Op …) と、命令を記録するだけの Recorder (値の型を覚える) | なし |
+| `crates/typeck` (`crustc-typeck`) | acg (構文木 → 命令の列の記録。型の検査はここで出る) / cache2 (Blob の直列化) | sema、ir、proc-macro2 |
+| `crates/codegen` (`crustc-codegen`) | lower (記録を minclif に組み立て直して機械語にする。Cranelift なら crustc-clif に渡す) / link | typeck、minclif |
+| `crates/core` (`crustc-core`) | driver2 (Session2: 解析・check・キャッシュ) と、feature `build` (既定) の driver2/build.rs (機械語・fork の並列化・オブジェクト・リンク・ワークスペース)。下の層を公開し直す | typeck、(build なら) codegen |
+| `crates/lsp` (`crustc-lsp`) | LSP サーバ (診断。driver2 の check を使う) | core (build なし)、serde_json |
+| `crates/minclif` | Cranelift に似た API の小さな x86-64 バックエンド (レジスタ割り当て・スタックの struct のフィールドの変数化・ELF の .o)。`from_recording` で記録を組み立て直す | ir |
+| `crates/clif` (`crustc-clif`) | driver2 の Cranelift バックエンド: minclif が組み立てた命令の列を Cranelift の IR にしてコンパイルする | minclif、cranelift |
+| `.` (`crustc`) | CLI と、上のものの再輸出 (テスト・ベンチ。`crustc::lsp` は crustc-lsp) | 上のもの |
+
+各 crate の lib.rs は下の層のモジュールを公開し直す (`pub use crustc_syntax::*;` など)。ファイルの中は `crate::lexer` の
+ように書き、どの crate に置いても、セルフホストで全部を 1 つのクレートのモジュールに並べても同じパスで引ける。
+
+型の検査とバックエンドの分け方: acg は命令を crustc_ir::Recorder に記録するだけ (値・ブロックなどに番号を振り、値の型を
+minclif と同じ決め方で覚える)。check はそこで止め、ビルドは codegen の lower が記録を minclif の FunctionBuilder に同じ順で
+組み立て直してから機械語にする (minclif は命令の中で値やスロットを作るので番号は組み立て直す側で振り直す。
+`CRUSTC_IR_VERIFY=1` で値の型が記録と同じかを確かめる)。出力の機械語は分ける前とバイト単位で同じ。
 
 経路は **driver2** だけ (`crustc x.rs` は Cranelift、`--backend=minclif` で minclif)。build / check / LSP のすべてが driver2 を使う。
 最初のドライバ (syn + Cranelift、`crates/legacy`) は 2026-11-16 に削除した (git の履歴にある)。
-セルフホスト (tests/selfhost*.sh) は crustc-core と minclif のソースを 1 ファイルにまとめて crustc でコンパイルする。
+セルフホスト (tests/selfhost*.sh) は base / syntax / sema / ir / typeck / codegen / core と minclif のソースを 1 ファイルにまとめて crustc でコンパイルする。
 
 ## 現状（2026-11-15、`python3 bench/vs_rustc.py`）
 
@@ -179,16 +197,16 @@ bench/regress.sh
 
 | ベンチ（`benches/compile.rs`、N=1000） | 何を見るか | 現在値 |
 |---|---|---:|
-| `lsp/did_change_1fn` | LSP 応答性：1 関数編集の didChange から publishDiagnostics まで | 10.0 ms |
-| `lsp/did_change_noop` | 内容が同じ didChange（保存など） | 0.28 ms |
-| `cold/lsp_did_open` | 初めて開いたとき（全関数を検査） | 166 ms |
+| `lsp/did_change_1fn` | LSP 応答性：1 関数編集の didChange から publishDiagnostics まで | 8.0 ms |
+| `lsp/did_change_noop` | 内容が同じ didChange（保存など） | 0.26 ms |
+| `cold/lsp_did_open` | 初めて開いたとき（全関数を検査） | 115 ms |
 | `build/noop` | 無変更ビルド（リンク省略） | 12.7 ms |
 | `build/edit_1fn` | 1 関数編集ビルド（リンク込み、wild） | 20.7 ms |
 | `cold/build` | キャッシュなしのビルド (Cranelift) | 188 ms |
 | `front/lex` | 字句解析だけ（no-op の下限） | 2.3 ms |
 
-(2026-11-16、driver2 に移した後の値。最初のドライバの check は型検査だけで 1 関数編集 3.9 ms / didOpen 41 ms だった。
-driver2 の check はコード生成までするので遅い: 型検査だけで止める経路は次の課題)
+(2026-11-17、check を型検査で止めた後の値。driver2 に移した直後は 10.0 ms / 0.28 ms / 166 ms だった。
+最初のドライバの check は型検査だけで 1 関数編集 3.9 ms / didOpen 41 ms だった)
 
 （値はマシンの状態で変わる。比べるときは同じ時間帯に、ベースラインのコミットと並べて測る。`build/edit_1fn` はリンク（この環境では ld.lld）が大半を占める）
 
@@ -674,16 +692,16 @@ src.rs ──srcmap (mod x; のファイル)──▶ macros (macro_rules!) ─�
 
 | 場所 | 役割 |
 |---|---|
-| `crates/core/src/lexer.rs` | トップレベルのアイテム分割と、正規化トークン列のハッシュ。`impl` はヘッダとメンバに分ける |
-| `crates/core/src/macros.rs` / `srcmap.rs` | macro_rules! の展開・include_str!、`mod x;` のファイルの読み込みと行の対応 |
-| `crates/core/src/parse.rs` / `ast_*.rs` | 自前の構文木・要約・型推論・クロージャ解析・定数評価 |
-| `crates/core/src/program.rs` | 全体の表 (シグネチャ・レイアウト・trait 実装・インスタンス) |
-| `crates/core/src/acg/` | 構文木から minclif の FunctionBuilder への 1 パスの lowering と型検査。-O で小さい関数をインライン展開 |
+| `crates/syntax/src/lexer.rs` | トップレベルのアイテム分割と、正規化トークン列のハッシュ。`impl` はヘッダとメンバに分ける |
+| `crates/syntax/src/macros.rs` / `srcmap.rs` | macro_rules! の展開・include_str!、`mod x;` のファイルの読み込みと行の対応 |
+| `crates/syntax/src/parse.rs` / `ast_*.rs` | 自前の構文木・要約・型推論・クロージャ解析・定数評価 |
+| `crates/sema/src/program.rs` | 全体の表 (シグネチャ・レイアウト・trait 実装・インスタンス) |
+| `crates/typeck/src/acg/` | 構文木から命令の列 (crustc_ir::Recorder) への 1 パスの lowering と型検査。-O で小さい関数をインライン展開 |
 | `crates/core/src/driver2.rs` / `cache2.rs` | `Session2`：キャッシュ (ディスク + メモリ)、build / check / ワークスペース、fork の並列化、.o の書き出し |
-| `crates/core/src/link.rs` | `cc -###` からリンク行を取り出して保存し、リンカを直接起動する |
+| `crates/codegen/src/link.rs` | `cc -###` からリンク行を取り出して保存し、リンカを直接起動する |
 | `crates/minclif` | 命令の記録・レジスタ割り当て・x86-64 の機械語・ELF の .o |
 | `crates/clif` | 記録した命令の列 → Cranelift の IR → 機械語 |
-| `src/lsp.rs` | 最小の LSP サーバ (ドキュメントごとに `Session2` を持ち、`check` の診断を返す) |
+| `crates/lsp/src/lib.rs` | 最小の LSP サーバ (ドキュメントごとに `Session2` を持ち、`check` の診断を返す) |
 | `src/main.rs` | CLI (build / check / lsp / ワークスペースの build) |
 
 ### インクリメンタル性の要点
@@ -1405,7 +1423,7 @@ rustc (lib を rlib にして `--extern`) と比べる: 出力が rustc -O と�
 実行時間・サイズ。対象は `cratebench/crates.txt` (名前・edition・feature)。
 
 足したもの:
-- `#[cfg(..)]` / `#[cfg_attr(..)]` / `cfg!(..)` の評価 (`crates/core/src/cfg.rs`。feature はワークスペースの `features=a,b`
+- `#[cfg(..)]` / `#[cfg_attr(..)]` / `cfg!(..)` の評価 (`crates/syntax/src/cfg.rs`。feature はワークスペースの `features=a,b`
   か `--features=`。x86-64 Linux の値・`debug_assertions` は -O でなければ真)。`extern crate x;` は消す
 - アイテム位置のマクロ呼び出しを `mod` / `impl` / `trait` の中でも展開する。`$x:expr` が式の終わりで止まる (`$($len:expr)+`)
 - 定数式: impl の関連 const (`i128::MAX_STR_LEN`)・`u128::MAX.ilog10()` などの整数のメソッド。`const _: () = ..;` は読み飛ばす
@@ -1491,7 +1509,7 @@ rustc-hash・cfg-if のために足したもの:
 最初は、使う側のクレートが推移的な依存のソース全体を毎回展開・解析し直していたので、依存が増えると cold と low-sig で cargo に
 並ばれた (100 クレートで cold 3718 ms (cargo 3250)、low-sig 1581 ms (cargo 1578)。解析の内訳はマクロの展開が 1.5 秒)。直したもの:
 - 依存するクレートのマクロの展開は 1 回: 各クレートは依存するクレートのマクロの定義だけを添えて自分の分だけ展開する
-- 使う側に渡すのはインターフェース (`crates/core/src/stub.rs`): 総称でない関数の本体を `{ loop {} }` にする (依存する
+- 使う側に渡すのはインターフェース (`crates/syntax/src/stub.rs`): 総称でない関数の本体を `{ loop {} }` にする (依存する
   クレート自身がコンパイルする)。総称関数・総称な impl・trait・`const fn`・`-> impl Trait`・`async fn` は残す。
   展開とインターフェースは `<名前>.prep` に保存する。`CRUSTC_NO_DEP_STUB=1` で前の動き
 - 並列にビルドする子プロセスが作ったキャッシュのエントリ (要約・関数の機械語) を親に返し、後の組のクレートが fork で引き継ぐ
@@ -1608,6 +1626,82 @@ Program を作り直している (クレートごとに選ぶ prelude が違う�
 - 調べるための環境変数: `CRUSTC_CLIF_STATS=1` (命令の種類ごとの数)、`CRUSTC_CLIF_DUMP=1` (IR)、`CRUSTC_CLIF_TIME=1`
   (関数ごとの compile の時間)。それぞれの変更は `CRUSTC_NO_FRESH` / `CRUSTC_NO_RET_DST` / `CRUSTC_CLIF_NO_REMAT` /
   `CRUSTC_CLIF_LATE_SEAL` / `CRUSTC_CLIF_NO_FOLD_BR` で切れる。
+
+### check を型検査で止めて LSP を速くする (2026-11-17)
+
+- check (`crustc check` と LSP) は、acg のコード生成 (型の検査はここで出る) までにして、機械語 (Cranelift / minclif) を作らない
+  (`Inline::check_only`)。検査済みの印は「要求した総称関数のインスタンスへの再配置だけを持つ空の Blob」で、ビルドの Blob と別の
+  キー (`CHECK_SALT`) に覚える (ビルドの Blob があればそれも検査済みとして使う)。`CRUSTC_CHECK_CODEGEN=1` で機械語まで作る。
+- prelude の選択 (`select_with`) がソースの全体を 80 回あまり `contains` で調べていたのを、アイテムごとに調べてアイテムの
+  ハッシュで覚える形にした (`PreludeScan`)。それまで `SelectCache` を呼ぶたびに作り直していて、アイテムごとの記憶が効いて
+  いなかったので Session2 に持たせた (`FrontMemo`)。
+- `lexer::split` を差分にした (`split_inc`): 前回の入力と結果を覚え、前後の変わっていない部分のアイテムはそのまま (後ろは位置と
+  行をずらして) 使い、間だけを split し直す。区切りは空白の後から始まるトップレベルのアイテム (impl / trait は丸ごと)。間の
+  終わりがコメント・文字列の途中かもしれないときと、split が失敗するときは全体を split する。tests/split_inc.rs は実際のソースに
+  乱数の編集を続けて加え、毎回全体の split と比べる。`CRUSTC_SPLIT_VERIFY=1` で毎回比べる、`CRUSTC_NO_SPLIT_INC=1` で切る。
+
+| | 前 | 後 |
+|---|---:|---:|
+| `crustc check` compiler_main.rs (38886 行) | 3.6 s | 1.6 s |
+| LSP didOpen / didChange、生成した 1000 関数 (17019 行、stdio 越し) | 135 / 12.2 ms | 122 / 9.6 ms |
+| LSP didOpen / didChange、compiler_main.rs (1 関数の編集) | 2.09 s / 523 ms | 1.63 s / 476 ms |
+| split (生成した 1000 関数の didChange) | 2.0 ms | 0.6 ms |
+
+残り (compiler_main.rs の didChange 476 ms の内訳): ファイル全体を書き換える前処理 (マクロの展開 97 ms・`mod` の平らにする 63 ms・
+入れ子のアイテムの移動 47 ms・コンストラクタの書き換え 33 ms。それぞれがファイル全体を字句解析し直す)、Program と参照 47 ms、
+全関数 (9115) のキャッシュのキーと読み戻し 100 ms。どれも全体を作り直しているので、次はアイテムごとの差分にする。
+
+### 前処理をアイテムごとの差分にする (2026-11-17)
+
+前処理 (thread_local! の展開・マクロの展開・`mod` を平らにする・入れ子のアイテムの移動・コンストラクタの書き換え) を
+`crates/syntax/src/prep.rs` にまとめ、編集をまたいでチャンクごとに覚えるようにした。
+
+- チャンク: アイテムの境界 (`mod` / `impl` / `trait` の中も) で切った行の範囲。チャンクに切るのも前回との差分
+  (前後の変わっていない部分の境界はそのまま、間だけを字句解析し直す)。
+- どの前処理も、ファイル全体から集めたもの (マクロの定義・タプル struct とバリアントの要素数・モジュールの木と `use`・入れ子の
+  アイテムの名前) を使ってトークンごとに書き換え、行の数を変えない。集めるものはアイテムの宣言にしか依らないので、関数の
+  本体の中の式と const / static の初期化式を消した「骨組み」から同じものが集まる (本体の中の入れ子のアイテム・`use`・
+  `macro_rules!`・ユーザのマクロの呼び出しは残す。残すもののない本体は括弧ごと消す)。
+- 骨組みの全体が前回と同じなら、変わっていないチャンクは前回の結果を使い、変わったチャンクだけを「ほかを骨組みにした
+  ソース」(compiler_main.rs で 2.1 MB → 0.31 MB) で前処理して行で切り出す。骨組みが変わったとき (宣言の編集)・括弧が
+  釣り合っていないとき・移したアイテムがチャンクをまたぐときは全体を前処理する。
+- 1 回目の呼び出しは全体を前処理するだけ (1 度しか前処理しないビルドでチャンクの記録を作らない)。
+- tests/prep_inc.rs: examples と crates/core/src のファイルを `mod` で束ねたものに乱数の編集 (本体の中と、どこでも) を
+  続けて加え、毎回全体の前処理と本文・桁のずれ・成否を比べる (差分の経路 156 回、全体の経路 364 回)。
+  `CRUSTC_PREP_VERIFY=1` で毎回比べる、`CRUSTC_NO_PREP_INC=1` で切る、`CRUSTC_PREP_LOG=1` で経路を出す。
+- 乱数の編集のテストで、壊れたソースで入れ子のアイテムの名前の変更が止まらず stack overflow になる hoist の不具合が
+  見つかったので直した (変えても同じならやり直さない、やり直しは 8 回まで)。
+
+| compiler_main.rs (38886 行) の 1 関数の編集 | 前 | 後 |
+|---|---:|---:|
+| 前処理 | 約 270 ms | 28 ms |
+| LSP didChange (stdio 越し) | 476 ms | 238 ms |
+
+残り (didChange 238 ms): 全関数 (9115) のキャッシュのキーと読み戻し 約 100 ms、参照 30 ms、Program 18 ms、要約 8 ms、
+split 6 ms、prelude の選択 7 ms。
+
+### check のキャッシュのキーと読み戻しを差分にする (2026-11-17)
+
+check は毎回、全関数 (compiler_main.rs で 9115) のキャッシュのキーを作り、キャッシュから読み戻して (要求していたインスタンスを
+要求し直して) いた。LSP のセッションでは前回の check の記録 (`ChkMemo`) を持ち、次の条件で使う。
+
+- 宣言の指紋 (`Analysis::iface_fp`): fn アイテムは要約 (シグネチャ・クロージャ) の符号のハッシュ、ほかのアイテムはテキストの
+  ハッシュを並べたもの。関数の本体だけの編集では変わらない。キーが参照するもの (参照先のシグネチャ・struct・const・
+  名前の表) はどれもこれで決まる。
+- 指紋が前回と同じなら、本体のアイテムのハッシュが同じ関数は検査済み (キーも読み戻しも要らない)。要求していたインスタンスは
+  名前で辿り、本体 (総称関数) のアイテムが変わったものだけを要求し直して検査する。検査に通らなかったものは毎回検査し直す。
+- 指紋が変わったら今までどおりキーとキャッシュで検査し、記録を作り直す。記録を作るのはキャッシュを使うセッション
+  (LSP) だけ (1 度だけの `crustc check` では作らない)。`CRUSTC_NO_CHECK_MEMO=1` で使わない。
+- tests/check.rs: examples の関数の本体に型エラーになる文・ならない文を足したり消したりを続け、毎回新しいセッションで
+  検査したものと診断を比べる。
+
+| compiler_main.rs の 1 関数の編集 | 前 | 後 |
+|---|---:|---:|
+| check (キーと読み戻し、検査) | 約 100 ms | 37 ms (検査し直すのは 13 関数: 編集した関数と、エラーのある関数) |
+| LSP didChange (stdio 越し) | 238 ms | 194 ms |
+
+残り (didChange 194 ms): 前処理 30 ms、参照 29 ms、Program 17 ms、要約 9 ms、prelude の選択 7 ms、split 6 ms、
+ほか (診断の JSON、cfg の評価など) 約 60 ms。
 
 ### 途中で分かったこと
 

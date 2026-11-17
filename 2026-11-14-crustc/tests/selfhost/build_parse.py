@@ -1,9 +1,9 @@
-"""crustc 自身の crates/core/src/parse.rs (syn を使わない Rust の構文解析) を 1 ファイルのプログラムにまとめる。
+"""crustc 自身の crates/syntax/src/parse.rs (syn を使わない Rust の構文解析) を 1 ファイルのプログラムにまとめる。
 usage: python3 tests/selfhost/build_parse.py > out/selfhost/parse_main.rs
 main は引数のファイルごとに構文解析し、節の数・アイテムの名前と関数のシグネチャを出す。"""
 
-parse = open("crates/core/src/parse.rs").read()
-print("""// 自動生成: tests/selfhost/build_parse.py (crustc の crates/core/src/parse.rs をそのまま含む)
+parse = open("crates/syntax/src/parse.rs").read()
+print("""// 自動生成: tests/selfhost/build_parse.py (crustc の crates/syntax/src/parse.rs をそのまま含む)
 mod parse {
 """ + parse + """}
 

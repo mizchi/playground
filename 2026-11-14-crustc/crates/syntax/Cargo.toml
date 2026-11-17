@@ -1,0 +1,10 @@
+[package]
+name = "crustc-syntax"
+version = "0.1.0"
+edition = "2024"
+description = "crustc の構文の層: 字句解析・構文木・cfg・マクロの展開などの前処理・アイテムの要約・prelude の選択"
+build = "build.rs"
+
+[dependencies]
+crustc-base = { path = "../base" }
+proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }

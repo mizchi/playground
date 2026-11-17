@@ -2368,26 +2368,7 @@ fn syn_holds_by_value(t: &TySyn, g: &str) -> bool {
     }
 }
 
-pub const TYS: [Ty; 18] = [
-    Ty::I8,
-    Ty::I16,
-    Ty::I32,
-    Ty::I64,
-    Ty::Isize,
-    Ty::U8,
-    Ty::U16,
-    Ty::U32,
-    Ty::U64,
-    Ty::Usize,
-    Ty::Bool,
-    Ty::Unit,
-    Ty::Never,
-    Ty::Char,
-    Ty::F32,
-    Ty::F64,
-    Ty::I128,
-    Ty::U128,
-];
+pub use crate::types::TYS;
 
 pub fn ty_code(t: Ty) -> u8 {
     TYS.iter().position(|&x| x == t).unwrap() as u8

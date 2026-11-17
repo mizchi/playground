@@ -3,7 +3,7 @@ use crate::parse::{Block, Expr, GArg, Pat, Path, Stmt};
 use crate::program::{FnSig, PPath, TyEnv};
 use crate::types::{Ty, intern};
 use crate::acg::clif::{TrapCode, types};
-use crate::minclif::{IntCC, Value};
+use crate::ir::{IntCC, Value};
 
 /// ラベルの名前 (syn の `l.ident` と同じく先頭の `'` を除く)
 pub(crate) fn label_name(l: &str) -> String {

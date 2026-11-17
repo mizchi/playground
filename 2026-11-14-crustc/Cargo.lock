@@ -317,11 +317,16 @@ dependencies = [
  "criterion",
  "crustc-clif",
  "crustc-core",
+ "crustc-lsp",
  "minclif",
  "proc-macro2",
  "serde_json",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "crustc-base"
+version = "0.1.0"
 
 [[package]]
 name = "crustc-clif"
@@ -334,10 +339,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "crustc-codegen"
+version = "0.1.0"
+dependencies = [
+ "crustc-typeck",
+ "minclif",
+]
+
+[[package]]
 name = "crustc-core"
 version = "0.1.0"
 dependencies = [
- "minclif",
+ "crustc-codegen",
+ "crustc-typeck",
+]
+
+[[package]]
+name = "crustc-ir"
+version = "0.1.0"
+
+[[package]]
+name = "crustc-lsp"
+version = "0.1.0"
+dependencies = [
+ "crustc-core",
+ "serde_json",
+]
+
+[[package]]
+name = "crustc-sema"
+version = "0.1.0"
+dependencies = [
+ "crustc-syntax",
+]
+
+[[package]]
+name = "crustc-syntax"
+version = "0.1.0"
+dependencies = [
+ "crustc-base",
+ "proc-macro2",
+]
+
+[[package]]
+name = "crustc-typeck"
+version = "0.1.0"
+dependencies = [
+ "crustc-ir",
+ "crustc-sema",
  "proc-macro2",
 ]
 
@@ -473,6 +522,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "minclif"
 version = "0.1.0"
+dependencies = [
+ "crustc-ir",
+]
 
 [[package]]
 name = "num-traits"

@@ -5,3 +5,4 @@ edition = "2024"
 description = "Cranelift に似た API の小さな x86-64 バックエンド (レジスタ割り当て・ELF の .o)。外部 crate に依存しない"
 
 [dependencies]
+crustc-ir = { path = "../ir" }

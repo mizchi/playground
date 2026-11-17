@@ -1,0 +1,8 @@
+[package]
+name = "crustc-sema"
+version = "0.1.0"
+edition = "2024"
+description = "crustc の意味の層: Program (名前・型・トレイトの表)、型推論、const の評価"
+
+[dependencies]
+crustc-syntax = { path = "../syntax" }

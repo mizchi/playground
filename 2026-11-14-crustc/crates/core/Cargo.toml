@@ -2,9 +2,13 @@
 name = "crustc-core"
 version = "0.1.0"
 edition = "2024"
-description = "crustc のフロントエンド (自前の lexer / parser / 型推論)・acg (コード生成)・driver2。syn と Cranelift に依存しない"
-build = "build.rs"
+description = "crustc のドライバ (driver2: 解析・check・キャッシュ。feature build でビルド・並列化・ワークスペース)。下の層を公開し直す。syn と Cranelift に依存しない"
+
+[features]
+# ビルド (機械語・オブジェクト・リンク)。LSP・解析は default-features = false で使い、バックエンドに依存しない
+default = ["build"]
+build = ["dep:crustc-codegen"]
 
 [dependencies]
-minclif = { path = "../minclif" }
-proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }
+crustc-typeck = { path = "../typeck" }
+crustc-codegen = { path = "../codegen", optional = true }

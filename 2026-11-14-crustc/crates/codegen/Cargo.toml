@@ -1,0 +1,9 @@
+[package]
+name = "crustc-codegen"
+version = "0.1.0"
+edition = "2024"
+description = "crustc のバックエンド側: 記録した命令の列を minclif / Cranelift で機械語にする (lower)、リンク"
+
+[dependencies]
+crustc-typeck = { path = "../typeck" }
+minclif = { path = "../minclif" }

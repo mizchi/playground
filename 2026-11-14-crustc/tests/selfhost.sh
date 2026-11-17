@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # セルフホストの確認: crustc 自身のソースの一部 (外部クレートに依存しないもの) を crustc でコンパイルし、
 # rustc でコンパイルしたものと同じ入力で同じ出力になるかを確かめる。
-#   lexer: crates/core/src/lexer.rs と crates/core/src/key.rs の KeyHasher (SipHash) → crustc 自身のソースを字句解析してアイテムとハッシュを出す
-#   prelude: crates/core/src/prelude.rs (prelude の項目を名前で選ぶ。lexer / fxhash / KeyHasher と、build.rs が作る表を含む)
+#   lexer: crates/syntax/src/lexer.rs と crates/base/src/key.rs の KeyHasher (SipHash) → crustc 自身のソースを字句解析してアイテムとハッシュを出す
+#   prelude: crates/syntax/src/prelude.rs (prelude の項目を名前で選ぶ。lexer / fxhash / KeyHasher と、build.rs が作る表を含む)
 #            → probe / examples をユーザのソースとして、選ばれた prelude の長さとハッシュを出す
-#   link:  crates/core/src/link.rs (リンカを探して直接起動する) と crates/core/src/testgen.rs → C の .o をリンクして実行する (std::path / process::Command)
-#   macros: crates/core/src/macros.rs (macro_rules! の展開と include_str!。proc_macro2 の代わりに tests/selfhost/mini_pm2.rs を付ける)
+#   link:  crates/codegen/src/link.rs (リンカを探して直接起動する) と crates/core/src/testgen.rs → C の .o をリンクして実行する (std::path / process::Command)
+#   macros: crates/syntax/src/macros.rs (macro_rules! の展開と include_str!。proc_macro2 の代わりに tests/selfhost/mini_pm2.rs を付ける)
 #           → probe / examples / src を展開して、結果の長さとハッシュを出す
-#   parse: crates/core/src/parse.rs (syn を使わない構文解析) → probe / examples / src を解析して節の数とアイテムを出す
-#   ast_closure: crates/core/src/parse.rs + crates/core/src/ast_closure.rs (自前の構文木の上のクロージャ解析) → 全関数のクロージャの自由変数
-#   ast_types: crates/core/src/types.rs + crates/core/src/parse.rs + crates/core/src/ast_types.rs (型の表現・intern と、型の構文 → TySyn。front.rs から分けたもの)
-#   ast_summary: crates/core/src/ast_summary.rs (front.rs の summarize の移植) + lexer / types / parse / ast_types / ast_closure → 全アイテムの要約
-#   program: crates/core/src/program.rs (全体の表: シグネチャ・レイアウト・trait 実装) + 要約までのモジュール + prelude
+#   parse: crates/syntax/src/parse.rs (syn を使わない構文解析) → probe / examples / src を解析して節の数とアイテムを出す
+#   ast_closure: crates/syntax/src/parse.rs + crates/syntax/src/ast_closure.rs (自前の構文木の上のクロージャ解析) → 全関数のクロージャの自由変数
+#   ast_types: crates/syntax/src/types.rs + crates/syntax/src/parse.rs + crates/syntax/src/ast_types.rs (型の表現・intern と、型の構文 → TySyn。front.rs から分けたもの)
+#   ast_summary: crates/syntax/src/ast_summary.rs (front.rs の summarize の移植) + lexer / types / parse / ast_types / ast_closure → 全アイテムの要約
+#   program: crates/sema/src/program.rs (全体の表: シグネチャ・レイアウト・trait 実装) + 要約までのモジュール + prelude
 #            + ast_consteval / solver / ctors → probe / examples / src の Program を作り、関数・型 (サイズ・オフセット・深いハッシュ)・
 #            impl・const とそのデータ・パスの検索・型推論の単一化の結果を出す
 #   minclif: crates/minclif/src/lib.rs (Cranelift の代わりの最小のバックエンド) → 関数を組み立てた ELF の .o が rustc 版と同じバイト列か。
 #            crustc 版が書いた .o を C の main とリンクして動かす
-#   enc:   crates/core/src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と crates/core/src/fxhash.rs (FxHasher / FxMap)
+#   enc:   crates/syntax/src/enc.rs (キャッシュの直列化。マクロ・trait の静的呼び出し) と crates/base/src/fxhash.rs (FxHasher / FxMap)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 # crustc 側のバックエンドは SELFHOST_BACKEND (既定 minclif: 外部クレートを使わない経路。cranelift も可)
@@ -30,7 +30,7 @@ rustc --edition 2024 -O -Awarnings "$out/lexer_main.rs" -o "$out/lexer_rustc" ||
 if ! crustc_cmd "$out/lexer_main.rs" -o "$out/lexer_crustc" -O; then
   echo "FAIL lexer (crustc)"; exit 1
 fi
-inputs=(crates/*/src/*.rs crates/core/src/prelude_lib.rs.in examples/*.rs tests/probe/*.rs)
+inputs=(crates/*/src/*.rs crates/syntax/src/prelude_lib.rs.in examples/*.rs tests/probe/*.rs)
 "$out/lexer_rustc" "${inputs[@]}" > "$out/lexer.rustc.out"
 "$out/lexer_crustc" "${inputs[@]}" > "$out/lexer.crustc.out"
 if cmp -s "$out/lexer.rustc.out" "$out/lexer.crustc.out"; then
