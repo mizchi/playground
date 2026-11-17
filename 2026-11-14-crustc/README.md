@@ -1755,6 +1755,49 @@ VmHWM と、括弧の中は子孫のプロセスも足した RSS の最大 (50 m
 - rust-analyzer と rust-glancer は子プロセス (cargo metadata・rustc・索引の作業) が大きい。rust-glancer は本体は 17〜31 MB。
 - シンボルの数の違い: rust-glancer は impl の中の関連アイテムなどの数え方が違う (synth の 38 は impl の名前の出し方)。
 
+### LSP の機能の比較 (2026-11-17、`python3 bench/lsp_parity.py`)
+
+速さの比較 (上の lsp_compare) は何を返すかを見ない。同じ対象・同じ位置で 3 つのサーバに問い合わせ、rust-analyzer の答えと
+比べる: documentSymbol の名前の集合、workspace/symbol の上位 20 の一致、ファイルの中の識別子 40 か所での definition の行き先・
+hover・references の数、`.` の直後 (`x.|name`) と識別子の途中 (`na|me`) の completion にそこに書いてある名前が入るか。
+
+#### synth (40 箇所、`.` の後 20 箇所。比べる相手は rust-analyzer)
+
+| 機能 | crustc | rust-analyzer | rust-glancer |
+|---|---|---|---|
+| 対応を返す機能 | docsym, wsym | docsym, wsym, definition, hover, completion, references, rename, signature, semantic, inlay, codeAction, format | docsym, wsym, definition, hover, completion, references, rename, semantic, inlay, codeAction, format |
+| documentSymbol (名前の一致) | 名前 100% (種類も 97%) | 名前 100% (種類も 100%) | 名前 100% (種類も 95%); 余分 #0 |
+| workspace/symbol (上位 20 の一致) | 87% | 100% | 76% |
+| definition (行き先の一致) | 同じ 0% (答えた 0%) | 同じ 100% (答えた 100%) | 同じ 100% (答えた 100%) |
+| hover (名前を含む) | 0% | 100% | 100% |
+| references (数の一致) | 0% | 100% | 100% |
+| completion `x.\|` (書いてある名前を含む) | 0% (候補 0) | 100% (候補 3) | 100% (候補 5) |
+| completion `na\|me` (同) | 0% (候補 0) | 91% (候補 145) | 56% (候補 5) |
+| 時間の中央値 (ms) | defi 0.1, hove 0.1, comp 0.1, refe 0.1 | defi 0.5, hove 0.6, comp 4.1, refe 1.0 | defi 7.7, hove 8.4, comp 234.5, refe 20.3 |
+
+#### crustc (40 箇所、`.` の後 20 箇所。比べる相手は rust-analyzer)
+
+| 機能 | crustc | rust-analyzer | rust-glancer |
+|---|---|---|---|
+| 対応を返す機能 | docsym, wsym | docsym, wsym, definition, hover, completion, references, rename, signature, semantic, inlay, codeAction, format | docsym, wsym, definition, hover, completion, references, rename, semantic, inlay, codeAction, format |
+| documentSymbol (名前の一致) | 名前 99% (種類も 97%); 足りない extern "C" | 名前 100% (種類も 100%) | 名前 90% (種類も 82%); 足りない c_close, c_exit, c_fork, c_mkdir |
+| workspace/symbol (上位 20 の一致) | 61% | 100% | 35% |
+| definition (行き先の一致) | 同じ 0% (答えた 0%) | 同じ 100% (答えた 78%) | 同じ 87% (答えた 68%) |
+| hover (名前を含む) | 0% | 88% | 72% |
+| references (数の一致) | 0% | 100% | 42% |
+| completion `x.\|` (書いてある名前を含む) | 0% (候補 0) | 100% (候補 26) | 90% (候補 37) |
+| completion `na\|me` (同) | 0% (候補 0) | 68% (候補 85) | 60% (候補 3) |
+| 時間の中央値 (ms) | defi 0.1, hove 0.1, comp 0.1, refe 0.1 | defi 0.9, hove 1.0, comp 7.7, refe 31.4 | defi 14.4, hove 12.3, comp 257.3, refe 325.4 |
+
+分かったこと:
+- crustc lsp が持っているのは診断と documentSymbol / workspace/symbol だけ。definition・hover・references・completion
+  (rust-analyzer と rust-glancer は持っている) が無いので、速さの比較は同じ機能での比較になっていない。
+- シンボルはおおむね同じ。documentSymbol の違いは extern ブロックの扱い (crustc は中の宣言を外に並べる、rust-analyzer は
+  `extern "C"` を 1 つのシンボルにする) と種類の付け方。workspace/symbol の違いは並べ方 (問い合わせに合う候補の選び方と
+  順) で、上位 20 の一致は 61〜87%。
+- rust-glancer は definition・hover・completion を持つが、crustc の対象では rust-analyzer と違う答えも多い (references の
+  数の一致 42%)。completion は 1 回 250 ms ほど。
+
 ### 途中で分かったこと
 
 - **cold 時に要約用の syn AST を全部保持していたため、5000 関数で RSS が 162MB になっていた**。
