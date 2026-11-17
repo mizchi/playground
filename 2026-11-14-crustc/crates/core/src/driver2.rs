@@ -101,6 +101,17 @@ pub struct Analysis {
     pub inl: acg::Inline,
     /// prelude の先頭の行 (結合したソースの行)
     pub prelude_line0: usize,
+    /// 依存するクレートのテキストの範囲と、そこから見えるクレート (CrateCtx::dep_ranges)
+    pub dep_ranges: Vec<(u32, u32, Vec<usize>, u32)>,
+}
+
+/// クレートの印 (panic の場所の行の上位ビット。ライブラリの panic の表の 8 byte 目): 1..=4000
+pub fn crate_tag(name: &str) -> u32 {
+    let mut h: u32 = 0x811c9dc5;
+    for b in name.bytes() {
+        h = (h ^ b as u32).wrapping_mul(0x01000193);
+    }
+    1 + h % 4000
 }
 
 /// prelude の中の panic の場所の行の基準 (結合したソースの行によらない: prelude の関数の機械語をクレートの間で使い回す)。
@@ -108,6 +119,84 @@ pub struct Analysis {
 pub const PRELUDE_LINE: u32 = 49152;
 
 impl Analysis {
+    /// アイテム ii が依存するクレートのものなら、その dep_ranges の番号
+    pub fn crate_of_item(&self, ii: usize) -> Option<usize> {
+        if ii >= self.prog.prelude_from as usize || !self.ext_items.get(ii).copied().unwrap_or(false) {
+            return None;
+        }
+        let l = self.items[ii].line as u32;
+        self.dep_ranges.iter().position(|r| r.0 <= l && l < r.1)
+    }
+
+    /// 閉じた関数 (インスタンス): 本体が prelude か依存するクレートにあり、型引数にこのクレートの型を含まないもの。
+    /// 本体が呼びうるのは、本体のクレートと型引数の型のクレートから見えるクレート (と prelude) のものだけなので、
+    /// キャッシュのキーはそれらだけで決まる (使う側によらない)。返り値は見えるクレート (dep_ranges の番号ごと)
+    pub fn closed_univ(&self, insts: &Insts, id: u32) -> Option<Vec<bool>> {
+        let body = insts.body_of(id);
+        if self.prog.closures.contains_key(&body) {
+            return None;
+        }
+        let ii = self.prog.item_of[body as usize]? as usize;
+        let mut u = vec![false; self.dep_ranges.len()];
+        if ii < self.prog.prelude_from as usize {
+            let r = self.crate_of_item(ii)?;
+            for &x in &self.dep_ranges[r].2 {
+                u[x] = true;
+            }
+        }
+        if let Some(inst) = insts.get(id) {
+            let mut stack: Vec<Ty> = inst.args.clone();
+            while let Some(t) = stack.pop() {
+                match t {
+                    Ty::Ref(_, i) | Ty::Ptr(_, i) | Ty::Array(i, _) | Ty::Slice(i) | Ty::Box(i) => stack.push(*i),
+                    Ty::Struct(sid) => {
+                        let b = self.prog.base_of(sid);
+                        if let Some(&sii) = self.prog.struct_item.get(b as usize) {
+                            let sii = sii as usize;
+                            if sii < self.prog.prelude_from as usize {
+                                let c = self.crate_of_item(sii)?;
+                                for &x in &self.dep_ranges[c].2 {
+                                    u[x] = true;
+                                }
+                            }
+                        }
+                        stack.extend(self.prog.structs[sid as usize].args.iter().copied());
+                    }
+                    Ty::Fn(f) => {
+                        stack.extend(f.params.iter().copied());
+                        stack.push(f.ret);
+                    }
+                    Ty::Dyn(_) | Ty::Assoc(_) | Ty::Param(_) => return None,
+                    _ => {}
+                }
+            }
+        }
+        Some(u)
+    }
+
+    /// 関数 (インスタンス) id の panic の場所の行の基準。閉じた依存するクレートの関数は、そのクレートのテキストの先頭からの
+    /// 行 (使う側の結合したソースの中の位置によらない: .o を書くときに位置を足す)
+    pub fn line_base_for(&self, insts: &Insts, id: u32) -> Option<u32> {
+        let body = insts.body_of(id);
+        let ii = self.prog.item_of[body as usize]? as usize;
+        if let Some(r) = self.crate_of_item(ii) {
+            if self.closed_univ(insts, id).is_some() {
+                return Some((self.dep_ranges[r].3 << 20) | (self.items[ii].line as u32 - self.dep_ranges[r].0));
+            }
+        }
+        Some(self.line_base(ii))
+    }
+
+    /// .o に書くときに、関数 id の panic の場所の行に足す数 (line_base_for で依存するクレートの中の行にしたもの)
+    pub fn line_shift(&self, insts: &Insts, id: u32) -> u32 {
+        let body = insts.body_of(id);
+        let Some(ii) = self.prog.item_of.get(body as usize).copied().flatten() else { return 0 };
+        match self.crate_of_item(ii as usize) {
+            Some(r) if self.closed_univ(insts, id).is_some() => self.dep_ranges[r].0 - 1,
+            _ => 0,
+        }
+    }
+
     /// アイテム ii の panic の場所の行の基準 (アイテムの先頭の行 - 1)
     pub fn line_base(&self, ii: usize) -> u32 {
         let it = &self.items[ii];
@@ -179,6 +268,8 @@ pub struct CrateCtx {
     pub deps: Vec<String>,
     /// このクレートの feature (ワークスペース。None なら Options2 の features)
     pub features: Option<Vec<String>>,
+    /// 依存するクレートのテキストの範囲 (結合したソースの行 [開始, 終わり)) と、そこから見えるクレート (この表の番号。自分も)
+    pub dep_ranges: Vec<(u32, u32, Vec<usize>, u32)>,
 }
 
 /// ビルドの結果
@@ -506,7 +597,7 @@ impl Session2 {
             crefs.push(c);
         }
         tm.lap("refs", String::new());
-        let mut a = Analysis { src, items, prog, refs, srefs, crefs, n_parsed, ext_items, inl: acg::Inline::default(), prelude_line0 };
+        let mut a = Analysis { src, items, prog, refs, srefs, crefs, n_parsed, ext_items, inl: acg::Inline::default(), prelude_line0, dep_ranges: self.ctx.dep_ranges.clone() };
         let cl = self.opts.backend;
         if self.opts.opt && std::env::var_os("CRUSTC_NO_INLINE").is_none() {
             a.inl = inline_bodies(&a);
@@ -744,9 +835,46 @@ impl Session2 {
     /// closed: prelude の関数で、ユーザの関数を呼びえないもの (総称でないか、型引数が prelude の型だけ)。参照の
     /// シグネチャは prelude のものだけを入れる (名前の最後で多めに取ると、ユーザの `Acc::push` などが入って、同じ prelude の
     /// 関数がクレートごとに違うキーになり、どのクレートでもコンパイルし直していた)
-    fn fn_key_r(&self, a: &Analysis, id: usize, closed: bool) -> Key {
+    fn fn_key_r(&self, a: &Analysis, id: usize, closed: Option<&[bool]>) -> Key {
         let ii = a.prog.item_of[id].unwrap() as usize;
         let pf = a.prog.prelude_from as usize;
+        // 閉じた依存するクレートの関数 (と、型引数に依存するクレートの型を持つ prelude の関数): 本体・自分のシグネチャと、
+        // 見えるクレートの中の参照先だけ (prelude はコンパイラで決まる、ほかのクレートのものは呼べない)
+        if let Some(u) = closed.filter(|u| ii < pf || u.iter().any(|&x| x)) {
+            let in_u = |item: Option<u32>| item.is_some_and(|ri| a.crate_of_item(ri as usize).is_some_and(|c| u[c]));
+            let mut h = KeyHasher::new();
+            h.add(&self.cid);
+            h.add(&3u8);
+            h.add(&(self.opts.opt as u8));
+            h.add(&(self.opts.backend.is_some() as u8));
+            h.add(&a.items[ii].hash);
+            a.prog.hash_sig(id as u32, &mut h);
+            for &r in &a.refs[id] {
+                if in_u(a.prog.item_of[r as usize]) {
+                    a.prog.hash_sig(r, &mut h);
+                }
+            }
+            for &st in &a.srefs[id] {
+                let b = a.prog.base_of(st);
+                if in_u(a.prog.struct_item.get(b as usize).copied()) {
+                    h.add(&a.prog.structs[st as usize].deep);
+                }
+            }
+            for &c in &a.crefs[id] {
+                let cd = &a.prog.consts[c as usize];
+                if in_u(Some(cd.item)) {
+                    h.add(&cd.name);
+                    h.add(&a.items[cd.item as usize].hash);
+                    a.prog.hash_ty(cd.ty, &mut h);
+                }
+            }
+            match a.prog.panic_handler {
+                Some(p) => h.add(&a.prog.names[p as usize]),
+                None => h.add(&0u8),
+            }
+            return h.finish();
+        }
+        let closed = closed.is_some();
         // 閉じた prelude の関数: prelude の本体とシグネチャはコンパイラ (cid) に入っているので、本体と自分のシグネチャと
         // panic の行き先 (`#[panic_handler]`) だけで決まる (参照先を名前の最後で多めに取ると、クレートごとに選ぶ prelude が
         // 違うのでキーが変わり、同じ関数をクレートごとにコンパイルし直していた)
@@ -806,14 +934,8 @@ impl Session2 {
     fn key_of(&self, a: &Analysis, insts: &Mutex<Insts>, id: u32) -> Key {
         let g = insts.lock().unwrap();
         let body = g.body_of(id) as usize;
-        let prelude = a.prog.item_of[body].is_some_and(|ii| ii >= a.prog.prelude_from);
-        let closed = prelude
-            && !a.prog.closures.contains_key(&(body as u32))
-            && match g.get(id) {
-                None => true,
-                Some(inst) => inst.args.iter().all(|&t| a.prog.is_prelude_ty(t)),
-            };
-        let k = self.fn_key_r(a, body, closed);
+        let closed = a.closed_univ(&*g, id);
+        let k = self.fn_key_r(a, body, closed.as_ref().map(|v| v.as_slice()));
         match g.get(id) {
             None => k,
             Some(inst) => {
@@ -933,8 +1055,8 @@ impl Session2 {
                 keys.insert(id, k);
                 // (場所を書き込んだ関数は、アイテムの開始行が変わっていたら使わない)
                 let lb = {
-                    let body = insts.lock().unwrap().body_of(id);
-                    a.prog.item_of[body as usize].map(|i| a.line_base(i as usize))
+                    let g = insts.lock().unwrap();
+                    a.line_base_for(&*g, id)
                 };
                 let raw = self.get(k);
                 if std::env::var_os("CRUSTC_LOG_COMPILED").is_some() && raw.is_some() {
@@ -1057,7 +1179,11 @@ fn compile_id(a: &Analysis, insts: &Mutex<Insts>, id: u32) -> R<Blob> {
     let ii = a.prog.item_of[body as usize].unwrap() as usize;
     let it = &a.items[ii];
     // (acg のエラーはファイルの中の `行:桁:` を持つ。持たないものはアイテムの先頭の行にする)
-    let (b, _) = acg::compile(&a.prog, insts, id, &f, a.line_base(ii), &a.inl)
+    let lb = {
+        let g = insts.lock().unwrap();
+        a.line_base_for(&*g, id).unwrap_or(it.line as u32 - 1)
+    };
+    let (b, _) = acg::compile(&a.prog, insts, id, &f, lb, &a.inl)
         .map_err(|e| if acg::has_loc(&e) { e } else { format!("{}:1: in `{}`: {e}", it.line, a.prog.names[body as usize]) })?;
     Ok(b)
 }
@@ -1197,6 +1323,7 @@ fn emit_object(a: &Analysis, ctx: &CrateCtx, insts: &Insts, user_live: &[u32], b
     // (ライブラリの panic の表は `_xT_<名前>` で外に見せる: 実行ファイルの表がそれを指す)
     let static_name = |ci: u32| match (&ctx.lib, prog.consts[ci as usize].name.as_str()) {
         (Some(l), "__EXR_TRAP_TABLE") => format!("_xT_{l}"),
+        (None, "__EXR_TRAP_TABLE") | (_, "__EXR_EXE_TABLE") => "_xT__exe".to_string(),
         _ => format!("_xS{}", prog.consts[ci as usize].name),
     };
     let mut todo: Vec<u32> = vec![];
@@ -1223,6 +1350,13 @@ fn emit_object(a: &Analysis, ctx: &CrateCtx, insts: &Insts, user_live: &[u32], b
         let c = &prog.consts[ci as usize];
         if c.name == "__EXR_TRAP_TABLE" {
             trap_table = Some(ci);
+            continue;
+        }
+        // (実行ファイルの表: 実行ファイルでは __EXR_TRAP_TABLE と同じもの、ライブラリでは外のもの)
+        if c.name == "__EXR_EXE_TABLE" {
+            if ctx.lib.is_none() {
+                todo.push(trap_table_ci(prog));
+            }
             continue;
         }
         // (依存するクレートの static はそちらの .o にある。unwrap の場所 (__EXR_CALLER) は実行ファイルの 1 つを皆で使う)
@@ -1347,6 +1481,8 @@ fn emit_object(a: &Analysis, ctx: &CrateCtx, insts: &Insts, user_live: &[u32], b
                 continue;
             }
             nf += 1;
+            // (閉じた依存するクレートの関数の場所は、そのクレートのテキストの中の行: このソースでの位置を足す)
+            let shift = a.line_shift(insts, uid) as i64;
             uv(&mut fbytes, fo - prev_fn);
             prev_fn = fo;
             uv(&mut fbytes, blob.traps.len() as u64);
@@ -1364,7 +1500,10 @@ fn emit_object(a: &Analysis, ctx: &CrateCtx, insts: &Insts, user_live: &[u32], b
                         }
                     }
                 };
-                let (kind, line, col) = ((info >> 27) as u64, ((info >> 11) & 0xFFFF) as i64, (info & 0x7FF) as u64);
+                let (kind, mut line, col) = ((info >> 27) as u64, ((info >> 11) & 0xFFFF) as i64, (info & 0x7FF) as u64);
+                if shift > 0 && line > 0 && line < PRELUDE_LINE as i64 {
+                    line += shift;
+                }
                 uv(&mut fbytes, off as u64 - prev_site);
                 prev_site = off as u64;
                 uv(&mut fbytes, kind | (gm << 4));
@@ -1416,9 +1555,17 @@ fn emit_object(a: &Analysis, ctx: &CrateCtx, insts: &Insts, user_live: &[u32], b
             datas.push((".Lxext".to_string(), ext, ers, false));
             rs.push((8, ".Lxext".to_string(), 0));
         }
-        datas.push((tname, bytes, rs, ctx.lib.is_some()));
+        // (ライブラリの表は 8 byte 目にクレートの印)
+        if let Some(l) = &ctx.lib {
+            bytes[8..16].copy_from_slice(&(crate_tag(l) as u64).to_le_bytes());
+        }
+        datas.push((tname, bytes, rs, true));
     }
     Ok(crate::minclif::write_object_full(&funcs, &datas))
+}
+
+fn trap_table_ci(prog: &Program) -> u32 {
+    prog.const_index.get("__EXR_TRAP_TABLE").copied().unwrap_or(0)
 }
 
 /// ワークスペースの 1 つのクレート
@@ -1633,6 +1780,7 @@ impl Session2 {
         let mut map = own_map.clone();
         src.push('\n');
         let no_prune = std::env::var_os("CRUSTC_NO_DEP_PRUNE").is_some();
+        let mut ranges: Vec<(u32, u32, Vec<usize>, u32)> = vec![];
         for &j in deps {
             let (t0, m) = dep_loaded[j].as_ref().unwrap();
             // (名前で届かないアイテムは空白にする: 平らにする・要約・Program・prelude の選択が使う分だけになる)
@@ -1658,6 +1806,30 @@ impl Session2 {
             map.files.extend(m.files.iter().cloned());
             src.push_str(t);
             src.push('\n');
+            ranges.push((at, n_lines(&src) + 1, vec![], crate_tag(&crates[j].name)));
+        }
+        // (依存するクレート j から見えるクレート: j 自身と j の推移的な依存)
+        for (k, &j) in deps.iter().enumerate() {
+            let mut seen = vec![false; crates.len()];
+            let mut st = vec![j];
+            seen[j] = true;
+            while let Some(x) = st.pop() {
+                for d in &crates[x].deps {
+                    if let Some(y) = crates.iter().position(|c| &c.name == d) {
+                        if !seen[y] {
+                            seen[y] = true;
+                            st.push(y);
+                        }
+                    }
+                }
+            }
+            let mut vis: Vec<usize> = vec![];
+            for (q, &y) in deps.iter().enumerate() {
+                if seen[y] {
+                    vis.push(q);
+                }
+            }
+            ranges[k].2 = vis;
         }
         self.ctx = CrateCtx {
             lib: if c.lib { Some(c.name.clone()) } else { None },
@@ -1665,6 +1837,7 @@ impl Session2 {
             map: map.clone(),
             deps: deps.iter().map(|&j| crates[j].name.clone()).collect(),
             features: Some(c.features.clone()),
+            dep_ranges: ranges,
         };
         let mut r = Report2::default();
         let a = self.analyze(&src).map_err(|e| format!("crate `{}`: {}", c.name, self.ctx.map.relocate_err(&e)))?;

@@ -47,7 +47,7 @@ fn workspace_matches_rustc_and_rebuilds_incrementally() {
     let r = s.build_workspace(&crates, &out).unwrap();
     assert_eq!(r.linked, 1);
     // (引数の数で: 0 = 依存するクレートの中の 0 除算, 1 = 普通, 2 = bin のモジュールのファイルの添字, 3 = unwrap)
-    for n in 0..4 {
+    for n in [0, 1, 2, 3, 5] {
         let a = run(&out.join("app"), &dir, n);
         let b = run(&rs.join("app"), &dir, n);
         assert_eq!(a, b, "args {n}");

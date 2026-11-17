@@ -5998,6 +5998,9 @@ static mut __EXR_CALLER: u64 = 0;
 
 // panic の trap の表 (中身はリンクの前に driver が入れる。形は emit_object を参照)
 static __EXR_TRAP_TABLE: [u64; 3] = [0, 0, 0];
+// 実行ファイルの panic の表 (どの .o からも同じもの: `_xT__exe`)。行の上位ビットに依存するクレートの印がある場所は、
+// その表の依存するクレートの表の列から、印 (表の 8 byte 目) が同じ表を選んで引く
+static __EXR_EXE_TABLE: [u64; 3] = [0, 0, 0];
 static mut __EXR_SA: [u64; 19] = [0; 19];
 static __EXR_KIND_MSG: &str = "attempt to add with overflowattempt to subtract with overflowattempt to multiply with overflowattempt to divide by zeroattempt to calculate the remainder with a divisor of zeroexplicit panicattempt to negate with overflowattempt to shift left with overflowattempt to shift right with overflowattempt to divide with overflowattempt to calculate the remainder with overflowexplicit panic";
 static __EXR_KIND_OFF: [u16; 13] = [0, 28, 61, 94, 119, 176, 190, 221, 256, 292, 323, 371, 385];
@@ -6063,7 +6066,25 @@ fn __exr_panic_head<G>(line: u64, col: u64) {
     } else {
         (line, col)
     };
-    let (f, n, l, c) = __exr_tab_file(__EXR_TRAP_TABLE.as_ptr(), line, col);
+    let mut t = __EXR_TRAP_TABLE.as_ptr();
+    let mut line = line;
+    if line >> 20 != 0 {
+        let tag = line >> 20;
+        line &= 0xFFFFF;
+        let ext = unsafe { *__EXR_EXE_TABLE.as_ptr().add(1) } as *const u64;
+        if !ext.is_null() {
+            let n = unsafe { *ext };
+            let mut k = 0;
+            while k < n {
+                let x = unsafe { *ext.add(1 + k as usize) } as *const u64;
+                if unsafe { *x.add(1) } == tag {
+                    t = x;
+                }
+                k += 1;
+            }
+        }
+    }
+    let (f, n, l, c) = __exr_tab_file(t, line, col);
     __exr_panic_head_at::<()>(f, n, l, c);
 }
 

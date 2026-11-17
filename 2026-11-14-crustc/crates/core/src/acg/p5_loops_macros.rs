@@ -794,7 +794,9 @@ impl Cx<'_> {
         let info = if self.caller_loc {
             (kind as u32) << 27
         } else {
+            // (行の上位ビットのクレートの印は trap の表には入れない: .o を書くときに行をずらす)
             let (l, c) = self.loc(span);
+            let l = l & 0xFFFFF;
             ((kind as u32) << 27) | (l.min(0xFFFF) << 11) | c.min(0x7FF)
         };
         let m = match msg {

@@ -11,5 +11,9 @@ fn main() {
     let v: Vec<Box<dyn Shape>> = vec![Box::new(Rect { w: 2, h: 3 }), Box::new(Sq(4))];
     println!("{} {}", geom::shape::total(&v), v[1].name());
     println!("calls {}", util::calls());
+    // (引数 5 個: 依存するクレートの総称関数の中で範囲外の添字 (場所はそのクレートのファイル))
+    if std::env::args().count() == 6 {
+        println!("{}", util::pick(&[1u8, 2, 3], 9));
+    }
     cli::run(std::env::args().count() as i64 - 1);
 }
