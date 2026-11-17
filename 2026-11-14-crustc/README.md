@@ -13,16 +13,27 @@ Cranelift (既定) か自前の minclif でコード生成する。crustc 自身
 
 ### crate の構成 (このディレクトリの Cargo ワークスペース)
 
-| crate | 中身 | 外部の依存 |
+層は base → syntax → sema → codegen → core (driver) の順で、LSP とコンパイラ (CLI) は core を使う。syntax と sema が
+コンパイラと LSP・解析で共有する部分 (型の検査は今は acg の中で出るので、check も codegen まで使う: 機械語は作らない)。
+
+| crate | 中身 | 依存 |
 |---|---|---|
+| `crates/base` (`crustc-base`) | fxhash (FxMap / FxSet)・key (キャッシュのキー)・prof (段ごとの時間) | なし |
+| `crates/syntax` (`crustc-syntax`) | front (前処理 → アイテムへの分割 (差分) → prelude を付ける、の流れと編集をまたぐ記憶 FrontMemo) / lexer / parse (自前の構文木) / cfg / macros / ctors / prep (前処理の差分) / srcmap / stub / types (要約の型)・types_enc / enc (直列化) / ast_types / ast_closure / ast_summary (アイテムの要約) / prelude (選択と prelude_lib.rs.in、build.rs) | base、proc-macro2 |
+| `crates/sema` (`crustc-sema`) | program (名前・型・トレイト・impl の表、インスタンス) / solver / ast_infer (型推論) / ast_consteval | syntax |
+| `crates/codegen` (`crustc-codegen`) | acg (構文木 → minclif の命令の列、型の検査) / cache2 (Blob の直列化) / link | sema、minclif、proc-macro2 |
+| `crates/core` (`crustc-core`) | driver2 (Session2: キャッシュ・fork の並列化・複数クレート・リンク・check) と testgen。下の層を公開し直す (`crustc_core::lexer` などで引ける) | codegen |
+| `crates/lsp` (`crustc-lsp`) | LSP サーバ (診断。driver2 の check を使う) | core、serde_json |
 | `crates/minclif` | Cranelift に似た API の小さな x86-64 バックエンド (命令の記録・レジスタ割り当て・スタックの struct のフィールドの変数化・ELF の .o) | なし |
-| `crates/core` (`crustc-core`) | lexer / parse / macros / prelude / ast_* (要約・型推論) / program / acg (コード生成) / driver2 (キャッシュ・fork の並列化・複数クレート・リンク) | proc-macro2 だけ |
 | `crates/clif` (`crustc-clif`) | driver2 の Cranelift バックエンド: minclif が記録した命令の列を Cranelift の IR にしてコンパイルする | cranelift |
-| `.` (`crustc`) | CLI・LSP サーバ (`src/lsp.rs`) と、上のものの再輸出 (テスト・ベンチ) | serde_json |
+| `.` (`crustc`) | CLI と、上のものの再輸出 (テスト・ベンチ。`crustc::lsp` は crustc-lsp) | 上のもの |
+
+各 crate の lib.rs は下の層のモジュールを公開し直す (`pub use crustc_syntax::*;` など)。ファイルの中は `crate::lexer` の
+ように書き、どの crate に置いても、セルフホストで全部を 1 つのクレートのモジュールに並べても同じパスで引ける。
 
 経路は **driver2** だけ (`crustc x.rs` は Cranelift、`--backend=minclif` で minclif)。build / check / LSP のすべてが driver2 を使う。
 最初のドライバ (syn + Cranelift、`crates/legacy`) は 2026-11-16 に削除した (git の履歴にある)。
-セルフホスト (tests/selfhost*.sh) は crustc-core と minclif のソースを 1 ファイルにまとめて crustc でコンパイルする。
+セルフホスト (tests/selfhost*.sh) は base / syntax / sema / codegen / core と minclif のソースを 1 ファイルにまとめて crustc でコンパイルする。
 
 ## 現状（2026-11-15、`python3 bench/vs_rustc.py`）
 
@@ -674,16 +685,16 @@ src.rs ──srcmap (mod x; のファイル)──▶ macros (macro_rules!) ─�
 
 | 場所 | 役割 |
 |---|---|
-| `crates/core/src/lexer.rs` | トップレベルのアイテム分割と、正規化トークン列のハッシュ。`impl` はヘッダとメンバに分ける |
-| `crates/core/src/macros.rs` / `srcmap.rs` | macro_rules! の展開・include_str!、`mod x;` のファイルの読み込みと行の対応 |
-| `crates/core/src/parse.rs` / `ast_*.rs` | 自前の構文木・要約・型推論・クロージャ解析・定数評価 |
-| `crates/core/src/program.rs` | 全体の表 (シグネチャ・レイアウト・trait 実装・インスタンス) |
-| `crates/core/src/acg/` | 構文木から minclif の FunctionBuilder への 1 パスの lowering と型検査。-O で小さい関数をインライン展開 |
+| `crates/syntax/src/lexer.rs` | トップレベルのアイテム分割と、正規化トークン列のハッシュ。`impl` はヘッダとメンバに分ける |
+| `crates/syntax/src/macros.rs` / `srcmap.rs` | macro_rules! の展開・include_str!、`mod x;` のファイルの読み込みと行の対応 |
+| `crates/syntax/src/parse.rs` / `ast_*.rs` | 自前の構文木・要約・型推論・クロージャ解析・定数評価 |
+| `crates/sema/src/program.rs` | 全体の表 (シグネチャ・レイアウト・trait 実装・インスタンス) |
+| `crates/codegen/src/acg/` | 構文木から minclif の FunctionBuilder への 1 パスの lowering と型検査。-O で小さい関数をインライン展開 |
 | `crates/core/src/driver2.rs` / `cache2.rs` | `Session2`：キャッシュ (ディスク + メモリ)、build / check / ワークスペース、fork の並列化、.o の書き出し |
-| `crates/core/src/link.rs` | `cc -###` からリンク行を取り出して保存し、リンカを直接起動する |
+| `crates/codegen/src/link.rs` | `cc -###` からリンク行を取り出して保存し、リンカを直接起動する |
 | `crates/minclif` | 命令の記録・レジスタ割り当て・x86-64 の機械語・ELF の .o |
 | `crates/clif` | 記録した命令の列 → Cranelift の IR → 機械語 |
-| `src/lsp.rs` | 最小の LSP サーバ (ドキュメントごとに `Session2` を持ち、`check` の診断を返す) |
+| `crates/lsp/src/lib.rs` | 最小の LSP サーバ (ドキュメントごとに `Session2` を持ち、`check` の診断を返す) |
 | `src/main.rs` | CLI (build / check / lsp / ワークスペースの build) |
 
 ### インクリメンタル性の要点
@@ -1405,7 +1416,7 @@ rustc (lib を rlib にして `--extern`) と比べる: 出力が rustc -O と�
 実行時間・サイズ。対象は `cratebench/crates.txt` (名前・edition・feature)。
 
 足したもの:
-- `#[cfg(..)]` / `#[cfg_attr(..)]` / `cfg!(..)` の評価 (`crates/core/src/cfg.rs`。feature はワークスペースの `features=a,b`
+- `#[cfg(..)]` / `#[cfg_attr(..)]` / `cfg!(..)` の評価 (`crates/syntax/src/cfg.rs`。feature はワークスペースの `features=a,b`
   か `--features=`。x86-64 Linux の値・`debug_assertions` は -O でなければ真)。`extern crate x;` は消す
 - アイテム位置のマクロ呼び出しを `mod` / `impl` / `trait` の中でも展開する。`$x:expr` が式の終わりで止まる (`$($len:expr)+`)
 - 定数式: impl の関連 const (`i128::MAX_STR_LEN`)・`u128::MAX.ilog10()` などの整数のメソッド。`const _: () = ..;` は読み飛ばす
@@ -1491,7 +1502,7 @@ rustc-hash・cfg-if のために足したもの:
 最初は、使う側のクレートが推移的な依存のソース全体を毎回展開・解析し直していたので、依存が増えると cold と low-sig で cargo に
 並ばれた (100 クレートで cold 3718 ms (cargo 3250)、low-sig 1581 ms (cargo 1578)。解析の内訳はマクロの展開が 1.5 秒)。直したもの:
 - 依存するクレートのマクロの展開は 1 回: 各クレートは依存するクレートのマクロの定義だけを添えて自分の分だけ展開する
-- 使う側に渡すのはインターフェース (`crates/core/src/stub.rs`): 総称でない関数の本体を `{ loop {} }` にする (依存する
+- 使う側に渡すのはインターフェース (`crates/syntax/src/stub.rs`): 総称でない関数の本体を `{ loop {} }` にする (依存する
   クレート自身がコンパイルする)。総称関数・総称な impl・trait・`const fn`・`-> impl Trait`・`async fn` は残す。
   展開とインターフェースは `<名前>.prep` に保存する。`CRUSTC_NO_DEP_STUB=1` で前の動き
 - 並列にビルドする子プロセスが作ったキャッシュのエントリ (要約・関数の機械語) を親に返し、後の組のクレートが fork で引き継ぐ
@@ -1636,7 +1647,7 @@ Program を作り直している (クレートごとに選ぶ prelude が違う�
 ### 前処理をアイテムごとの差分にする (2026-11-17)
 
 前処理 (thread_local! の展開・マクロの展開・`mod` を平らにする・入れ子のアイテムの移動・コンストラクタの書き換え) を
-`crates/core/src/prep.rs` にまとめ、編集をまたいでチャンクごとに覚えるようにした。
+`crates/syntax/src/prep.rs` にまとめ、編集をまたいでチャンクごとに覚えるようにした。
 
 - チャンク: アイテムの境界 (`mod` / `impl` / `trait` の中も) で切った行の範囲。チャンクに切るのも前回との差分
   (前後の変わっていない部分の境界はそのまま、間だけを字句解析し直す)。

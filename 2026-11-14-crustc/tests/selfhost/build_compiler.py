@@ -21,26 +21,26 @@ def body(p):
     return open(p).read()
 
 items = max(glob.glob("target/release/build/crustc-core*/**/prelude_items.rs", recursive=True), key=os.path.getmtime)
-prelude = (body("crates/core/src/prelude.rs")
-    .replace('include_str!("prelude_lib.rs.in")', 'include_str!("../../crates/core/src/prelude_lib.rs.in")')
+prelude = (body("crates/syntax/src/prelude.rs")
+    .replace('include_str!("prelude_lib.rs.in")', 'include_str!("../../crates/syntax/src/prelude_lib.rs.in")')
     .replace('include!(concat!(env!("OUT_DIR"), "/prelude_items.rs"));', open(items).read()))
 
 # acg/mod.rs の `pub mod clif;` / `mod p1_expr;` を中身で置き換える
-acg = body("crates/core/src/acg/mod.rs")
+acg = body("crates/codegen/src/acg/mod.rs")
 def inline(m):
     vis, name = m.group(1) or "", m.group(2)
-    return f"{vis}mod {name} {{\n" + body(f"crates/core/src/acg/{name}.rs") + "\n}\n"
+    return f"{vis}mod {name} {{\n" + body(f"crates/codegen/src/acg/{name}.rs") + "\n}\n"
 acg = re.sub(r"^(pub )?mod (\w+);\n", inline, acg, flags=re.M)
 # (`#![allow(..)]` はモジュールの先頭にしか書けない: 中に入れると内側の属性になるので外す)
 acg = re.sub(r"^#!\[allow\([^)]*\)\]\n", "", acg, flags=re.M)
 
-parts = [("key", body("crates/core/src/key.rs")), ("fxhash", body("crates/core/src/fxhash.rs")), ("lexer", body("crates/core/src/lexer.rs")),
-         ("prelude", prelude), ("types", body("crates/core/src/types.rs")), ("parse", body("crates/core/src/parse.rs")),
-         ("ast_types", body("crates/core/src/ast_types.rs")), ("ast_closure", body("crates/core/src/ast_closure.rs")),
-         ("ast_summary", body("crates/core/src/ast_summary.rs")), ("program", body("crates/core/src/program.rs")),
-         ("ast_consteval", body("crates/core/src/ast_consteval.rs")), ("solver", body("crates/core/src/solver.rs")), ("ctors", body("crates/core/src/ctors.rs")),
-         ("ast_infer", body("crates/core/src/ast_infer.rs")), ("minclif", body("crates/minclif/src/lib.rs")), ("link", body("crates/core/src/link.rs")),
-         ("macros", body("crates/core/src/macros.rs") + "\nuse crate::proc_macro2;\n"), ("acg", acg), ("enc", body("crates/core/src/enc.rs")), ("types_enc", expand_enc_struct(body("crates/core/src/types_enc.rs"))), ("cache2", body("crates/core/src/cache2.rs")), ("cfg", body("crates/core/src/cfg.rs")), ("stub", body("crates/core/src/stub.rs")), ("srcmap", body("crates/core/src/srcmap.rs")), ("prep", body("crates/core/src/prep.rs")), ("driver2", body("crates/core/src/driver2.rs"))]
+parts = [("key", body("crates/base/src/key.rs")), ("fxhash", body("crates/base/src/fxhash.rs")), ("lexer", body("crates/syntax/src/lexer.rs")),
+         ("prelude", prelude), ("types", body("crates/syntax/src/types.rs")), ("parse", body("crates/syntax/src/parse.rs")),
+         ("ast_types", body("crates/syntax/src/ast_types.rs")), ("ast_closure", body("crates/syntax/src/ast_closure.rs")),
+         ("ast_summary", body("crates/syntax/src/ast_summary.rs")), ("program", body("crates/sema/src/program.rs")),
+         ("ast_consteval", body("crates/sema/src/ast_consteval.rs")), ("solver", body("crates/sema/src/solver.rs")), ("ctors", body("crates/syntax/src/ctors.rs")),
+         ("ast_infer", body("crates/sema/src/ast_infer.rs")), ("minclif", body("crates/minclif/src/lib.rs")), ("link", body("crates/codegen/src/link.rs")),
+         ("macros", body("crates/syntax/src/macros.rs") + "\nuse crate::proc_macro2;\n"), ("acg", acg), ("enc", body("crates/syntax/src/enc.rs")), ("types_enc", expand_enc_struct(body("crates/syntax/src/types_enc.rs"))), ("cache2", body("crates/codegen/src/cache2.rs")), ("cfg", body("crates/syntax/src/cfg.rs")), ("stub", body("crates/syntax/src/stub.rs")), ("srcmap", body("crates/syntax/src/srcmap.rs")), ("prep", body("crates/syntax/src/prep.rs")), ("prof", body("crates/base/src/prof.rs")), ("front", body("crates/syntax/src/front.rs")), ("driver2", body("crates/core/src/driver2.rs"))]
 out = ["// 自動生成: tests/selfhost/build_compiler.py (crustc の src/*.rs をそのまま含む)",
        "mod cache {\n    pub use crate::key::*;\n}\n", body("tests/selfhost/mini_pm2.rs")]
 for name, src in parts:

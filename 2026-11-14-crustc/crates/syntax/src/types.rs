@@ -379,3 +379,25 @@ impl Default for TySyn {
         TySyn::Prim(Ty::Unit)
     }
 }
+
+/// 組み込みの型 (キャッシュの直列化での番号の順)
+pub const TYS: [Ty; 18] = [
+    Ty::I8,
+    Ty::I16,
+    Ty::I32,
+    Ty::I64,
+    Ty::Isize,
+    Ty::U8,
+    Ty::U16,
+    Ty::U32,
+    Ty::U64,
+    Ty::Usize,
+    Ty::Bool,
+    Ty::Unit,
+    Ty::Never,
+    Ty::Char,
+    Ty::F32,
+    Ty::F64,
+    Ty::I128,
+    Ty::U128,
+];

@@ -356,6 +356,8 @@ pub fn split(src: &str) -> Result<Vec<SrcItem>, String> {
             st.seen_ident = false;
             st.n_head = 0;
             semi_only = false;
+            // (`impl X;` のような壊れたアイテムの後で、次の `{` をヘッダにしない: アイテムの境界では状態を戻す)
+            impl_pending = false;
             if header_end {
                 impl_pending = false;
                 impl_header = Some(items.len() as u32);

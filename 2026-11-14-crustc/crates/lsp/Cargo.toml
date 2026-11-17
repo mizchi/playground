@@ -1,0 +1,9 @@
+[package]
+name = "crustc-lsp"
+version = "0.1.0"
+edition = "2024"
+description = "crustc の LSP サーバ (診断)。driver2 の Session2::check を使う"
+
+[dependencies]
+crustc-core = { path = "../core" }
+serde_json = "1"

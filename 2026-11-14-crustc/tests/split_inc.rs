@@ -1,8 +1,8 @@
-//! 差分の split (driver2::split_inc) が、毎回全体を split したものと同じになるか。
-//! 実際のソース (crates/core/src/*.rs と examples/*.rs) に、乱数で編集 (文字の挿入・削除、引用符やコメントの開き、
+//! 差分の split (front::split_inc) が、毎回全体を split したものと同じになるか。
+//! 実際のソース (crates/{syntax,sema,core}/src/*.rs と examples/*.rs) に、乱数で編集 (文字の挿入・削除、引用符やコメントの開き、
 //! 関数の追加・削除) を続けて加え、各段で比べる
 
-use crustc::driver2::split_inc;
+use crustc::front::split_inc;
 use crustc::lexer::{self, SrcItem};
 
 fn same(a: &[SrcItem], b: &[SrcItem]) -> bool {
@@ -58,7 +58,7 @@ fn edit(s: &str, r: &mut Rng) -> String {
 fn split_inc_matches_full_split() {
     let root = env!("CARGO_MANIFEST_DIR");
     let mut files: Vec<String> = vec![];
-    for dir in ["crates/core/src", "examples"] {
+    for dir in ["crates/syntax/src", "crates/sema/src", "crates/core/src", "examples"] {
         let mut ps: Vec<_> = std::fs::read_dir(format!("{root}/{dir}")).unwrap().map(|e| e.unwrap().path()).collect();
         ps.sort();
         for p in ps {
@@ -75,9 +75,15 @@ fn split_inc_matches_full_split() {
         let mut prev = src.clone();
         for step in 0..60 {
             let full = lexer::split(&cur);
+            let memo_txt = memo.as_ref().map(|m: &(String, Vec<SrcItem>)| m.0.clone()).unwrap_or_default();
             let inc = split_inc(&cur, &mut memo);
             match (full, inc) {
                 (Ok(f), Ok(i)) => {
+                    if !same(&f, &i) {
+                        let d = env!("CARGO_TARGET_TMPDIR");
+                        let _ = std::fs::write(format!("{d}/split_inc_prev.rs"), &memo_txt);
+                        let _ = std::fs::write(format!("{d}/split_inc_cur.rs"), &cur);
+                    }
                     assert!(same(&f, &i), "differs after {step} edits");
                     checked += 1;
                 }

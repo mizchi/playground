@@ -1,33 +1,9 @@
-//! crustc のフロントエンドとコード生成 (syn・Cranelift に依存しない。crustc 自身でもコンパイルできる)。
-//! ソース → lexer / macros / prelude → ast_summary → Program → acg (自前の構文木のコード生成) → minclif の命令の列。
-//! 機械語にするのは minclif か、crustc-clif (Cranelift)。driver2 がキャッシュ・並列化・リンクをまとめる
+//! crustc のドライバ。driver2 (Session2) がキャッシュ・並列化・ワークスペースのビルドと check (LSP の診断) をまとめる。
+//! 層: base (部品) → syntax (字句・構文・前処理・要約) → sema (Program・型推論) → codegen (acg・リンク) → core (ここ)。
+//! LSP は crustc-lsp、Cranelift のバックエンドは crustc-clif。下の層のモジュールはここからも `crustc_core::lexer` のように引ける
 
-pub use minclif;
+pub use crustc_codegen::*;
 
-pub mod acg;
-pub mod ast_closure;
-pub mod ast_consteval;
-pub mod ast_infer;
-pub mod ast_summary;
-pub mod ast_types;
-pub mod cache2;
-pub mod cfg;
-pub mod ctors;
 pub mod driver2;
-pub mod enc;
-pub mod fxhash;
-pub mod key;
-pub mod lexer;
-pub mod prep;
-pub mod link;
-pub mod macros;
-pub mod parse;
-pub mod prelude;
-pub mod program;
-pub mod solver;
-pub mod srcmap;
-pub mod stub;
 #[doc(hidden)]
 pub mod testgen;
-pub mod types;
-pub mod types_enc;

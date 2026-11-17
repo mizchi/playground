@@ -7,7 +7,7 @@ autoexamples = false
 
 # 他の実験と干渉しないよう、このディレクトリ単独のワークスペースにする
 [workspace]
-members = ["crates/minclif", "crates/core", "crates/clif"]
+members = ["crates/minclif", "crates/base", "crates/syntax", "crates/sema", "crates/codegen", "crates/core", "crates/clif", "crates/lsp"]
 
 [features]
 # (以前は driver2 を有効にする feature。今は常に入っている: テストの cfg のために残す)
@@ -17,10 +17,12 @@ acg = []
 [dependencies]
 crustc-core = { path = "crates/core" }
 crustc-clif = { path = "crates/clif" }
-serde_json = "1"
+crustc-lsp = { path = "crates/lsp" }
 minclif = { path = "crates/minclif" }
 
 [dev-dependencies]
+# (LSP のテストとベンチが JSON を組み立てる)
+serde_json = "1"
 # (テストが syn 版と比べるのに使う)
 syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "visit", "clone-impls"] }
 proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }

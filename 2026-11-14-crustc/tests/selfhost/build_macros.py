@@ -1,16 +1,16 @@
-"""crustc 自身の crates/core/src/macros.rs (macro_rules! の展開と include_str!) を 1 ファイルのプログラムにまとめる。
+"""crustc 自身の crates/syntax/src/macros.rs (macro_rules! の展開と include_str!) を 1 ファイルのプログラムにまとめる。
 proc_macro2 クレートは使えないので、使う分だけの代わり (tests/selfhost/mini_pm2.rs) を付ける
 (rustc 版も同じ代わりを使う)。
 usage: python3 tests/selfhost/build_macros.py > out/selfhost/macros_main.rs
 main は引数のファイルごとに macros::expand を呼び、展開した結果の長さ・行数・ハッシュ (とエラー) を出す。"""
 
-macros = open("crates/core/src/macros.rs").read()
+macros = open("crates/syntax/src/macros.rs").read()
 pm2 = open("tests/selfhost/mini_pm2.rs").read()
 # (expand は lexer::tokenize を使う。lexer は cache の Key / KeyHasher を使う)
-lexer = open("crates/core/src/lexer.rs").read()
-key = open("crates/core/src/key.rs").read()
-cfg = open("crates/core/src/cfg.rs").read()
-print("""// 自動生成: tests/selfhost/build_macros.py (crustc の crates/core/src/macros.rs をそのまま含む)
+lexer = open("crates/syntax/src/lexer.rs").read()
+key = open("crates/base/src/key.rs").read()
+cfg = open("crates/syntax/src/cfg.rs").read()
+print("""// 自動生成: tests/selfhost/build_macros.py (crustc の crates/syntax/src/macros.rs をそのまま含む)
 """ + pm2 + """
 mod cache {
 """ + key + """

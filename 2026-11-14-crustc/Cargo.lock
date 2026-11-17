@@ -317,11 +317,16 @@ dependencies = [
  "criterion",
  "crustc-clif",
  "crustc-core",
+ "crustc-lsp",
  "minclif",
  "proc-macro2",
  "serde_json",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "crustc-base"
+version = "0.1.0"
 
 [[package]]
 name = "crustc-clif"
@@ -334,10 +339,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "crustc-codegen"
+version = "0.1.0"
+dependencies = [
+ "crustc-sema",
+ "minclif",
+ "proc-macro2",
+]
+
+[[package]]
 name = "crustc-core"
 version = "0.1.0"
 dependencies = [
- "minclif",
+ "crustc-codegen",
+]
+
+[[package]]
+name = "crustc-lsp"
+version = "0.1.0"
+dependencies = [
+ "crustc-core",
+ "serde_json",
+]
+
+[[package]]
+name = "crustc-sema"
+version = "0.1.0"
+dependencies = [
+ "crustc-syntax",
+]
+
+[[package]]
+name = "crustc-syntax"
+version = "0.1.0"
+dependencies = [
+ "crustc-base",
  "proc-macro2",
 ]
 

@@ -1,5 +1,5 @@
 //! 差分の前処理 (prep::prep) が、毎回全体を前処理したもの (prep::prep_full) と同じになるか。
-//! 実際のソース (examples/*.rs と、crates/core/src のファイルを `mod x { .. }` で束ねたもの) に乱数で編集を続けて加え、
+//! 実際のソース (examples/*.rs と、crates/syntax/src のファイルを `mod x { .. }` で束ねたもの) に乱数で編集を続けて加え、
 //! 各段で本文・桁のずれ・成否を比べる。編集は関数の本体の中 (骨組みが変わらない: 差分の経路) と、どこでも (骨組みが
 //! 変わる: 全体の経路) の両方
 
@@ -62,7 +62,7 @@ fn sources() -> Vec<String> {
     // (モジュールに束ねたもの: 名前のぶつかりの書き換え・use・入れ子のアイテム・マクロ)
     let mut bundle = String::from("fn main() {}\n");
     for m in ["ctors", "cfg", "stub", "macros"] {
-        let t = std::fs::read_to_string(format!("{root}/crates/core/src/{m}.rs")).unwrap();
+        let t = std::fs::read_to_string(format!("{root}/crates/syntax/src/{m}.rs")).unwrap();
         let t: String = t.lines().filter(|l| !l.starts_with("//!") && !l.starts_with("#![")).map(|l| format!("{l}\n")).collect();
         bundle.push_str(&format!("mod {m} {{\n{t}}}\n"));
     }
