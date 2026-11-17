@@ -101,6 +101,8 @@ pub struct Analysis {
     pub inl: acg::Inline,
     /// prelude の先頭の行 (結合したソースの行)
     pub prelude_line0: usize,
+    /// 読んだ関数の本体 (関数 id → 構文木)
+    pub asts: Mutex<FxMap<u32, ItemFn>>,
     /// 依存するクレートのテキストの範囲と、そこから見えるクレート (CrateCtx::dep_ranges)
     pub dep_ranges: Vec<(u32, u32, Vec<usize>, u32)>,
 }
@@ -597,7 +599,7 @@ impl Session2 {
             crefs.push(c);
         }
         tm.lap("refs", String::new());
-        let mut a = Analysis { src, items, prog, refs, srefs, crefs, n_parsed, ext_items, inl: acg::Inline::default(), prelude_line0, dep_ranges: self.ctx.dep_ranges.clone() };
+        let mut a = Analysis { src, items, prog, refs, srefs, crefs, n_parsed, ext_items, inl: acg::Inline::default(), prelude_line0, dep_ranges: self.ctx.dep_ranges.clone(), asts: Mutex::new(FxMap::default()) };
         let cl = self.opts.backend;
         if self.opts.opt && std::env::var_os("CRUSTC_NO_INLINE").is_none() {
             a.inl = inline_bodies(&a);
@@ -1175,7 +1177,13 @@ impl Session2 {
 /// 関数 (インスタンス) 1 つをコンパイルする
 fn compile_id(a: &Analysis, insts: &Mutex<Insts>, id: u32) -> R<Blob> {
     let body = insts.lock().unwrap().body_of(id);
-    let f = fn_ast(a, body)?;
+    // (本体の構文木は本体ごとに 1 回だけ読む: 総称関数のインスタンスごとに読み直していた (コンパイルの 10%))
+    let mut asts = a.asts.lock().unwrap();
+    if !asts.contains_key(&body) {
+        let f = fn_ast(a, body)?;
+        asts.insert(body, f);
+    }
+    let f = asts.get(&body).unwrap();
     let ii = a.prog.item_of[body as usize].unwrap() as usize;
     let it = &a.items[ii];
     // (acg のエラーはファイルの中の `行:桁:` を持つ。持たないものはアイテムの先頭の行にする)
@@ -1183,7 +1191,7 @@ fn compile_id(a: &Analysis, insts: &Mutex<Insts>, id: u32) -> R<Blob> {
         let g = insts.lock().unwrap();
         a.line_base_for(&*g, id).unwrap_or(it.line as u32 - 1)
     };
-    let (b, _) = acg::compile(&a.prog, insts, id, &f, lb, &a.inl)
+    let (b, _) = acg::compile(&a.prog, insts, id, f, lb, &a.inl)
         .map_err(|e| if acg::has_loc(&e) { e } else { format!("{}:1: in `{}`: {e}", it.line, a.prog.names[body as usize]) })?;
     Ok(b)
 }

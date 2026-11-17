@@ -5,7 +5,7 @@
 //! 返すのは minclif と同じ形: (機械語, 再配置 (名前・ELF の種類), trap の場所と番号)。
 //! crustc 自身ではコンパイルできない (cranelift を使う) ので、セルフホストには入れない。
 
-use std::collections::HashMap;
+use minclif::{FMap, FSet};
 
 use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::condcodes::{FloatCC as CFloatCC, IntCC as CIntCC};
@@ -27,10 +27,13 @@ pub fn make_isa(opt: bool, fast_ra: bool) -> OwnedTargetIsa {
     f.set("is_pic", "true").unwrap();
     f.set("unwind_info", "false").unwrap();
     f.set("enable_llvm_abi_extensions", "true").unwrap();
+    // (IR の検査はコンパイルの 18% を占めていた: 既定では切る。CRUSTC_CLIF_VERIFY=1 で入れる)
+    f.set("enable_verifier", if std::env::var_os("CRUSTC_CLIF_VERIFY").is_some() { "true" } else { "false" }).unwrap();
     cranelift_native::builder().unwrap().finish(settings::Flags::new(f)).unwrap()
 }
 
 thread_local! {
+    static CTXS: std::cell::RefCell<Option<(Context, FunctionBuilderContext)>> = const { std::cell::RefCell::new(None) };
     static ISA: std::cell::RefCell<Option<(bool, bool, OwnedTargetIsa)>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -95,18 +98,19 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
         sig.returns.push(AbiParam::new(ty(r)));
     }
     let mut func = ir::Function::with_name_signature(UserFuncName::user(0, 0), sig);
-    let mut fctx = FunctionBuilderContext::new();
+    // (Context と FunctionBuilderContext は関数の間で使い回す: 中の Vec を毎回作り直さない)
+    let (mut ctx, mut fctx) = CTXS.with(|c| c.borrow_mut().take()).unwrap_or_else(|| (Context::new(), FunctionBuilderContext::new()));
     let mut b = CBuilder::new(&mut func, &mut fctx);
     // (名前の表: 再配置の番号 → 名前)
     let mut names: Vec<String> = vec![];
-    let mut vals: HashMap<u32, ir::Value> = HashMap::new();
-    let mut blocks: HashMap<u32, ir::Block> = HashMap::new();
-    let mut vars: HashMap<u32, Variable> = HashMap::new();
-    let mut slots: HashMap<u32, ir::StackSlot> = HashMap::new();
+    let mut vals: FMap<u32, ir::Value> = FMap::default();
+    let mut blocks: FMap<u32, ir::Block> = FMap::default();
+    let mut vars: FMap<u32, Variable> = FMap::default();
+    let mut slots: FMap<u32, ir::StackSlot> = FMap::default();
     // (minclif の関数の番号 → 名前。呼ぶときのシグネチャごとに Cranelift の FuncRef を作る)
-    let mut fnames: HashMap<u32, String> = HashMap::new();
-    let mut frefs: HashMap<(String, Vec<ir::Type>, Vec<ir::Type>), ir::FuncRef> = HashMap::new();
-    let mut gvs: HashMap<String, ir::GlobalValue> = HashMap::new();
+    let mut fnames: FMap<u32, String> = FMap::default();
+    let mut frefs: FMap<(String, Vec<ir::Type>, Vec<ir::Type>), ir::FuncRef> = FMap::default();
+    let mut gvs: FMap<String, ir::GlobalValue> = FMap::default();
     // 入口: 引数の値 (minclif の値 0..) と、0 にするスロット。最初のブロックへ飛ぶ
     let entry = b.create_block();
     b.append_block_params_for_function_params(entry);
@@ -117,7 +121,7 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
     }
     // 定義と別の区間 (ブロックを続けて書いた範囲) で使う値は Variable にする: acg は値を支配していないブロックで
     // 使うことがある (minclif は値をスロットに置くので困らない)。SSA は cranelift_frontend が組み立てる
-    let mut gvars: HashMap<u32, Variable> = HashMap::new();
+    let mut gvars: FMap<u32, Variable> = FMap::default();
     if let Some(tr) = fb.track() {
         let segs = &tr.segs;
         let seg_of = |op: u32| -> usize {
@@ -132,8 +136,8 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
             }
             lo
         };
-        let mut first: HashMap<u32, usize> = HashMap::new();
-        let mut multi: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut first: FMap<u32, usize> = FMap::default();
+        let mut multi: FSet<u32> = FSet::default();
         for &(id, op, _) in &tr.ev {
             if id >= 1 << 28 || id < fb.params.len() as u32 {
                 continue;
@@ -158,7 +162,7 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
     }
     // スタックのスロットのフィールドを Variable にする (SROA: minclif と同じ判定。アドレスが load / store にしか
     // 使われないスロット)。Cranelift はスタックのスロットを SSA にしないので、struct の値がメモリを往復しなくなる
-    let mut facc: HashMap<u32, Variable> = HashMap::new();
+    let mut facc: FMap<u32, Variable> = FMap::default();
     if let (Some(tr), true) = (fb.track(), std::env::var_os("CRUSTC_CLIF_NO_SROA").is_none()) {
         let zs: Vec<u32> = zero.iter().map(|z| z.0).collect();
         let (prom, fields, ftys) = minclif::sroa(tr, fb.n_values(), fb.paddr(), fb.n_slots(), &zs);
@@ -187,8 +191,8 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
         }
     }
     // (ブロックの引数: Variable にしたものはブロックの始まりで def_var する)
-    let mut bparams: HashMap<u32, Vec<u32>> = HashMap::new();
-    let mut started: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut bparams: FMap<u32, Vec<u32>> = FMap::default();
+    let mut started: FSet<u32> = FSet::default();
     let mut in_entry = true;
     macro_rules! v {
         ($x:expr) => {
@@ -223,7 +227,7 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
             op,
             Op::CreateBlock | Op::AppendBlockParam(..) | Op::SwitchToBlock(_) | Op::DeclareVar(_) | Op::CreateStackSlot(..) | Op::ImportFunction(_)
         );
-        let set1 = |vals: &mut HashMap<u32, ir::Value>, v: ir::Value| {
+        let set1 = |vals: &mut FMap<u32, ir::Value>, v: ir::Value| {
             vals.insert(res[0], v);
         };
         match op {
@@ -788,7 +792,7 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
             }
         }
     }
-    let mut ctx = Context::for_function(func);
+    ctx.func = func;
     ctx.compile(isa, &mut ControlPlane::default()).map_err(|e| format!("cranelift: {:?}", e.inner))?;
     let code = ctx.compiled_code().unwrap();
     let mut relocs = vec![];
@@ -810,5 +814,8 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
         relocs.push(Reloc { offset: r.offset, name, kind, addend: r.addend });
     }
     let traps: Vec<(u32, u8)> = code.buffer.traps().iter().map(|t| (t.offset, t.code.as_raw().get())).collect();
-    Ok((code.buffer.data().to_vec(), relocs, traps))
+    let data = code.buffer.data().to_vec();
+    ctx.clear();
+    CTXS.with(|c| *c.borrow_mut() = Some((ctx, fctx)));
+    Ok((data, relocs, traps))
 }

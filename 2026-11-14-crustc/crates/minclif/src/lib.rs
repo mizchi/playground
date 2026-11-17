@@ -5,6 +5,39 @@
 //! 整数の値は型の幅で 0 拡張した形でスロットに持つ (符号つきの比較・拡張のときだけ符号拡張する)。
 //! 外部クレートに依存しないので crustc 自身でもコンパイルできる。tests/minclif.rs が cc でリンクして動かす。
 
+
+/// 速いハッシュ (FxHash: 番号を引く表に。std の SipHash はコンパイルの数 % を占めていた)
+#[derive(Default, Clone, Copy)]
+pub struct FxHasher {
+    h: u64,
+}
+
+impl std::hash::Hasher for FxHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.h = (self.h.rotate_left(5) ^ b as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+        }
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.h = (self.h.rotate_left(5) ^ i as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.h = (self.h.rotate_left(5) ^ i as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.h = (self.h.rotate_left(5) ^ i).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64);
+    }
+    fn finish(&self) -> u64 {
+        self.h
+    }
+}
+
+pub type FMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
+pub type FSet<K> = std::collections::HashSet<K, std::hash::BuildHasherDefault<FxHasher>>;
+
 /// 値の型
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Type {
@@ -209,7 +242,7 @@ pub struct Plan {
     /// スロットごとの、フィールドを変数にしたか (アドレスが load / store にしか使われない)
     pub prom: Vec<bool>,
     /// (スロット, オフセット) → フィールドの番号、フィールドのレジスタ (MEM ならスロットのその場所)
-    pub fields: std::collections::HashMap<(u32, i32), u32>,
+    pub fields: FMap<(u32, i32), u32>,
     pub floc: Vec<u8>,
 }
 
@@ -2233,7 +2266,7 @@ pub fn write_object_full(funcs: &[(String, Vec<u8>, Vec<Reloc>, bool)], datas: &
     };
     // (名前, info, shndx, value, size)
     let mut syms: Vec<(u32, u8, u16, u64, u64)> = vec![(0, 0, 0, 0, 0), (0, 3, 1, 0, 0), (0, 3, 2, 0, 0)];
-    let mut index: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut index: FMap<String, u32> = FMap::default();
     for pass in 0..2 {
         let global = pass == 1;
         for (i, (name, code, _, g)) in funcs.iter().enumerate() {
@@ -2252,7 +2285,7 @@ pub fn write_object_full(funcs: &[(String, Vec<u8>, Vec<Reloc>, bool)], datas: &
         }
     }
     let first_global = syms.iter().position(|s| s.1 >> 4 == 1).unwrap_or(syms.len()) as u32;
-    let undefined = |name: &str, syms: &mut Vec<(u32, u8, u16, u64, u64)>, index: &mut std::collections::HashMap<String, u32>, strtab: &mut Vec<u8>| {
+    let undefined = |name: &str, syms: &mut Vec<(u32, u8, u16, u64, u64)>, index: &mut FMap<String, u32>, strtab: &mut Vec<u8>| {
         if !index.contains_key(name) {
             let n = add_str(name, strtab);
             syms.push((n, 1 << 4, 0, 0, 0));
@@ -2367,12 +2400,12 @@ pub fn write_object_full(funcs: &[(String, Vec<u8>, Vec<Reloc>, bool)], datas: &
 /// paddr: 値ごとのスロットのアドレス、nslots: スロットの数、zero: 入口で 0 にするスロット (変数にしない)
 /// スロットのフィールドを変数にする判定 (SROA): (スロットごとに変数にするか, (スロット, オフセット) → フィールドの番号, フィールドの型)。
 /// アドレスを load / store / iadd_imm にしか使わず、読み書きが重ならず型が同じスロット。clif_backend も使う
-pub fn sroa(tr: &Track, nvals: usize, paddr: &[Option<(u32, i32)>], nslots: usize, zero: &[u32]) -> (Vec<bool>, std::collections::HashMap<(u32, i32), u32>, Vec<Type>) {
+pub fn sroa(tr: &Track, nvals: usize, paddr: &[Option<(u32, i32)>], nslots: usize, zero: &[u32]) -> (Vec<bool>, FMap<(u32, i32), u32>, Vec<Type>) {
     let mut prom = vec![std::env::var_os("MINCLIF_NO_SROA").is_none(); nslots];
     // (スロットのアドレスを入れた変数: 定義がすべて同じアドレスでなければ、そのスロットは変数にしない)
     {
-        let mut st: std::collections::HashMap<u32, Option<(u32, i32)>> = std::collections::HashMap::new();
-        let mut bad: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut st: FMap<u32, Option<(u32, i32)>> = FMap::default();
+        let mut bad: FSet<u32> = FSet::default();
         for &(var, pa) in &tr.var_defs {
             match (st.get(&var), pa) {
                 (_, None) => {
@@ -2413,7 +2446,7 @@ pub fn sroa(tr: &Track, nvals: usize, paddr: &[Option<(u32, i32)>], nslots: usiz
             }
         }
     }
-    let mut ftype: std::collections::HashMap<(u32, i32), Type> = std::collections::HashMap::new();
+    let mut ftype: FMap<(u32, i32), Type> = FMap::default();
     for &(_, sl, off, t, _) in &tr.acc {
         let su = sl as usize;
         if !prom[su] {
@@ -2440,7 +2473,7 @@ pub fn sroa(tr: &Track, nvals: usize, paddr: &[Option<(u32, i32)>], nslots: usiz
             prom[a.0 as usize] = false;
         }
     }
-    let mut fields: std::collections::HashMap<(u32, i32), u32> = std::collections::HashMap::new();
+    let mut fields: FMap<(u32, i32), u32> = FMap::default();
     let mut ftys: Vec<Type> = vec![];
     for k in &keys {
         if prom[k.0 as usize] {
@@ -2560,7 +2593,7 @@ pub fn plan(tr: &Track, nvals: usize, nvars: usize, paddr: &[Option<(u32, i32)>]
             }
         }
         // 区間の行き先: 飛び先のブロックの最初の区間、続き (同じブロックの次の区間 / 入口の前の区間は次)
-        let mut first_seg: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        let mut first_seg: FMap<u32, usize> = FMap::default();
         for (k, sg) in segs.iter().enumerate() {
             first_seg.entry(sg.block).or_insert(k);
         }

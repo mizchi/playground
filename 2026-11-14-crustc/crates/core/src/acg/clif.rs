@@ -75,14 +75,14 @@ pub struct FunctionBuilder {
     results: Vec<Vec<Value>>,
     gvs: Vec<String>,
     /// iconst で作った値とその定数
-    consts: std::collections::HashMap<u32, i64>,
+    consts: crate::fxhash::FxMap<u32, i64>,
 }
 
 impl FunctionBuilder {
     pub fn new(sig: &Signature) -> FunctionBuilder {
         let ps = sig.params.iter().map(|p| p.value_type).collect();
         let rs = sig.returns.iter().map(|p| p.value_type).collect();
-        FunctionBuilder { m: M::new(ps, rs), funcs: vec![], sigs: vec![], results: vec![], gvs: vec![], consts: std::collections::HashMap::new() }
+        FunctionBuilder { m: M::new(ps, rs), funcs: vec![], sigs: vec![], results: vec![], gvs: vec![], consts: crate::fxhash::FxMap::default() }
     }
     pub fn ins(&mut self) -> Ins<'_> {
         Ins(self)

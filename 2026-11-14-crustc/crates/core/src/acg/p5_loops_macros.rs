@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::HashSet;
+use crate::fxhash::FxSet as HashSet;
 
 use crate::acg::clif::MemFlagsData;
 use crate::parse::{Block as PBlock, Expr, GArg, Pat, Path, Stmt, TokKind, tokenize};

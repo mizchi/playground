@@ -46,7 +46,7 @@ pub use p7_fmt_hash_cmp::*;
 #[allow(unused_imports)]
 pub use p8_misc::*;
 
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{FxMap as HashMap, FxSet as HashSet};
 use std::sync::Mutex;
 
 use crate::acg::clif::{AbiParam, FuncRef, FunctionBuilder, Signature, TrapCode, types};
@@ -221,7 +221,7 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
         Some(cd) => (cd.parent, cd.k + 1),
         None => (body_id, 0),
     };
-    let mut closure_ix = HashMap::new();
+    let mut closure_ix = HashMap::default();
     let mut taken = addr_taken(&f.block);
     for (i, (a, t)) in crate::ast_closure::closure_slots(&f.block).into_iter().enumerate() {
         let k = base_k + i as u32;
@@ -261,7 +261,7 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
         ) && prog.item_of.get(body_id as usize).copied().flatten().is_some_and(|i| i >= prog.prelude_from),
         self_sid: env.self_sid,
         sret: None,
-        frefs: HashMap::new(),
+        frefs: HashMap::default(),
         lets,
         addr_taken: taken,
         caps,
@@ -411,7 +411,7 @@ fn addr_taken(b: &crate::parse::Block) -> HashSet<String> {
         }
         crate::ast_closure::each_child_pub(e, &mut |c| visit(c, out));
     }
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     let blk = Expr::Block(None, false, b.clone());
     visit(&blk, &mut out);
     out
