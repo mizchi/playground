@@ -50,6 +50,8 @@ pub struct Server {
     lib: Vec<(String, FileIndex)>,
     /// ワークスペースのファイルの並び (パス, モジュール, クレート, 本体か)。ドキュメントの変更・ファイルの変更で作り直す
     layout: Option<Vec<(PathBuf, Vec<String>, u32, bool)>>,
+    /// クレートの番号 → 有効な feature (Cargo.toml の default から)。cfg で外れたアイテムを除くのに使う
+    feats: HashMap<u32, Vec<String>>,
     /// 本文を持つワークスペースのファイルの大きさの上限 (byte)。超えた分は slim にする
     budget: usize,
     /// slim なファイルを読み直したもの (uri, 索引)。新しいものが後ろ。本文の合計が budget を超えたら古いものから捨てる
@@ -73,6 +75,7 @@ impl Server {
             lib_job: None,
             lib: vec![],
             layout: None,
+            feats: HashMap::new(),
             budget: std::env::var("CRUSTC_LSP_MEM_MB").ok().and_then(|v| v.parse::<f64>().ok()).map(|m| (m * 1048576.0) as usize).unwrap_or(4 << 20),
             cache: RefCell::new(vec![]),
             exit: false,
@@ -308,7 +311,10 @@ impl Server {
         // (Cargo のワークスペースならそのモジュールの木のファイル、なければ根の下の .rs 全部)
         if self.layout.is_none() {
             self.layout = Some(match root.as_ref().map(|r| (r, cargo_files(r))) {
-                Some((_, Some(v))) => v,
+                Some((_, Some((v, feats)))) => {
+                    self.feats = feats;
+                    v
+                }
                 Some((r, None)) => {
                     let mut ps = vec![];
                     rs_files(r, &mut ps, 0);
@@ -330,6 +336,9 @@ impl Server {
                 let mut ix = FileIndex::new(d.text.clone(), m);
                 ix.in_src = main;
                 ix.krate = kr;
+                if let Some(fs) = self.feats.get(&kr) {
+                    ix.apply_cfg(fs.clone());
+                }
                 d.idx = Some(ix);
             }
             open.push(p);
@@ -358,6 +367,9 @@ impl Server {
                         let mut ix = FileIndex::new(text, pm.clone());
                         ix.in_src = main;
                         ix.krate = kr;
+                        if let Some(fs) = self.feats.get(&kr) {
+                            ix.apply_cfg(fs.clone());
+                        }
                         if full + ix.text_len() > self.budget {
                             ix.make_slim();
                         } else {
@@ -703,7 +715,39 @@ pub fn run<R: BufRead, W: Write>(mut r: R, mut w: W) -> io::Result<()> {
 /// ルートの Cargo.toml の members (と [package]) のパッケージの、ターゲットの根 (src/lib.rs・src/main.rs・src/bin・
 /// tests・benches・examples (autoexamples = false でなければ)・build.rs・[[bin]] などの path) から `mod x;` をたどる。
 /// Cargo.toml がなければ None
-fn cargo_files(root: &Path) -> Option<Vec<(PathBuf, Vec<String>, u32, bool)>> {
+/// Cargo.toml の `[features]` の default から有効になる feature (default が含むものもたどる。`dep:` は除く)
+fn default_features(toml: &str) -> Vec<String> {
+    let mut table: HashMap<String, Vec<String>> = HashMap::new();
+    let mut in_feat = false;
+    for l in toml.lines() {
+        let l = l.trim();
+        if l.starts_with('[') {
+            in_feat = l == "[features]";
+            continue;
+        }
+        if !in_feat || l.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = l.split_once('=') {
+            let vs: Vec<String> = v.trim().trim_start_matches('[').split(']').next().unwrap_or("").split(',').map(|x| x.trim().trim_matches('"').to_string()).filter(|x| !x.is_empty()).collect();
+            table.insert(k.trim().to_string(), vs);
+        }
+    }
+    let mut out: Vec<String> = vec![];
+    let mut stack: Vec<String> = table.get("default").cloned().unwrap_or_default();
+    while let Some(f) = stack.pop() {
+        if f.starts_with("dep:") || f.contains('/') || out.contains(&f) {
+            continue;
+        }
+        if let Some(more) = table.get(&f) {
+            stack.extend(more.iter().cloned());
+        }
+        out.push(f);
+    }
+    out
+}
+
+fn cargo_files(root: &Path) -> Option<(Vec<(PathBuf, Vec<String>, u32, bool)>, HashMap<u32, Vec<String>>)> {
     let top = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
     let mut pkgs: Vec<PathBuf> = vec![];
     if top.contains("[package]") {
@@ -729,6 +773,7 @@ fn cargo_files(root: &Path) -> Option<Vec<(PathBuf, Vec<String>, u32, bool)>> {
         }
     }
     let mut out: Vec<(PathBuf, Vec<String>, u32, bool)> = vec![];
+    let mut feats: HashMap<u32, Vec<String>> = HashMap::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut krate = 0u32;
     for pkg in pkgs {
@@ -771,6 +816,7 @@ fn cargo_files(root: &Path) -> Option<Vec<(PathBuf, Vec<String>, u32, bool)>> {
                 continue;
             }
             krate += 1;
+            feats.insert(krate, default_features(&toml));
             let mut stack: Vec<(PathBuf, Vec<String>, bool)> = vec![(r, vec![], true)];
             while let Some((f, m, is_root)) = stack.pop() {
                 if !seen.insert(f.clone()) {
@@ -803,7 +849,7 @@ fn cargo_files(root: &Path) -> Option<Vec<(PathBuf, Vec<String>, u32, bool)>> {
             }
         }
     }
-    Some(out)
+    Some((out, feats))
 }
 
 /// ファイルの中の `mod x;` (囲む `mod a { .. }` の名前の列, 名前, `#[path = ".."]`)
