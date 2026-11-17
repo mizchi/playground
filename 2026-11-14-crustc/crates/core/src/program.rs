@@ -252,6 +252,8 @@ pub struct Program {
     pub aliases: FxMap<String, (Vec<String>, TySyn)>,
     /// 同じく `S::<PartialOrd<R>>::partial_cmp`。`a < b` の型が違うとき探す
     pub pord: Vec<u32>,
+    /// struct / enum の定義 (番号の若いもの) を書いたアイテムの番号
+    pub struct_item: Vec<u32>,
 }
 
 /// `impl<..> Trait for S<..> { type Name = Value; }`
@@ -476,6 +478,7 @@ impl Program {
             peq: vec![],
             aliases: FxMap::default(),
             pord: vec![],
+            struct_item: vec![],
         };
         // 0. 型の別名 (struct のフィールドの型より先に)
         // (同じ名前の struct / enum があればそちら: ユーザの `struct Path` と prelude の `type Path = str`)
@@ -546,6 +549,7 @@ impl Program {
                 ));
             }
         }
+        p.struct_item = sdefs.iter().map(|d| d.0 as u32).collect();
         // 2. フィールド型を解決し、依存順にレイアウトを決める
         for (_, n, sh, g) in &sdefs {
             let mut d = StructDef::blank(n.clone(), matches!(sh, AdtShape::Enum(_)));
@@ -1434,6 +1438,21 @@ impl Program {
         let id = self.structs.push(d);
         g.insert(n, id);
         id
+    }
+
+    /// 型が prelude とプリミティブの型だけでできているか (ユーザ・依存するクレートの struct / enum を含まない)
+    pub fn is_prelude_ty(&self, t: Ty) -> bool {
+        match t {
+            Ty::Ref(_, i) | Ty::Ptr(_, i) | Ty::Array(i, _) | Ty::Slice(i) | Ty::Box(i) => self.is_prelude_ty(*i),
+            Ty::Struct(sid) => {
+                let b = self.base_of(sid);
+                let user = self.struct_item.get(b as usize).is_some_and(|&ii| ii < self.prelude_from);
+                !user && self.structs[sid as usize].args.iter().all(|&a| self.is_prelude_ty(a))
+            }
+            Ty::Fn(f) => f.params.iter().all(|&p| self.is_prelude_ty(p)) && self.is_prelude_ty(f.ret),
+            Ty::Dyn(_) | Ty::Assoc(_) | Ty::Param(_) => false,
+            _ => true,
+        }
     }
 
     pub fn is_tuple(&self, sid: u32) -> bool {

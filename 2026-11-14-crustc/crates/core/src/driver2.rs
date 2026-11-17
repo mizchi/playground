@@ -20,13 +20,14 @@ pub type R<T> = Result<T, String>;
 /// ユーザのソースの後ろに、使われうる prelude のアイテムを付ける (driver::with_prelude と同じ)。
 /// 返り値は (全体のソース, アイテム, ユーザのアイテムの数)
 pub fn with_prelude(src: &str) -> R<(String, Vec<SrcItem>, usize)> {
-    with_prelude_in(src, &[], &mut vec![], None)
+    with_prelude_in(src, &[], &mut vec![], None).map(|(s, i, u, _)| (s, i, u))
 }
 
 /// crates: ソースの中のクレートのモジュールの名前 (lexer::rename_module_collisions_in)
 /// fix: モジュールの名前を変えて桁がずれた所 (lexer::rename_module_collisions_fix)
 /// cfg: マクロを展開したものの中の `#[cfg(..)]` を評価する設定
-pub fn with_prelude_in(src: &str, crates: &[String], fix: &mut Vec<(u32, u32, i32)>, cfg: Option<&crate::cfg::CfgSet>) -> R<(String, Vec<SrcItem>, usize)> {
+/// 返り値の 4 つ目は prelude の先頭の行 (prelude の中の行 = 結合したソースの行 - これ)
+pub fn with_prelude_in(src: &str, crates: &[String], fix: &mut Vec<(u32, u32, i32)>, cfg: Option<&crate::cfg::CfgSet>) -> R<(String, Vec<SrcItem>, usize, usize)> {
     let mut tm = Timer { on: std::env::var_os("CRUSTC_PROF").is_some(), last: now_ns(), start: now_ns() };
     let tl = lexer::expand_thread_local(src);
     let src: &str = tl.as_deref().unwrap_or(src);
@@ -56,7 +57,7 @@ pub fn with_prelude_in(src: &str, crates: &[String], fix: &mut Vec<(u32, u32, i3
     let extra = crate::prelude::select_with(src, &items, &mut cache);
     tm.lap("prelude", String::new());
     if extra.is_empty() {
-        return Ok((src.to_string(), items, user));
+        return Ok((src.to_string(), items, user, 0));
     }
     let base = src.len() + 1;
     let lines = src.bytes().filter(|&c| c == b'\n').count() + 1;
@@ -80,7 +81,7 @@ pub fn with_prelude_in(src: &str, crates: &[String], fix: &mut Vec<(u32, u32, i3
     full.push_str(src);
     full.push('\n');
     full.push_str(&extra);
-    Ok((full, items, user))
+    Ok((full, items, user, lines))
 }
 
 /// 解析の結果
@@ -98,6 +99,25 @@ pub struct Analysis {
     pub ext_items: Vec<bool>,
     /// `-O` で展開してよい (prelude の小さい) 関数の本体
     pub inl: acg::Inline,
+    /// prelude の先頭の行 (結合したソースの行)
+    pub prelude_line0: usize,
+}
+
+/// prelude の中の panic の場所の行の基準 (結合したソースの行によらない: prelude の関数の機械語をクレートの間で使い回す)。
+/// 場所の表では、この行から後ろは prelude のファイル
+pub const PRELUDE_LINE: u32 = 49152;
+
+impl Analysis {
+    /// アイテム ii の panic の場所の行の基準 (アイテムの先頭の行 - 1)
+    pub fn line_base(&self, ii: usize) -> u32 {
+        let it = &self.items[ii];
+        let user_lines = self.prelude_line0 as u32;
+        if ii >= self.prog.prelude_from as usize && self.prelude_line0 > 0 && user_lines < PRELUDE_LINE && it.line >= self.prelude_line0 {
+            PRELUDE_LINE + (it.line - self.prelude_line0).saturating_sub(1) as u32
+        } else {
+            it.line as u32 - 1
+        }
+    }
 }
 
 impl Analysis {
@@ -351,7 +371,7 @@ impl Session2 {
         crates.extend(self.ctx.lib.iter().cloned());
         let mut fix = vec![];
         let cfg = self.opts.cfg_with(self.ctx.features.as_ref().unwrap_or(&self.opts.features));
-        let (src, items, user) = with_prelude_in(src0, &crates, &mut fix, Some(&cfg))?;
+        let (src, items, user, prelude_line0) = with_prelude_in(src0, &crates, &mut fix, Some(&cfg))?;
         self.ctx.map.colfix = fix;
         let mut tm = Timer { on: std::env::var_os("CRUSTC_PROF").is_some(), last: now_ns(), start: now_ns() };
         if let Some(p) = std::env::var_os("CRUSTC_DUMP_SRC") {
@@ -486,7 +506,7 @@ impl Session2 {
             crefs.push(c);
         }
         tm.lap("refs", String::new());
-        let mut a = Analysis { src, items, prog, refs, srefs, crefs, n_parsed, ext_items, inl: acg::Inline::default() };
+        let mut a = Analysis { src, items, prog, refs, srefs, crefs, n_parsed, ext_items, inl: acg::Inline::default(), prelude_line0 };
         let cl = self.opts.backend;
         if self.opts.opt && std::env::var_os("CRUSTC_NO_INLINE").is_none() {
             a.inl = inline_bodies(&a);
@@ -720,8 +740,30 @@ fn write_all(fd: i32, mut d: &[u8]) {
 
 impl Session2 {
     /// 関数 id のキャッシュのキー: 本体のハッシュ + 自分と参照先のシグネチャ + 名前で現れる struct (レイアウトごと) + const
-    fn fn_key(&self, a: &Analysis, id: usize) -> Key {
+
+    /// closed: prelude の関数で、ユーザの関数を呼びえないもの (総称でないか、型引数が prelude の型だけ)。参照の
+    /// シグネチャは prelude のものだけを入れる (名前の最後で多めに取ると、ユーザの `Acc::push` などが入って、同じ prelude の
+    /// 関数がクレートごとに違うキーになり、どのクレートでもコンパイルし直していた)
+    fn fn_key_r(&self, a: &Analysis, id: usize, closed: bool) -> Key {
         let ii = a.prog.item_of[id].unwrap() as usize;
+        let pf = a.prog.prelude_from as usize;
+        // 閉じた prelude の関数: prelude の本体とシグネチャはコンパイラ (cid) に入っているので、本体と自分のシグネチャと
+        // panic の行き先 (`#[panic_handler]`) だけで決まる (参照先を名前の最後で多めに取ると、クレートごとに選ぶ prelude が
+        // 違うのでキーが変わり、同じ関数をクレートごとにコンパイルし直していた)
+        if closed && ii >= pf {
+            let mut h = KeyHasher::new();
+            h.add(&self.cid);
+            h.add(&2u8);
+            h.add(&(self.opts.opt as u8));
+            h.add(&(self.opts.backend.is_some() as u8));
+            h.add(&a.items[ii].hash);
+            a.prog.hash_sig(id as u32, &mut h);
+            match a.prog.panic_handler {
+                Some(p) => h.add(&a.prog.names[p as usize]),
+                None => h.add(&0u8),
+            }
+            return h.finish();
+        }
         let mut h = KeyHasher::new();
         h.add(&self.cid);
         h.add(&1u8);
@@ -733,6 +775,9 @@ impl Session2 {
         }
         a.prog.hash_sig(id as u32, &mut h);
         for &r in &a.refs[id] {
+            if closed && a.prog.item_of[r as usize].is_some_and(|ri| (ri as usize) < pf) {
+                continue;
+            }
             a.prog.hash_sig(r, &mut h);
             // (展開しうるユーザの関数は、本体と行も効く)
             if let Some(&lb) = a.inl.user_lines.get(&r) {
@@ -743,6 +788,9 @@ impl Session2 {
             }
         }
         for &st in &a.srefs[id] {
+            if closed && !a.prog.is_prelude_ty(Ty::Struct(st)) {
+                continue;
+            }
             h.add(&a.prog.structs[st as usize].deep);
         }
         for &c in &a.crefs[id] {
@@ -757,7 +805,15 @@ impl Session2 {
     /// 関数かインスタンスのキー (インスタンスは元の関数のキー + 型引数)
     fn key_of(&self, a: &Analysis, insts: &Mutex<Insts>, id: u32) -> Key {
         let g = insts.lock().unwrap();
-        let k = self.fn_key(a, g.body_of(id) as usize);
+        let body = g.body_of(id) as usize;
+        let prelude = a.prog.item_of[body].is_some_and(|ii| ii >= a.prog.prelude_from);
+        let closed = prelude
+            && !a.prog.closures.contains_key(&(body as u32))
+            && match g.get(id) {
+                None => true,
+                Some(inst) => inst.args.iter().all(|&t| a.prog.is_prelude_ty(t)),
+            };
+        let k = self.fn_key_r(a, body, closed);
         match g.get(id) {
             None => k,
             Some(inst) => {
@@ -878,15 +934,32 @@ impl Session2 {
                 // (場所を書き込んだ関数は、アイテムの開始行が変わっていたら使わない)
                 let lb = {
                     let body = insts.lock().unwrap().body_of(id);
-                    a.prog.item_of[body as usize].map(|i| a.items[i as usize].line as u32 - 1)
+                    a.prog.item_of[body as usize].map(|i| a.line_base(i as usize))
                 };
-                let hit = self.get(k).and_then(|d| crate::cache2::decode_blob(&d, &a.prog, &insts)).filter(|b| b.line_base.is_none() || b.line_base == lb);
+                let raw = self.get(k);
+                if std::env::var_os("CRUSTC_LOG_COMPILED").is_some() && raw.is_some() {
+                    let d = crate::cache2::decode_blob(raw.as_ref().unwrap(), &a.prog, &insts);
+                    match &d {
+                        None => eprintln!("decode-fail {}", a.prog.names[insts.lock().unwrap().body_of(id) as usize]),
+                        Some(b) if !(b.line_base.is_none() || b.line_base == lb) => eprintln!("line-mismatch {}", a.prog.names[insts.lock().unwrap().body_of(id) as usize]),
+                        _ => {}
+                    }
+                }
+                let hit = raw.and_then(|d| crate::cache2::decode_blob(&d, &a.prog, &insts)).filter(|b| b.line_base.is_none() || b.line_base == lb);
                 match hit {
                     Some(b) => {
                         rep.fns_hit += 1;
                         blobs.insert(id, b);
                     }
                     None => misses.push(id),
+                }
+            }
+            if std::env::var_os("CRUSTC_LOG_COMPILED").is_some() {
+                let g = insts.lock().unwrap();
+                for &id in &misses {
+                    let b = g.body_of(id);
+                    let args = g.get(id).map(|i| i.args.iter().map(|&t| a.prog.tn(t)).collect::<Vec<_>>().join(",")).unwrap_or_default();
+                    eprintln!("compiled {}<{args}>", a.prog.names[b as usize]);
                 }
             }
             let compiled = self.compile_many(a, &insts, &misses)?;
@@ -984,7 +1057,7 @@ fn compile_id(a: &Analysis, insts: &Mutex<Insts>, id: u32) -> R<Blob> {
     let ii = a.prog.item_of[body as usize].unwrap() as usize;
     let it = &a.items[ii];
     // (acg のエラーはファイルの中の `行:桁:` を持つ。持たないものはアイテムの先頭の行にする)
-    let (b, _) = acg::compile(&a.prog, insts, id, &f, it.line as u32 - 1, &a.inl)
+    let (b, _) = acg::compile(&a.prog, insts, id, &f, a.line_base(ii), &a.inl)
         .map_err(|e| if acg::has_loc(&e) { e } else { format!("{}:1: in `{}`: {e}", it.line, a.prog.names[body as usize]) })?;
     Ok(b)
 }
@@ -1301,12 +1374,18 @@ fn emit_object(a: &Analysis, ctx: &CrateCtx, insts: &Insts, user_live: &[u32], b
                 uv(&mut fbytes, col);
             }
         }
-        // (ファイルの対応: 結合したソースの行 → ファイル)
-        uv(&mut bytes, ctx.map.segs.len() as u64);
-        for &(st, fi, first) in &ctx.map.segs {
-            uv(&mut bytes, st as u64);
-            uv(&mut bytes, first as u64);
-            let n = ctx.map.files.get(fi as usize).map(|s| s.as_str()).unwrap_or("src/main.rs");
+        // (ファイルの対応: 結合したソースの行 → ファイル。PRELUDE_LINE から後ろは prelude)
+        let mut segs: Vec<(u32, String, u32)> = ctx.map.segs.iter().map(|&(st, fi, first)| (st, ctx.map.files.get(fi as usize).cloned().unwrap_or_else(|| "src/main.rs".to_string()), first)).collect();
+        if segs.is_empty() {
+            segs.push((1, "src/main.rs".to_string(), 1));
+        }
+        if a.prelude_line0 > 0 && (a.prelude_line0 as u32) < PRELUDE_LINE {
+            segs.push((PRELUDE_LINE + 1, "<crustc prelude>".to_string(), 1));
+        }
+        uv(&mut bytes, segs.len() as u64);
+        for (st, n, first) in &segs {
+            uv(&mut bytes, *st as u64);
+            uv(&mut bytes, *first as u64);
             uv(&mut bytes, n.len() as u64);
             bytes.extend_from_slice(n.as_bytes());
         }

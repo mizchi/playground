@@ -1215,10 +1215,13 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
     }
     let mut out = String::new();
     let mut open_impl = false;
+    // (アイテムは prelude の元の行に置く (間は改行): panic の場所の行が選び方によらず、機械語をクレートの間で使い回せる)
+    let mut cur_line = 1usize;
     for (i, (it, _, _)) in all.iter().enumerate() {
         let in_impl = matches!(it.kind, ItemKind::ImplMember(_) | ItemKind::TraitMember(_));
         if open_impl && !in_impl {
             out.push_str("}\n");
+            cur_line += 1;
             open_impl = false;
         }
         // impl の関連型 (`type Item = &T;`) は、その impl が付くなら必ず付ける
@@ -1230,8 +1233,14 @@ pub fn select_with(user_src: &str, user_items: &[SrcItem], cache: &mut SelectCac
         if !chosen[i] && !assoc_member {
             continue;
         }
-        out.push_str(&PRELUDE[it.start..it.end]);
+        while cur_line < it.line {
+            out.push('\n');
+            cur_line += 1;
+        }
+        let text = &PRELUDE[it.start..it.end];
+        out.push_str(text);
         out.push('\n');
+        cur_line += text.bytes().filter(|&c| c == b'\n').count() + 1;
         if matches!(it.kind, ItemKind::ImplHeader | ItemKind::TraitHeader) {
             open_impl = true;
         }
