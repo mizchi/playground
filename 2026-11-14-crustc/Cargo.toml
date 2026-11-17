@@ -34,3 +34,9 @@ harness = false
 
 [profile.release]
 debug = false
+
+# cargo-mutants の変異ごとのビルド (.cargo/mutants.toml)。release と同じ最適化で、増分ビルドを使う
+[profile.mutants]
+inherits = "release"
+incremental = true
+codegen-units = 64
