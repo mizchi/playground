@@ -249,3 +249,16 @@ mod tests {
         assert_eq!(extra_or_test(), 2);
     }
 }
+
+impl From<i32> for Hidden {
+    fn from(v: i32) -> Self {
+        Hidden { v }
+    }
+}
+
+pub fn convert(n: i32) -> i32 {
+    let h: Hidden = n.into();
+    let g = Hidden::from(n);
+    let s = "abc".to_string();
+    h.v + g.get() + s.len() as i32
+}

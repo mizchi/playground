@@ -126,13 +126,13 @@ sym/odd.rs:35:12 Gen -> sym/odd.rs:35:12+3 | refs 2/1 [sym/odd.rs:35:12+3 sym/od
 sym/odd.rs:35:17 a -> - | refs 0/0 | -
 sym/odd.rs:35:20 T -> sym/odd.rs:35:20+1 | refs 3/2 [sym/odd.rs:35:20+1 sym/odd.rs:37:5+1 sym/odd.rs:40:24+1] | ```rust⏎T: a + Clone⏎```
 sym/odd.rs:35:24 a -> - | refs 0/0 | -
-sym/odd.rs:35:28 Clone -> lib/core/src/fmt/macros.rs:5:11+5 | refs 5/4 [lib/core/src/fmt/macros.rs:5:11+5 sym/odd.rs:35:28+5 sym/odd.rs:54:18+5 sym/odd.rs:67:13+5 sym/odd.rs:82:6+5] | ```rust⏎fmt::macros⏎pub macro Clone($item:item)⏎```
+sym/odd.rs:35:28 Clone -> lib/core/src/clone.rs:2:11+5 | refs 5/4 [lib/core/src/clone.rs:2:11+5 sym/odd.rs:35:28+5 sym/odd.rs:54:18+5 sym/odd.rs:67:13+5 sym/odd.rs:82:6+5] | ```rust⏎clone⏎pub trait Clone: Sized⏎```⏎⏎---⏎⏎A common trait for the ability to explicitly duplicate an object.
 sym/odd.rs:35:35 const -> - | refs 0/0 | -
 sym/odd.rs:35:41 N -> sym/odd.rs:35:41+1 | refs 2/1 [sym/odd.rs:35:41+1 sym/odd.rs:40:27+1] | ```rust⏎N: usize⏎```
 sym/odd.rs:35:44 usize -> - | refs 6/6 | ```rust⏎usize⏎```
 sym/odd.rs:36:1 where -> - | refs 0/0 | -
 sym/odd.rs:37:5 T -> sym/odd.rs:35:20+1 | refs 3/2 | ```rust⏎T: a + Clone⏎```
-sym/odd.rs:37:8 Default -> lib/core/src/fmt/macros.rs:8:11+7 | refs 3/2 [lib/core/src/fmt/macros.rs:8:11+7 sym/odd.rs:37:8+7 sym/odd.rs:67:21+7] | ```rust⏎fmt::macros⏎pub macro Default($item:item)⏎```
+sym/odd.rs:37:8 Default -> lib/core/src/default.rs:1:11+7 | refs 3/2 [lib/core/src/default.rs:1:11+7 sym/odd.rs:37:8+7 sym/odd.rs:67:21+7] | ```rust⏎default⏎pub trait Default: Sized⏎```
 sym/odd.rs:39:7 allow -> - | refs 0/0 | -
 sym/odd.rs:39:13 unused -> - | refs 0/0 | -
 sym/odd.rs:40:5 pub -> - | refs 0/0 | -
@@ -180,7 +180,7 @@ sym/odd.rs:54:1 pub -> - | refs 0/0 | -
 sym/odd.rs:54:5 trait -> - | refs 0/0 | -
 sym/odd.rs:54:11 Tr -> sym/odd.rs:54:11+2 | refs 2/1 [sym/odd.rs:54:11+2 sym/odd.rs:74:9+2] | ```rust⏎odd⏎pub trait Tr<T>: Clone where T: Copy,⏎```
 sym/odd.rs:54:14 T -> sym/odd.rs:54:14+1 | refs 2/1 [sym/odd.rs:54:14+1 sym/odd.rs:56:5+1] | ```rust⏎T⏎```
-sym/odd.rs:54:18 Clone -> lib/core/src/fmt/macros.rs:5:11+5 | refs 5/4 | ```rust⏎fmt::macros⏎pub macro Clone($item:item)⏎```
+sym/odd.rs:54:18 Clone -> lib/core/src/clone.rs:2:11+5 | refs 5/4 | ```rust⏎clone⏎pub trait Clone: Sized⏎```⏎⏎---⏎⏎A common trait for the ability to explicitly duplicate an object.
 sym/odd.rs:55:1 where -> - | refs 0/0 | -
 sym/odd.rs:56:5 T -> sym/odd.rs:54:14+1 | refs 2/1 | ```rust⏎T⏎```
 sym/odd.rs:56:8 Copy -> - | refs 0/0 | -
@@ -190,7 +190,7 @@ sym/odd.rs:59:5 const -> - | refs 0/0 | -
 sym/odd.rs:59:11 K -> sym/odd.rs:59:11+1 | refs 2/1 [sym/odd.rs:59:11+1 sym/odd.rs:62:15+1] | ```rust⏎Tr⏎const K: usize = 3⏎```
 sym/odd.rs:59:14 usize -> - | refs 6/6 | ```rust⏎usize⏎```
 sym/odd.rs:60:5 fn -> - | refs 0/0 | -
-sym/odd.rs:60:8 req -> sym/odd.rs:60:8+3 | refs 1/0 [sym/odd.rs:60:8+3] | ```rust⏎Tr⏎fn req(&self) -> Self::Out⏎```
+sym/odd.rs:60:8 req -> sym/odd.rs:60:8+3 | refs 2/1 [sym/odd.rs:60:8+3 sym/odd.rs:79:8+3] | ```rust⏎Tr⏎fn req(&self) -> Self::Out⏎```
 sym/odd.rs:60:13 self -> - | refs 0/0 | -
 sym/odd.rs:60:22 Self -> - | refs 0/0 | -
 sym/odd.rs:60:28 Out -> sym/odd.rs:58:10+3 | refs 2/1 | ```rust⏎Tr⏎type Out;⏎```
@@ -208,8 +208,8 @@ sym/odd.rs:66:22 Unit -> sym/odd.rs:34:12+4 | refs 6/5 | ```rust⏎odd⏎pub str
 sym/odd.rs:67:1 impl -> sym/odd.rs:67:1+4 | refs 1/0 [sym/odd.rs:67:1+4] | ```rust⏎impl⏎```
 sym/odd.rs:67:7 a -> - | refs 0/0 | -
 sym/odd.rs:67:10 T -> sym/odd.rs:67:10+1 | refs 4/3 [sym/odd.rs:67:10+1 sym/odd.rs:67:54+1 sym/odd.rs:67:66+1 sym/odd.rs:68:29+1] | ```rust⏎T: Clone + Default⏎```
-sym/odd.rs:67:13 Clone -> lib/core/src/fmt/macros.rs:5:11+5 | refs 5/4 | ```rust⏎fmt::macros⏎pub macro Clone($item:item)⏎```
-sym/odd.rs:67:21 Default -> lib/core/src/fmt/macros.rs:8:11+7 | refs 3/2 | ```rust⏎fmt::macros⏎pub macro Default($item:item)⏎```
+sym/odd.rs:67:13 Clone -> lib/core/src/clone.rs:2:11+5 | refs 5/4 | ```rust⏎clone⏎pub trait Clone: Sized⏎```⏎⏎---⏎⏎A common trait for the ability to explicitly duplicate an object.
+sym/odd.rs:67:21 Default -> lib/core/src/default.rs:1:11+7 | refs 3/2 | ```rust⏎default⏎pub trait Default: Sized⏎```
 sym/odd.rs:67:30 const -> - | refs 0/0 | -
 sym/odd.rs:67:36 N -> sym/odd.rs:67:36+1 | refs 3/2 [sym/odd.rs:67:36+1 sym/odd.rs:67:57+1 sym/odd.rs:68:32+1] | ```rust⏎N: usize⏎```
 sym/odd.rs:67:39 usize -> - | refs 6/6 | ```rust⏎usize⏎```
@@ -254,7 +254,7 @@ sym/odd.rs:81:7 Sync -> - | refs 0/0 | -
 sym/odd.rs:81:12 for -> - | refs 0/0 | -
 sym/odd.rs:81:16 Tuple -> sym/odd.rs:33:12+5 | refs 2/1 | ```rust⏎odd⏎pub struct Tuple(pub u8, u16)⏎```
 sym/odd.rs:82:1 impl -> sym/odd.rs:82:1+4 | refs 1/0 [sym/odd.rs:82:1+4] | ```rust⏎impl⏎```
-sym/odd.rs:82:6 Clone -> lib/core/src/fmt/macros.rs:5:11+5 | refs 5/4 | ```rust⏎fmt::macros⏎pub macro Clone($item:item)⏎```
+sym/odd.rs:82:6 Clone -> lib/core/src/clone.rs:2:11+5 | refs 5/4 | ```rust⏎clone⏎pub trait Clone: Sized⏎```⏎⏎---⏎⏎A common trait for the ability to explicitly duplicate an object.
 sym/odd.rs:82:12 for -> sym/odd.rs:82:12+3 | refs 1/0 [sym/odd.rs:82:12+3] | ```rust⏎for⏎```
 sym/odd.rs:82:16 Unit -> sym/odd.rs:34:12+4 | refs 6/5 | ```rust⏎odd⏎pub struct Unit⏎```
 sym/odd.rs:83:5 fn -> sym/odd.rs:83:5+2 | refs 1/0 [sym/odd.rs:83:5+2] | ```rust⏎fn⏎```
@@ -274,7 +274,7 @@ sym/odd.rs:89:10 Alias -> sym/odd.rs:89:10+5 | refs 1/0 [sym/odd.rs:89:10+5] | `
 sym/odd.rs:89:16 K -> sym/odd.rs:89:16+1 | refs 2/1 [sym/odd.rs:89:16+1 sym/odd.rs:89:50+1] | ```rust⏎K⏎```
 sym/odd.rs:89:19 V -> sym/odd.rs:89:19+1 | refs 2/1 [sym/odd.rs:89:19+1 sym/odd.rs:89:57+1] | ```rust⏎V⏎```
 sym/odd.rs:89:24 std -> - | refs 0/0 | -
-sym/odd.rs:89:29 collections -> - | refs 0/0 | -
+sym/odd.rs:89:29 collections -> lib/std/src/lib.rs:2:9+11 | refs 2/1 [lib/std/src/lib.rs:2:9+11 sym/odd.rs:89:29+11] | ```rust⏎pub mod collections⏎```
 sym/odd.rs:89:42 HashMap -> lib/std/src/collections/hash/map.rs:2:12+7 | refs 2/1 [lib/std/src/collections/hash/map.rs:2:12+7 sym/odd.rs:89:42+7] | ```rust⏎collections::hash::map⏎pub struct HashMap<K, V>⏎```⏎⏎---⏎⏎A hash map.
 sym/odd.rs:89:50 K -> sym/odd.rs:89:16+1 | refs 2/1 | ```rust⏎K⏎```
 sym/odd.rs:89:53 Vec -> lib/alloc/src/vec/mod.rs:2:12+3 | refs 5/4 | ```rust⏎vec⏎pub struct Vec<T>⏎```⏎⏎---⏎⏎A contiguous growable array type.

@@ -58,6 +58,29 @@ flat Target in "impl Deref for Vec<T>" lsp=26
 flat deref in "impl Deref for Vec<T>" lsp=6
 flat impl Clone for Vec<T> in "" lsp=19
 flat clone in "impl Clone for Vec<T>" lsp=6
+== lib/core/src/clone.rs
+Trait Clone [70..125] name 80..85 
+  Method clone [99..123] name 102..107 fn clone(&self) -> Self
+flat Clone in "" lsp=11
+flat clone in "Clone" lsp=6
+== lib/core/src/convert/mod.rs
+Trait Into [0..52] name 10..14 
+  Method into [31..50] name 34..38 fn into(self) -> T
+Trait From [54..113] name 64..68 
+  Method from [85..111] name 88..92 fn from(value: T) -> Self
+Impl impl Into<U> for T [115..212] name 126..139 
+  Method into [168..210] name 171..175 fn into(self) -> U
+flat Into in "" lsp=11
+flat into in "Into" lsp=6
+flat From in "" lsp=11
+flat from in "From" lsp=6
+flat impl Into<U> for T in "" lsp=19
+flat into in "impl Into<U> for T" lsp=6
+== lib/core/src/default.rs
+Trait Default [0..54] name 10..17 
+  Method default [31..52] name 34..41 fn default() -> Self
+flat Default in "" lsp=11
+flat default in "Default" lsp=6
 == lib/core/src/fmt/macros.rs
 Macro Debug [58..117] name 68..73 macro
 Macro Clone [118..177] name 128..133 macro
@@ -189,6 +212,13 @@ flat len in "impl HashMap<K, V>" lsp=6
 == lib/std/src/collections/mod.rs
 Module hash [35..44] name 39..43 
 flat hash in "" lsp=2
+== lib/std/src/lib.rs
+Module collections [41..61] name 49..60 
+Module sync [62..75] name 70..74 
+Module sys [76..84] name 80..83 
+flat collections in "" lsp=2
+flat sync in "" lsp=2
+flat sys in "" lsp=2
 == lib/std/src/sync/mod.rs
 Module nonpoison [56..74] name 64..73 
 Module poison [75..86] name 79..85 
@@ -440,6 +470,9 @@ Function use_macro [4463..4565] name 4470..4479 fn use_macro(n: i64) -> i64
 Function texts [4567..4683] name 4574..4579 fn texts() -> usize
 Module tests [4685..4902] name 4702..4707 
   Function counter_works [4733..4900] name 4748..4761 fn counter_works()
+Impl impl From<i32> for Hidden [4904..4990] name 4909..4929 
+  Method from [4936..4988] name 4939..4943 fn from(v: i32) -> Self
+Function convert [4992..5150] name 4999..5006 fn convert(n: i32) -> i32
 flat shapes in "" lsp=2
 flat util in "" lsp=2
 flat inner in "" lsp=2
@@ -497,6 +530,9 @@ flat use_macro in "" lsp=12
 flat texts in "" lsp=12
 flat tests in "" lsp=2
 flat counter_works in "tests" lsp=12
+flat impl From<i32> for Hidden in "" lsp=19
+flat from in "impl From<i32> for Hidden" lsp=6
+flat convert in "" lsp=12
 == ws/src/shapes.rs
 Struct Point [35..137] name 96..101 
   Field x [108..118] name 112..113 i32
