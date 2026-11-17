@@ -14,6 +14,7 @@ pub mod ctors;
 pub mod enc;
 pub mod front;
 pub mod lexer;
+pub mod navigate;
 pub mod macros;
 pub mod parse;
 pub mod prelude;

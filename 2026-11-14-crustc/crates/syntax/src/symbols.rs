@@ -381,6 +381,16 @@ impl Scan<'_> {
                     out.push(named(SymKind::Macro, j + 2, e, String::from("macro_rules!"), vec![]));
                     e + 1
                 }
+                // (宣言マクロ 2.0 `macro name(..) { .. }` / `macro name { .. }`: std の derive など)
+                b"macro" if self.ident(j + 1) => {
+                    let mut b = j + 2;
+                    if self.sym(b, b'(') {
+                        b = self.close(b, end) + 1;
+                    }
+                    let e = if self.sym(b, b'{') { self.close(b, end) } else { self.item_end(j, end, true) };
+                    out.push(named(SymKind::Macro, j + 1, e, String::from("macro"), vec![]));
+                    e + 1
+                }
                 b"use" | b"extern" => self.item_end(j, end, false) + 1,
                 _ => {
                     // (マクロの呼び出し `m! { .. }` / `m!(..);` などは読み飛ばす。わからないトークンは 1 つ進める)

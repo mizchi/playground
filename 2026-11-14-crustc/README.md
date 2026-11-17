@@ -19,13 +19,13 @@ Cranelift (既定) か自前の minclif でコード生成する。crustc 自身
 | crate | 中身 | 依存 |
 |---|---|---|
 | `crates/base` (`crustc-base`) | fxhash (FxMap / FxSet)・key (キャッシュのキー)・prof (段ごとの時間) | なし |
-| `crates/syntax` (`crustc-syntax`) | front (前処理 → アイテムへの分割 (差分) → prelude を付ける、の流れと編集をまたぐ記憶 FrontMemo) / lexer / parse (自前の構文木) / cfg / macros / ctors / prep (前処理の差分) / srcmap / stub / symbols (LSP のシンボル) / types (要約の型)・types_enc / enc (直列化) / ast_types / ast_closure / ast_summary (アイテムの要約) / prelude (選択と prelude_lib.rs.in、build.rs) | base、proc-macro2 |
+| `crates/syntax` (`crustc-syntax`) | front (前処理 → アイテムへの分割 (差分) → prelude を付ける、の流れと編集をまたぐ記憶 FrontMemo) / lexer / parse (自前の構文木) / cfg / macros / ctors / prep (前処理の差分) / srcmap / stub / symbols (LSP のシンボル) / navigate (LSP の定義・参照) / types (要約の型)・types_enc / enc (直列化) / ast_types / ast_closure / ast_summary (アイテムの要約) / prelude (選択と prelude_lib.rs.in、build.rs) | base、proc-macro2 |
 | `crates/sema` (`crustc-sema`) | program (名前・型・トレイト・impl の表、インスタンス) / solver / ast_infer (型推論) / ast_consteval | syntax |
 | `crates/ir` (`crustc-ir`) | 命令の列の型 (Type / Value / Block / Op …) と、命令を記録するだけの Recorder (値の型を覚える) | なし |
 | `crates/typeck` (`crustc-typeck`) | acg (構文木 → 命令の列の記録。型の検査はここで出る) / cache2 (Blob の直列化) | sema、ir、proc-macro2 |
 | `crates/codegen` (`crustc-codegen`) | lower (記録を minclif に組み立て直して機械語にする。Cranelift なら crustc-clif に渡す) / link | typeck、minclif |
 | `crates/core` (`crustc-core`) | driver2 (Session2: 解析・check・キャッシュ) と、feature `build` (既定) の driver2/build.rs (機械語・fork の並列化・オブジェクト・リンク・ワークスペース)。下の層を公開し直す | typeck、(build なら) codegen |
-| `crates/lsp` (`crustc-lsp`) | LSP サーバ (診断は driver2 の check、documentSymbol / workspace/symbol は syntax の symbols) | core (build なし)、serde_json |
+| `crates/lsp` (`crustc-lsp`) | LSP サーバ (診断は driver2 の check、documentSymbol / workspace/symbol は syntax の symbols、definition / references は syntax の navigate) | core (build なし)、serde_json |
 | `crates/minclif` | Cranelift に似た API の小さな x86-64 バックエンド (レジスタ割り当て・スタックの struct のフィールドの変数化・ELF の .o)。`from_recording` で記録を組み立て直す | ir |
 | `crates/clif` (`crustc-clif`) | driver2 の Cranelift バックエンド: minclif が組み立てた命令の列を Cranelift の IR にしてコンパイルする | minclif、cranelift |
 | `.` (`crustc`) | CLI と、上のものの再輸出 (テスト・ベンチ。`crustc::lsp` は crustc-lsp) | 上のもの |
@@ -1738,9 +1738,11 @@ VmHWM と、括弧の中は子孫のプロセスも足した RSS の最大 (50 m
 | 対象 | サーバ | init | ready | docsym (数) | wsym (見つかった) | edit→docsym | edit→diag | peak RSS (子も) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
 | synth | crustc | 2.2 ms | 9.6 ms | 0.6 ms (37) | 0.7 ms (5/5) | 2.0 ms | 1.3 ms | 7.5 MB (5.1 MB) |
+| synth | crustc (定義・参照を足した後) | 2.0 ms | 9.7 ms | 0.6 ms (37) | 0.6 ms (5/5) | 1.8 ms | 1.6 ms | 10.7 MB (6.4 MB) |
 | synth | rust-analyzer | 18.7 ms | 3243 ms | 1.0 ms (37) | 2.3 ms (5/5) | 8.3 ms | 309 ms | 607 MB (878 MB) |
 | synth | rust-glancer | 36.4 ms | 5799 ms | 1.9 ms (38) | 27.0 ms (5/5) | 43.3 ms | - | 16.9 MB (888 MB) |
 | crustc | crustc | 2.3 ms | 55.0 ms | 1.8 ms (123) | 3.5 ms (5/5) | 9.7 ms | 7.8 ms | 10.9 MB (9.9 MB) |
+| crustc | crustc (定義・参照を足した後) | 1.9 ms | 91.4 ms | 2.1 ms (123) | 1.3 ms (5/5) | 13.0 ms | 10.4 ms | 29.9 MB (29.4 MB) |
 | crustc | rust-analyzer | 23.0 ms | 5954 ms | 3.6 ms (124) | 2.0 ms (5/5) | 26.2 ms | - | 1360 MB (2723 MB) |
 | crustc | rust-glancer | 130 ms | 10593 ms | 7.5 ms (113) | 262 ms (5/5) | 48.6 ms | - | 30.7 MB (1798 MB) |
 
@@ -1790,13 +1792,73 @@ hover・references の数、`.` の直後 (`x.|name`) と識別子の途中 (`na
 | 時間の中央値 (ms) | defi 0.1, hove 0.1, comp 0.1, refe 0.1 | defi 0.9, hove 1.0, comp 7.7, refe 31.4 | defi 14.4, hove 12.3, comp 257.3, refe 325.4 |
 
 分かったこと:
-- crustc lsp が持っているのは診断と documentSymbol / workspace/symbol だけ。definition・hover・references・completion
+- (この時点では) crustc lsp が持っているのは診断と documentSymbol / workspace/symbol だけ。definition・hover・references・completion
   (rust-analyzer と rust-glancer は持っている) が無いので、速さの比較は同じ機能での比較になっていない。
 - シンボルはおおむね同じ。documentSymbol の違いは extern ブロックの扱い (crustc は中の宣言を外に並べる、rust-analyzer は
   `extern "C"` を 1 つのシンボルにする) と種類の付け方。workspace/symbol の違いは並べ方 (問い合わせに合う候補の選び方と
   順) で、上位 20 の一致は 61〜87%。
 - rust-glancer は definition・hover・completion を持つが、crustc の対象では rust-analyzer と違う答えも多い (references の
   数の一致 42%)。completion は 1 回 250 ms ほど。
+
+### LSP の定義ジャンプと参照 (2026-11-17)
+
+`textDocument/definition` と `textDocument/references` に対応した (crustc-syntax の `navigate`)。型推論はせず、字句の列と
+アイテムの表 (symbols を平らにして、持ち主の型・モジュールのパスを付けたもの) で名前を解決する:
+
+- ローカル: 関数の引数・`let` (`;` の後から見える)・`for` / `if let` / `while let` (次の `{` から)・match の腕・クロージャの引数。
+- `x.name`: x の型 (`self` なら囲む impl、ローカルなら型注釈か `T::..` / `T { .. }` / `T(..)` の初期化) のメソッド・フィールド。
+  型が分からないときは、同じ名前のメンバが一つだけのときだけ答える。
+- `Q::name`: Q のメンバか、Q というモジュールの中のアイテム。`Self` は囲む impl の型。
+- アイテム: 同じモジュール → `use` (名前・glob・glob で取り込んだモジュールの use、`as` の別名、`use` の中の名前そのもの) →
+  ワークスペースで一つ → std。std の再エクスポート (`std::sync::Mutex` → sync::poison::mutex) は `pub use` をたどる。
+  `#[derive(X)]` の X は derive のマクロ。組み込みの型は答えない。
+- ワークスペース: initialize の root の Cargo.toml (members) から、各クレートの根 (lib / main / bin / tests / examples /
+  benches / build.rs) と `mod x;` (`#[path]`・インラインの mod も) をたどってファイルのモジュールのパスを決める。tests などの
+  クレートのアイテムは同じクレートからだけ見える。
+- std / core / alloc (`rustc --print sysroot` の rust-src) は initialize の後に別スレッドで索引を作る (定義と use だけを持ち、
+  本文は捨てて位置は行と桁で覚える: 約 7 MB)。`CRUSTC_LSP_NO_STD=1` で切る。
+- references は、同じ名前の識別子 (ファイルごとの名前の表で引く) のうち、definition が同じ所に解決されるもの。
+  `macro_rules!` の本体の中は数えない (rust-analyzer と同じ)。
+- メモリ: ワークスペースの全ファイルの字句の列 (u32 で持つ) と名前の表を持つので、crustc の対象で peak RSS 10.9 → 29.9 MB
+  (std の索引を切ると 27.5 MB)。ready も 55 → 91 ms (ワークスペースの索引を作る)。
+
+`python3 bench/lsp_parity.py` (rust-analyzer の答えと比べる。`--detail` で合わない所を出す):
+
+#### synth (40 箇所、`.` の後 20 箇所。比べる相手は rust-analyzer)
+
+| 機能 | crustc | rust-analyzer | rust-glancer |
+|---|---|---|---|
+| 対応を返す機能 | docsym, wsym, definition, references | docsym, wsym, definition, hover, completion, references, rename, signature, semantic, inlay, codeAction, format | docsym, wsym, definition, hover, completion, references, rename, semantic, inlay, codeAction, format |
+| documentSymbol (名前の一致) | 名前 100% (種類も 97%) | 名前 100% (種類も 100%) | 名前 100% (種類も 95%); 余分 #0 |
+| workspace/symbol (上位 20 の一致) | 87% | 100% | 76% |
+| definition (行き先の一致) | 同じ 100% (答えた 100%) | 同じ 100% (答えた 100%) | 同じ 100% (答えた 100%) |
+| hover (名前を含む) | 0% | 100% | 100% |
+| references (数の一致) | 100% | 100% | 100% |
+| completion `x.\|` (書いてある名前を含む) | 0% (候補 0) | 100% (候補 3) | 100% (候補 5) |
+| completion `na\|me` (同) | 0% (候補 0) | 91% (候補 145) | 56% (候補 5) |
+| 時間の中央値 (ms) | defi 0.8, hove 0.2, comp 0.1, refe 5.8 | defi 0.4, hove 0.5, comp 2.5, refe 1.0 | defi 6.3, hove 6.3, comp 218.4, refe 18.8 |
+
+#### crustc (40 箇所、`.` の後 20 箇所。比べる相手は rust-analyzer)
+
+| 機能 | crustc | rust-analyzer | rust-glancer |
+|---|---|---|---|
+| 対応を返す機能 | docsym, wsym, definition, references | docsym, wsym, definition, hover, completion, references, rename, signature, semantic, inlay, codeAction, format | docsym, wsym, definition, hover, completion, references, rename, semantic, inlay, codeAction, format |
+| documentSymbol (名前の一致) | 名前 99% (種類も 97%); 足りない extern "C" | 名前 100% (種類も 100%) | 名前 90% (種類も 82%); 足りない c_close, c_exit, c_fork, c_mkdir |
+| workspace/symbol (上位 20 の一致) | 73% | 100% | 35% |
+| definition (行き先の一致) | 同じ 97% (答えた 80%) | 同じ 100% (答えた 78%) | 同じ 87% (答えた 68%) |
+| hover (名前を含む) | 0% | 88% | 72% |
+| references (数の一致) | 64% | 100% | 42% |
+| completion `x.\|` (書いてある名前を含む) | 0% (候補 0) | 100% (候補 26) | 90% (候補 37) |
+| completion `na\|me` (同) | 0% (候補 0) | 68% (候補 85) | 60% (候補 3) |
+| 時間の中央値 (ms) | defi 1.3, hove 0.3, comp 0.1, refe 13.6 | defi 0.8, hove 1.1, comp 6.6, refe 27.9 | defi 15.4, hove 13.0, comp 243.6, refe 315.0 |
+
+- definition は synth で 100%、crustc で 97% (合わないのは、cfg で外れたアイテム `Backend` に答える所 (rust-analyzer は
+  答えない) と、`FxMap::default()` を型の別名の先 (HashMap の impl) までたどれない所)。rust-glancer は 87%。時間は 1 回 1 ms ほど。
+- references (数がちょうど同じ) は synth で 100%、crustc で 64% (rust-glancer 42%)。合わないのは主に型推論が要るもの:
+  `Default::default()` の呼び出し先 (impl Default のメソッド)、`FxMap::default()` (型の別名をたどった先の std のメソッド)、
+  `x.f()` の受け手の型がローカルの注釈から分からないもの。ほかは数が 1〜3 ずれるもの (`Ty` 2290 個など)。組み込みの型
+  (`u8`) は rust-analyzer が参照を返すが crustc は返さない。時間は crustc の対象で 1 回 10〜14 ms (rust-analyzer 28 ms)。
+- hover と completion は未対応。
 
 ### 途中で分かったこと
 

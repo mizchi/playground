@@ -182,11 +182,26 @@ def run(servers, t, npts, timeout):
             r["pre_n"].append(len(c))
         s.close()
         res[sn] = r
-    return res, len(pts), len(dpts)
+    return res, len(pts), len(dpts), pts
 
 
 def pct(a, b):
     return f"{100 * a / b:.0f}%" if b else "-"
+
+
+def detail(tn, res, pts):
+    """--detail: rust-analyzer と違った所 (definition の行き先・references の数)"""
+    ref = res.get("rust-analyzer")
+    if not ref:
+        return
+    for sn, r in res.items():
+        if sn == "rust-analyzer" or not r:
+            continue
+        for i, (li, col, name) in enumerate(pts):
+            a, b = r["def"][i], ref["def"][i]
+            ra, rb = r["refs"][i], ref["refs"][i]
+            if (b and a != b) or (rb is not None and ra != rb):
+                print(f"[{tn}/{sn}] {li + 1}:{col + 1} {name}: def {sorted(a)} vs ra {sorted(b)}; refs {ra} vs ra {rb}", file=sys.stderr)
 
 
 def report(tn, res, npts, ndots):
@@ -243,6 +258,7 @@ def main():
     ap.add_argument("--points", type=int, default=40)
     ap.add_argument("--timeout", type=float, default=300)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--detail", action="store_true", help="rust-analyzer と違った所を stderr に出す")
     a = ap.parse_args()
     glancer = os.environ.get("RUST_GLANCER") or shutil.which("rust-glancer") or "/home/user/rust-glancer/target/release/rust-glancer"
     allsv = {"crustc": [os.path.join(HERE, "target/release/crustc"), "lsp"], "rust-analyzer": [os.environ.get("RUST_ANALYZER") or "rust-analyzer"], "rust-glancer": [glancer, "lsp"]}
@@ -251,7 +267,9 @@ def main():
     parts = []
     for tn in a.targets.split(","):
         t = make_synth(os.path.join(tmp, "synth")) if tn == "synth" else crustc_target()
-        res, n, nd = run(servers, t, a.points, a.timeout)
+        res, n, nd, pts = run(servers, t, a.points, a.timeout)
+        if a.detail:
+            detail(tn, res, pts)
         parts.append(report(tn, res, n, nd))
     text = "\n\n".join(parts) + "\n"
     print(text)

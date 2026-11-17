@@ -126,3 +126,55 @@ fn symbols() {
     let r: Value = serde_json::from_str(&r[0]).unwrap();
     assert_eq!(r["result"][0]["name"], "renamed_fn");
 }
+
+/// definition / references: ローカル・メソッド (受け手の型から)・`use` したアイテム・ファイルをまたぐ参照
+#[test]
+fn definition_and_references() {
+    use crustc::lsp::Server;
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lsp_nav");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/geom.rs"), "pub struct Point { pub x: f64 }\nimpl Point {\n    pub fn new() -> Point { Point { x: 0.0 } }\n    pub fn norm(&self) -> f64 { self.x }\n}\npub fn norm() {}\n").unwrap();
+    let uri_root = format!("file://{}", root.display());
+    let mut srv = Server::new();
+    let r = srv.handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": uri_root}}).to_string());
+    let r: Value = serde_json::from_str(&r[0]).unwrap();
+    assert_eq!(r["result"]["capabilities"]["definitionProvider"], true);
+    assert_eq!(r["result"]["capabilities"]["referencesProvider"], true);
+    let uri = format!("{uri_root}/src/main.rs");
+    let text = "mod geom;\nuse geom::Point;\nfn main() {\n    let p = Point::new();\n    let n = p.norm();\n    helper(n);\n}\nfn helper(x: f64) -> f64 { x }\n";
+    srv.handle(&json!({"jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": uri, "languageId": "rust", "version": 1, "text": text}}}).to_string());
+    let mut id = 10;
+    let mut ask = |method: &str, line: u32, ch: u32| -> Vec<(String, u64, u64)> {
+        id += 1;
+        let r = srv.handle(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": {"textDocument": {"uri": uri},
+            "position": {"line": line, "character": ch}, "context": {"includeDeclaration": true}}}).to_string());
+        let r: Value = serde_json::from_str(&r[0]).unwrap();
+        let v = match &r["result"] {
+            Value::Array(a) => a.clone(),
+            Value::Null => vec![],
+            o => vec![o.clone()],
+        };
+        let mut out: Vec<(String, u64, u64)> = v.iter()
+            .map(|l| (l["uri"].as_str().unwrap().rsplit('/').next().unwrap().to_string(), l["range"]["start"]["line"].as_u64().unwrap(), l["range"]["start"]["character"].as_u64().unwrap()))
+            .collect();
+        out.sort();
+        out
+    };
+    let at = |f: &str, l: u64, c: u64| (f.to_string(), l, c);
+    // `Point::new()` の Point → geom.rs の struct、new → impl のメソッド
+    assert_eq!(ask("textDocument/definition", 3, 12), [at("geom.rs", 0, 11)]);
+    assert_eq!(ask("textDocument/definition", 3, 19), [at("geom.rs", 2, 11)]);
+    // `p.norm()`: p の型 (Point) のメソッド。同じ名前の関数 geom::norm ではない
+    assert_eq!(ask("textDocument/definition", 4, 14), [at("geom.rs", 3, 11)]);
+    // ローカル
+    assert_eq!(ask("textDocument/definition", 5, 11), [at("main.rs", 4, 8)]);
+    assert_eq!(ask("textDocument/definition", 7, 28), [at("main.rs", 7, 10)]);
+    // 参照: helper は宣言と呼び出し、Point はファイルをまたいで (use・パス・impl・戻り値の型・構造体の式)
+    assert_eq!(ask("textDocument/references", 7, 4), [at("main.rs", 5, 4), at("main.rs", 7, 3)]);
+    let refs = ask("textDocument/references", 0, 12);
+    assert!(refs.is_empty(), "{refs:?}"); // (`mod geom` の geom はモジュール: 参照は返さない)
+    let refs = ask("textDocument/references", 1, 11);
+    assert_eq!(refs, [at("geom.rs", 0, 11), at("geom.rs", 1, 5), at("geom.rs", 2, 20), at("geom.rs", 2, 28), at("main.rs", 1, 10), at("main.rs", 3, 12)]);
+}
