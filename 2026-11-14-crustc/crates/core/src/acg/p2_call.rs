@@ -857,6 +857,8 @@ impl Cx<'_> {
     }
 
     pub(crate) fn call_fn(&mut self, id: u32, recv: Option<(Value, Ty)>, args: &[&Expr], turbofish: Option<&[GArg]>, expected: Option<Ty>, span: Sp) -> R<V> {
+        // (戻り値を書く先: 引数の中の呼び出しには渡さない)
+        let hint = self.dst_hint.take();
         let id = self.pick_overload(id, recv.map(|r| r.1), args);
         let sig0 = self.prog.sigs[id as usize].clone();
         let skip = recv.is_some() as usize;
@@ -1066,7 +1068,10 @@ impl Cx<'_> {
         let (target, sig) = self.resolve_call(id, &arg_tys, sol0, expected, span)?;
         let mut cv = vec![];
         let sret = if is_sret(&sig) {
-            let a = self.temp(sig.ret);
+            let a = match hint {
+                Some(d) if sig.ret == self.ret => d,
+                _ => self.temp_fresh(sig.ret),
+            };
             cv.push(a);
             Some(a)
         } else {
@@ -1119,6 +1124,11 @@ impl Cx<'_> {
             return;
         }
         if pt.is_agg() {
+            // (呼び出しの戻り値の一時領域はそのまま渡す)
+            if self.take_fresh(v).is_some() {
+                vals.push(v);
+                return;
+            }
             // 値渡し: 呼び出し側でコピーしてから渡す
             let tmp = self.temp(pt);
             self.copy(tmp, v, pt);

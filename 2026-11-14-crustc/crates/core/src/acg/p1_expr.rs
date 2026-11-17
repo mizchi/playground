@@ -327,6 +327,17 @@ impl Cx<'_> {
             None => None,
         };
         match e {
+            Expr::Call(..) | Expr::MethodCall(..) | Expr::Struct(..) if self.ret_call == Some(e as *const Expr as usize) => {
+                self.ret_call = None;
+                self.dst_hint = self.sret;
+                let r = match e {
+                    Expr::Call(..) => self.call(e, expected),
+                    Expr::MethodCall(..) => self.method_call(e, expected),
+                    _ => self.struct_lit(e, expected),
+                };
+                self.dst_hint = None;
+                r
+            }
             Expr::Lit(l, _) => self.lit(l, expected),
             Expr::Paren(p) => self.expr(p, expected),
             Expr::Block(label, _, b) => {
@@ -615,6 +626,7 @@ impl Cx<'_> {
                 let ret = self.ret;
                 let v = match value {
                     Some(e) => {
+                        self.mark_ret_call(e);
                         let (v, t) = self.expr(e, Some(ret))?;
                         if t == Ty::Never {
                             return Ok((None, Ty::Never));
@@ -1194,7 +1206,7 @@ impl Cx<'_> {
         };
         let mut cv = vec![];
         let sret = if is_sret(&sig) {
-            let a = self.temp(ret);
+            let a = self.temp_fresh(ret);
             cv.push(a);
             Some(a)
         } else {

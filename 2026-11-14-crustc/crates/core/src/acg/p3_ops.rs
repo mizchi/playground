@@ -993,6 +993,8 @@ impl Cx<'_> {
     /// struct (vi = None) / enum のバリアント (vi = Some) の値を一時領域に作る。args は (フィールド番号, 式)。
     /// ジェネリックな定義なら、期待型 → 実引数の型 の順にインスタンスを決める
     pub(crate) fn adt_value(&mut self, base: u32, vi: Option<usize>, args: &[(usize, &Expr)], expected: Option<Ty>, span: Sp) -> R<V> {
+        // (戻り値を書く先: フィールドの式の中の呼び出しには渡さない)
+        let hint = self.dst_hint.take();
         let fields_of = |this: &Self, sid: u32| -> Vec<(String, Ty, u32)> {
             let sd = &this.prog.structs[sid as usize];
             match vi {
@@ -1038,7 +1040,10 @@ impl Cx<'_> {
             },
         };
         let t = Ty::Struct(inst);
-        let a = self.temp(t);
+        let a = match hint {
+            Some(d) if t == self.ret => d,
+            _ => self.temp_fresh(t),
+        };
         let fields = fields_of(self, inst);
         if let Some(vi) = vi {
             let sd = &self.prog.structs[inst as usize];

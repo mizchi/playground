@@ -122,6 +122,17 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
     // 定義と別の区間 (ブロックを続けて書いた範囲) で使う値は Variable にする: acg は値を支配していないブロックで
     // 使うことがある (minclif は値をスロットに置くので困らない)。SSA は cranelift_frontend が組み立てる
     let mut gvars: FMap<u32, Variable> = FMap::default();
+    // スロットのアドレスは使う所で作り直す (長く生きる値・区間をまたぐ Variable にしない: レジスタ割り当てが軽くなる)
+    let remat = std::env::var_os("CRUSTC_CLIF_NO_REMAT").is_none();
+    let fold_br = std::env::var_os("CRUSTC_CLIF_NO_FOLD_BR").is_none();
+    let mut saddr: FMap<u32, (u32, i32)> = FMap::default();
+    if remat {
+        for (i, op) in fb.ops.iter().enumerate() {
+            if let Op::StackAddr(sl, off) = op {
+                saddr.insert(fb.res[i][0], (sl.0, *off));
+            }
+        }
+    }
     if let Some(tr) = fb.track() {
         let segs = &tr.segs;
         let seg_of = |op: u32| -> usize {
@@ -139,7 +150,7 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
         let mut first: FMap<u32, usize> = FMap::default();
         let mut multi: FSet<u32> = FSet::default();
         for &(id, op, _) in &tr.ev {
-            if id >= 1 << 28 || id < fb.params.len() as u32 {
+            if id >= 1 << 28 || id < fb.params.len() as u32 || saddr.contains_key(&id) {
                 continue;
             }
             let sg = seg_of(op);
@@ -194,11 +205,50 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
     let mut bparams: FMap<u32, Vec<u32>> = FMap::default();
     let mut started: FSet<u32> = FSet::default();
     let mut in_entry = true;
+    // 前のブロックの数 (まだ書いていない飛び込む命令の数)。0 になったブロックはすぐ閉じる (seal): 変数の値を前のブロックから
+    // その場で決められるので、ブロックの引数の仮置きが減り、定数の条件の分岐を畳める
+    let early_seal = std::env::var_os("CRUSTC_CLIF_LATE_SEAL").is_none();
+    let mut rem: FMap<u32, u32> = FMap::default();
+    if early_seal {
+        b.seal_block(entry);
+        let mut first = true;
+        for op in &fb.ops {
+            match op {
+                Op::Jump(bk, _) => *rem.entry(bk.0).or_default() += 1,
+                Op::Brif(_, t, _, f, _) => {
+                    *rem.entry(t.0).or_default() += 1;
+                    *rem.entry(f.0).or_default() += 1;
+                }
+                Op::SwitchToBlock(bk) if first => {
+                    // (入口からの jump)
+                    *rem.entry(bk.0).or_default() += 1;
+                    first = false;
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut sealed: FSet<u32> = FSet::default();
+    macro_rules! edge {
+        ($bk:expr) => {
+            if early_seal {
+                if let Some(r) = rem.get_mut(&$bk) {
+                    *r -= 1;
+                    if *r == 0 && sealed.insert($bk) {
+                        b.seal_block(blocks[&$bk]);
+                    }
+                }
+            }
+        };
+    }
     macro_rules! v {
         ($x:expr) => {
             match gvars.get(&$x.0) {
                 Some(&var) => b.use_var(var),
-                None => *vals.get(&$x.0).ok_or_else(|| format!("clif_backend: unknown value v{}", $x.0))?,
+                None => match saddr.get(&$x.0) {
+                    Some(&(sl, off)) => b.ins().stack_addr(types::I64, slots[&sl], off),
+                    None => *vals.get(&$x.0).ok_or_else(|| format!("clif_backend: unknown value v{}", $x.0))?,
+                },
             }
         };
     }
@@ -246,8 +296,12 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
                 if in_entry {
                     b.ins().jump(bl, &[]);
                     in_entry = false;
+                    edge!(bk.0);
                 }
                 b.switch_to_block(bl);
+                if early_seal && rem.get(&bk.0).copied().unwrap_or(0) == 0 && sealed.insert(bk.0) {
+                    b.seal_block(bl);
+                }
                 if started.insert(bk.0) {
                     for id in bparams.get(&bk.0).cloned().unwrap_or_default() {
                         if let Some(&var) = gvars.get(&id) {
@@ -440,6 +494,7 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
                 let _t1 = v!(a);
                 b.ins().store(MemFlagsData::trusted(), _t0, _t1, *off);
             }
+            Op::StackAddr(..) if remat => {}
             Op::StackAddr(s, off) => {
                 let r = b.ins().stack_addr(types::I64, slots[&s.0], *off);
                 set1(&mut vals, r);
@@ -447,12 +502,33 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
             Op::Jump(bk, args) => {
                 let a: Vec<ir::BlockArg> = vs!(args).into_iter().map(|x| x.into()).collect();
                 b.ins().jump(blocks[&bk.0], &a);
+                edge!(bk.0);
             }
             Op::Brif(c, tb, ta, eb, ea) => {
                 let cv = v!(c);
                 let ta: Vec<ir::BlockArg> = vs!(ta).into_iter().map(|x| x.into()).collect();
                 let ea: Vec<ir::BlockArg> = vs!(ea).into_iter().map(|x| x.into()).collect();
-                b.ins().brif(cv, blocks[&tb.0], &ta, blocks[&eb.0], &ea);
+                // (条件が定数 (ムーブした後の drop フラグなど) なら、行く方へ jump する: 行かない方は到達しなくなって消える)
+                let k = match b.func.dfg.value_def(b.func.dfg.resolve_aliases(cv)) {
+                    ir::ValueDef::Result(inst, _) => match b.func.dfg.insts[inst] {
+                        ir::InstructionData::UnaryImm { opcode: ir::Opcode::Iconst, imm } if fold_br => Some(imm.bits() != 0),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                match k {
+                    Some(true) => {
+                        b.ins().jump(blocks[&tb.0], &ta);
+                    }
+                    Some(false) => {
+                        b.ins().jump(blocks[&eb.0], &ea);
+                    }
+                    None => {
+                        b.ins().brif(cv, blocks[&tb.0], &ta, blocks[&eb.0], &ea);
+                    }
+                }
+                edge!(tb.0);
+                edge!(eb.0);
             }
             Op::Return_(rs) => {
                 let r: Vec<ir::Value> = vs!(rs);
@@ -792,8 +868,26 @@ fn build(fb: &FunctionBuilder, zero: &[StackSlot], isa: &dyn cranelift_codegen::
             }
         }
     }
+    // (CRUSTC_CLIF_STATS=1: 命令の種類ごとの数を出す。CRUSTC_CLIF_DUMP=1: IR を出す)
+    if std::env::var_os("CRUSTC_CLIF_STATS").is_some() {
+        let mut n = 0;
+        for bl in func.layout.blocks() {
+            for i in func.layout.block_insts(bl) {
+                n += 1;
+                eprintln!("CLIFOP {}", func.dfg.insts[i].opcode());
+            }
+        }
+        eprintln!("CLIFFN insts={n} blocks={} slots={} values={}", func.layout.blocks().count(), func.sized_stack_slots.len(), func.dfg.num_values());
+    }
+    if std::env::var_os("CRUSTC_CLIF_DUMP").is_some() {
+        eprintln!("{}", func.display());
+    }
+    let stat_n = if std::env::var_os("CRUSTC_CLIF_TIME").is_some() { Some((func.dfg.num_insts(), func.layout.blocks().count(), std::time::Instant::now())) } else { None };
     ctx.func = func;
     ctx.compile(isa, &mut ControlPlane::default()).map_err(|e| format!("cranelift: {:?}", e.inner))?;
+    if let Some((n, bl, t)) = stat_n {
+        eprintln!("CLIFTIME {n} {bl} {}", t.elapsed().as_micros());
+    }
     let code = ctx.compiled_code().unwrap();
     let mut relocs = vec![];
     for r in code.buffer.relocs() {

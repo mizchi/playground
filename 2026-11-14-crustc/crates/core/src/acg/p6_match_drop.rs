@@ -843,7 +843,7 @@ impl Cx<'_> {
         let sig = self.insts.lock().unwrap().sig(self.prog, iid).clone();
         let mut cv = vec![];
         let sret = if is_sret(&sig) {
-            let a = self.temp(sig.ret);
+            let a = self.temp_fresh(sig.ret);
             cv.push(a);
             Some(a)
         } else {

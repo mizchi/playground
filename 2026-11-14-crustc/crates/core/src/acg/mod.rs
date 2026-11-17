@@ -261,6 +261,9 @@ pub fn compile(prog: &Program, insts: &Mutex<Insts>, id: u32, f: &ItemFn, line_b
         ) && prog.item_of.get(body_id as usize).copied().flatten().is_some_and(|i| i >= prog.prelude_from),
         self_sid: env.self_sid,
         sret: None,
+        fresh: Default::default(),
+        ret_call: None,
+        dst_hint: None,
         frefs: HashMap::default(),
         lets,
         addr_taken: taken,
@@ -562,6 +565,12 @@ pub struct Cx<'p> {
     pub caller_loc: bool,
     pub self_sid: Option<u32>,
     pub sret: Option<Value>,
+    /// 呼び出しの戻り値を書かせた一時領域 (まだ誰も使っていない): 値渡し・let ではコピーせずにそのまま使う
+    pub fresh: crate::fxhash::FxMap<u32, StackSlot>,
+    /// 戻り値になる呼び出しの式 (関数の末尾・return の式): その呼び出しには sret の場所に直接書かせる
+    pub ret_call: Option<usize>,
+    /// call_fn の入口で取る: この呼び出しの戻り値を書く先
+    pub dst_hint: Option<Value>,
     pub frefs: HashMap<u32, FuncRef>,
     pub lets: crate::ast_infer::LetTypes,
     pub addr_taken: HashSet<String>,
@@ -778,6 +787,27 @@ impl Cx<'_> {
         self.b.ins().stack_addr(PTR, ss, 0)
     }
 
+    /// 呼び出しの戻り値の一時領域 (fresh に入れる)
+    pub fn temp_fresh(&mut self, t: Ty) -> Value {
+        let ss = self.slot(t);
+        let a = self.b.ins().stack_addr(PTR, ss, 0);
+        if std::env::var_os("CRUSTC_NO_FRESH").is_none() {
+            self.fresh.insert(a.0, ss);
+        }
+        a
+    }
+
+    /// v がまだ誰も使っていない一時領域なら、そのスロット (取り出す: 2 度目からはコピーする)。
+    /// drop の予定に入っているもの (文の終わりで drop する一時値) は使わない
+    pub fn take_fresh(&mut self, v: Value) -> Option<StackSlot> {
+        let ss = *self.fresh.get(&v.0)?;
+        self.fresh.remove(&v.0);
+        if self.temps.iter().chain(self.owned.iter()).any(|o| o.loc == Loc::Ptr(v)) {
+            return None;
+        }
+        Some(ss)
+    }
+
     pub fn addr_plus(&mut self, a: Value, off: i32) -> Value {
         if off == 0 { a } else { self.b.ins().iadd_imm_s(a, off as i64) }
     }
@@ -878,12 +908,17 @@ impl Cx<'_> {
     pub fn bind(&mut self, name: String, ty: Ty, v: Option<Value>) {
         let loc = match ty {
             t if t.is_agg() => {
-                let ss = self.slot(ty);
-                let dst = self.b.ins().stack_addr(PTR, ss, 0);
-                if let Some(v) = v {
-                    self.copy(dst, v, ty);
+                // (呼び出しの戻り値の一時領域はそのまま変数の場所にする)
+                if let Some(ss) = v.and_then(|v| self.take_fresh(v)) {
+                    Loc::Slot(ss)
+                } else {
+                    let ss = self.slot(ty);
+                    let dst = self.b.ins().stack_addr(PTR, ss, 0);
+                    if let Some(v) = v {
+                        self.copy(dst, v, ty);
+                    }
+                    Loc::Slot(ss)
                 }
-                Loc::Slot(ss)
             }
             _ => match clif_ty(ty) {
                 None => Loc::Zst,
@@ -961,6 +996,9 @@ impl Cx<'_> {
         if self.is_main && self.prog.panic_handler.is_none() && self.prog.index.contains_key("__exr_rt_init") {
             let _ = self.call_named("__exr_rt_init", vec![Ty::Unit], &[], SP);
         }
+        if let Some(Stmt::Expr(e, false)) = f.block.stmts.last() {
+            self.mark_ret_call(e);
+        }
         let (v, t) = self.block(&f.block, Some(self.ret))?;
         if t == Ty::Never {
             self.b.ins().trap(TrapCode::unwrap_user(1));
@@ -975,6 +1013,14 @@ impl Cx<'_> {
         self.drop_for_exit(0, 0);
         self.emit_return(v);
         Ok(())
+    }
+
+    /// e が呼び出しなら、戻り値を sret の場所に直接書かせる印を付ける
+    pub fn mark_ret_call(&mut self, e: &Expr) {
+        let e = strip_paren(e);
+        if self.sret.is_some() && self.inline_ret.is_none() && matches!(e, Expr::Call(..) | Expr::MethodCall(..) | Expr::Struct(..)) && std::env::var_os("CRUSTC_NO_RET_DST").is_none() {
+            self.ret_call = Some(e as *const Expr as usize);
+        }
     }
 
     pub fn emit_return(&mut self, v: Option<Value>) {
@@ -1016,7 +1062,10 @@ impl Cx<'_> {
             let z = self.b.ins().iconst(types::I32, 0);
             self.b.ins().return_(&[z]);
         } else if let Some(dst) = self.sret {
-            self.copy(dst, v.unwrap(), self.ret);
+            // (呼び出しが sret の場所に直接書いたものはコピーしない)
+            if v != Some(dst) {
+                self.copy(dst, v.unwrap(), self.ret);
+            }
             self.b.ins().return_(&[]);
         } else {
             match v {
