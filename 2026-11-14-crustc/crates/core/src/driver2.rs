@@ -27,6 +27,25 @@ pub fn with_prelude(src: &str) -> R<(String, Vec<SrcItem>, usize)> {
 /// fix: モジュールの名前を変えて桁がずれた所 (lexer::rename_module_collisions_fix)
 /// cfg: マクロを展開したものの中の `#[cfg(..)]` を評価する設定
 /// 返り値の 4 つ目は prelude の先頭の行 (prelude の中の行 = 結合したソースの行 - これ)
+/// check の記録 (LSP の編集をまたいで): 宣言の指紋と、検査に通った関数・インスタンス (名前 → 記録)
+pub struct ChkMemo {
+    fp: u64,
+    ents: FxMap<String, ChkEnt>,
+}
+
+#[derive(Clone)]
+struct ChkEnt {
+    /// 本体の関数の名前と、そのアイテムのハッシュ
+    body: String,
+    body_hash: Key,
+    /// 要求したインスタンスの名前
+    children: Vec<String>,
+    /// インスタンスなら、自分を要求し直すための Blob (自分への再配置だけ)
+    me: Vec<u8>,
+    /// 検査に通ったか (通らなかったものは毎回検査し直す)
+    ok: bool,
+}
+
 /// 前処理の、編集をまたいで覚えておくもの (LSP の didChange で変わっていない所を作り直さない)
 #[derive(Default)]
 pub struct FrontMemo {
@@ -198,6 +217,9 @@ pub fn with_prelude_in(src: &str, crates: &[String], fix: &mut Vec<(u32, u32, i3
 
 /// 解析の結果
 pub struct Analysis {
+    /// 宣言の指紋: fn アイテムは要約 (シグネチャ・クロージャ)、ほかのアイテムはテキストのハッシュを並べたもの。
+    /// fn の本体だけを変えた編集では変わらない (check の記憶 ChkMemo を使ってよいかの印)
+    pub iface_fp: u64,
     pub src: String,
     pub items: Vec<SrcItem>,
     pub prog: Program,
@@ -506,13 +528,17 @@ pub struct Session2 {
     fresh: Vec<Key>,
     /// prelude の選択の、アイテムごとの記憶 (LSP の編集のたびに全アイテムを調べ直さない)
     sel: FrontMemo,
+    /// fn アイテムのハッシュ → 要約の符号のハッシュ (Analysis::iface_fp を作るため)
+    sum_fp: FxMap<Key, u64>,
+    /// 前回の check の記録
+    chk: Option<ChkMemo>,
     /// 複数のクレートのうちの 1 つをコンパイルするとき
     pub ctx: CrateCtx,
 }
 
 impl Session2 {
     pub fn new(opts: Options2) -> Session2 {
-        Session2 { opts, cid: compiler_id(), disk: crate::cache2::Cache2::empty(), mem: FxMap::default(), used: FxSet::default(), fresh: vec![], ctx: CrateCtx::default(), sel: Default::default() }
+        Session2 { opts, cid: compiler_id(), disk: crate::cache2::Cache2::empty(), mem: FxMap::default(), used: FxSet::default(), fresh: vec![], ctx: CrateCtx::default(), sel: Default::default(), sum_fp: FxMap::default(), chk: None }
     }
 
     pub fn load_cache(&mut self, path: &std::path::Path) {
@@ -701,6 +727,33 @@ impl Session2 {
                 self.put(k, b);
             }
         }
+        // 宣言の指紋 (要約の符号のハッシュはアイテムのハッシュで覚える)
+        let iface_fp = {
+            let mut h = KeyHasher::new();
+            h.add(&self.ctx.dep_ranges.len());
+            let mut new_fp: FxMap<Key, u64> = FxMap::default();
+            for (i, it) in items.iter().enumerate() {
+                let is_fn = !sums[i].fns.is_empty() && sums[i].structs.is_empty() && sums[i].enums.is_empty() && matches!(it.kind, ItemKind::Normal | ItemKind::ImplMember(_) | ItemKind::TraitMember(_));
+                if !is_fn || self.opts.opt {
+                    h.add(&it.hash);
+                    continue;
+                }
+                let x = match self.sum_fp.get(&it.hash) {
+                    Some(&x) => x,
+                    None => {
+                        let mut e = vec![];
+                        sums[i].encode(&mut e);
+                        let mut hh = KeyHasher::new();
+                        hh.add(&e[..]);
+                        hh.finish() as u64
+                    }
+                };
+                new_fp.insert(it.hash, x);
+                h.add(&x);
+            }
+            self.sum_fp = new_fp;
+            h.finish() as u64
+        };
         tm.lap("summaries", {
             if tm.on {
                 let ol = self.ctx.own_lines as usize;
@@ -737,7 +790,7 @@ impl Session2 {
             crefs.push(c);
         }
         tm.lap("refs", String::new());
-        let mut a = Analysis { src, items, prog, refs, srefs, crefs, n_parsed, ext_items, inl: acg::Inline::default(), prelude_line0, dep_ranges: self.ctx.dep_ranges.clone(), asts: Mutex::new(FxMap::default()), encl: Mutex::new(FxMap::default()), sig_keys: Mutex::new(Vec::new()) };
+        let mut a = Analysis { iface_fp, src, items, prog, refs, srefs, crefs, n_parsed, ext_items, inl: acg::Inline::default(), prelude_line0, dep_ranges: self.ctx.dep_ranges.clone(), asts: Mutex::new(FxMap::default()), encl: Mutex::new(FxMap::default()), sig_keys: Mutex::new(Vec::new()) };
         let cl = self.opts.backend;
         if self.opts.opt && std::env::var_os("CRUSTC_NO_INLINE").is_none() {
             a.inl = inline_bodies(&a);
@@ -2493,10 +2546,31 @@ impl Session2 {
         let check_only = std::env::var_os("CRUSTC_CHECK_CODEGEN").is_none();
         a.inl.check_only = check_only;
         let mut tm = Timer { on: std::env::var_os("CRUSTC_PROF").is_some(), last: now_ns(), start: now_ns() };
-        let (mut n_keys, mut n_hit, mut n_checked) = (0, 0, 0);
+        let (mut n_keys, mut n_hit, mut n_checked, mut n_memo) = (0, 0, 0, 0);
         let insts = Mutex::new(Insts::new(&a.prog));
         let mut errs: Vec<String> = vec![];
         let mut done: FxSet<u32> = FxSet::default();
+        // 前回の check の記録: 宣言の指紋が同じなら、本体のアイテムが変わっていない関数は検査済み (キーも読み戻しも要らない)。
+        // 要求していたインスタンスは名前で辿り、本体が変わったものだけを要求し直す
+        let old = match self.chk.take() {
+            Some(m) if m.fp == a.iface_fp && check_only && std::env::var_os("CRUSTC_NO_CHECK_MEMO").is_none() => Some(m),
+            _ => None,
+        };
+        // (記録を作るのは、続けて検査する (キャッシュを使う) セッションだけ: 1 度だけの `crustc check` では作らない)
+        let keep = check_only && !self.opts.no_cache;
+        let mut memo = ChkMemo { fp: a.iface_fp, ents: FxMap::default() };
+        let mut seen: FxSet<String> = FxSet::default();
+        let name_of = |g: &Insts, id: u32| -> String {
+            match g.get(id) {
+                Some(i) => format!("{}\u{1}{}", a.prog.names[i.base as usize], i.sig.symbol),
+                None => a.prog.names[id as usize].clone(),
+            }
+        };
+        let body_hash = |name: &str| -> Option<Key> {
+            let &id = a.prog.index.get(name)?;
+            let ii = a.prog.item_of[id as usize]?;
+            Some(a.items[ii as usize].hash)
+        };
         let n = a.prog.names.len();
         let mut wave: Vec<u32> = (0..n)
             .filter(|&i| concrete(&a.prog, i) && a.prog.item_of[i].is_some_and(|ii| ii < a.prog.prelude_from) && !a.is_ext(i as u32))
@@ -2507,42 +2581,104 @@ impl Session2 {
                 if !done.insert(id) {
                     continue;
                 }
+                let (name, body) = {
+                    let g = insts.lock().unwrap();
+                    (name_of(&*g, id), a.prog.names[g.body_of(id) as usize].clone())
+                };
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
+                // (記録から: 本体が同じなら、要求していたインスタンスを名前で辿る)
+                if let Some(o) = &old {
+                    if let Some(e) = o.ents.get(&name) {
+                        if e.ok && Some(e.body_hash) == body_hash(&e.body) {
+                            n_memo += 1;
+                            let mut st: Vec<String> = e.children.clone();
+                            memo.ents.insert(name.clone(), e.clone());
+                            while let Some(c) = st.pop() {
+                                if seen.contains(&c) {
+                                    continue;
+                                }
+                                let Some(ce) = o.ents.get(&c) else { continue };
+                                if ce.ok && Some(ce.body_hash) == body_hash(&ce.body) {
+                                    seen.insert(c.clone());
+                                    n_memo += 1;
+                                    st.extend(ce.children.iter().cloned());
+                                    memo.ents.insert(c, ce.clone());
+                                } else {
+                                    // (本体が変わったインスタンス: 要求し直して検査する)
+                                    let _ = crate::cache2::decode_blob(&ce.me, &a.prog, &insts);
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
                 let k = self.key_of(&a, &insts, id);
                 let kc = k ^ CHECK_SALT;
                 n_keys += 1;
                 // (キャッシュにあれば検査済み: 読み戻すと要求していたインスタンスも要求し直す)
-                if self.get(k).and_then(|d| crate::cache2::decode_blob(&d, &a.prog, &insts)).is_some() {
-                    continue;
-                }
-                if check_only && self.get(kc).and_then(|d| crate::cache2::decode_blob(&d, &a.prog, &insts)).is_some() {
-                    n_hit += 1;
-                    continue;
-                }
-                n_checked += 1;
-                match compile_id_req(&a, &insts, id) {
-                    Ok((b, req)) => {
-                        if !self.opts.no_cache {
-                            let b = if check_only {
-                                let relocs = req.into_iter().map(|i| acg::BlobReloc { offset: 0, kind: 4, addend: 0, target: acg::Target::Func(i) }).collect();
-                                Blob { relocs, ..b }
-                            } else {
-                                b
-                            };
-                            let mut e = vec![];
-                            {
-                                let g = insts.lock().unwrap();
-                                crate::cache2::encode_blob(&b, &a.prog, &*g, &mut e);
+                let hit = match self.get(k).and_then(|d| crate::cache2::decode_blob(&d, &a.prog, &insts)) {
+                    Some(b) => Some(b),
+                    None if check_only => self.get(kc).and_then(|d| crate::cache2::decode_blob(&d, &a.prog, &insts)),
+                    None => None,
+                };
+                let mut ok = true;
+                let req: Option<Vec<u32>> = match hit {
+                    Some(b) => {
+                        n_hit += 1;
+                        Some(b.relocs.iter().filter_map(|r| match r.target { acg::Target::Func(i) => Some(i), _ => None }).collect())
+                    }
+                    None => {
+                        n_checked += 1;
+                        match compile_id_req(&a, &insts, id) {
+                            Ok((b, req)) => {
+                                if !self.opts.no_cache {
+                                    let b = if check_only {
+                                        let relocs = req.iter().map(|&i| acg::BlobReloc { offset: 0, kind: 4, addend: 0, target: acg::Target::Func(i) }).collect();
+                                        Blob { relocs, ..b }
+                                    } else {
+                                        b
+                                    };
+                                    let mut e = vec![];
+                                    {
+                                        let g = insts.lock().unwrap();
+                                        crate::cache2::encode_blob(&b, &a.prog, &*g, &mut e);
+                                    }
+                                    self.put(if check_only { kc } else { k }, e);
+                                }
+                                Some(req)
                             }
-                            self.put(if check_only { kc } else { k }, e);
+                            Err(e) => {
+                                errs.push(e);
+                                ok = false;
+                                Some(vec![])
+                            }
                         }
                     }
-                    Err(e) => errs.push(e),
+                };
+                // (記録)
+                if !keep {
+                    continue;
+                }
+                if let (Some(req), Some(bh)) = (req, body_hash(&body)) {
+                    let g = insts.lock().unwrap();
+                    let children: Vec<String> = req.iter().filter(|&&i| g.get(i).is_some()).map(|&i| name_of(&*g, i)).collect();
+                    let mut me = vec![];
+                    if g.get(id).is_some() {
+                        let b = Blob { align: 1, code: vec![], relocs: vec![acg::BlobReloc { offset: 0, kind: 4, addend: 0, target: acg::Target::Func(id) }], datas: vec![], vtables: vec![], traps: vec![], line_base: None, code_ref: None };
+                        crate::cache2::encode_blob(&b, &a.prog, &*g, &mut me);
+                    }
+                    memo.ents.insert(name, ChkEnt { body, body_hash: bh, children, me, ok });
                 }
             }
             wave = std::mem::take(&mut insts.lock().unwrap().pending);
             wave.retain(|id| !done.contains(id));
         }
-        tm.lap("check", format!("{n_keys} keys, {n_hit} cached, {n_checked} checked"));
+        if keep {
+            self.chk = Some(memo);
+        }
+        tm.lap("check", format!("{n_memo} from the last check, {n_keys} keys, {n_hit} cached, {n_checked} checked"));
         let mut d: Vec<Diagnostic> = errs.iter().map(|e| Diagnostic::parse(e)).filter(|d| d.line <= user_lines).collect();
         d.sort_by(|x, y| (x.line, x.col).cmp(&(y.line, y.col)));
         d.dedup();

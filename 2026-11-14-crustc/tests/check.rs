@@ -60,3 +60,45 @@ fn closure_and_dyn_errors() {
     assert_eq!(d.len(), 1, "{d:?}");
     assert!(d[0].msg.contains("not implemented for `u32`"), "{d:?}");
 }
+
+/// 編集をまたいだ check の記録 (ChkMemo) を使っても、毎回新しい Session2 で検査したものと診断が同じ。
+/// examples の関数の本体 (総称関数も) に、型エラーになる文・ならない文を足したり消したりを続ける
+#[test]
+fn check_memo_matches_fresh_check() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let mut ps: Vec<_> = std::fs::read_dir(format!("{root}/examples")).unwrap().map(|e| e.unwrap().path()).collect();
+    ps.sort();
+    let stmts = ["let _q: u32 = 1;\n", "let _q: u32 = true;\n", "let _w = 1u8 + 2u16;\n", "let _e: i64 = 3;\n"];
+    let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = |n: usize| -> usize {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng % n as u64) as usize
+    };
+    let mut compared = 0;
+    for p in ps.iter().filter(|p| p.extension().is_some_and(|e| e == "rs")).take(20) {
+        let src = std::fs::read_to_string(p).unwrap();
+        let mut s = Session2::new(Options2 { jobs: 1, ..Options2::default() });
+        let mut cur = src.clone();
+        for _ in 0..8 {
+            let d1 = s.check(&cur);
+            let d2 = Session2::new(Options2 { jobs: 1, ..Options2::default() }).check(&cur);
+            let f = |d: &[crustc::Diagnostic]| d.iter().map(|x| (x.line, x.col, x.msg.clone())).collect::<Vec<_>>();
+            assert_eq!(f(&d1), f(&d2), "{}", p.display());
+            compared += 1;
+            // (関数の本体の先頭 (`{\n` の後ろ) に文を足すか、足したものを消す)
+            let at: Vec<usize> = cur.match_indices(") {\n").map(|(i, _)| i + 4).collect();
+            if at.is_empty() {
+                break;
+            }
+            if next(3) == 0 && cur != src {
+                cur = src.clone();
+            } else {
+                let i = at[next(at.len())];
+                cur = format!("{}    {}{}", &cur[..i], stmts[next(stmts.len())], &cur[i..]);
+            }
+        }
+    }
+    assert!(compared > 50, "{compared}");
+}
