@@ -1,0 +1,19 @@
+# cargo-mutants の設定 (bench/mutants.sh から使う。直接 `cargo mutants ...` でも読まれる)
+# 変異は 1 万 8 千個ほどあるので、全部は回さない: bench/mutants.sh で差分・ファイル・クレート・shard に絞る
+
+# 変異ごとのビルドは release の設定で (テストの多くは crustc でプログラムをコンパイルして動かすので、debug だと遅い)。
+# 増分ビルドを入れ、デバッグ情報は付けない
+profile = "mutants"
+
+# 変異を入れないもの: CLI の引数の処理・ビルドスクリプト・テストとベンチのコード
+exclude_globs = ["src/main.rs", "crates/syntax/build.rs", "benches/**", "tests/**", "crates/*/tests/**", "crates/*/benches/**"]
+# 表示と見積もりだけの関数 (結果に効かない)
+exclude_re = ["impl (fmt::)?Debug", "impl (fmt::)?Display", "<impl Debug", "<impl Display", "heap_bytes", "::fmt$"]
+
+# テストの時間切れ: 変異でできた無限ループを打ち切る (基準のテストの時間の 3 倍か、180 秒の大きい方。
+# ワークスペース全部のテストは 1 回 1 分ほどかかるので、60 秒では変異でないものまで切れる)
+timeout_multiplier = 3.0
+minimum_test_timeout = 180
+
+# 警告で落ちないように (変異で使わなくなった変数など)
+cap_lints = true

@@ -658,6 +658,13 @@ mod tests {
         assert_eq!(match_score("oob", "foobar"), Some(3));
         assert_eq!(match_score("fbr", "foo_bar"), Some(4));
         assert_eq!(match_score("xyz", "foo"), None);
+        // 語の頭: camelCase の大文字・`::` の後・空白の後 (containerName の `impl Point`)。ほかは 3
+        assert_eq!(match_score("bar", "fooBar"), Some(2));
+        assert_eq!(match_score("bar", "a::bar"), Some(2));
+        assert_eq!(match_score("point", "impl Point"), Some(2));
+        assert_eq!(match_score("bar", "FOOBAR"), Some(3));
+        assert_eq!(match_score("ar", "fooBar"), Some(3));
+        assert_eq!(match_score("bar", "fooBAR"), Some(2));
     }
 
     #[test]
