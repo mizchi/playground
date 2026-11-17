@@ -1,0 +1,18 @@
+HELLO, WÖRLD | hello, wörld | HeLLo, WörLd
+ababab | He__o, Wörld | abc
+["one", "two", "three"] Some(("k", "v=w")) Some(("key", "val"))
+Some("rest") Some("file") None
+[pad  ] [  pad] Some(4)
+0:a 1:é 3:😀 7:b 
+294 true
+-42 Err(ParseIntError { kind: PosOverflow }) Err(ParseIntError { kind: InvalidDigit }) Err(ParseIntError { kind: Empty })
+error: number too large to fit in target type
+[1, 2, 3, 40] 46
+> hellO '>' Some('o')
+abc abc-> hellO! xabc-> hellO!
+Hello Wörld abc
+101001 101010 011000 000100 101001 000100 000000 
+Some(7) Some(15) None Some('5') A q
+A Some('☺') 2 true
+SHOUT
+V2 { x: 11, y: 23 } V2 { x: -1, y: -2 } V2 { x: 30, y: 60 }

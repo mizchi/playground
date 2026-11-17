@@ -5,9 +5,13 @@ import os, shutil, statistics, subprocess, sys, time
 
 CRUSTC = os.path.abspath("target/release/crustc")
 W = os.path.abspath("out/runtime")
+# (既定は driver2 (自前のフロントエンド) + Cranelift。--backend=minclif で minclif。
+#  MINCLIF_NO_REGALLOC は minclif のレジスタ割り当てなし)
 CONFIGS = [
-    ("crustc", lambda s, o: [CRUSTC, s, "-o", o, "--no-cache"]),
-    ("crustc -O", lambda s, o: [CRUSTC, s, "-o", o, "-O", "--no-cache"]),
+    ("minclif -O (割り当てなし)", lambda s, o: ["env", "MINCLIF_NO_REGALLOC=1", CRUSTC, s, "-o", o, "--backend=minclif", "-O", "--no-cache"]),
+    ("minclif -O", lambda s, o: [CRUSTC, s, "-o", o, "--backend=minclif", "-O", "--no-cache"]),
+    ("crustc (Cranelift)", lambda s, o: [CRUSTC, s, "-o", o, "--no-cache"]),
+    ("crustc -O (Cranelift)", lambda s, o: [CRUSTC, s, "-o", o, "-O", "--no-cache"]),
     ("rustc (debug)", lambda s, o: ["rustc", "--edition", "2021", "-Awarnings", s, "-o", o]),
     ("rustc -O", lambda s, o: ["rustc", "--edition", "2021", "-Awarnings", "-O", s, "-o", o]),
 ]
@@ -23,7 +27,7 @@ def bench(name):
     src = os.path.abspath(f"bench/rt/{name}.rs")
     rows, want = [], None
     for label, mk in reversed(CONFIGS):  # rustc -O の出力を正解にする
-        exe = os.path.join(W, f"{name}-{label.replace(' ', '').replace('(', '').replace(')', '')}")
+        exe = os.path.join(W, f"{name}-{abs(hash(label)) % 10**8}")
         builds = [timed(mk(src, exe))[0] for _ in range(3)]
         runs, out = [], None
         for _ in range(3):

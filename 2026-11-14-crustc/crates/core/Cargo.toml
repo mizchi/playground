@@ -1,0 +1,10 @@
+[package]
+name = "crustc-core"
+version = "0.1.0"
+edition = "2024"
+description = "crustc のフロントエンド (自前の lexer / parser / 型推論)・acg (コード生成)・driver2。syn と Cranelift に依存しない"
+build = "build.rs"
+
+[dependencies]
+minclif = { path = "../minclif" }
+proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }

@@ -1,0 +1,5 @@
+Some(S(3)) N
+[S(1), S(2)] [Some(1)] Err("5") [W(4), W(5)] [One("x")] P(1, "s") Zero 3
+2 true
+[1, 2] 3
+3 true

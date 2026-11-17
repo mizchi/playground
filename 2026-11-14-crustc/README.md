@@ -1,6 +1,7 @@
 # crustc
 
-自分用の Rust (サブセット) コンパイラ。Rust で書き、バックエンドは Cranelift。
+自分用の Rust (サブセット) コンパイラ。Rust で書き、自前のフロントエンド (lexer / parser / 型推論) と、
+Cranelift (既定) か自前の minclif でコード生成する。crustc 自身で crustc をコンパイルできる (minclif の経路)。
 **インクリメンタルな開発ビルド**に特化して、次の 4 つを小さくすることを狙う。
 
 - 再ビルド時間
@@ -9,6 +10,19 @@
 - 出力バイナリのサイズ
 
 設計の元にした blaze / relax / wild の調査は [NOTES.md](NOTES.md) にまとめた。
+
+### crate の構成 (このディレクトリの Cargo ワークスペース)
+
+| crate | 中身 | 外部の依存 |
+|---|---|---|
+| `crates/minclif` | Cranelift に似た API の小さな x86-64 バックエンド (命令の記録・レジスタ割り当て・スタックの struct のフィールドの変数化・ELF の .o) | なし |
+| `crates/core` (`crustc-core`) | lexer / parse / macros / prelude / ast_* (要約・型推論) / program / acg (コード生成) / driver2 (キャッシュ・fork の並列化・複数クレート・リンク) | proc-macro2 だけ |
+| `crates/clif` (`crustc-clif`) | driver2 の Cranelift バックエンド: minclif が記録した命令の列を Cranelift の IR にしてコンパイルする | cranelift |
+| `.` (`crustc`) | CLI・LSP サーバ (`src/lsp.rs`) と、上のものの再輸出 (テスト・ベンチ) | serde_json |
+
+経路は **driver2** だけ (`crustc x.rs` は Cranelift、`--backend=minclif` で minclif)。build / check / LSP のすべてが driver2 を使う。
+最初のドライバ (syn + Cranelift、`crates/legacy`) は 2026-11-16 に削除した (git の履歴にある)。
+セルフホスト (tests/selfhost*.sh) は crustc-core と minclif のソースを 1 ファイルにまとめて crustc でコンパイルする。
 
 ## 現状（2026-11-15、`python3 bench/vs_rustc.py`）
 
@@ -29,18 +43,18 @@ crustc のリンカは wild 0.10.0。どの組み合わせでも出力は rustc 
 |  | crustc -O | 41 | 6 | 29.3 | 18.9 | 176（1.55x） |
 |  | rustc -Cincremental | 211 | 107 | 2632.2 | 373.7 | 732（6.43x） |
 |  | rustc -O | 280 | - | 0.0 | 347.8 | 114（1.00x） |
-| matmul | crustc | 53 | 8 | 47.6 | 44.1 | 245（7.20x） |
-|  | crustc -O | 60 | 8 | 39.0 | 26.9 | 77（2.26x） |
-|  | rustc -Cincremental | 158 | 121 | 2671.3 | 378.4 | 746（21.99x） |
-|  | rustc -O | 234 | - | 0.0 | 361.0 | 34（1.00x） |
-| nbody | crustc | 37 | 8 | 37.2 | 40.9 | 442（7.12x） |
-|  | crustc -O | 47 | 6 | 29.3 | 23.3 | 92（1.48x） |
-|  | rustc -Cincremental | 149 | 106 | 2226.5 | 365.9 | 1231（19.85x） |
-|  | rustc -O | 177 | - | 0.0 | 363.9 | 62（1.00x） |
-| sieve | crustc | 28 | 5 | 21.0 | 21.5 | 348（3.26x） |
-|  | crustc -O | 32 | 4 | 17.5 | 15.0 | 252（2.36x） |
-|  | rustc -Cincremental | 142 | 98 | 1475.6 | 340.4 | 432（4.04x） |
-|  | rustc -O | 163 | - | 0.0 | 335.0 | 107（1.00x） |
+| matmul | crustc | 51 | 7 | 46.1 | 42.2 | 198（6.32x） |
+|  | crustc -O | 56 | 7 | 37.9 | 26.3 | 53（1.69x） |
+|  | rustc -Cincremental | 162 | 98 | 2671.3 | 378.4 | 692（22.13x） |
+|  | rustc -O | 211 | - | 0.0 | 361.0 | 31（1.00x） |
+| nbody | crustc | 36 | 6 | 36.3 | 39.9 | 413（9.83x） |
+|  | crustc -O | 46 | 5 | 28.4 | 22.6 | 69（1.65x） |
+|  | rustc -Cincremental | 143 | 105 | 2226.5 | 365.9 | 1185（28.22x） |
+|  | rustc -O | 165 | - | 0.0 | 363.9 | 42（1.00x） |
+| sieve | crustc | 26 | 4 | 20.4 | 20.5 | 211（2.30x） |
+|  | crustc -O | 29 | 4 | 16.8 | 14.2 | 130（1.42x） |
+|  | rustc -Cincremental | 131 | 94 | 1475.6 | 340.4 | 431（4.69x） |
+|  | rustc -O | 128 | - | 0.0 | 335.0 | 92（1.00x） |
 | sort | crustc | 42 | 7 | 40.7 | 46.4 | 252（1.33x） |
 |  | crustc -O | 51 | 8 | 32.3 | 30.0 | 195（1.03x） |
 |  | rustc -Cincremental | 174 | 113 | 3102.2 | 384.9 | 1983（10.45x） |
@@ -53,7 +67,7 @@ crustc のリンカは wild 0.10.0。どの組み合わせでも出力は rustc 
 - 1 か所編集の再ビルドは rustc の incremental の 13〜24 倍速い（gen1000 で 28 ms 対 417 ms）。
 - 残すディスク（crustc はキャッシュ + 圧縮した `.o`、rustc は incremental ディレクトリ）は 1/16〜1/210（gen1000 で 105 KiB 対 22156 KiB）。
 - バイナリは、小さいプログラムでは rustc の 1/8〜1/18（rustc は std を静的にリンクする）。gen1000 は debug の検査の分だけ rustc `-O` より大きい。
-- 実行時間は、crustc の debug ビルドが rustc の debug ビルドより速いものが多い（gen1000 と fib を除く）。crustc `-O` は rustc `-O` の 1.0〜2.9 倍（sort は同じ）。
+- 実行時間は、crustc の debug ビルドが rustc の debug ビルドより速いものが多い（gen1000 と fib を除く）。crustc `-O` は rustc `-O` の 1.0〜2.9 倍（sort は同じ、sieve は 1.4 倍、matmul・nbody は 1.6〜1.7 倍）。
 
 ## 動かし方
 
@@ -64,10 +78,15 @@ cargo build --release
 ```
 
 ```bash
+./target/release/crustc build tests/workspace/workspace.txt -o out/ws   # 複数クレートのワークスペース (書き方は下の「複数ファイル・複数クレート」)
+```
+
+```bash
 ./target/release/crustc check examples/traits.rs
 ```
 
-型検査だけを行い、全関数の診断を表示する。
+全関数 (到達しないものも、総称関数は要求されたインスタンスごと) を検査して全診断を表示する (`Session2::check`。
+コード生成までして minclif でエラーを集める。結果はキャッシュに入る)。
 
 ```bash
 ./target/release/crustc lsp
@@ -77,8 +96,9 @@ LSP サーバ（stdio）。対応は initialize / didOpen / didChange（全文�
 
 | オプション | 意味 |
 |---|---|
-| `-o PATH` | 出力パス。同じ場所に `PATH.o`（`.text` などを zstd で圧縮した ELF。次のビルドの機械語の置き場）、`PATH.crcache`（キャッシュ）、`PATH.link`（リンク行）を置く |
-| `-O` | Cranelift の `speed_and_size` と backtracking regalloc を使う。既定は `none` + `single_pass` |
+| `-o PATH` | 出力パス。同じ場所に `PATH.o`、`PATH.crcache2`（キャッシュ）、`PATH.link`（リンク行）を置く |
+| `-O` | 小さい関数のインライン展開と、Cranelift の `speed` + backtracking regalloc (minclif ならレジスタ割り当ての後の命令の形)。オーバーフローの検査をしない |
+| `--backend=cranelift\|minclif` | コード生成 (既定 cranelift。環境変数 `CRUSTC_BACKEND` でも) |
 | `--linker=wild\|mold\|lld\|bfd\|PATH` | リンカを選ぶ。既定は PATH にある順に wild > mold > ld.lld > ld |
 | `--time` | フェーズごとの時間とピーク RSS を表示する |
 | `-j N` | コード生成のスレッド数。ミスが 32 件未満ならスレッドを立てない |
@@ -118,7 +138,24 @@ crustc（debug / `-O`）と rustc（`-Cincremental` / `-O`）でビルドし、c
 tests/probe.sh
 ```
 
-よく使う機能の小さいプログラム（`tests/probe/*.rs`、81 本）を rustc と比べ、通った数を出す。
+よく使う機能の小さいプログラム（`tests/probe/*.rs`、91 本）を rustc と比べ、通った数を出す。
+
+```bash
+tests/selfhost.sh
+```
+
+セルフホストの確認。crustc 自身のソースのうち外部クレートに依存しない部分を crustc でコンパイルし、rustc でコンパイルしたものと出力を比べる。
+- `src/lexer.rs`（と `src/cache.rs` の KeyHasher = std の DefaultHasher 2 つ）：crustc 自身のソース・examples・probe の 144 ファイルを字句解析し、アイテムの区切りと 128 bit のハッシュが rustc 版と完全に一致する。
+- `src/prelude.rs`（prelude の項目を名前で選ぶ。lexer / fxhash / KeyHasher と、build.rs が作る 46 万文字の表 `PRELUDE_ITEMS` を含む）：probe と examples の 125 ファイルをユーザのソースとして、選ばれた prelude の長さ・行数・ハッシュが rustc 版と一致する（-O で rustc 版 0.13 秒に対し 0.40 秒）。
+- `src/link.rs`（リンカを探して直接起動する）と `src/testgen.rs`：C の `.o` を自分でリンクして実行し（2 回目は保存したリンク行で）、出力が rustc 版と一致する。`std::path` と `std::process::Command` を使う。
+- `src/elfz.rs`（`.o` のセクションを SHF_COMPRESSED にする）：zstd クレートの代わりに同じ API の小さな RLE を付けて、C の `.o` を圧縮・解凍し、セクションとシンボルが rustc 版と一致する。
+- `src/macros.rs`（`macro_rules!` の展開と `include_str!`）：proc_macro2 の代わりに使う分だけの字句解析器（`tests/selfhost/mini_pm2.rs`、トークン木・位置・Spacing）を付けて、probe / examples / src の 147 ファイルを展開し、結果が rustc 版と一致する。
+- `src/parse.rs`（syn を使わない自前の構文解析）：probe / examples / src の 149 ファイル（parse.rs 自身も）を解析し、アイテムと節の数が rustc 版と一致する（-O で rustc 版 0.12 秒に対し 0.33 秒）。
+- `src/ast_closure.rs`（自前の構文木の上のクロージャ解析。closure.rs の移植）：全ファイルの関数のクロージャの自由変数と「値でキャプチャするか」が rustc 版と一致する。
+- `src/types.rs` + `src/ast_types.rs`（front.rs から分けた型の表現・intern と、自前の構文木の型 → TySyn）：全ファイルの型の変換結果と intern が rustc 版と一致する。
+- `src/ast_summary.rs`（アイテムの要約。front.rs の summarize / parse_sig / クロージャの持ち上げの移植）：全ファイルの全アイテムの要約が rustc 版と一致する。
+- `src/program.rs`（全体の表。front.rs から syn に依存しない部分を分けたもの：関数シグネチャ・struct / enum の定義とレイアウト・インスタンス化・trait 実装・const の評価）：要約までのモジュールと prelude を合わせた約 1 万 1 千行のプログラムで、probe / examples の 135 ファイルの Program を作り、関数・型（サイズ・フィールドのオフセット・128 bit の深いハッシュ）・impl・const（と `src/ast_consteval.rs` で評価した static の初期値のデータ）と、全関数の本体のパスを `fn_by_p` / `struct_by_p` / `variant_by_p` で引いた結果、`src/solver.rs`（型推論の単一化器）でジェネリックな関数を解いた結果、`src/ctors.rs` の書き換え、`src/ast_infer.rs`（型推論）でユーザの関数 552 個の let の型を推論した結果の 7 万 5 千行の出力が、probe / examples / src の 157 ファイルで rustc 版と一致する（-O でも）。
+- `src/enc.rs`（キャッシュの直列化。`enc_struct!` マクロと trait の静的呼び出し `T::dec(r)`）と `src/fxhash.rs`（FxHasher / `FxMap`）：構造体・Vec・Option・タプルを符号化して戻し、バイト列とハッシュが rustc 版と一致する（-O でも）。
 
 環境変数：`CRUSTC_DUMP_PRELUDE=1` は付けた prelude を stderr に出す。`CRUSTC_NO_STRIP=1` は出力のシンボルを残す（callgrind などで関数名を見るため）。
 `CRUSTC_BENCH_LINKER` は criterion のベンチのリンカを固定する。
@@ -142,19 +179,22 @@ bench/regress.sh
 
 | ベンチ（`benches/compile.rs`、N=1000） | 何を見るか | 現在値 |
 |---|---|---:|
-| `lsp/did_change_1fn` | LSP 応答性：1 関数編集の didChange から publishDiagnostics まで | 3.9 ms |
-| `lsp/did_change_noop` | 内容が同じ didChange（保存など） | 0.19 ms |
-| `cold/lsp_did_open` | 初めて開いたとき（全関数を検査） | 41 ms |
-| `build/noop` | 無変更ビルド（リンク省略） | 7.1 ms |
-| `build/edit_1fn` | 1 関数編集ビルド（リンク込み） | 28 ms |
-| `cold/build` | キャッシュなしのビルド | 84 ms |
-| `front/lex` | 字句解析だけ（no-op の下限） | 1.7 ms |
+| `lsp/did_change_1fn` | LSP 応答性：1 関数編集の didChange から publishDiagnostics まで | 10.0 ms |
+| `lsp/did_change_noop` | 内容が同じ didChange（保存など） | 0.28 ms |
+| `cold/lsp_did_open` | 初めて開いたとき（全関数を検査） | 166 ms |
+| `build/noop` | 無変更ビルド（リンク省略） | 12.7 ms |
+| `build/edit_1fn` | 1 関数編集ビルド（リンク込み、wild） | 20.7 ms |
+| `cold/build` | キャッシュなしのビルド (Cranelift) | 188 ms |
+| `front/lex` | 字句解析だけ（no-op の下限） | 2.3 ms |
+
+(2026-11-16、driver2 に移した後の値。最初のドライバの check は型検査だけで 1 関数編集 3.9 ms / didOpen 41 ms だった。
+driver2 の check はコード生成までするので遅い: 型検査だけで止める経路は次の課題)
 
 （値はマシンの状態で変わる。比べるときは同じ時間帯に、ベースラインのコミットと並べて測る。`build/edit_1fn` はリンク（この環境では ld.lld）が大半を占める）
 
 - 判定の閾値：5% 未満の変化は無視し（`noise_threshold`）、有意水準は 1% にしている。
   cold 系は実行ごとに ±10% ぶれるので、閾値を 15% にしている。
-- サイズ予算は、バイナリ・`.o`・キャッシュ・LSP のメモリ上キャッシュを、例ごとに上限バイトで持つ。
+- サイズ予算は、バイナリ・`.o`・キャッシュ (driver2 + Cranelift。キャッシュは機械語を持つ) を、例ごとに上限バイトで持つ。
   意図して増やすなら `UPDATE_BUDGET=1`、新しい例を足しただけなら `UPDATE_BUDGET=new`（既存の上限は変えない）。
 - 回帰検出が実際に働いた例（どれも予算や閾値を緩めずに直した）：
   - サイズ
@@ -622,42 +662,29 @@ prelude は、ユーザのコードの識別子から辿れるアイテムだけ
 
 ## アーキテクチャ
 
+今の主経路 (driver2):
+
 ```
-src.rs ──lexer(自前)──▶ アイテム列 + 正規化ハッシュ
-                          │ (空白・コメントは無視)
-                          ▼
-           要約キャッシュ? ── hit ──▶ シグネチャ
-                 │ miss
-                 ▼
-          syn でそのアイテムだけ parse → シグネチャ
-                          ▼
-     識別子集合から参照グラフ → main からの到達集合
-                          ▼
- 関数キー = H(コンパイラ, 設定, 本体ハッシュ, 自分と参照先の「シグネチャ」,
-               名前で現れる struct の deep hash)
-                          ▼
-           機械語キャッシュ? ── hit ──▶ Blob（機械語 + 名前付きリロケーション）
-                 │ miss
-                 ▼
-  syn parse → infer → syn AST から直接 Cranelift IR → 機械語 → Blob
-                          ▼
-   cranelift-object で 1 個の .o にまとめる（関数ごとのセクション、Local シンボル）
-                          ▼
-   .o が前回と同一ならリンクを省略。違えば、保存したリンク行で wild を直接起動
+src.rs ──srcmap (mod x; のファイル)──▶ macros (macro_rules!) ──▶ モジュールを平らに ──▶ lexer: アイテム + ハッシュ
+   ──▶ 要約 (キャッシュ、fork で並列) ──▶ Program (シグネチャ・レイアウト) ──▶ 到達する関数
+   ──▶ 関数ごと: キャッシュ? ── miss ──▶ ast_infer (型推論) → acg (自前の構文木から minclif の命令の列。-O で小さい関数を展開)
+                                        → Cranelift (crustc-clif) か minclif (レジスタ割り当て) で機械語 → Blob (fork で並列)
+   ──▶ minclif の ELF 書き出しで .o (panic の場所の表を含む) ──▶ wild でリンク (変わらなければしない)
 ```
 
-| ファイル | 役割 |
+| 場所 | 役割 |
 |---|---|
-| `src/lexer.rs` | トップレベルのアイテム分割と、正規化トークン列のハッシュ。syn より 1 桁以上速い。`impl` はヘッダとメンバに分ける |
-| `src/front.rs` | 型（intern）、struct レイアウト、シグネチャ、アイテム要約とそのシリアライズ、参照グラフ、到達可能性 |
-| `src/infer.rs` | 関数単位の型推論（union-find。参照・クロージャの形も単一化する） |
-| `src/closure.rs` | クロージャの持ち上げ：キャプチャの抽出（スコープを辿る自由変数解析）と、本体を fn にする合成 |
-| `src/codegen.rs` | syn AST から Cranelift IR への 1 パス lowering と型検査（place / スタックスロット / sret）。出力は `Blob` |
-| `src/cache.rs` | 1 ファイルキャッシュ（index + payload、tmp + rename で書き込む） |
-| `src/link.rs` | `cc -###` からリンク行を抽出して保存し、リンカを直接起動する |
-| `src/driver.rs` | `Session`：2 層キャッシュ（ディスク + メモリ）、check / build、インスタンスの作業リスト、並列化、.o 生成 |
-| `src/lsp.rs` | 最小の LSP サーバ（ドキュメントごとに Session を持つ） |
-| `src/main.rs` | CLI（build / check / lsp） |
+| `crates/core/src/lexer.rs` | トップレベルのアイテム分割と、正規化トークン列のハッシュ。`impl` はヘッダとメンバに分ける |
+| `crates/core/src/macros.rs` / `srcmap.rs` | macro_rules! の展開・include_str!、`mod x;` のファイルの読み込みと行の対応 |
+| `crates/core/src/parse.rs` / `ast_*.rs` | 自前の構文木・要約・型推論・クロージャ解析・定数評価 |
+| `crates/core/src/program.rs` | 全体の表 (シグネチャ・レイアウト・trait 実装・インスタンス) |
+| `crates/core/src/acg/` | 構文木から minclif の FunctionBuilder への 1 パスの lowering と型検査。-O で小さい関数をインライン展開 |
+| `crates/core/src/driver2.rs` / `cache2.rs` | `Session2`：キャッシュ (ディスク + メモリ)、build / check / ワークスペース、fork の並列化、.o の書き出し |
+| `crates/core/src/link.rs` | `cc -###` からリンク行を取り出して保存し、リンカを直接起動する |
+| `crates/minclif` | 命令の記録・レジスタ割り当て・x86-64 の機械語・ELF の .o |
+| `crates/clif` | 記録した命令の列 → Cranelift の IR → 機械語 |
+| `src/lsp.rs` | 最小の LSP サーバ (ドキュメントごとに `Session2` を持ち、`check` の診断を返す) |
+| `src/main.rs` | CLI (build / check / lsp / ワークスペースの build) |
 
 ### インクリメンタル性の要点
 
@@ -879,6 +906,709 @@ crustc のリンカは wild 0.10.0、rustc 1.97.0。どの設定でも出力は 
 
 crustc のバイナリはシンボルを持たない（strip しても同じ大きさ）。rustc は std を静的にリンクするので、strip しても 335 KiB 以上ある。crustc は使う部分の prelude だけをコンパイルし、libc を動的にリンクするので、rustc の 1/10〜1/30 になる。
 
+#### matmul と sieve の `-O`、ジェネリクスと単相化
+
+| | 前 | 後 | rustc -O |
+|---|---:|---:|---:|
+| matmul `-O` | 77 ms | **53 ms** | 31 ms |
+| sieve `-O` | 252 ms | **144 ms** | 92 ms |
+| nbody `-O` | 92 ms | **69 ms** | 42 ms |
+
+- ループの前に出す（`-O`）：for / while の本体（と条件）で変わらない添字の受け手の先頭と長さを、ループの前で読む。
+  - 対象はローカルの Vec と `&Vec` / `&mut Vec` の引数（`c` / `b`）と、ループで変わらない変数で引いた行（`c[i]` / `b[k]`）。
+    本体で受け手が `x[..]..` の形（読むか、要素がスカラーの代入）でしか現れず、メソッドの受け手・`&mut`・束縛し直し・マクロの中・クロージャがないこと。
+  - 行の読み出しはループの前で行い、範囲外なら読む場所をダミーの領域にする（`select`）。`i < c.len()` の検査は本体の中で、前で比べた値を使って行う（panic の順序は変わらない）。
+  - matmul の内側のループは 30 命令 → 12 命令（`c` と `c[i]` の読み直しが消えた）。
+- `vec![x; n]` は push の呼び出しをやめ、確保した領域に直接書く（1 byte の要素は memset）。sieve の初期化の 2000 万回の push が消えた。
+- `for (i, x) in v.iter().enumerate()` は組を作らずに i と x を束縛する（スタックへの書き出しと読み戻しが消えた。sieve の命令数 615M → 535M）。
+- 同じ機械語になるインスタンスは 1 つだけ置く（ICF：`Vec<u32>::push` と `Vec<i32>::push` など）。機械語・リロケーション（呼び先は代表に直す）・データ・vtable・panic の場所・呼び出し規約が同じものを、変わらなくなるまで繰り返して畳む。
+  キャッシュは機械語を（長さ, ハッシュ）で `.o` から引くので、畳んだインスタンスも代表の機械語でヒットする。examples 全体でバイナリ −3%（binary_heap −13%）、`.o` −3%。
+- drop の要らない型の `__exr_drop_in_place::<T>` / `drop(x)` は呼ばない（インスタンスも作らない。collections でインスタンス 353 → 341）。
+
+#### std の範囲へ（セルフホストの第 1 段階: crustc 自身の lexer）
+
+crustc 自身の `src/lexer.rs` を 1 ファイルにまとめて（`tests/selfhost/build_lexer.py`）crustc でコンパイルし、足りないものを順に足した。
+- `std::hash`：`Hash` / `Hasher`（`write_u8` 〜 `write_usize`・`write_str`・`write_length_prefix` の既定のメソッドも）と、整数・bool・char・str・String・スライス・Vec の `impl Hash`、
+  `DefaultHasher`（std と同じ SipHash-1-3・鍵 0 で、値も std と一致する）
+- str とスライスへの trait 実装（`impl Hash for str` / `impl<T: Hash> Hash for [T]`）のメソッド呼び出し（組み込みのメソッドより先に探す）
+- 型の別名 `type Key = u128;` / `type Res<T> = Result<T, String>;`
+- `std::fs::read_to_string` / `read` / `write`、`std::env::args` / `var`、`std::io::Error`（Display / Debug は std と同じ形: `Os { code: 2, kind: NotFound, message: ".." }`）、`std::io::Result<T>`
+- `String::from_utf8_lossy`（std と同じく壊れた列ごとに U+FFFD）、`bool::then` / `then_some`、整数の `to_le_bytes` / `to_be_bytes` / `to_ne_bytes` / `from_le_bytes` など、u8 の `is_ascii_alphanumeric` など
+- バイト列のパターン（`match w { b"pub" | b"fn" => .. }`、w: &[u8]）、`&[u8] == b"pub"`、`&&str` を `&str` の引数に（deref の強制変換）
+- 関数の中で定義した `macro_rules!`
+- 本体がキャプチャを値として使うクロージャ（`changed.then(|| String::from_utf8(out))`）は、rustc と同じく値でキャプチャする（FnOnce）。値で持ったキャプチャからのムーブは、環境の側を 0 にする
+- prelude の新しい項目（Hash / Hasher / Args など）は、その名前が要るときだけ付ける（`fn write` / `len` などのよくある名前では引かない）
+
+#### セルフホストの第 2 段階: enc.rs + fxhash.rs
+
+- trait の静的呼び出し：`Enc::dec(r)?`・`T::dec(r)`（Self は期待される型・型推論から）、ジェネリックな impl（`impl<T: Enc> Enc for Vec<T>` / `impl<A, B> Enc for (A, B)`）への静的ディスパッチと単相化
+- `Trait::m(&x, ..)` / `crate::m::Trait::m(..)`（self を取るメソッド）はメソッド呼び出しとして
+- スライス → 配列の `try_into`（`u64::from_le_bytes(b[..8].try_into().unwrap())`、`TryFromSliceError`）、`get(a..b)` / `get_mut(a..b)`（Vec・配列・スライス）
+- `S::default()` / `<S>::default()` / `m::S::default()` / ジェネリックな別名 `FxMap::default()`
+- `HashMap<K, V, BuildHasherDefault<H>>` / `HashSet<K, S>`（ハッシャの型引数は受け付けて、既定のハッシュを使う。反復順は std と違う）
+- `macro_rules!`：`$t:ty { .. }` のように後ろに括弧が続くフラグメント、`$crate`、`crate::m!(..)` の呼び出し
+- ユーザ定義の trait をタプルに実装（`impl<A, B> Tr for (A, B)`）
+
+#### セルフホストの第 3 段階: prelude.rs
+
+- `include_str!("..")` / `include_bytes!("..")`（入力ファイルからの相対パス。中身はエスケープして 1 行のリテラルにする）
+- `std::sync::OnceLock`（`get_or_init` / `get` / `set`）。mut でない static も書き込める所に置く（内部可変性）
+- `str::rsplit` / `rsplit_once` / `match_indices`、クロージャのパターンの `starts_with` / `ends_with`、`Iterator::find_map`
+- 要素が整数などでないスライスの `contains`（`NAMES.contains(&w)`、PartialEq で比べる）
+- 参照の列の `flatten`（`map.get(k)` の `&Vec<T>` などを `&T` で順に）
+- const のパターン（`Some(BOX_FREE) | Some(DROP_GLUE)`、初期値がリテラルの const）
+- `&s[a..b]`（s: &str / String）の型推論、`matches!` の中のメソッドの連鎖（parse し直した式の型を位置で引く）
+- 修正：`a || f(&format!(..))` の右辺の一時値の drop フラグが、右辺を通らないとき初期化されていなかった（入口で 0 にする）
+
+#### セルフホストの第 4 段階: link.rs + testgen.rs
+
+- `std::path`：`Path`（= str）/ `PathBuf` / `OsStr` / `OsString`（= String）。`join` / `push` / `file_name` / `file_stem` / `extension` / `parent` /
+  `with_extension` / `set_extension` / `display` / `to_string_lossy` / `is_file` / `is_dir` / `exists`（stat）
+- `std::process::Command`：`new` / `arg` / `args` / `output` / `status`（fork + execvp。exec の失敗は close-on-exec の pipe で受け取り `Err` にする。
+  stdout と stderr は poll で両方読む）、`ExitStatus`（`success` / `code` / Display）
+- `env::var_os` / `env::split_paths`、`fs::remove_file`
+- 同じ型への複数の `impl From<A> for T` / `impl From<B> for T`（呼び出し側が最初の引数の型で選ぶ）
+- Deref の先が str の型のメソッド（`path_buf.join(..)` → str の trait のメソッド）、`os_string.push("..")`
+- 書式文字列に直接書いた名前（`format!("{cands:?}")`）をクロージャのキャプチャとして数える
+- 修正：`&&str` を受け手にした str の trait メソッドが 1 段余計に読んでいた
+
+#### セルフホストの第 5 段階: elfz.rs
+
+- `std::borrow::Cow`（`Cow<[T]>` / `Cow<str>`：`Borrowed` / `Owned`、`into_owned`、Deref）
+- スライス・配列・Vec の `copy_from_slice` / `clone_from_slice`
+
+#### セルフホストの第 6 段階: macros.rs
+
+- struct と同じ名前のバリアント（`TokenTree::Punct(Punct { .. })`：裸の名前は struct を優先）
+- `&a == &b`（a, b が struct などの参照どうし）、`impl PartialEq` と `impl PartialEq<str>` の両方
+- `Option::flatten`、HashMap の `clone`（以前は浅いコピーで二重解放になっていた）、`String::replace_range` / `into_bytes`
+- 修正：`None` などの大文字の名前のパターンをクロージャのキャプチャ候補に数えていた
+- 修正：`include_str!` の展開が、同じ行の 2 つ目以降のコメント・文字列の中のものも展開していた
+
+#### セルフホストの第 7 段階: 自前の構文解析 (syn から離れる土台)
+
+- `src/parse.rs`：外部クレートなしの Rust の字句・構文解析（アイテム・型・パターン・式・文。優先順位、`if` の頭の struct リテラル、
+  `>>` とジェネリクス、let チェーン、ラベル、クロージャ、マクロの呼び出しはトークン列のまま）。crustc がコンパイルできる書き方で書いてある
+- `tests/parse.rs`：probe / examples / src の全ファイルで、節の種類ごとの数 (22 種) が syn で数えたものと一致する
+- 後で代入する `let x;`（0 で埋めて置く）
+- 修正：非ジェネリックな enum のフィールドの `Option<T>` が、T の大きさが決まる前に配置されてフィールドが重なっていた
+  （再帰する構文木で起きる。インスタンスを取り直した後、非ジェネリックな定義も取り直す）
+- 修正：ユーザの `struct Path` が prelude の `type Path = str` に負けていた
+
+#### セルフホストの第 8 段階: クロージャ解析を自前の構文木へ移す
+
+- `src/ast_closure.rs`：closure.rs（syn の構文木）と同じ解析（本体の中のクロージャを前順に、マクロの引数の中も・自由変数・
+  キャプチャを値として使うか）を src/parse.rs の構文木の上で行う。`tests/ast_closure.rs` が全ファイルの 1273 個のクロージャで syn 版と一致することを確かめる
+- 修正：値として渡す変数と代入する変数が混ざったクロージャ（`|| { r = cnt(caps); }`）は全部を値でキャプチャしていたので、外の `r` が変わらなかった
+  （代入するキャプチャがあれば参照で持つ）
+- 修正：型推論で `&Vec<T>` を `&[T]` の引数に渡すと参照どうしを同じ型にしていたので、クロージャがキャプチャした `&Vec<T>` が `&[T]` として扱われた
+- 修正：`matches!(x, p if guard)` の guard の中の変数をキャプチャに数えていなかった
+- `&Box<T>` / `&&T` を `&dyn FnMut(&T)` の引数に渡す（deref の強制変換）
+
+#### セルフホストの第 9 段階: front.rs の型の部分を分ける・モジュールの名前空間
+
+- `src/types.rs`：front.rs から syn に依存しない部分（`Ty` / `TySyn` / `ArrLen` / intern）を分けた（front は `pub use` で見せる）
+- `src/ast_types.rs`：front.rs の `parse_tysyn`（syn の型 → TySyn）を自前の構文木に移植。`tests/ast_types.rs` が全ファイルの 3914 個の型で syn 版と一致することを確かめる
+  （`dyn` の trait は proc_macro2 と同じ空け方のテキストにする）
+- モジュールの名前空間：別々のモジュールで同じ名前（`types::Ty` と `parse::Ty`）を定義したら、平らにする前にモジュールの中の定義を `m__Ty` にし、
+  中の参照・`use crate::m::{Ty as X}`（別名も）・`m::Ty` / `crate::m::Ty` / `super::Ty` のパスを直す（enum のバリアント名・フィールドは変えない）。Debug の表示は元の名前
+- 関数の中の同じ名前の static（`intern` ごとの `static TABLE`）は、外に出す前に関数ごとに名前を変える
+- `std::sync::Mutex`、`Box::leak`、`std::ptr::eq`、`Result::as_ref`、`HashSet<&T>::get(&t)`（`&T` を `&&T` に）、生ポインタのハッシュ、`&&str == &&str`
+- 修正：参照を通して再帰する型（`enum T { R(&'static T) }`）の `==` でコンパイラがスタックを使い切っていた（glue 関数で比べる）
+- 修正：型推論で `&String` を `&str` の引数に渡すと参照どうしを同じ型にしていた（ガードつきの腕で `t.len()` が壊れた値を読んだ）
+- 修正：`v == b"crate"`（v は後で型の決まる `x.to_vec()`）で v をバイト列の型にしていた
+- 修正：`String` の `contains` などの書き換えで作ったノードに型の記録がなく、メソッドが見つからなかった
+- クロージャの変数の呼び出し `tok(k)` の戻り値の型を `peek` で引く
+
+#### セルフホストの第 10 段階: アイテムの要約を自前の構文木へ移す
+
+- `src/ast_summary.rs`：front.rs の `summarize` / `parse_sig` / `lift_closures` / `parse_and_summarize`（syn の構文木 → 要約）を自前の構文木に移植。
+  `tests/ast_summary.rs` が driver と同じ前処理の後の全 2199 アイテムで syn 版と同じ要約になることを確かめる
+  （const の初期値のテキスト・境界のテキストは proc_macro2 の表示と同じ空け方）
+- 要約の型（`Summary` / `SigSyn` / `VariantSyn` / `ClosureSyn` / `Owner` など）も types.rs へ
+- モジュールの中の `use a::{X as Y}` の別名（名前がぶつからないときも）
+- 修正：`let nn = ..; if let Some(nn) = nn { v.push(nn) }`（match 対象と同じ名前の束縛でムーブ）で外側の変数をムーブ済みにせず、二重に解放していた
+- `if` / ブロックの式の型を `peek` で引く（`if c { "a" } else { "b" }.to_string()`）
+
+#### セルフホストの第 11 段階: Program の表を syn から分ける
+
+- `src/program.rs`：front.rs の `Program` / `FnSig` / `StructDef` / `AdtTable` / `Insts` と、`build`（要約 → 表）・レイアウト・
+  インスタンス化・`implements`・`resolve_with` などを移した。syn の構文木を引く検索（`fn_by_path` / `variant_by_path` / `eval_int` など）は
+  front.rs の別の `impl Program` に残る。const の評価（配列の長さ）は自前の構文解析（`parse::parse_expr`）で行う
+- `src/key.rs`：キャッシュキーの `KeyHasher` を cache.rs から分けた（cache.rs は codegen に依存するため）
+- 足したもの：`thread_local!`（遅延初期化する `static mut` と `with` を持つ unit struct に展開）、unit struct の static、
+  モジュールの中の static のパス（`m::S`）、`use crate::m::*` で取り込んだ名前の改名、`&T` → `*const T`、
+  `&mut v[i]`（`Vec<Box<T>>`）→ `&mut T`、MutexGuard など Deref の型の `*g` / `g[i]`、`Range::contains`、`next_multiple_of`、
+  u128 / i128 の掛け算のオーバーフロー検査（Cranelift に `umul_overflow.i128` がないので 64 bit ずつ組み立てる）、
+  タプル・Option の `Hash::hash`（std と同じ順に書き込むので DefaultHasher の値も一致する）、`it.chain([(&a, &b)])`、
+  `&&u32 == &&u32`、`print!` 系の型 ()
+- 修正：
+  - HashMap のキーの Vec を（要素でなく）バッファのアドレスでハッシュしていた（`HashMap<(u32, Vec<Ty>), u32>` が引けない）
+  - `*b`（b: Box）から中身をムーブしても b を drop して中身を二重に解放していた
+  - `it.zip(slice)` の要素の型を推論せず、`sn == "__array"` で `&String` を `&str` と取り違えていた（推論でも `.iter()` にする）
+
+#### セルフホストの第 12 段階: 定数評価を自前の構文木へ移す
+
+- `src/ast_consteval.rs`：consteval.rs（static の初期値 → データのバイト列とリロケーション）を自前の構文木に移植し、
+  driver の static の評価はこちらを使う（失敗したときだけ、場所つきのメッセージを syn 版で作る）。
+  文字列・バイト文字列のリテラルの中身（エスケープ・raw 文字列）も自前で読む。
+  `tests/ast_consteval.rs` が probe / examples の全 696 個の const / static で syn 版と同じバイト列・リロケーションになることを確かめる
+- 足したもの：`&Box<T>` → `&T` の強制変換（`e = x;` で x: `&Box<Expr>`。推論でも参照どうしをつながず中身を単一化する）
+
+#### セルフホストの第 13 段階: パスの検索を syn から分ける
+
+- `program.rs` の `PPath`（セグメントの名前と型引数の有無）の上に、モジュールを外す・struct / enum のバリアント / 関数をパスで引く処理を移した。
+  front.rs の syn 版（`fn_by_path` など）は syn のパスを `PPath` にして呼ぶだけ。自前の構文木のパスからも `PPath::of` で引ける
+- 修正：関数の中のアイテムを外に出すとき、トップレベルの同じ名前（`fn walk` が 2 つ）とぶつかるものも改名する
+
+#### セルフホストの第 14 段階: 型推論の単一化器を分ける
+
+- `src/solver.rs`：infer.rs から、構文木に依存しない単一化器（型変数・形 `Shape`・union-find・関連型と境界の後回し・
+  `known_g` / `apply` / `resolve` など 900 行余り）を分けた。infer.rs の `Inf` は syn に固有の部分だけを持ち、`Deref` で `Solver` を使う。
+  境界の関連型の束縛（`Iterator<Item = T>`）も自前の構文解析で読む
+- `src/ctors.rs`：値として使ったタプルのバリアント / タプル struct（`.map(Some)` / `.map(Ty::Struct)` / `.map(W)` / `let f = E::V;`）を
+  クロージャ（`|__c0| Some(__c0)`）に書き換える（字句の上で、enum / struct の定義から要素数を読む。行番号は変えない）
+- 足したもの：`None::<u32>`（型引数を書いたバリアント）、ユーザの `impl Index` の結果の型の推論、配列の `as_slice()`
+- 修正：
+  - `move` でないクロージャのキャプチャを、クロージャ全体で「値か参照か」を決めていた。Copy の値（`f(p)` の p）を渡すだけで
+    Vec のキャプチャまで値で持ち、二重に解放していた。キャプチャごとに決める（値として渡す・返すものだけ値で持つ）
+  - const ジェネリクスの仮の長さで配列のサイズの掛け算があふれていた（デバッグビルドで trap）
+
+#### セルフホストの第 15 段階: 型推論を自前の構文木へ移す
+
+- `src/ast_infer.rs`：infer.rs の構文木を辿る部分（パターン・ブロック・式・メソッド呼び出し・クロージャ・書式マクロの引数など 1,900 行）を
+  自前の構文木に移植した。単一化器は solver.rs を共有する。`tests/ast_infer.rs` が probe / examples と crustc 自身のモジュール
+  （`out/selfhost/program_main.rs`）の 885 関数・2,380 個の let で syn 版と同じ型になることを確かめる
+- 推論の結果をノードのアドレスに加えてソース上の位置でも記録し、codegen が書き換えで複製したノード（`__exr_slice_to_vec(&a[..])` の中の式など）も型を引けるようにした
+- 足したもの：`DerefMut` trait、Deref 越しのフィールド（`self.prog` で self: `&mut Inf`）、`Option::iter` / `into_iter` と `it.chain(Some(x))`、
+  クロージャで `split`（`s.split(|c| ..)`）
+- 修正：
+  - `let Some(name) = name else { .. }`（外の変数を同じ名前で隠す）で、外の変数の drop をやめず二重に解放していた
+  - 一時値のフィールドのムーブ（`f().0`）で一時値を丸ごと drop していた（残りのフィールドだけ drop する）
+  - 相互再帰の型（`Ty` ↔ `FnTy`）の deep hash が同じになり、別の型のインスタンス（`HashMap::find<&FnTy>` と `<&Ty>`）のキャッシュキーがぶつかっていた
+  - 自前の構文解析で `&&T` を 3 重の参照と読んでいた
+  - `*const T` の `const` をモジュールの名前空間の定義と見ていた
+- 回避（crustc が未対応のもの）：スコープにない trait のメソッドを候補から外さない（`Solver::deref` を `deref_var` に改名）、
+  `std::mem::discriminant`（形の番号の関数にした）
+
+#### セルフホストの第 16 段階: Cranelift の代わりのバックエンドの土台
+
+- `src/minclif.rs`：Cranelift の FunctionBuilder に寄せた API（ブロック・ブロック引数・変数・スタックスロット・整数の命令・比較・select・
+  読み書き・呼び出し (System V、7 個目以降はスタック)・return）で x86-64 の機械語を直接出し、ELF の再配置可能オブジェクトを書く最小のバックエンド。
+  値はすべてフレームのスロットに置く単純な生成。`tests/minclif.rs` がループ・再帰・8 引数の関数を組み立てて cc でリンクして動かす。
+  crustc でコンパイルした版も同じバイト列の .o を書き、それをリンクして動く（tests/selfhost.sh の minclif）
+- 浮動小数点 (f32 / f64 の四則・sqrt・丸め・比較 (NaN の扱いも)・符号の操作・整数との変換 (Rust の `as` と同じく飽和))、
+  i128 (加減・ビット演算・比較・シフトは命令列、乗除は libgcc の `__multi3` など)、オーバーフローつきの演算、clz / ctz / popcnt /
+  bswap / 回転 / min / max / abs / umulhi、trapz / trapnz、関数ポインタの呼び出し、名前のアドレス (GOT 経由)、
+  浮動小数点の引数・戻り値 (xmm)、.data とその中のポインタ (R_X86_64_64) まで。`tests/minclif.rs` の ext_ops が 69 個の結果を rustc の計算と比べる
+
+#### セルフホストの第 17 段階: syn・Cranelift を使わない経路でプログラムを作る
+
+- `src/ast_codegen.rs`：自前の構文木と ast_infer の型から minclif で機械語を作るコード生成 (codegen.rs の置き換えの始まり)。
+  `build_object(src)` が lexer → prelude → ast_summary → program → ast_infer → ast_codegen → minclif → ELF の .o を作る (syn も Cranelift も使わない)
+- いま扱えるもの: 整数・bool・char・キャスト、let / 代入 / 複合代入、算術・ビット演算・比較・`&&` / `||`、if / while / loop / break / continue / return、
+  ユーザの関数と extern "C" の関数の呼び出し。`tests/ast_codegen.rs` が `tests/acg/*.rs` (no_std) を cc でリンクして rustc 版と出力を比べる
+- v1: 値の表し方を codegen.rs に寄せた。ローカル変数はスタックスロット、struct / enum / 配列 / タプル / fat pointer はアドレスで扱い memcpy で複製、
+  集約型の引数はアドレス渡し、集約型の戻り値は隠れた第 1 引数 (sret)。struct / タプル / 配列 / enum の値とパターン (match / if let / while let / let-else)、
+  フィールド・添字 (範囲検査)・`&a[i..j]`・`&[T; N]` → `&[T]`、文字列 / バイト列リテラル (.data)、`len` / `as_bytes` / `as_ptr`、
+  範囲・配列・スライスの for、ジェネリックでないメソッド。`tests/acg/aggs.rs` が rustc と同じ出力になる
+  (ast_infer は配列・タプル・参照・演算・キャストの式の型も記録するようにした)
+
+#### セルフホストの第 18 段階: codegen.rs を自前の構文木と minclif に移す (acg / driver2)
+
+- `src/acg/`：codegen.rs (syn + Cranelift、12,500 行) を、自前の構文木 (parse.rs) と minclif の上にメソッド単位でそのまま移したもの。
+  `clif.rs` が Cranelift と同じ形の API (`b.ins().iadd(..)` など、i128 / 浮動小数点の振り分けつき) を minclif の上に作るので、
+  IR を組み立てるコードはほぼ変えずに移せる。`mod.rs` が Cx の定義と中核 (メモリ・変数・関数本体・ブロック)、`p1`〜`p8` が残り
+  (式 / 呼び出し / 演算 / メソッド / ループとマクロ / match と drop / 書式化・ハッシュ・比較 / その他)
+- `src/driver2.rs`：syn と Cranelift を使わないドライバ。lexer / macros / prelude → ast_summary → Program → acg → minclif の ELF の .o → リンク。
+  インスタンスの不動点・クロージャ・static・vtable・同じ機械語のインスタンスの畳み込み・panic の場所の表は driver.rs と同じ
+- `--features acg` で有効になる。`CRUSTC_DRIVER2=1 crustc x.rs` でこちらを使う。`tests/driver2.rs` が probe / examples / acg を今のドライバと比べ、
+  `tests/selfhost.sh` (当時は `SELFHOST_DRIVER2=1`。今は常にこの経路) がセルフホストの全段階 (lexer〜program・minclif・enc) を driver2 でビルドして rustc 版と比べる (すべて一致)
+- 移して分かったこと:
+  - minclif のブロックに後から戻って続きを書けなかった (Cranelift は書ける)。離れるときに続きへの jmp を置くようにした
+  - i128 の引数・戻り値はレジスタ 2 つ (System V)。i128 の変数・ブロック引数も 16 byte で写す
+  - コード生成は式を複製して書き換えるので、アドレスで引く型の記録が当たらない。syn 版はソース上の位置で引いていた。
+    型推論が読んだマクロの引数の構文木をそのままコード生成に渡し、さらに「式の形 (Debug のハッシュ) → 型」の表で引く
+  - 型推論が捨てた一時的な式のアドレスが、コード生成の新しい式に再利用されて違う型が当たっていた。推論の構文木はすべて最後まで持つ
+  - 同じ文字列のクロージャ (`|x| x.1.clone()` が 2 か所) が同じ番号になっていた。本体のクロージャはアドレスで引く
+  - 自前の構文解析の誤り (`&&x` のパターン、パターンの `true` / `false`)、整数の `clone()` の型推論の誤り (syn 版にもあった) も直した
+
+#### セルフホストの第 19 段階: crustc で crustc (syn・Cranelift を使わない経路) をコンパイルする
+
+- `tests/selfhost/build_compiler.py`：driver2 + acg + minclif と、それが使うモジュール全部 (lexer / macros / prelude / types / parse /
+  ast_* / program / solver / ctors / ast_infer / ast_consteval / link) を 1 ファイル (約 3 万 1 千行) のコンパイラにまとめる
+  (`compiler <in.rs> -o <out> [-O]`)
+- これを crustc (driver2) でコンパイルしたものが、実際にプログラムをコンパイルして動かせる (crustc が自分自身をコンパイルした)
+- `tests/selfhost_compiler.sh`：rustc 版と crustc 版の 2 つのコンパイラで probe / examples / acg をコンパイルし、.o と実行結果を比べる。
+  さらに crustc 版で自分自身をもう一度コンパイルする (2 段目)
+- 結果: **139 個のプログラムすべてで、rustc 版と crustc 版のコンパイラが同じバイト列の .o を出し、実行結果も同じ**。
+  crustc 版のコンパイラで自分自身をコンパイルし直すと、1 段目と同じ .o (約 18 MB) になる (不動点)
+- 比べて見つかったもの: `matches!(tmp, Some(V(x)) if ..)` で束縛が一時値からムーブして二重に drop していた (syn 版にもあった)、
+  acg の i128 の `abs` / 加減算のオーバーフロー検査
+- そこまでに直したこと: モジュールを平らにするときの名前 (`std::path::Path` と同名の定義、`use super::*` で見える use、`&'static`)、
+  型推論 (受け手の型が分からない `len`、注釈つきの let、`x.clone()` の整数)、acg の deref の強制変換 (`&&T` → `&T`、`&String` → `&str`)、
+  範囲の添字の受け手の自動参照、`matches!` の guard の中のクロージャ、minclif の bitcast の 0 拡張。crustc がまだ扱えない書き方
+  (分解代入・`collect::<Option<Vec<_>>>`・クロージャから fn ポインタへの変換・`std::f64::consts` の値など) はソースを書き換えた
+
+#### 自前の構文木のソース位置
+
+- `parse::Span { start, at }` を、panic の場所に使う式 (Unary / Binary / AssignOp / MethodCall / Index / Macro) に持たせた。
+  start は式の先頭 (syn の `e.span()`)、at は式ごとの位置 (メソッド名・`[`・演算子・マクロの開き括弧)
+- 式のマクロの引数のテキストは、元の行・桁の配置のまま作る (`group_text_laid_out`)。読み直すときはマクロの位置からずらす
+  (`parse_expr_at` / `ast_closure::macro_args_at`) ので、`println!` の引数の中の `unwrap()` なども元の位置になる
+- acg の `loc()` がこの位置を使う: 添字の範囲外 (Vec は `[`、配列は式の先頭)・オーバーフロー・0 除算・`unwrap` / `expect` (メソッド名)・
+  `panic!` / `assert!` / `dbg!` (マクロの先頭) の場所が rustc と同じになった。`tests/panic_loc.rs` が rustc と比べる
+- `tests/driver2.rs` は stderr (panic のメッセージ) も比べるようにした (139 すべて一致)。`matches!` の引数は型推論とコード生成が同じ構文木 (`ast_closure::matches_parts`) を使う
+- `dbg!` の桁は syn 版が引数の位置を出していた (rustc はマクロの位置)。syn 版も直した
+- 移植の初めに作った ast_codegen.rs (v1) は acg が置き換えたので消した (tests/ast_codegen.rs は driver2 で tests/acg を試す)
+- コンパイルエラーにも場所を付ける: Path / Field / Lit にも位置を持たせ、acg のエラーには「位置を持つ一番内側の式」の
+  `行:桁:` を付ける (メソッド呼び出し・フィールドは名前の位置、let の型の不一致は初期値、引数の型の不一致はその引数、
+  return・末尾の式はその値)。構文エラー・要約のエラーはアイテムの中の行をファイルの行に直す。
+  `tests/compile_errors.rs` が tests/compile_errors/*.rs で syn 版のドライバとメッセージ (場所ごと) が同じか比べる
+
+#### driver2 のキャッシュと並列化
+
+- `src/cache2.rs`：キーは 128 bit のハッシュ、値はアイテムの要約 (`types_enc.rs` の Summary の直列化) か、関数の機械語 +
+  シンボリックな再配置 (acg::Blob。呼び先のインスタンスは「元の関数名 + 型引数」で書く)。保存は今回使ったエントリだけ
+- 関数のキーは「本体のハッシュ + 自分と呼び先のシグネチャ + 名前で現れる struct のレイアウト + const」(driver.rs と同じ考え方)
+- 並列化は fork: 子プロセス k が i % jobs == k の関数をコンパイルし、Blob を pipe で親に返す。親は順に読み戻してインスタンスを
+  要求し直す (j=1 と j=8 で .o は同じバイト列)。crustc の std にスレッドがないので libc の fork / pipe / waitpid を直接呼ぶ
+- 400 関数のプログラム: cold 104 ms (j=1) / 90 ms (j=8)、変更なし 7 ms (リンクしない)、1 関数の変更で 1 関数だけコンパイル
+
+#### 複数ファイル・複数クレート (`crustc build <workspace>`)
+
+- `mod x;` は `x.rs` / `x/mod.rs` を読む (`src/srcmap.rs`)。行番号を変えないように、`mod x;` は空白にして中身をファイルの最後に
+  `pub mod x { .. }` として足し、結合したソースの行 → (ファイル, 行) の表を持つ。エラーは `ファイル:行:桁:` になる
+- ワークスペースのファイルは 1 行 1 クレート (`lib <名前> <根> [依存..]` / `bin <名前> <根> [依存..]`)。クレートごとに .o を作り、最後にリンクする
+- クレート C は「C のソース + 依存するクレートのソースを `pub mod 名前 { .. }` で後ろに付けたもの」として解析する。
+  依存するクレートの総称でない関数と static は、そのクレートの .o にあるのでコンパイルせずシンボルで呼ぶ。総称関数のインスタンスと
+  prelude は各 .o に local で置く。クレートのモジュールの中の名前は必ず `名前__Item` にする (どのクレートと一緒に解析しても同じシンボル)。
+  クレートの中の `crate::` はそのクレート、`pub use` の再輸出も辿る
+- panic の表はクレートごとに置き、実行ファイルの表が依存するクレートの表 (`_xT_<名前>`) の列を指す。表にはファイルの対応と、
+  名前を変えて桁がずれた所 (`geom::f` → `geom__f` は同じ長さだが、`f` → `geom__f` は長くなる) の表を入れ、panic の場所は
+  元のファイル・行・桁で出る (rustc と同じ `geom/src/lib.rs:13:37`)。unwrap の呼んだ場所 (`__EXR_CALLER`) は実行ファイルのものを皆で使う
+- 指紋: クレートごとに「コンパイラ・設定・自分のソース・依存するクレートのインターフェースのハッシュ」を `<名前>.fp` に書き、同じなら
+  何もしない。インターフェースのハッシュは、総称でない関数はシグネチャだけ、それ以外 (総称関数・trait・総称の impl・`const fn`・
+  `-> impl Trait`) は本体と行も入れる。だから依存されるクレートの関数の本体を変えても、使う側はコンパイルし直さない (リンクだけ)
+- 古いクレートは互いのソースしか使わない (.o を待たない) ので、fork して同時にコンパイルする。キャッシュはクレートごと (`<名前>.crcache2`)
+- `tests/workspace.rs`：tests/workspace (3 クレート・5 ファイル: trait オブジェクト・static・再輸出・Display) を rustc (rlib + リンク) と
+  比べる (出力・終了コード・クレートとファイルをまたぐ 0 除算 / 添字 / unwrap の panic の場所)。関数の本体の変更でそのクレートだけ、
+  シグネチャの変更で使う側も作り直すことも確かめる
+
+`python3 bench/ws_bench.py --rustc` (6 lib × 8 ファイル × 40 関数 = 1920 関数 + bin、4 コア。rustc は `-C incremental` の rlib + リンク):
+
+| 場面 | crustc build | rustc |
+|---|---:|---:|
+| cold | 489 ms | 3786 ms |
+| 変更なし | 7 ms | 1043 ms |
+| いちばん下のクレートの関数の本体を変える | 66 ms | 1062 ms |
+| いちばん下のクレートの関数のシグネチャを変える | 189 ms | 1136 ms |
+| bin の main を変える | 83 ms | 1029 ms |
+
+(どれも 3 回の中央値。シグネチャの場面は 150〜190 ms で揺れる)
+
+速くするためにしたこと (この順に計った):
+
+| 変更 | cold | 変更なし | 本体 | シグネチャ | bin |
+|---|---:|---:|---:|---:|---:|
+| 最初 (毎回すべてのクレートを解析) | 1229 | 725 | 936 | 733 | 805 |
+| 指紋 + インターフェースのハッシュ + クレートごとのキャッシュ | 1296 | 15 | 798 → 83 | 743 | 237 |
+| モジュールの名前の付け替えの 2 乗を除く (トークンごとの線形探索を表に) | 880 | 24 | 83 | 422 | 108 |
+| 古いクレートを fork で同時に | 486 | 20 | 81 | 229 | 113 |
+| インターフェースのハッシュを保存、名前の表を FxHash にしパスでない名前を先に除く | 464 | 7 | 60 | 154 | 82 |
+
+(「本体」の 798 → 83 は、平らにした後のテキストで `{` を探していたインターフェースのハッシュの誤りを直した分)。
+残りはリンク (約 22 ms、毎回すべての .o) と、使う側ごとに依存するクレートのソースを解析し直す時間 (名前の付け替え・分割・prelude の選択)。
+
+セルフホストで見つかった遅さ: crustc で作ったコンパイラが自分自身をコンパイルすると、.o を作る段階が 13 分以上かかっていた。
+`parse::tokenize` がトークンごとに行頭から文字を数えていた (長い行で 2 乗。rustc 版は SIMD の `chars().count()` で目立たなかった) ので、
+前のトークンから数え足すようにした。2.4 秒になり、2 段目全体は 36 秒 (rustc 版のコンパイラは 5.6 秒)。
+
+#### セルフホスト版のコンパイラの前半 (front) を速くする
+
+crustc で作ったコンパイラ (`tests/selfhost/build_compiler.py`) で自分自身 (約 3 万 3 千行) をコンパイルするときの前半の時間
+(`CRUSTC_PROF=1 ... --time` の段階ごとの時間。gdb で止めた場所を数えて、多いところから直した):
+
+| 段階 | 最初 | 後 | rustc 版のコンパイラ (後) |
+|---|---:|---:|---:|
+| macros | 9870 ms | 499 ms | 96 ms |
+| flatten (モジュールを平らに) | 2501 | 552 | 51 |
+| hoist + ctor | 613 | 467 | 61 |
+| split | 578 | 287 | 18 |
+| prelude の選択 | 1219 | 74 | 16 |
+| 要約 | 約 2400 | 1054 | 110 |
+| program + refs | 862 | 645 | 72 |
+| **front の合計** | **18159** | **3745** | **439** |
+
+- macros: 自前の proc_macro2 (mini_pm2) の字句解析がトークンごとに行頭から桁を数えていた (前から数え足す)。
+  `find_calls` / 定義集めが括弧ごとに中身を写していた (中にマクロの名前が無い括弧は辿らない)。
+  展開したものにマクロの名前が無ければもう一周しない。さらに、ソース全体は速い `lexer::tokenize` で見て、proc_macro2 で読むのは
+  定義と呼び出しの括弧の中だけにした (`tests/macros_expand.rs` が前の版 `expand_reference` と結果が同じか確かめる)
+- flatten: 表を埋める `iter_mut().take(n).skip(m)` が毎回先頭から辿っていた (添字のループに)
+- prelude の選択: ソース全体の `contains` を 40 回ほど呼ぶ。prelude の `str::find` を libc の `memmem` にした
+  (crustc で作るプログラムすべてで速くなる)
+- split: アイテムのハッシュ (キャッシュのキー) は SipHash を 2 つ使っていた。2 本の掛け算・回転の混ぜ合わせ (`src/key.rs`) にした。
+  呼び出しの区切りに依らない (8 byte ずつ溜める) ので、std と crustc の prelude で Hash の実装が write を呼ぶ区切りが違っても同じ値になる
+- 要約: アイテムごとに独立なので fork して分ける (driver2 の関数のコンパイルと同じ)。構文解析の `punct_at` (演算子の優先順位ごとに
+  何度も呼ぶ) をバイトで比べ、記号でない位置では演算子を探さない。字句解析は ASCII をバイトのまま見る
+- refs: 4 つの表を引く前に、どれかの表にある名前の集合で 1 回だけ引く
+- 残りは生成するコードの質 (小さい関数のインライン展開がない、`Iterator` のアダプタが関数呼び出しになる)。後半の codegen は 15.8 秒
+  (rustc 版 0.95 秒) で、こちらも同じ理由
+
+#### 小さい関数のインライン展開 (driver2 の `-O`)
+
+- minclif は IR を持たず命令をすぐ機械語にするので、構文木の段階で展開する (`src/acg/p9_inline.rs`)。
+  呼び出しの引数を ABI の形 (値渡しの集成体はコピーしたアドレス、sret は書き込む先) まで作ったところで、呼ぶ代わりに
+  呼び先の本体を同じ関数にコード生成する。本体の引数はその値に束縛し、`return` / `?` / 末尾の値は続きのブロックへの
+  jump にする (`emit_return` が見る)。呼び先の型推論・スコープ・drop の状態は入れ替えてから戻す
+- 展開する関数: 本体の構文木が小さく (Debug の文字列で 1600 字まで)、クロージャ・マクロ・入れ子のアイテムを含まず、
+  特別な本体 (drop glue など) や呼んだ場所を出す unwrap / expect でないもの。prelude もユーザの関数も (`Vec::len` /
+  `Option::is_some` / `Parser::tok` など、約 300 個)。展開した中ではもう 1 段まで、1 関数で 400 回まで
+- ユーザの関数を展開しうる呼ぶ側は、キャッシュのキーに呼び先のアイテムのハッシュと行を入れる。panic の場所は
+  呼び先の行を基準にする (rustc の -O と同じ場所)。依存するクレートの関数は展開しない (本体はインターフェースの
+  ハッシュに入らないので、変わっても使う側が作り直されない)
+- 呼び先の型推論は呼ぶ側に依らないので、インスタンスごとに 1 回だけ (プロセスの中で使い回す)
+- 展開した本体だけが呼ぶ関数は、呼ぶ側の名前からは届かない: コンパイルした機械語の再配置が指す総称でない関数も
+  コンパイルする (これがないとリンクで未定義になった)
+- 一緒に minclif に、直前に書いた値をすぐ読み直す命令を省く覗き穴最適化を入れた (`rax_holds`: 直前の命令が
+  「rax を v のスロットに書く」なら v を読まない。ブロックの始まりでは消す)
+- `tests/driver2_inline.rs`：probe / examples / acg を `-O` と `-O` なしでビルドし、出力・stderr・終了コードが同じか
+- 効果 (セルフホスト版のコンパイラで自分自身をコンパイルする時間。どれも `CRUSTC_NO_INLINE=1` で同じ仕事をさせて比べる):
+  展開なし 20.85 秒 → 展開あり 19.76 秒 → 読み直しの省略も 18.32 秒 (12% 速い)。展開で生成するコードは 27% 大きくなり、
+  `-O` のコンパイルは約 20% 遅くなる (型推論の使い回しの後)。minclif はすべての値をスタックに置くので、呼び出しを
+  なくしても値の読み書きが残り、効果は小さい。大きく速くするにはレジスタ割り当てが要る
+
+#### minclif のレジスタ割り当て
+
+minclif は命令をすぐ機械語にし、値はすべてスタックのスロットに置いていた (命令ごとに rax / rcx に読んで結果を書く)。
+割り当てには関数全体を見る必要があるので、2 回組み立てる形にした (`src/minclif.rs`):
+
+1. **記録と解析**: `FunctionBuilder` は呼ばれた命令を `Op` (104 種。Emitter の公開メソッドから機械的に作った) として記録しながら、
+   今までの組み立て (`Emitter`) で 1 回目を組み立てる (値の番号と型を決め、acg が問い合わせる値・ブロックを返す)。
+   1 回目は値・変数の読み書き (命令の番号)、区間 (ブロックを続けて書いた範囲) と飛び先、関数を呼ぶ命令を記録する
+2. **割り当て** (`plan`): 1 つの区間の中で書いて読む値はその範囲、区間をまたぐもの (変数・ブロック引数・ループで生きる値) は
+   後ろ向きのデータフロー (区間の入口・出口で生きているか) で生きている区間の端まで延ばした範囲を生存区間にし、線形走査で
+   rbx・r12〜r15 (呼ばれた側が保存: 呼び出しをまたぐ区間用) と rsi・rdi・r8〜r10 (呼び出しを含まない区間用) に割り当てる。
+   足りなければ「読み書きの回数 / 長さ」が小さいものをスロットへ。浮動小数点・i128・スロットを直接使う値 (アドレスとして
+   使う・幅の違う読み書き) はスロットのまま。すぐ後が trap の呼び出し (panic) は戻らないので、またぐとしない
+3. **本番**: 割り当てを持った Emitter で記録した命令をもう一度組み立てる。今までの命令の組み立てはそのまま使え、
+   値の読み書き (load_rax / store_rax など) が割り当てを見る。よく使う命令はレジスタの形で書く: 64 / 32 bit の
+   add / sub / and / or / xor / imul と cmp は `mov d, a; op d, b`、定数は直接、load / store は `[base + off]`。
+   使った呼ばれた側が保存するレジスタはプロローグで保存し ret の前に戻す。呼び出しの引数が引数のレジスタにあるときは
+   スタックを経由する (順に書くと壊れる)
+
+あわせて: `icmp` の値を `brif` だけが使うなら `cmp` + `jcc` にする、else に渡すものがなければ直接飛ぶ、すぐ次への `jmp` は nop。
+浮動小数点は xmm8〜15 (呼び出しで壊れるので、呼び出しを含まない区間だけ) に置き、`fadd` などは 2 つ目もレジスタから読む。
+変数と値の間は直接写す。自分の関数 (`_x..`) を呼ぶときは可変長引数用の `al` を書かない。
+`MINCLIF_NO_REGALLOC=1` で割り当てなし (比較用)。
+
+結果:
+- `python3 bench/runtime.py` の実行時間 (driver2 -O。出力はすべて一致):
+
+  | | 割り当てなし | 整数だけ | + 浮動小数点・直接の写し | Cranelift の経路 (`crustc -O`) | rustc -O |
+  |---|---:|---:|---:|---:|---:|
+  | fib | 111 ms | 90 | 96 | 82 | 30 |
+  | hashmap | 341 | 210 | 208 | 149 | 103 |
+  | matmul | 242 | 190 | 158 | 91 | 45 |
+  | nbody | 1150 | 725 | 516 | 83 | 47 |
+  | sieve | 346 | 185 | 169 | 141 | 109 |
+  | sort | 624 | 344 | 341 | 252 | 210 |
+  | strings | 227 | 119 | 120 | 70 | 42 |
+
+  rustc のデバッグビルドよりどれも速く、ビルドは Cranelift の経路の約半分の時間。実行は Cranelift の経路にまだ届かない
+  (struct のフィールド・配列の要素はメモリのまま、命令の選び方がまだ単純)
+- 簡単なループ (1000 要素の和 × 20 万回): 1.08 秒 → 0.44 秒 (rustc の opt-level=0 と同じ)
+- セルフホスト版のコンパイラで自分自身をコンパイルする時間: 18.0 秒 → **10.1 秒** (front 3.2 → 1.7 秒、codegen 13.0 → 7.6 秒)。
+  コンパイラの実行ファイルは 23 MB → 12 MB
+- リンカに wild (0.10) を入れた (`cargo install --locked wild-linker --version 0.10.0`。link.rs は wild > mold > ld.lld の順に使う)。
+  ワークスペースのベンチ: cold 355 ms、関数の本体の変更 37 ms、bin の変更 60 ms
+
+#### スタックの struct のフィールドをレジスタに置く (minclif)
+
+- スロット (struct・tuple・配列の一時領域) のアドレスを、解析のときに追う: `stack_addr` の値と、それに定数を足した値は
+  「(スロット, オフセット)」。そのアドレスが load / store / 定数の足し算にしか使われず (呼び出しに渡す・保存する・
+  ほかの計算に使うと逃げたとみなす)、読み書きが重ならず同じ場所はいつも同じ型なら、(スロット, オフセット) ごとに
+  フィールドを 1 つの変数にする (scalar replacement)。割り当てでは値・変数と同じに扱い、レジスタに置けなかったフィールドは
+  スロットのその場所を使う。アドレスの値は作らない
+- acg の struct のコピーを、8 byte ずつからフィールドごと (その型) にした (読み書きの幅がフィールドと揃うように)
+- 入口で 0 にするスロット (drop フラグ) は変数にしない。`MINCLIF_NO_SROA=1` で切れる
+- 値で渡して値で返す struct のループ (tests/acg/struct_fields_regs.rs と同じもの、2000 万回): 176 ms → 147 ms (rustc -O 87 ms)。
+  bench/rt はほとんど変わらない (nbody などの struct は Vec の中: ヒープ)
+- セルフホスト版のコンパイラで自分自身: 9.7 秒
+
+Rust を 1.100.0、wild を 0.11.0 に上げた (`rustup update stable`、`cargo install --locked wild-linker`)。
+
+#### driver2 の Cranelift バックエンド (minclif と比べる)
+
+minclif の FunctionBuilder は acg が呼んだ命令をすべて `Op` として記録している。その列を Cranelift の IR に組み立て直して
+コンパイルするバックエンドを足した (`src/clif_backend.rs`、`CRUSTC_BACKEND=cranelift`)。acg・インライン展開・キャッシュ・.o の
+書き出しは同じなので、同じフロントエンド・同じ命令の列でバックエンドだけを比べられる。
+
+- 値は minclif の値の番号 → Cranelift の値。ブロック・変数・スロット・関数も番号で対応させる (記録のときに命令ごとの戻り値も
+  残すようにした)。acg は値を支配していないブロックで使うことがある (minclif は値をスロットに置くので困らない) ので、
+  定義と別の区間で使う値は Cranelift の Variable にして、SSA は cranelift_frontend に組み立てさせる
+- drop フラグのスロットは途中で作られるので、組み立てた後で入口の先頭に 0 を書く
+- 再配置は名前で返す (呼び出しは PLT32、記号は GOTPCREL)。trap の番号も minclif と同じ
+- `tests/driver2_cranelift.rs`：probe / examples / acg を -O なしと -O で、minclif と出力・stderr・終了コードが同じか (すべて一致)。
+  セルフホスト版のコンパイラを Cranelift でビルドしたものも、minclif でビルドしたものと同じ .o を出す
+
+実行時間 (`python3 bench/runtime.py`、ms):
+
+| | driver2 -O (minclif) | driver2 + Cranelift | driver2 + Cranelift -O | 前の Cranelift の経路 (`crustc -O`) | rustc -O |
+|---|---:|---:|---:|---:|---:|
+| fib | 110 | 91 | 79 | 79 | 31 |
+| hashmap | 214 | 155 | 144 | 148 | 112 |
+| matmul | 168 | 105 | 76 | 85 | 40 |
+| nbody | 522 | 232 | 86 | 105 | 54 |
+| sieve | 158 | 150 | 154 | 134 | 94 |
+| sort | 334 | 294 | 233 | 248 | 208 |
+| strings | 111 | 91 | 68 | 73 | 42 |
+
+セルフホスト版のコンパイラ (約 3 万 3 千行) で比べる:
+
+| バックエンド | そのコンパイル (-j 1。acg を含む) | できる実行ファイル | できたコンパイラが自分自身をコンパイルする時間 |
+|---|---:|---:|---:|
+| minclif | 2.40 秒 | 8.8 MB | 11.5 秒 |
+| minclif -O | 3.15 秒 | 10.6 MB | 10.1 秒 |
+| Cranelift (opt none) | 5.07 秒 | 5.4 MB | 6.9 秒 |
+| Cranelift -O (speed, backtracking) | 8.26 秒 | 6.6 MB | **6.0 秒** |
+| Cranelift -O (speed, single_pass) | 6.95 秒 | 9.2 MB | 8.9 秒 |
+
+(rustc -O でビルドしたコンパイラは 1.6 秒)。ワークスペースのベンチ (`bench/ws_bench.py`) は minclif / Cranelift で cold 440 / 727 ms、
+変更なし 7 / 6 ms、関数の本体の変更 42 / 36 ms、bin の変更 74 / 67 ms (関数ごとのキャッシュで、変更のあとのコンパイルは小さい)。
+
+分かったこと: minclif は Cranelift (opt none) の約 2 倍、-O どうしで約 2.6 倍速くコンパイルするが、出すコードは 1.0〜6 倍遅い
+(セルフホスト版のコンパイラでは 1.7 倍)。増分のビルドでは変わった関数しかコンパイルしないので、コンパイルの速さの差は
+cold のときだけ効く。
+
+ここまでで、外部クレートに依存しないモジュール（lexer / enc / fxhash / prelude / link / testgen / program / ast_consteval / solver / ctors / ast_infer / minclif / ast_codegen）と、
+依存が小さく代わりを書けるもの（elfz: zstd、macros: proc_macro2）は crustc でコンパイルでき、rustc と同じ結果になる。
+残りの front（syn の構文木を引く検索）/ infer（syn 版。自前の構文木の版 ast_infer はある）/ consteval（codegen の定数の昇格）/ closure / codegen / driver / cache は syn と cranelift の上に書かれている。
+syn の代わりは src/parse.rs（自前の構文木）を土台にして front から順に移す。cranelift の代わり (自前のコード生成) はその後。
+
+#### 最初のドライバ (syn + Cranelift) を外す
+
+- `crustc check` と LSP を driver2 の `Session2::check` に移した。全関数 (到達しないものも) と要求された総称関数のインスタンスを
+  コンパイルしてエラーを集め、結果はキャッシュに入れる (次の検査・ビルドはそれを使う)
+- `crates/legacy` (syn・cranelift-object・zstd) と、syn 版と比べていたテスト (ast_closure / ast_consteval / ast_infer /
+  ast_summary / ast_types) とセルフホストの elfz を削除した。期待する出力は `tests/expected/` の golden ファイル
+  (syn 版で作ったもの) にして、`tests/driver2.rs` が比べる
+- 見つかったバグ: `Session2::save_cache` の後にメモリ上のキャッシュが空になっていた (使ったキーの集合を先に消していた)。
+  同じ Session で続けてビルドすると全関数をコンパイルし直していた。ベンチの `build/edit_1fn` の assert で見つかった
+- タプル構造体のパターンのフィールドの数のエラーに場所 (パスの位置) を付けた
+
+#### 実在の小さなクレートをビルドする (`cratebench/`)
+
+crates.io の小さなクレートのソースをそのまま `cratebench/vendor/` に置き (ライセンスも同梱)、それを使う app
+(`cratebench/apps/<名前>/main.rs`) と一緒にワークスペースとしてビルドする。`python3 cratebench/run.py [名前..]` が
+rustc (lib を rlib にして `--extern`) と比べる: 出力が rustc -O と同じか、ビルド時間 (cold / noop / app の 1 か所の編集)・
+実行時間・サイズ。対象は `cratebench/crates.txt` (名前・edition・feature)。
+
+足したもの:
+- `#[cfg(..)]` / `#[cfg_attr(..)]` / `cfg!(..)` の評価 (`crates/core/src/cfg.rs`。feature はワークスペースの `features=a,b`
+  か `--features=`。x86-64 Linux の値・`debug_assertions` は -O でなければ真)。`extern crate x;` は消す
+- アイテム位置のマクロ呼び出しを `mod` / `impl` / `trait` の中でも展開する。`$x:expr` が式の終わりで止まる (`$($len:expr)+`)
+- 定数式: impl の関連 const (`i128::MAX_STR_LEN`)・`u128::MAX.ilog10()` などの整数のメソッド。`const _: () = ..;` は読み飛ばす
+- prelude: `chunks_exact` (`remainder`)・`Read` / `BufRead` (`&[u8]` の実装)・`ExactSizeIterator`・`slice::Iter::len`
+- `impl Tr for &[u8]` のメソッドと境界・組み込みの `AsRef<str>` / `AsRef<[T]>` (`as_ref()` の先は期待型か関数の境界から)・
+  `FromIterator` の境界・ブランケット impl の中のクロージャ・`&mut [u8; N] as &mut [u8]`・`&u8 >> 4`
+- クロージャの中の `?`: 戻り値の Result のエラー型を `?` のものにする
+- 同じ名前の impl が配列の長さごとに並ぶとき (`impl FromHex for [u8; 1]` .. `[u8; 4096]`) は self の型が合うものを選ぶ
+- 型別名の名前がクレートの接頭辞で小文字始まり (`fnv__FnvHashMap`) でも、モジュールとして読み飛ばさない
+- 直したバグ: `&&str` → `&str` の deref の強制変換が fat ポインタを読み込んでいた (値が壊れる)。注釈なしの let で
+  型推論の型と実際の型が違うときは強制変換を試し、だめなら実際の型を使う
+
+結果 (2026-11-16、ms。run は実行時間。下の最適化の後):
+
+| crate | compiler | cold | noop | edit | run | size | same output |
+|---|---|---:|---:|---:|---:|---:|---|
+| fnv | rustc | 170 |  | 135 | 495 | 4483 KiB |  |
+| fnv | rustc -O | 348 |  | 312 | 42 | 4413 KiB |  |
+| fnv | crustc | 64 | 2 | 18 | 135 | 26 KiB | yes |
+| fnv | crustc -O | 91 | 2 | 24 | 114 | 27 KiB | yes |
+| adler2 | rustc | 157 |  | 95 | 624 | 4424 KiB |  |
+| adler2 | rustc -O | 220 |  | 138 | 12 | 4389 KiB |  |
+| adler2 | crustc | 52 | 2 | 18 | 262 | 16 KiB | yes |
+| adler2 | crustc -O | 68 | 2 | 22 | 136 | 15 KiB | yes |
+| hex | rustc | 265 |  | 121 | 148 | 4479 KiB |  |
+| hex | rustc -O | 454 |  | 291 | 11 | 4399 KiB |  |
+| hex | crustc | 79 | 2 | 27 | 84 | 52 KiB | yes |
+| hex | crustc -O | 109 | 2 | 32 | 73 | 52 KiB | yes |
+| rustc-hash | rustc | 203 |  | 142 | 468 | 4490 KiB |  |
+| rustc-hash | rustc -O | 352 |  | 300 | 58 | 4408 KiB |  |
+| rustc-hash | crustc | 67 | 2 | 19 | 182 | 29 KiB | yes |
+| rustc-hash | crustc -O | 88 | 2 | 27 | 163 | 27 KiB | yes |
+| cfg-if | rustc | 94 |  | 74 | 388 | 4390 KiB |  |
+| cfg-if | rustc -O | 110 |  | 86 | 58 | 4387 KiB |  |
+| cfg-if | crustc | 28 | 2 | 13 | 183 | 8 KiB | yes |
+| cfg-if | crustc -O | 37 | 2 | 15 | 57 | 8 KiB | yes |
+
+ビルドは rustc より 2〜4 倍速く、編集のビルドは 5〜10 倍速い。実行は rustc -O より遅い (adler2 は 40 倍だった)。
+
+adler2 の内側のループ (`U32X4([u32; 4])` の `+=` と `chunks_exact`) を見て直したもの (-O の実行 478 → 114 ms、fnv 137 → 112 ms):
+- Cranelift の経路にも SROA: minclif と同じ判定 (`minclif::sroa`。アドレスが load / store にしか使われないスロット) で、
+  スロットの (オフセット, 型) ごとに Cranelift の Variable にする (Cranelift はスタックのスロットを SSA にしない)。
+  `CRUSTC_CLIF_NO_SROA=1` で切る
+- スロットのアドレスを入れた変数 (インライン展開した `&mut self`) も、定義がすべて同じアドレスならそのアドレスとして扱う
+- スカラーの小さい配列 (16 要素まで) のコピーと `[0; N]` の初期化は要素の幅で読み書きする (8 byte ずつだと幅が合わず変数にできない)
+- インライン展開の大きさを構文木の Debug の長さではなくソースのトークンの数 (110 まで) で測る (Debug は位置などで膨らみ、
+  4 文の `add_assign` が 1565 文字になっていた)。`ChunksExact::next` も展開される
+
+残り (rustc -O の約 10 倍): `a_vec.0.iter()` でアドレスが本当に漏れる、enum (`Option<&[u8]>`) のコピーが 8 byte ずつ、
+rustc は SIMD にする。
+itoa も通る (下)。either は未対応 (`Pin` / `Future` / io の各トレイト / `Error` / `fmt::Binary` など)。
+
+itoa (-O の実行 440 → 73 ms、rustc -O は 32 ms) のために足したもの:
+- 整数の const は使う所で畳み込む (`u8::MAX.ilog10() as usize + 1` を使うたびに u128 で計算していた: 実行の 74%)。
+  評価は i128 で途中の切り詰めを見ないので、`!` を含むものと結果が型の範囲の外のものは実行時に計算する
+- `999.try_into().expect(..)` (型に収まる整数リテラル) は定数
+- クロージャの本体もインライン展開する (`Map::next` の中の `(self.f)(x)` など。キャプチャは `__env` のフィールドとして束縛する。
+  `CRUSTC_NO_INLINE_CLOSURE=1` で切る)。依存するクレートのクロージャは展開しない (ほかの関数と同じ)
+- prelude: `MaybeUninit<T>` (uninit は 0 で埋める)・`hint::unreachable_unchecked`。組み込み: `mem::zeroed`・整数の
+  `ilog2` / `ilog10` / `unsigned_abs`・`get_unchecked(_mut)` (添字にする)・スライス → `&mut [T; N]` の `try_into`
+  (行き先が型推論にないときは `.unwrap()` の期待型から)
+- 定数: `<u64 as Integer>::MAX_STR_LEN` (修飾されたパスの関連 const)・プリミティブ型への impl の中の `Self::C`・
+  const ジェネリクスの引数の式 (`enc::<{ u128::MAX_STR_LEN - 16 }>`)・static の `*b"..."`
+- モジュールを平らにするときの名前の衝突回避が、impl の中の関連型の定義 (`type Buffer = ..`) まで改名していた (トップレベルに
+  同じ名前の `struct Buffer` があると)
+- `const _` を読み飛ばしたときに、const の型を付けるループの添字がずれていた
+
+rustc-hash・cfg-if のために足したもの:
+- マクロの呼び出しの引数と macro_rules! の中の `#[cfg]` は評価しない (cfg_if! の `if #[cfg(..)] { .. }` を消していた)。
+  代わりにマクロを展開した周ごとに評価する (`#[cfg(p)] $crate::cfg_if! { .. }` を、中を展開する前に)。feature はクレートごと
+- `$t:tt` に入った Joint の記号 (`->` の `-`) の後に空白を入れない (`- >` になっていた)
+- prelude: `BuildHasher` (`hash_one`)・`split_first_chunk::<N>()` / `first_chunk` (turbofish を prelude の関数に渡す)
+- `[T]` の Hash は std の `hash_slice` と同じく整数の列をまとめて `write` する (FxHasher で値が std と一致する)
+- 型の中の `<<` (`Either<<&L as IntoIterator>::IntoIter, ..>`) は `<` と修飾されたパスの `<`
+
+#### 依存の多い複数クレート (`bench/deps_bench.py`)
+
+葉に cratebench の実在のクレート 6 個、その上に生成した中間クレート N 個 (それぞれ実在のクレート 2〜3 個と前の中間クレート
+最大 3 個に依存する DAG。struct・trait・総称関数・クロージャ・cfg_if! を使う)、いちばん上に app を置き、cargo
+(path 依存のワークスペース、dev プロファイル、4 並列) と比べる。場面は cold / noop / いちばん下の中間クレート m0 の関数の
+本体の変更 (low-body) / m0 の pub 関数のシグネチャの変更 (low-sig、使う側も直す) / app の変更。出力は cargo と同じか確かめる。
+
+最初は、使う側のクレートが推移的な依存のソース全体を毎回展開・解析し直していたので、依存が増えると cold と low-sig で cargo に
+並ばれた (100 クレートで cold 3718 ms (cargo 3250)、low-sig 1581 ms (cargo 1578)。解析の内訳はマクロの展開が 1.5 秒)。直したもの:
+- 依存するクレートのマクロの展開は 1 回: 各クレートは依存するクレートのマクロの定義だけを添えて自分の分だけ展開する
+- 使う側に渡すのはインターフェース (`crates/core/src/stub.rs`): 総称でない関数の本体を `{ loop {} }` にする (依存する
+  クレート自身がコンパイルする)。総称関数・総称な impl・trait・`const fn`・`-> impl Trait`・`async fn` は残す。
+  展開とインターフェースは `<名前>.prep` に保存する。`CRUSTC_NO_DEP_STUB=1` で前の動き
+- 並列にビルドする子プロセスが作ったキャッシュのエントリ (要約・関数の機械語) を親に返し、後の組のクレートが fork で引き継ぐ
+  (prelude の単相化や依存するクレートのアイテムの要約は多くのクレートで同じ: 100 クレートの cold でコンパイルする関数 11360 → 5984)
+- 細かい指紋 (`<名前>.fp2`): 依存するクレートのインターフェースのアイテムのうち、自分の識別子から名前でたどって届くもの
+  (impl はヘッダの型・trait の名前、メソッドは名前で届く: 取りこぼしでなく取りすぎの側) のハッシュだけを入れる。前の指紋が
+  違っても細かい指紋が同じなら作り直さない。本体を消してあるので、依存の依存の関数のシグネチャは使う側に届かない
+- 本体を消したので、自分の型を `Box<dyn Tr>` にしたときのメソッドが名前で届かなくなる: vtable の欄からもコンパイルする
+
+- 使う側に渡すのは、依存するクレートのインターフェースのうち自分から名前で届くアイテムだけ (細かい指紋と同じたどり方)。
+  ほかは空白にする (`use` は名前の解決に要るので残す)。これで平らにする・要約・Program・prelude の選択が使う分だけになる
+  (100 クレートの m50 で依存のアイテム 800 前後 → 150)。`CRUSTC_NO_DEP_PRUNE=1` で切る。
+  impl の名前はヘッダの trait と型の名前で、`impl<..>` の中・`where` から後ろ・プリミティブ型は数えず、std の型 (`Vec` など)
+  への trait の実装は trait の名前だけで届く (`impl FromHex for [u8; 4]` が `u8` と書いたクレートすべてから届いていた)
+
+結果 (ms、中央値。「前」は使い回しの前、「中」はインターフェースと指紋とキャッシュの共有まで、右は名前で届くものだけにした後):
+
+| 中間クレート | 場面 | crustc 前 | crustc 中 | crustc | cargo |
+|---|---|---:|---:|---:|---:|
+| 20 (400 関数) | cold | 759 | 462 | 261 | 858 |
+| | low-body | 29 | 33 | 23 | 373 |
+| | low-sig | 249 | 54 | 32 | 398 |
+| | app-body | 62 | 42 | 24 | 113 |
+| 50 (1500 関数) | cold | 1927 | 1050 | 612 | 1719 |
+| | low-body | 33 | 39 | 27 | 797 |
+| | low-sig | 731 | 76 | 61 | 803 |
+| | app-body | 110 | 72 | 34 | 164 |
+| 100 (3000 関数) | cold | 3718 | 1866 | 1190 | 2933 |
+| | noop | 11 | 13 | 11 | 119 |
+| | low-body | 46 | 42 | 33 | 1434 |
+| | low-sig | 1581 | 126 | 87 | 1465 |
+| | app-body | 204 | 107 | 49 | 246 |
+
+その後、prelude の関数の機械語をクレートの間で使い回すようにした (100 クレートの cold で、コンパイルする関数 5984 → 4973):
+- 閉じた prelude の関数 (本体が prelude で、総称でないか型引数が prelude・プリミティブの型だけ、クロージャでない) のキーは、
+  コンパイラ ID・本体・自分のシグネチャ・`#[panic_handler]` だけにする。参照先のシグネチャを名前の最後で多めに取っていたので、
+  `.push(` を呼ぶ prelude の関数のキーにユーザの `Acc5::push` が入り、クレートごとに違うキーになっていた
+- prelude の関数の panic の場所は prelude の中の行にする (`PRELUDE_LINE` = 49152 から後ろを場所の表で `<crustc prelude>` の
+  ファイルにする)。選んだ prelude のアイテムは元の行に置く (間は改行)。前は prelude の場所の行の基準がユーザのソースの長さと
+  prelude の選び方で変わるのでキャッシュが当たらず、表示も `src/main.rs:259` のような意味のない場所だった
+- 依存するクレートの総称関数のインスタンスも使い回す: 本体が prelude か依存するクレート j にあり、型引数にこのクレートの型を
+  含まない関数 (閉じた関数) は、キーに「j と型引数の型のクレートから見えるクレート」の中の参照先だけを入れる。panic の場所は
+  j のテキストの中の行で持つ: trap の表は .o を書くときに使う側での位置を足し、定数で渡す場所 (添字の検査・assert_eq!・
+  unwrap の呼んだ側) は行の上位ビットに j の印 (`crate_tag`) を入れ、実行時に実行ファイルの表 (`_xT__exe`) の依存する
+  クレートの表の列から j の表を選んで引く。ついでに、依存するクレートの中の定数で渡す場所を実行ファイルの表で引いていた
+  (違うファイル・行を出していた) のも直った。tests/workspace に、依存するクレートの総称関数の中の範囲外の添字を足した。
+  このベンチでは重複が 80 個ほどだったので、cold の時間は計測の揺れの範囲 (100 クレートで 1088〜1223 ms)
+- Program を「依存の土台 + 自分のアイテム」に分けるのは見送った: 測ると Program の段は 1 クレートあたり約 1 ms
+  (cold の合計の 4%、app の変更の 2%) で、土台 (依存の届く部分と選んだ prelude) もクレートごとに違って共有できない
+
+| 中間クレート | 場面 | crustc | cargo |
+|---|---|---:|---:|
+| 20 | cold | 265 | 862 |
+| 50 | cold | 553 | 1731 |
+| 100 | cold | 1088 | 3070 |
+| 100 | noop / low-body / low-sig / app-body | 11 / 37 / 94 / 49 | 120 / 1481 / 1557 / 250 |
+
+cargo は依存するクレートが変わると (本体だけでも) 使う側をすべてコンパイルし直す。crustc は関数ごとのキャッシュと
+インターフェースの指紋で、変わった所を使うクレートだけを作り直す。残り: 各クレートが prelude (500 アイテム余り) の要約・
+Program を作り直している (クレートごとに選ぶ prelude が違うので、Program を丸ごと共有はしていない)。cold の残りの大半は関数の
+コンパイル (Cranelift)。
+
+### Cranelift の経路の関数のコンパイルを速くする (2026-11-17)
+
+自分自身 (out/selfhost/compiler_main.rs、38886 行・9178 関数) を `--no-cache` でコンパイルした時間 (ms)。
+どの段階でも出力の .o は同じ。
+
+| 変更 | -j 1 | -j 4 |
+|---|---:|---:|
+| 前 | 4650 | 2040 |
+| Cranelift の IR の検査を切る (`CRUSTC_CLIF_VERIFY=1` で入れる) | 4140 | |
+| 関数の本体の構文木を本体ごとに 1 回だけ読む | 3950 | |
+| 番号の表を FxHash に、`Context` / `FunctionBuilderContext` を使い回す | 3810 | |
+| クロージャの本体を引くたびに囲む関数を読み直さない (囲む関数ごとにクロージャの式を覚える) | 約 −450 | |
+| 式の形のハッシュ (`expr_hash`) を Debug の文字列から木をたどるハッシュに (部分式はアドレスで覚える) | 3740 | |
+| キャッシュのキーで、参照先のシグネチャのハッシュを関数ごとに覚える | 3690 | |
+| 文字列リテラルの解読で 1 文字ずつ String を作らない (コンパイラに埋め込んだ 286KB の prelude) | 3640 | 1740 |
+
+(計測の揺れは ±200 ms 程度。最初の 3 行は前のコミット)
+
+- 式の形のハッシュは、推論で記録した全部の部分式について Debug の文字列を作っていたので、深さに比例して重くなっていた
+  (全体の 9%)。今は木を 1 回たどり、部分式のハッシュを混ぜる (Debug が同じなら同じ値)。
+- 残りは Cranelift 自身が約半分 (regalloc2 が 22%、lower 6%、emit 4%)、acg のコード生成が 20%、型推論が 5%。
+- `single_pass` の regalloc (`CRUSTC_CLIF_FAST_RA=1`) にすると 3640 → 3050 ms になるが、.o が 43% 大きくなり、
+  できたコンパイラの実行が約 40% 遅くなる (lexer_main.rs で 75 → 104 ms)。既定は backtracking のままにした。
+
+### Cranelift に渡す IR を小さくする (2026-11-17)
+
+自分自身 (out/selfhost/compiler_main.rs) を `--no-cache -j 1` でコンパイルしたときの、Cranelift に渡した IR の合計と時間。
+
+| | 前 | 後 |
+|---|---:|---:|
+| 値 | 837,051 | 785,840 (−6%) |
+| スタックのスロット | 74,805 | 62,674 (−16%) |
+| 命令 | 972,578 | 997,071 (+3%: スロットのアドレスを使う所で作り直す分) |
+| Cranelift の compile の時間 | 1420〜1490 ms | 1270〜1320 ms (−11%) |
+| 全体 | 3850〜4020 ms | 3670〜3820 ms (−5%) |
+| できたコンパイラの .o | 5.20 MB | 4.54 MB (−13%) |
+
+できたコンパイラで同じファイルをコンパイルする時間は変わらない (2.37〜2.52 s)。bench/runtime.py の実行時間も同じか少し速い。
+
+- 呼び出しの戻り値を書かせた一時領域 (と struct / enum を組み立てた一時領域) を「まだ誰も使っていない」と覚え、値渡しの引数と
+  `let` ではコピーせずにそのまま使う (`Cx::fresh` / `take_fresh`。文の終わりで drop する一時値に入っているものは除く)。
+- 関数の末尾の式と `return` の式が呼び出しか struct / enum の値なら、その戻り値を関数自身の sret の場所に直接書かせる
+  (`Cx::ret_call` / `dst_hint`。引数の中の呼び出しには渡さない)。
+- clif バックエンド: スロットのアドレス (`stack_addr`) は使う所で作り直す。生きている区間が短くなり、区間をまたぐ Variable
+  (ブロックの引数) にもならない。
+- clif バックエンド: 飛び込む命令をすべて書いたブロックはその場で閉じる (seal)。変数の値をその場で決められるので、ブロックの
+  引数の仮置きが減る。条件が定数の分岐は jump にする。
+- 試してやめたもの: 8 byte の load / store の組が 2 つ続くコピーを 16 byte (xmm) の 1 組にした。命令は 10% 減ったが時間は
+  変わらず、8 byte で書いた直後に 16 byte で読むとストアからの転送が効かず、できたコンパイラの実行が 20% 遅くなった。
+- 残り: 小さい関数でも Cranelift は 1 関数あたり約 30 µs かかる (10 命令未満の関数 1600 個で 50 ms)。時間の多くは
+  regalloc2 の生存区間の計算 (Env::init) と割り当て。
+- 調べるための環境変数: `CRUSTC_CLIF_STATS=1` (命令の種類ごとの数)、`CRUSTC_CLIF_DUMP=1` (IR)、`CRUSTC_CLIF_TIME=1`
+  (関数ごとの compile の時間)。それぞれの変更は `CRUSTC_NO_FRESH` / `CRUSTC_NO_RET_DST` / `CRUSTC_CLIF_NO_REMAT` /
+  `CRUSTC_CLIF_LATE_SEAL` / `CRUSTC_CLIF_NO_FOLD_BR` で切れる。
+
 ### 途中で分かったこと
 
 - **cold 時に要約用の syn AST を全部保持していたため、5000 関数で RSS が 162MB になっていた**。
@@ -886,7 +1616,7 @@ crustc のバイナリはシンボルを持たない（strip しても同じ大�
 - **初版は syn でファイル全体を parse していた**。そのため no-op でも 114ms かかり、cold では並列スレッドがそれぞれ全体を parse し直して RSS が 191 MiB になっていた。
   自前 lexer と要約キャッシュに変えた結果、no-op は 12ms、cold の RSS は 39 MiB になった。
 - **リンクは cc ドライバのプロセス段数が支配的だった**。cc + lld は 21ms、ld.lld の直接起動は 17ms、wild の直接起動は 5ms。
-- Cranelift の `single_pass` regalloc は、開発ビルドならこれで十分。
+- Cranelift の `single_pass` regalloc はコンパイルは速いが、実行は約 40% 遅くなる (上の表)。
 
 ## 次にやること
 
@@ -896,7 +1626,8 @@ crustc のバイナリはシンボルを持たない（strip しても同じ大�
   - 最小の自前 std（relax 方式）
 - **インクリメンタル**
   - α 正規化ハッシュ
-  - マルチファイル / モジュールごとの要約
+  - 依存するクレートの解析結果 (要約・Program の一部) を使う側で使い回す (今はソースを解析し直す)
+  - 変わった .o だけを差し替えるリンク
   - libwild の埋め込みと、メモリ上の .o（`.o` 書き出しと `exec` をなくす）
 - **増分リンク**
   - `.text` に余白を残し、変更された関数だけを差し替える

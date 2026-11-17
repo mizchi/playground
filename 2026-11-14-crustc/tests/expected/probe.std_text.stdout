@@ -1,0 +1,17 @@
+Some("Program") ["Program", "front", "crate"]
+Some(("crate::front", "Program")) ["w", "v", "k"]
+2 [(0, "aa"), (2, "aa")]
+"fn" keyword
+"12" number
+"-3" number
+"vec!" macro
+"x" ident
+"" ident
+true false
+true
+init
+["x", "y", "z"] 2
+[1, 2, 3]
+true
+ab true
+xyz false

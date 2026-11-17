@@ -1,0 +1,9 @@
+49 9 5
+3 9
+4 0
+["a=1", "b=2", "c=3"]
+int 5 | byte 7 | flag true
+42 7
+[INFO] started 4 workers
+[WARN] low disk: 93%
+2 20

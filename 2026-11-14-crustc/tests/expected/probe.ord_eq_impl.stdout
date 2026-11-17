@@ -1,0 +1,16 @@
+["0", "a", "c", "b"]
+true false
+Some("b")
+Some("0")
+Some("b")
+[Abs(-1), Abs(3), Abs(4), Abs(-5)]
+Abs(-5) Some(Abs(-5))
+Greater Equal
+Abs(-7) Abs(6)
+Abs(4)
+true
+{Abs(1), Abs(-2)}
+{Abs(1): "c", Abs(-3): "b"}
+[Abs(-5), Abs(4), Abs(3), Abs(-1)]
+true
+[Abs(-5), Abs(4), Abs(3), Abs(-1)] Ok(1)

@@ -1,7 +1,7 @@
 //! 最小の LSP サーバ (stdio)。対応: initialize / didOpen / didChange (全文同期) / didClose /
-//! shutdown / exit。開く・変更するたびに [`Session::check`] を走らせて publishDiagnostics を返す。
+//! shutdown / exit。開く・変更するたびに [`Session2::check`] を走らせて publishDiagnostics を返す。
 //!
-//! ドキュメントごとに Session を 1 つ持ち、キャッシュはメモリ上だけに置く。
+//! ドキュメントごとに Session2 を 1 つ持ち、キャッシュはメモリ上だけに置く。
 //! 変わっていない関数は「検査済み」の印で飛ばすので、応答時間は変更量に比例する。
 
 use std::collections::HashMap;
@@ -9,11 +9,11 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{Value, json};
 
-use crate::{Options, Session};
+use crustc_core::driver2::{Options2, Session2};
 
 pub struct Server {
     /// uri → (セッション, 直前の本文と診断)
-    docs: HashMap<String, (Session, String, Vec<Value>)>,
+    docs: HashMap<String, (Session2, String, Vec<Value>)>,
     pub exit: bool,
     shutdown: bool,
 }
@@ -93,7 +93,7 @@ impl Server {
         let (s, last, cached) = self
             .docs
             .entry(uri.clone())
-            .or_insert_with(|| (Session::new(Options::default()), String::new(), vec![]));
+            .or_insert_with(|| (Session2::new(Options2 { jobs: 1, ..Default::default() }), String::new(), vec![]));
         // 本文が同じ (保存しただけ等) なら前回の診断をそのまま返す。比較は memcmp なのでハッシュより安い
         if !last.is_empty() && last == text {
             return publish(&uri, version, cached.clone());

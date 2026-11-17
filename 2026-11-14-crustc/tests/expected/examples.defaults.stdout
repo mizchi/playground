@@ -1,0 +1,8 @@
+Config { name: "", retries: 0, verbose: false, tags: [], limit: None }
+Config { name: "svc", retries: 3, verbose: false, tags: [], limit: None }
+Config { name: "svc", retries: 3, verbose: true, tags: [], limit: None }
+Server { port: Port(8080), host: "", weights: [0, 0, 0] }
+0 [] (0, "", false) 0 ""
+0
+[] 5 0
+[] ["a", "b"] new left right

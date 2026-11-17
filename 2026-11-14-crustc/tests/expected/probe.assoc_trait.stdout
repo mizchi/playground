@@ -1,0 +1,6 @@
+size=2 first=Some("a")
+Some("b") None
+6
+Some(3) Some(6)
+Some("z")
+Some(8)

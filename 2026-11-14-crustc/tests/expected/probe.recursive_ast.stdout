@@ -1,0 +1,2 @@
+Item { kind: Mod("m", [Item { kind: Fn("f", Some(Block { stmts: [Let("x", Some(Path(None, Path { segs: ["std", "string", "String"] })), None), E(Closure([("a", Some(Infer))], Lit("1"))), Item(Item { kind: Const("N", Some(Ref(false, Path(None, Path { segs: ["usize"] }))), Some(Cast(Lit("3"), Path(None, Path { segs: ["u8"] })))), line: 3 })] })), line: 1 }, Item { kind: Const("N", Some(Ref(false, Path(None, Path { segs: ["usize"] }))), Some(Cast(Lit("3"), Path(None, Path { segs: ["u8"] })))), line: 2 }]), line: 0 }
+m 2

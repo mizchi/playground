@@ -9,11 +9,11 @@ fail=0
 for src in examples/*.rs; do
   name=$(basename "$src" .rs)
   # キャッシュなし (cold) とキャッシュからの再ビルド (warm) の両方を確かめる
-  rm -f "$out/$name.crcache" "$out/$name.cold.crcache"
+  rm -f "$out/$name.crcache2" "$out/$name.cold.crcache2"
   if ! ./target/release/crustc "$src" -o "$out/$name.cold" >"$out/$name.log" 2>&1; then
     echo "FAIL $name (crustc)"; cat "$out/$name.log"; fail=1; continue
   fi
-  cp "$out/$name.cold.crcache" "$out/$name.crcache" 2>/dev/null
+  cp "$out/$name.cold.crcache2" "$out/$name.crcache2" 2>/dev/null
   if ! ./target/release/crustc "$src" -o "$out/$name" >"$out/$name.log" 2>&1; then
     echo "FAIL $name (crustc, warm)"; cat "$out/$name.log"; fail=1; continue
   fi

@@ -1,0 +1,15 @@
+7 true false true
+[1, 2, 3, 4, 5, 6] [1, 2, 3, 4, 5, 6, 7] [4, 5, 6] [1, 2, 3]
+3
+{"brown": 1, "dog": 1, "end": 1, "fox": 1, "jumps": 1, "lazy": 1, "over": 1, "quick": 1, "the": 3}
+the 3
+Some(("brown", 1)) Some(("the", 3)) 1 None
+{3: ["dog", "end", "fox", "the"], 4: ["lazy", "over"], 5: ["brown", "jumps", "quick"]}
+[5, 4, 3] Some((3, ["dog", "end", "fox", "the"])) 2
+{"al": 6, "bo": 7} Some(3)
+Some(6) false
+{'d', 'e', 'h', 'l', 'o', 'r', 'w'} Some('d') Some('w')
+[5, 3, 1, 0, 2, 4] 3 Some(5) Some(4)
+[100, 3, 1, 0, 2, 4, -1] true
+120 ["x", "y"] 2
+7 2 [2, 0, 0, 0, 0, 0, 0, 7, 0]

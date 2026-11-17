@@ -1,0 +1,10 @@
+sum=46 depth=3
+rc(c)=2 rc(root)=1
+rc(c)=3 c
+rc(c)=2
+["a", "b"]
+[("x", 6), ("y", 6), ("z", 3)] same=true
+4 w t
+2 ["a#1", "b#2"]
+[1, 2, 3] RefCell { value: [9] } Cell { value: 7 }
+s2 2 2
