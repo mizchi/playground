@@ -838,6 +838,8 @@ fn cargo_files(root: &Path) -> Option<(Vec<(PathBuf, Vec<String>, u32, bool)>, H
                         d = d.join(x);
                     }
                     let cand = match path {
+                        // (`#[path]` はファイルのあるディレクトリから。inline の mod の中ならその下から)
+                        Some(p) if inline.is_empty() => vec![f.parent().map(|x| x.join(&p)).unwrap_or_default()],
                         Some(p) => vec![d.join(p)],
                         None => vec![d.join(format!("{name}.rs")), d.join(&name).join("mod.rs")],
                     };

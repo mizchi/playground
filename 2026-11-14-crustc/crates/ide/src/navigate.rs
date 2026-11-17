@@ -382,12 +382,14 @@ impl FileIndex {
                 k += 1;
             }
         }
-        if !inactive.is_empty() {
-            self.defs.retain(|d| !inactive.iter().any(|&(a, b)| a <= d.item_start && d.item_end <= b));
+        self.inactive = inactive;
+        if !self.inactive.is_empty() {
+            let ina = std::mem::take(&mut self.inactive);
+            self.defs.retain(|d| !ina.iter().any(|&(a, b)| a <= d.item_start && d.item_end <= b));
+            self.inactive = ina;
             self.derives = self.collect_derives();
             self.impls = self.collect_impls();
         }
-        self.inactive = inactive;
         self.features = Some(features);
     }
 
@@ -987,7 +989,8 @@ impl FileIndex {
                         // match の腕のパターン (`T { x: a, .. }` の x はフィールドの名前)
                         let (pa, pe) = self.arm_pat(i);
                         for j in pa.max(arm_start.min(pa))..pe {
-                            if is_bind(j) && !self.sym(j + 1, b'{') && !(self.sym(j + 1, b':') && !self.sym(j + 2, b':')) {
+                            // (`(m, 0) | (0, m)` の 2 つめの m は 1 つめと同じ束縛: rust-analyzer と同じく 1 つめに)
+                            if is_bind(j) && !self.sym(j + 1, b'{') && !(self.sym(j + 1, b':') && !self.sym(j + 2, b':')) && !(pa..j).any(|q| self.ident(q) && self.tok(q) == self.tok(j)) {
                                 live.push((j, depth, 1));
                             }
                         }
@@ -1036,6 +1039,19 @@ impl FileIndex {
                 }
             } else if t.0 == 0 {
                 match self.tok(i) {
+                    // match の腕のガード `P(x) if x > 0 =>`: パターンの束縛はガードから見える
+                    "if" => {
+                        if let Some(arrow) = self.guard_arrow(i) {
+                            let (pa, pe) = self.arm_pat(arrow);
+                            if pe == i {
+                                for j in pa..pe {
+                                    if is_bind(j) && !self.sym(j + 1, b'{') && !(self.sym(j + 1, b':') && !self.sym(j + 2, b':')) {
+                                        live.push((j, depth, 1));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     "let" => {
                         // (`if let` / `while let` は次のブロックで有効)
                         let cond = i > 0 && matches!(self.tok(i - 1), "if" | "while");
@@ -1060,6 +1076,30 @@ impl FileIndex {
         }
         live.extend(pend_block.iter().map(|&j| (j, depth, 0)));
         live.into_iter().map(|l| l.0).collect()
+    }
+
+    /// `if` (トークン i) が match の腕のガードなら、その後の `=>` の `=` (ブロック `{` や `;` の前にあるもの)
+    fn guard_arrow(&self, i: usize) -> Option<usize> {
+        let mut d = 0i32;
+        for j in i + 1..(i + 128).min(self.toks.len()) {
+            if self.toks[j].0 != 1 {
+                continue;
+            }
+            match self.text.as_bytes()[self.toks[j].1 as usize] {
+                b'(' | b'[' => d += 1,
+                b')' | b']' => {
+                    d -= 1;
+                    if d < 0 {
+                        return None;
+                    }
+                }
+                b'{' | b'}' | b';' => return None,
+                b',' if d == 0 => return None,
+                b'=' if d == 0 && self.sym(j + 1, b'>') => return Some(j),
+                _ => {}
+            }
+        }
+        None
     }
 
     /// k が `#[derive(..)]` の中の名前か
@@ -1094,7 +1134,8 @@ impl FileIndex {
         let mut j = b + 1;
         if self.sym(j, b':') && !self.sym(j + 1, b':') {
             j += 1;
-            while j < n && (self.sym(j, b'&') || self.tok(j) == "mut" || self.toks[j].0 == 2) {
+            // (`&` / `mut` / 寿命 `'a` (字句では `'` の後の識別子) を飛ばす)
+            while j < n && (self.sym(j, b'&') || self.tok(j) == "mut" || self.toks[j].0 == 2 || (self.ident(j) && self.toks[j].1 >= 1 && self.text.as_bytes()[self.toks[j].1 as usize - 1] == b'\'')) {
                 j += 1;
             }
             // (`a::b::T<..>` の最後)
@@ -1111,12 +1152,13 @@ impl FileIndex {
             while j < n && (self.sym(j, b'&') || self.tok(j) == "mut") {
                 j += 1;
             }
-            let first = j;
-            while self.ident(j) && self.before_path(j) && self.ident(j + 3) && self.tok(j + 3).starts_with(|c: char| c.is_ascii_uppercase()) {
+            let up = |j: usize| self.tok(j).starts_with(|c: char| c.is_ascii_uppercase());
+            // (`a::b::T` のモジュールの部分を飛ばす。`T::new` の T で止まる)
+            while self.ident(j) && self.before_path(j) && self.ident(j + 3) && !(up(j) && !up(j + 3)) {
                 j += 3;
             }
-            if self.ident(j) && self.tok(j).starts_with(|c: char| c.is_ascii_uppercase()) && (self.before_path(j) || self.sym(j + 1, b'{') || self.sym(j + 1, b'(')) {
-                let _ = first;
+            // (`T::..` / `T { .. }` / `T(..)`、単位構造体 `a::T;` (全部大文字の定数は除く))
+            if self.ident(j) && up(j) && (self.before_path(j) || self.sym(j + 1, b'{') || self.sym(j + 1, b'(') || (self.sym(j + 1, b';') && (self.tok(j).len() == 1 || self.tok(j).contains(|c: char| c.is_ascii_lowercase())))) {
                 return Some(self.tok(j).to_string());
             }
         }
@@ -2114,6 +2156,10 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
             // `Q::CONST` / `Enum::Variant`
             let q = f.tok(k.checked_sub(3)?).to_string();
             let q = if q == "Self" { self_ty(at)? } else { q };
+            // (`a::b::P` / `m::CONST`: モジュールの下の単位構造体・const)
+            if q.starts_with(|c: char| c.is_ascii_lowercase()) {
+                return all().map(|x| x.1).find(|d| d.name == r && d.owner.is_empty() && matches!(d.kind, SymKind::Struct | SymKind::Const | SymKind::Static)).map(|d| if d.kind == SymKind::Struct { r.to_string() } else { d.ty.clone() });
+            }
             return member_type(ws, file, &q, r, &[SymKind::Const, SymKind::Variant]).or(Some(q).filter(|_| r.starts_with(|c: char| c.is_ascii_uppercase())));
         }
         if let Some(b) = f.local(k, r) {
@@ -2227,6 +2273,12 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
         if f.after_path(m) && m >= 3 && f.ident(m - 3) {
             let q = f.tok(m - 3).to_string();
             let q = if q == "Self" { self_ty(at)? } else { q };
+            // (`a::b::T(..)` / `m::f(..)`: モジュールの下のタプル構造体・関数)
+            if q.starts_with(|c: char| c.is_ascii_lowercase()) && q != "self" && q != "super" && q != "crate" {
+                if let Some(t) = all().map(|x| x.1).find(|d| d.name == name && d.owner.is_empty() && matches!(d.kind, SymKind::Struct | SymKind::Function)).map(|d| if d.kind == SymKind::Struct { name.to_string() } else { d.ty.clone() }).filter(|t| !t.is_empty()) {
+                    return Some(t);
+                }
+            }
             return member_type(ws, file, &q, name, &[SymKind::Method, SymKind::Function, SymKind::Variant]).or_else(|| name.starts_with(|c: char| c.is_ascii_uppercase()).then(|| q.clone()));
         }
         if name == "Some" {
@@ -2832,3 +2884,7 @@ fn g() -> u8 { 1 }
         assert_eq!(references(&ws, 0, at(src, "u8 }", 0), true, no).len(), 2);
     }
 }
+
+#[cfg(test)]
+#[path = "navigate_tests.rs"]
+mod unit_tests;
