@@ -389,6 +389,15 @@ impl FileIndex {
                         params: params.clone(),
                         fnret: if matches!(s.kind, SymKind::Function | SymKind::Method) {
                             fn_bounds(&s.detail)
+                        } else if s.kind == SymKind::Struct {
+                            // (タプル構造体 `struct P<'a>(A, B);`: フィールドの書き方を (255, "", "A, B", ""))
+                            let after = text.get(s.name_end..s.end).unwrap_or("");
+                            let a = after.trim_start();
+                            let a = if a.starts_with('<') { close_angle(a).map(|c| &a[c + 1..]).unwrap_or("") } else { a };
+                            match a.trim_start().strip_prefix('(').and_then(|r| Some(&r[..r.rfind(')')?])) {
+                                Some(inner) => vec![(255, String::new(), inner.to_string(), String::new())],
+                                None => vec![],
+                            }
                         } else if s.kind == SymKind::Variant {
                             // (タプルのバリアント `V(A, B)`: フィールドの書き方を (255, "", "A, B", "") に。本文を捨てたライブラリでも
                             // パターンのフィールドの型が分かるように)
@@ -1857,6 +1866,11 @@ fn def_at1(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
         }
         let c: Vec<(usize, &Def)> = named(ws, file, &*name).into_iter().filter(|(_, d)| kinds.contains(&d.kind) && (owner.is_none() || owners.contains(&d.owner))).collect();
         let mut c = prefer_concrete(c, &concrete);
+        // (受け手の型と Deref の先の両方にあるもの (`String::len` と `str::len`): 受け手に近い方)
+        if let Some(first) = concrete.iter().find(|o| c.iter().any(|x| &x.1.owner == *o)) {
+            let first = first.clone();
+            c.retain(|x| x.1.owner == first || !concrete.contains(&x.1.owner));
+        }
         // (`let h: Hidden = n.into();`: 期待する型 Hidden の `impl From<..> for Hidden` の from (rust-analyzer と同じ))
         if call && name == "into" {
             if let Some(l) = into_from(ws, file, k, owner.as_deref()) {
@@ -3098,8 +3112,17 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
         let base = expand(ws, file, strip_ref(&base)).into_iter().last()?;
         return match tuple_items(strip_ref(&base)) {
             Some(v) => v.get(i).cloned(),
-            // (タプル構造体 `struct P(A, B)` のフィールド: 名前のないフィールドは持たないので分からない)
-            None => None,
+            // (タプル構造体 `struct P(A, B)` のフィールド: 定義に残したフィールドの書き方から)
+            None => {
+                let h = type_head(&base);
+                let d = named(ws, file, &h).into_iter().map(|x| x.1).find(|d| d.kind == SymKind::Struct && d.owner.is_empty() && d.fnret.iter().any(|x| x.0 == 255))?;
+                let inner = &d.fnret.iter().find(|x| x.0 == 255)?.2;
+                let tys = targs(&format!("X<{inner}>"));
+                let t = tys.get(i)?.trim();
+                let t = t.strip_prefix("pub(crate)").or_else(|| t.strip_prefix("pub(super)")).or_else(|| t.strip_prefix("pub ")).unwrap_or(t).trim();
+                let params = &d.params;
+                Some(strip_lifetimes(&if params.is_empty() { t.to_string() } else { subst(t, params, &targs(&base)) }))
+            }
         };
     }
     if let Some(t) = literal_type(f, k) {
@@ -3715,7 +3738,8 @@ fn scrutinee_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Optio
                 }
             }
             return if f.sym(q, b'{') && q >= 1 { expr_type(ws, file, q - 1, depth + 1) } else { None };
-        } else if d <= 0 && f.sym(j, b'=') && !f.sym(j + 1, b'=') {
+        } else if d <= 0 && f.sym(j, b'=') && !f.sym(j + 1, b'=') && !(f.sym(j - 1, b'=') || f.sym(j - 1, b'!') || f.sym(j - 1, b'<') || f.sym(j - 1, b'>')) {
+            // (`==` / `!=` / `<=` / `>=` (ガードの中) は代入ではない)
             let e = expr_end(f, j + 1, true)?;
             return expr_type(ws, file, e, depth + 1);
         }

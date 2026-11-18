@@ -1249,3 +1249,14 @@ fn qualified_projections_are_not_holes() {
     assert!(has_proj("Self::Output"));
     assert!(has_proj("<A as Tr>::B"));
 }
+
+#[test]
+fn tuple_struct_fields_and_guards_with_eq() {
+    let src = "struct B { n: u8 }\nstruct W<'a, T>(pub &'a mut B, T);\nstruct K { kind: u8 }\nimpl<'a, T> W<'a, T> {\n    fn f(self, o: Option<K>) {\n        let a = self.0;\n        let b = self.1;\n        match o { Some(t) if t.kind == 1 => {} _ => {} }\n    }\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap_or_default();
+    for (p, want) in [("a =", "a: &mut B"), ("b =", "b: T"), ("t.kind", "t: K")] {
+        assert!(ty(p).contains(want), "{p}: {}", ty(p));
+    }
+}
