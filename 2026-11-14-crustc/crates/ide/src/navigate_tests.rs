@@ -1198,3 +1198,13 @@ fn macro_call_types() {
     let ws = [&fi];
     assert!(hover(&ws, 0, at(src, "a =", 0), &no).unwrap().contains("a: Vec<V>"), "{:?}", hover(&ws, 0, at(src, "a =", 0), &no));
 }
+
+/// `if let PAT = EXPR` の右の名前は、パターンの束縛ではなく外の束縛
+#[test]
+fn if_let_rhs_scope() {
+    let src = "fn f(req: Option<u8>) {\n    if let (Some(req), Some(bh)) = (req, Some(1u8)) { req; }\n    for x in x_of(x) {}\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    assert_eq!(def1(&fi, at(src, "req, Some(1", 0)), Some(at(src, "req: Option", 0)));
+    assert_eq!(def1(&fi, at(src, "req; }", 0)), Some(at(src, "req), Some(bh", 0)));
+    assert_eq!(def1(&fi, at(src, "x) {}", 0)), None);
+}

@@ -1264,6 +1264,7 @@ impl FileIndex {
         }
         // (本体)
         let mut stmt_kind: u8 = 0; // 1: let のパターン, 2: for / if let / while let のパターン, 3: クロージャの引数
+        let mut body_seen = false;
         let mut pat_start = 0usize;
         let mut arm_start = i;
         while i < k {
@@ -1272,6 +1273,7 @@ impl FileIndex {
                 match self.text.as_bytes()[t.1 as usize] {
                     b'{' => {
                         depth += 1;
+                        body_seen = true;
                         for j in pend_block.drain(..) {
                             live.push((j, depth, 0));
                         }
@@ -1389,7 +1391,11 @@ impl FileIndex {
             }
             i += 1;
         }
-        live.extend(pend_block.iter().map(|&j| (j, depth, 0)));
+        // (まだ本体の `{` の前 (関数の引数の中) なら、引数は見える。本体の中で残っているのは、次のブロックから見える
+        // `if let` / `while let` / `for` のパターンの束縛なので、まだ見えない (`if let Some(x) = (x, ..)` の右の x は外の x))
+        if !body_seen {
+            live.extend(pend_block.iter().map(|&j| (j, depth, 0)));
+        }
         live.into_iter().map(|l| l.0).collect()
     }
 
@@ -3116,7 +3122,24 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
         // マクロ `vec![..]` / `format!(..)`
         if f.sym(m, b'!') && m >= 1 && f.ident(m - 1) {
             return match f.tok(m - 1) {
-                "vec" => Some("Vec<_>".to_string()),
+                // (`vec![a, b]` / `vec![x; n]`: 最初の要素の型)
+                "vec" => {
+                    let mut dd = 0;
+                    let mut e0 = None;
+                    for q in p + 1..k {
+                        if f.sym(q, b'(') || f.sym(q, b'[') || f.sym(q, b'{') {
+                            dd += 1;
+                        } else if f.sym(q, b')') || f.sym(q, b']') || f.sym(q, b'}') {
+                            dd -= 1;
+                        } else if dd == 0 && (f.sym(q, b',') || f.sym(q, b';')) {
+                            e0 = Some(q - 1);
+                            break;
+                        }
+                    }
+                    let e0 = e0.unwrap_or(k - 1);
+                    let et = if k > p + 1 { expr_type(ws, file, e0, depth + 1) } else { None };
+                    Some(format!("Vec<{}>", et.unwrap_or_else(|| "_".to_string())))
+                }
                 "format" => Some("String".to_string()),
                 // (このファイルの `macro_rules!` で腕が一つのもの: 本体のブロックの最後の式の型)
                 mname => macro_result_type(ws, file, mname, depth),
@@ -3141,6 +3164,20 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
                 let tb = f.text[f.toks[q + 1].1 as usize..f.toks[m - 1].2 as usize].to_string();
                 let o = expr_type(ws, file, q - 5, depth + 1)?;
                 return method_call_type_at(ws, file, &o, f.tok(q - 3), m + 1, Some(&tb), depth);
+            }
+            // (関数のターボフィッシュ `serde_json::from_str::<Value>(s)` / `f::<T>(x)`: 戻り値の最初の型引数に)
+            if q >= 3 && f.sym(q - 1, b':') && f.sym(q - 2, b':') && f.ident(q - 3) {
+                let tb = f.text[f.toks[q + 1].1 as usize..f.toks[m - 1].2 as usize].to_string();
+                let name = f.tok(q - 3);
+                let qm = if q >= 6 && f.after_path(q - 3) { Some(f.tok(q - 6).to_string()) } else { None };
+                let cands: Vec<&Def> = named(ws, file, name).into_iter().map(|x| x.1).filter(|d| d.owner.is_empty() && d.kind == SymKind::Function && !d.ty.is_empty()).collect();
+                let d = cands.iter().find(|d| qm.as_ref().is_some_and(|qm| d.module.last() == Some(qm))).or(cands.first())?;
+                let mut ret = d.ty.clone();
+                if let Some(g) = ret.split(|c: char| !(c.is_alphanumeric() || c == '_')).find(|w| w.len() == 1 && w.starts_with(|c: char| c.is_ascii_uppercase())) {
+                    let g = g.to_string();
+                    ret = subst(&ret, &[g], &[tb]);
+                }
+                return Some(strip_lifetimes(&ret));
             }
             return None;
         }
@@ -3428,6 +3465,8 @@ fn binding_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<
     if let Some((in_tok, path)) = for_pattern(f, b) {
         let e = expr_end(f, in_tok + 1, true)?;
         let t = expr_type(ws, file, e, depth + 1)?;
+        // (`for x in &v` / `&mut v`: 参照の繰り返し)
+        let t = if f.sym(in_tok + 1, b'&') && !t.starts_with('&') { if f.tok(in_tok + 2) == "mut" { format!("&mut {t}") } else { format!("&{t}") } } else { t };
         let mut ty = if is_iter_head(&type_head(&t)) { iter_item(&t) } else { iter_item(&t).or_else(|| elem_type(&t)).or_else(|| iter_item_ws(ws, file, &t)) }?;
         for &i in &path {
             let inner = strip_ref(&ty).to_string();
@@ -3493,6 +3532,10 @@ fn binding_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<
         }
         if let Some(e) = expr_end(f, b + 2, false) {
             if let Some(t) = expr_type(ws, file, e, depth + 1) {
+                // (`let p = &v["x"];` / `&mut x`: 前の参照。式の終わりの型がそのまま全体の型のとき (`&a.b` / `&v[i]`))
+                if f.sym(b + 2, b'&') && !f.sym(b + 3, b'&') && !t.starts_with('&') && (b + 3..e).all(|q| !(f.toks[q].0 == 1 && b"+-*/%<>=!|^".contains(&f.text.as_bytes()[f.toks[q].1 as usize]) && !f.sym(q, b'>'))) {
+                    return Some(if f.tok(b + 3) == "mut" { format!("&mut {t}") } else { format!("&{t}") });
+                }
                 return Some(t);
             }
         }
@@ -4476,6 +4519,42 @@ fn norm_proj_with(t: &str, more: &dyn Fn(&str, bool) -> Option<String>) -> Strin
     let mut s = t.to_string();
     for _ in 0..6 {
         // (`::Item` (要素) と `::IntoIter` (IntoIterator: 繰り返しならそれ自身、集まりなら IntoIter<要素>))
+        // (`T::Target` (Deref の先) は別に置き換える)
+        if let Some(ti) = s.find("::Target") {
+            let b = s.as_bytes();
+            let mut j = ti;
+            let mut d = 0;
+            while j > 0 {
+                let c = b[j - 1];
+                if c == b'>' && !(j >= 2 && b[j - 2] == b'-') {
+                    d += 1;
+                } else if c == b'<' {
+                    if d == 0 {
+                        break;
+                    }
+                    d -= 1;
+                } else if d == 0 && (c == b',' || c == b'(' || c == b' ' || c == b'&') {
+                    break;
+                }
+                j -= 1;
+            }
+            let inner = s[j..ti].to_string();
+            let tgt = match type_head(&inner).as_str() {
+                "String" => Some("str".to_string()),
+                "Vec" => targs(&inner).first().map(|e| format!("[{e}]")),
+                "Box" | "Rc" | "Arc" => targs(&inner).first().cloned(),
+                "PathBuf" => Some("Path".to_string()),
+                "OsString" => Some("OsStr".to_string()),
+                _ => more(&inner, true).filter(|_| false),
+            };
+            match tgt {
+                Some(x) => {
+                    s = format!("{}{}{}", &s[..j], x, &s[ti + 8..]);
+                    continue;
+                }
+                None => break,
+            }
+        }
         let (i, plen, into) = match (s.find("::Item"), s.find("::IntoIter")) {
             (Some(a), Some(b)) if b < a => (b, 10, true),
             (Some(a), _) => (a, 6, false),
@@ -4910,6 +4989,7 @@ fn pattern_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<
             let (in_tok, _) = for_pattern_in(f, b)?;
             let e = expr_end(f, in_tok + 1, true)?;
             let t = expr_type(ws, file, e, depth + 1)?;
+            let t = if f.sym(in_tok + 1, b'&') && !t.starts_with('&') { if f.tok(in_tok + 2) == "mut" { format!("&mut {t}") } else { format!("&{t}") } } else { t };
             if is_iter_head(&type_head(&t)) { iter_item(&t) } else { iter_item(&t).or_else(|| elem_type(&t)).or_else(|| iter_item_ws(ws, file, &t)) }?
         }
         'l' => {

@@ -366,7 +366,7 @@ ws/src/lib.rs:137:25 p -> ws/src/lib.rs:136:9+1 | refs 3/2 | ```rust⏎p: Point�
 ws/src/lib.rs:137:27 x -> ws/src/shapes.rs:7:9+1 | refs 15/14 | ```rust⏎Point⏎pub x: i32⏎```
 ws/src/lib.rs:137:32 ORIGIN -> ws/src/lib.rs:53:12+6 | refs 2/1 | ```rust⏎pub static ORIGIN: Pt = Pt { x: 0, y: 0 }⏎```
 ws/src/lib.rs:138:5 let -> - | refs 0/0 | -
-ws/src/lib.rs:138:9 all -> ws/src/lib.rs:138:9+3 | refs 3/2 [ws/src/lib.rs:138:9+3 ws/src/lib.rs:140:16+3 ws/src/lib.rs:144:18+3] | ```rust⏎all: Vec<_>⏎```
+ws/src/lib.rs:138:9 all -> ws/src/lib.rs:138:9+3 | refs 3/2 [ws/src/lib.rs:138:9+3 ws/src/lib.rs:140:16+3 ws/src/lib.rs:144:18+3] | ```rust⏎all: Vec<Shape>⏎```
 ws/src/lib.rs:138:15 vec -> - | refs 0/0 | -
 ws/src/lib.rs:138:20 s -> ws/src/lib.rs:134:9+1 | refs 2/1 | ```rust⏎s: Shape⏎```
 ws/src/lib.rs:138:23 r -> ws/src/lib.rs:135:9+1 | refs 2/1 | ```rust⏎r: Rect⏎```
@@ -374,26 +374,26 @@ ws/src/lib.rs:139:5 let -> - | refs 0/0 | -
 ws/src/lib.rs:139:9 mut -> ws/src/lib.rs:139:9+3 | refs 1/0 [ws/src/lib.rs:139:9+3] | ```rust⏎mut⏎```
 ws/src/lib.rs:139:13 sum -> ws/src/lib.rs:139:13+3 | refs 3/2 [ws/src/lib.rs:139:13+3 ws/src/lib.rs:141:9+3 ws/src/lib.rs:145:5+3] | ```rust⏎sum⏎```
 ws/src/lib.rs:140:5 for -> - | refs 0/0 | -
-ws/src/lib.rs:140:9 sh -> ws/src/lib.rs:140:9+2 | refs 2/1 [ws/src/lib.rs:140:9+2 ws/src/lib.rs:141:21+2] | ```rust⏎sh: _⏎```
+ws/src/lib.rs:140:9 sh -> ws/src/lib.rs:140:9+2 | refs 2/1 [ws/src/lib.rs:140:9+2 ws/src/lib.rs:141:21+2] | ```rust⏎sh: &Shape⏎```
 ws/src/lib.rs:140:12 in -> ws/src/lib.rs:140:12+2 | refs 1/0 [ws/src/lib.rs:140:12+2] | ```rust⏎in⏎```
-ws/src/lib.rs:140:16 all -> ws/src/lib.rs:138:9+3 | refs 3/2 | ```rust⏎all: Vec<_>⏎```
+ws/src/lib.rs:140:16 all -> ws/src/lib.rs:138:9+3 | refs 3/2 | ```rust⏎all: Vec<Shape>⏎```
 ws/src/lib.rs:141:9 sum -> ws/src/lib.rs:139:13+3 | refs 3/2 | ```rust⏎sum⏎```
 ws/src/lib.rs:141:16 area -> ws/src/shapes.rs:54:8+4 | refs 4/3 | ```rust⏎shapes⏎pub fn area(s: &Shape) -> f64⏎```⏎⏎---⏎⏎Area of a shape.
-ws/src/lib.rs:141:21 sh -> ws/src/lib.rs:140:9+2 | refs 2/1 | ```rust⏎sh: _⏎```
+ws/src/lib.rs:141:21 sh -> ws/src/lib.rs:140:9+2 | refs 2/1 | ```rust⏎sh: &Shape⏎```
 ws/src/lib.rs:143:5 let -> - | refs 0/0 | -
 ws/src/lib.rs:143:9 d -> ws/src/lib.rs:143:9+1 | refs 2/1 [ws/src/lib.rs:143:9+1 ws/src/lib.rs:145:11+1] | ```rust⏎d: i32⏎```
 ws/src/lib.rs:143:13 p -> ws/src/lib.rs:136:9+1 | refs 3/2 | ```rust⏎p: Point⏎```
 ws/src/lib.rs:143:15 dist2 -> ws/src/shapes.rs:25:12+5 | refs 2/1 [ws/src/lib.rs:143:15+5 ws/src/shapes.rs:25:12+5] | ```rust⏎impl Point⏎pub fn dist2(&self, o: &Point) -> i32⏎```
 ws/src/lib.rs:143:22 q -> ws/src/lib.rs:137:9+1 | refs 2/1 | ```rust⏎q: Pt⏎```
 ws/src/lib.rs:144:5 let -> - | refs 0/0 | -
-ws/src/lib.rs:144:9 first -> ws/src/lib.rs:144:9+5 | refs 2/1 [ws/src/lib.rs:144:9+5 ws/src/lib.rs:145:27+5] | ```rust⏎first: _⏎```
-ws/src/lib.rs:144:18 all -> ws/src/lib.rs:138:9+3 | refs 3/2 | ```rust⏎all: Vec<_>⏎```
+ws/src/lib.rs:144:9 first -> ws/src/lib.rs:144:9+5 | refs 2/1 [ws/src/lib.rs:144:9+5 ws/src/lib.rs:145:27+5] | ```rust⏎first: &Shape⏎```
+ws/src/lib.rs:144:18 all -> ws/src/lib.rs:138:9+3 | refs 3/2 | ```rust⏎all: Vec<Shape>⏎```
 ws/src/lib.rs:145:5 sum -> ws/src/lib.rs:139:13+3 | refs 3/2 | ```rust⏎sum⏎```
 ws/src/lib.rs:145:11 d -> ws/src/lib.rs:143:9+1 | refs 2/1 | ```rust⏎d: i32⏎```
 ws/src/lib.rs:145:13 as -> - | refs 0/0 | -
 ws/src/lib.rs:145:16 f64 -> - | refs 10/10 | ```rust⏎f64⏎```
 ws/src/lib.rs:145:22 area -> ws/src/shapes.rs:54:8+4 | refs 4/3 | ```rust⏎shapes⏎pub fn area(s: &Shape) -> f64⏎```⏎⏎---⏎⏎Area of a shape.
-ws/src/lib.rs:145:27 first -> ws/src/lib.rs:144:9+5 | refs 2/1 | ```rust⏎first: _⏎```
+ws/src/lib.rs:145:27 first -> ws/src/lib.rs:144:9+5 | refs 2/1 | ```rust⏎first: &Shape⏎```
 ws/src/lib.rs:145:36 util -> ws/src/util/mod.rs:1:1+0 | refs 6/5 | ```rust⏎pub mod util⏎```
 ws/src/lib.rs:145:42 scale -> ws/src/util/mod.rs:6:8+5 | refs 4/3 [ws/src/lib.rs:145:42+5 ws/src/util/mod.rs:6:8+5 ws/src/util/text.rs:1:12+5 ws/src/util/text.rs:24:13+5] | ```rust⏎util⏎pub fn scale(v: f64) -> f64⏎```⏎⏎---⏎⏎Scale a value.
 ws/src/lib.rs:145:55 LIMIT -> ws/src/lib.rs:52:11+5 | refs 2/1 | ```rust⏎pub const LIMIT: usize = 16⏎```
