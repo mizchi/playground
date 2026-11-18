@@ -1312,6 +1312,14 @@ impl FileIndex {
                     }
                     b';' => {
                         live.retain(|l| !(l.2 == 2 && l.1 == depth));
+                        // (初期化のない `let x;`)
+                        if stmt_kind == 1 {
+                            for j in pat_start..i {
+                                if is_bind(j) {
+                                    pend_let.push((j, depth));
+                                }
+                            }
+                        }
                         for (j, d) in pend_let.drain(..) {
                             live.push((j, d, 0));
                         }
@@ -3147,7 +3155,12 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
             let q = if q == "Self" { self_ty(at)? } else { q };
             // (`a::b::P` / `m::CONST`: モジュールの下の単位構造体・const)
             if q.starts_with(|c: char| c.is_ascii_lowercase()) {
-                return named(ws, file, r).into_iter().map(|x| x.1).find(|d| d.owner.is_empty() && matches!(d.kind, SymKind::Struct | SymKind::Const | SymKind::Static)).map(|d| if d.kind == SymKind::Struct { r.to_string() } else { d.ty.clone() });
+                let kr = f.krate;
+                return named(ws, file, r)
+                    .into_iter()
+                    .filter(|(_, d)| d.owner.is_empty() && matches!(d.kind, SymKind::Struct | SymKind::Const | SymKind::Static))
+                    .min_by_key(|(i, d)| (d.module.last().map(|m| m.as_str()) != Some(q.as_str()), ws[*i].krate != kr, ws[*i].lib))
+                    .map(|(_, d)| if d.kind == SymKind::Struct { r.to_string() } else { d.ty.clone() });
             }
             return member_type(ws, file, &q, r, &[SymKind::Const, SymKind::Variant]).or(Some(q).filter(|_| r.starts_with(|c: char| c.is_ascii_uppercase())));
         }
@@ -3163,7 +3176,13 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
             return Some(r.to_string());
         }
         // (const / static)
-        return named(ws, file, r).into_iter().map(|x| x.1).find(|d| d.owner.is_empty() && matches!(d.kind, SymKind::Const | SymKind::Static) && !d.ty.is_empty()).map(|d| d.ty.clone());
+        // (同じ名前のものが別のファイルにもあれば (`const PRELUDE`)、同じファイル・同じクレートのもの)
+        let kr = f.krate;
+        return named(ws, file, r)
+            .into_iter()
+            .filter(|(_, d)| d.owner.is_empty() && matches!(d.kind, SymKind::Const | SymKind::Static) && !d.ty.is_empty())
+            .min_by_key(|(i, _)| (*i != file, ws[*i].krate != kr, ws[*i].lib))
+            .map(|(_, d)| d.ty.clone());
     }
     if f.sym(k, b'?') && k >= 1 {
         let t = expr_type(ws, file, k - 1, depth + 1)?;
@@ -3438,7 +3457,10 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
             return name.starts_with(|c: char| c.is_ascii_uppercase()).then(|| q.clone());
         }
         if name == "Some" {
-            return Some("Option<_>".to_string());
+            // (`Some(e)`: e の型が分かれば Option<e の型>)
+            let close = close_of(f, m + 1);
+            let inner = expr_end(f, m + 2, false).filter(|&e| e + 1 == close).and_then(|e| expr_type(ws, file, e, depth + 1));
+            return Some(format!("Option<{}>", inner.unwrap_or_else(|| "_".to_string())));
         }
         if name == "Ok" || name == "Err" {
             return Some("Result<_, _>".to_string());
@@ -3455,7 +3477,16 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
             }
             return None;
         }
-        return named(ws, file, name).into_iter().map(|x| x.1).find(|d| d.owner.is_empty() && d.kind == SymKind::Function && !d.ty.is_empty()).map(|d| d.ty.clone());
+        // (呼ぶ関数: 名前の解決 (use・同じモジュール) で決まるもの。同じ名前の関数がほかのクレートにもある (`run`))
+        if let Some(t) = def_at(ws, file, f.toks[m].1 as usize).first().and_then(|l| ws[l.file].defs.iter().find(|d| d.start == l.start && d.kind == SymKind::Function)).map(|d| d.ty.clone()) {
+            return Some(t).filter(|t| !t.is_empty());
+        }
+        let kr = f.krate;
+        return named(ws, file, name)
+            .into_iter()
+            .filter(|(_, d)| d.owner.is_empty() && d.kind == SymKind::Function && !d.ty.is_empty())
+            .min_by_key(|(i, _)| (*i != file, ws[*i].krate != kr, ws[*i].lib))
+            .map(|(_, d)| d.ty.clone());
     }
     if f.toks[k].0 == 2 && f.text.as_bytes()[f.toks[k].1 as usize] == b'"' {
         return Some("&str".to_string());
@@ -3577,6 +3608,10 @@ fn binding_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<
     // クロージャの引数 `x.iter().map(|d| ..)` / `opt.map(|v| ..)`: 受け手の要素の型
     if let Some(t) = closure_param_type(ws, file, b, depth) {
         return Some(t);
+    }
+    // (`let x;`: 後の代入 `x = EXPR;` の型)
+    if f.sym(b + 1, b';') && b >= 1 && (f.tok(b - 1) == "let" || f.tok(b - 1) == "mut") {
+        return refine_by_use(ws, file, b, "_", depth);
     }
     // `let x = EXPR;`
     if f.sym(b + 1, b'=') && !f.sym(b + 2, b'=') && b >= 1 && (f.tok(b - 1) == "let" || f.tok(b - 1) == "mut") {
@@ -4980,10 +5015,21 @@ fn apply_call_args(ws: &[&FileIndex], file: usize, mut ret: String, d: &[(u8, St
                 }
                 continue;
             }
-            if !(f.sym(s, b'|') || f.tok(s) == "move") {
-                continue;
+            let closure = f.sym(s, b'|') || f.tok(s) == "move";
+            // (関数の名前を渡したもの `and_then(str_lit)` / `map(Path::new)`: その関数の戻り値の型)
+            let mut e = s;
+            while f.ident(e) && f.before_path(e) {
+                e += 3;
             }
-            let Some(r) = closure_ret(ws, file, s, depth + 1) else { continue };
+            let fn_path = !closure && f.ident(e) && (f.sym(e + 1, b',') || e + 1 == close);
+            let r = if closure {
+                closure_ret(ws, file, s, depth + 1)
+            } else if fn_path {
+                def_at(ws, file, f.toks[e].1 as usize).first().and_then(|l| ws[l.file].defs.iter().find(|d| d.start == l.start && matches!(d.kind, SymKind::Function | SymKind::Method))).map(|d| d.ty.clone()).filter(|t| !t.is_empty())
+            } else {
+                None
+            };
+            let Some(r) = r else { continue };
             // (pat の中の型引数: 1 文字か大文字で始まる短い名前)
             let vars: Vec<String> = pat.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty() && w.starts_with(|c: char| c.is_ascii_uppercase()) && w.len() <= 2).map(|w| w.to_string()).collect();
             let mut b = vec![];

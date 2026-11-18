@@ -1260,3 +1260,16 @@ fn tuple_struct_fields_and_guards_with_eq() {
         assert!(ty(p).contains(want), "{p}: {}", ty(p));
     }
 }
+
+#[test]
+fn same_crate_names_and_deferred_lets() {
+    let other = FileIndex::new("pub const P: [u8; 2] = [0, 0];\npub fn run() -> u8 { 0 }\n".to_string(), vec![]);
+    let src = "const P: &str = \"a\";\nfn run() -> (String, u8) { todo!() }\nfn lit(x: u8) -> Option<String> { None }\nfn f(o: Option<u8>) {\n    let a = P;\n    let (s, _) = run();\n    let c;\n    let d = Some(s.clone());\n    c = s;\n}\n";
+    let mut fi = FileIndex::new(src.to_string(), vec![]);
+    fi.krate = 1;
+    let ws = [&fi, &other];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap_or_default();
+    for (p, want) in [("a =", "a: &str"), ("s, _", "s: String"), ("c;", "c: String")] {
+        assert!(ty(p).contains(want), "{p}: {}", ty(p));
+    }
+}
