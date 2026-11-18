@@ -110,7 +110,16 @@ impl Server {
                     .or_else(|| p["workspaceFolders"][0]["uri"].as_str().and_then(uri_path));
                 self.root = root;
                 if self.lib_job.is_none() && std::env::var_os("CRUSTC_LSP_NO_STD").is_none() {
-                    self.lib_job = Some(std::thread::spawn(index_std));
+                    let r = self.root.clone();
+                    self.lib_job = Some(std::thread::spawn(move || {
+                        let mut v = index_std();
+                        if let Some(r) = r {
+                            if std::env::var_os("CRUSTC_LSP_NO_DEPS").is_none() {
+                                v.extend(index_deps(&r));
+                            }
+                        }
+                        v
+                    }));
                 }
                 vec![reply(json!({
                     "capabilities": { "textDocumentSync": 1, "documentSymbolProvider": true, "workspaceSymbolProvider": true, "definitionProvider": true, "referencesProvider": true,
@@ -686,6 +695,80 @@ fn index_std() -> Vec<(String, FileIndex)> {
             match std::panic::catch_unwind(move || FileIndex::library(text, m)) {
                 Ok(ix) => out.push((path_uri(&p), ix)),
                 Err(_) => eprintln!("crustc-lsp: {rel} の索引を作れなかった (飛ばす)"),
+            }
+        }
+    }
+    out
+}
+
+/// 依存クレート (ワークスペースのパッケージの `[dependencies]` / `[dev-dependencies]` / `[build-dependencies]` のうち、
+/// path でないもの) のソース: cargo の registry (`$CARGO_HOME/registry/src/*/名前-版`) の src の下。版は Cargo.lock から。
+/// std と同じくライブラリの索引 (定義と pub use だけ) にする
+fn index_deps(root: &Path) -> Vec<(String, FileIndex)> {
+    let Ok(top) = std::fs::read_to_string(root.join("Cargo.toml")) else { return vec![] };
+    // (パッケージの Cargo.toml: 根と members)
+    let mut tomls = vec![top.clone()];
+    if let Some(i) = top.find("members") {
+        if let (Some(a), Some(b)) = (top[i..].find('['), top[i..].find(']')) {
+            for m in top[i + a + 1..i + b].split(',') {
+                let m = m.trim().trim_matches('"').trim();
+                if !m.is_empty() && !m.contains('*') {
+                    if let Ok(s) = std::fs::read_to_string(root.join(m).join("Cargo.toml")) {
+                        tomls.push(s);
+                    }
+                }
+            }
+        }
+    }
+    let mut names: Vec<String> = vec![];
+    for toml in &tomls {
+        let mut in_deps = false;
+        for l in toml.lines() {
+            let l = l.trim();
+            if l.starts_with('[') {
+                in_deps = matches!(l, "[dependencies]" | "[dev-dependencies]" | "[build-dependencies]") || l.starts_with("[target.") && l.ends_with("dependencies]");
+                continue;
+            }
+            if !in_deps || l.starts_with('#') || l.contains("path =") || l.contains("path=") || l.contains("workspace = true") {
+                continue;
+            }
+            if let Some((k, v)) = l.split_once('=') {
+                // (`foo = { package = "bar", .. }` は bar)
+                let name = v.split("package").nth(1).and_then(|r| r.split('"').nth(1)).unwrap_or(k.trim()).trim().to_string();
+                if !name.is_empty() && !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap_or_default();
+    let mut vers: HashMap<String, String> = HashMap::new();
+    let mut cur: Option<String> = None;
+    for l in lock.lines() {
+        if let Some(n) = l.strip_prefix("name = ") {
+            cur = Some(n.trim().trim_matches('"').to_string());
+        } else if let (Some(v), Some(n)) = (l.strip_prefix("version = "), cur.as_ref()) {
+            vers.entry(n.clone()).or_insert_with(|| v.trim().trim_matches('"').to_string());
+        }
+    }
+    let home = std::env::var_os("CARGO_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
+    let Some(home) = home else { return vec![] };
+    let regs: Vec<PathBuf> = std::fs::read_dir(home.join("registry/src")).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    let mut out = vec![];
+    for n in names {
+        let Some(v) = vers.get(&n) else { continue };
+        let Some(dir) = regs.iter().map(|r| r.join(format!("{n}-{v}"))).find(|d| d.join("src").exists()) else { continue };
+        let mut paths = vec![];
+        rs_files(&dir.join("src"), &mut paths, 0);
+        for p in paths {
+            let rel = p.strip_prefix(&dir).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+            if rel.contains("/tests/") || rel.contains("/benches/") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            let m = navigate::module_of(&rel);
+            if let Ok(ix) = std::panic::catch_unwind(move || FileIndex::library(text, m)) {
+                out.push((path_uri(&p), ix));
             }
         }
     }

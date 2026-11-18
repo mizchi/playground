@@ -1189,3 +1189,12 @@ fn nested_pattern_types() {
         assert!(ty(p).contains(want), "{p}: {}", ty(p));
     }
 }
+
+/// このファイルの macro_rules の呼び出しの型 (本体のブロックの最後の式)
+#[test]
+fn macro_call_types() {
+    let src = "struct V;\nfn f(xs: Vec<u8>) {\n    macro_rules! vs {\n        ($xs:expr) => {{\n            let mut out: Vec<V> = vec![];\n            for x in $xs.iter() {}\n            out\n        }};\n    }\n    let a = vs!(xs);\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    assert!(hover(&ws, 0, at(src, "a =", 0), &no).unwrap().contains("a: Vec<V>"), "{:?}", hover(&ws, 0, at(src, "a =", 0), &no));
+}

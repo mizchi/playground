@@ -73,6 +73,10 @@ pub struct FileIndex {
     use_at: Vec<usize>,
     /// `macro_rules!` の本体の byte 範囲 (関数の中のものも)
     macros: Vec<(usize, usize)>,
+    /// 定義の名前のハッシュと defs の番号 (ハッシュの順): 名前で定義を引くのに二分探索で
+    name_ix: Vec<(u64, u32)>,
+    /// 持ち主の名前のハッシュと defs の番号 (ハッシュの順): `.` の後の補完で持ち主ごとに引く
+    owner_ix: Vec<(u64, u32)>,
     /// workspace/symbol に出す use: 別名 `use a::B as C` (C) と再エクスポート `pub use a::B` (B)。
     /// (名前, 行, UTF-16 の桁, 名前の長さ (UTF-16)) (slim にしても残す)
     pub use_syms: Vec<(String, u32, u32, u32)>,
@@ -412,13 +416,40 @@ impl FileIndex {
                 idents.entry(text[t.1 as usize..t.2 as usize].to_string()).or_default().push(i as u32);
             }
         }
-        let mut f = FileIndex { text, lib: false, in_src: true, krate: 0, module, defs, toks, idents, uses: vec![], use_at: vec![], macros: vec![], use_syms: vec![], slim: false, names: vec![], impls: vec![], derives: vec![], inactive: vec![], features: None };
+        let mut f = FileIndex { text, lib: false, in_src: true, krate: 0, module, defs, toks, idents, uses: vec![], use_at: vec![], macros: vec![], use_syms: vec![], name_ix: vec![], owner_ix: vec![], slim: false, names: vec![], impls: vec![], derives: vec![], inactive: vec![], features: None };
         (f.uses, f.use_at) = f.collect_uses(false).into_iter().map(|(a, b, c)| ((a, b), c)).unzip();
         f.use_syms = f.collect_use_syms();
         f.macros = f.macro_bodies();
+        f.index_names();
         f.derives = f.collect_derives();
         f.impls = f.collect_impls();
         f
+    }
+
+    /// name_ix を作り直す (defs が変わったとき)
+    fn index_names(&mut self) {
+        let mut v: Vec<(u64, u32)> = self.defs.iter().enumerate().map(|(i, d)| (name_hash(&d.name), i as u32)).collect();
+        v.sort_unstable();
+        v.shrink_to_fit();
+        self.name_ix = v;
+        let mut o: Vec<(u64, u32)> = self.defs.iter().enumerate().filter(|(_, d)| !d.owner.is_empty()).map(|(i, d)| (name_hash(&d.owner), i as u32)).collect();
+        o.sort_unstable();
+        o.shrink_to_fit();
+        self.owner_ix = o;
+    }
+
+    /// 持ち主が owner の定義の defs の番号
+    fn defs_owned<'a>(&'a self, owner: &'a str) -> impl Iterator<Item = usize> + 'a {
+        let h = name_hash(owner);
+        let a = self.owner_ix.partition_point(|x| x.0 < h);
+        self.owner_ix[a..].iter().take_while(move |x| x.0 == h).map(|x| x.1 as usize).filter(move |&i| self.defs[i].owner == owner)
+    }
+
+    /// 名前 name の定義の defs の番号
+    fn defs_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = usize> + 'a {
+        let h = name_hash(name);
+        let a = self.name_ix.partition_point(|x| x.0 < h);
+        self.name_ix[a..].iter().take_while(move |x| x.0 == h).map(|x| x.1 as usize).filter(move |&i| self.defs[i].name == name)
     }
 
     /// トークン k を囲む構造体の式 `T { .. }` の T
@@ -541,7 +572,7 @@ impl FileIndex {
     /// ライブラリのファイルの本文だけを持つもの (hover / signatureHelp がシグネチャと doc コメントを読むのに使う。定義は
     /// もとの索引のものを使うので、字句の列も定義も作らない)
     pub fn text_only(&self, text: String) -> FileIndex {
-        FileIndex { text, lib: self.lib, in_src: self.in_src, krate: self.krate, module: self.module.clone(), defs: vec![], toks: vec![], idents: FxMap::default(), uses: vec![], use_at: vec![], macros: vec![], use_syms: vec![], slim: false, names: vec![], impls: vec![], derives: vec![], inactive: vec![], features: None }
+        FileIndex { text, lib: self.lib, in_src: self.in_src, krate: self.krate, module: self.module.clone(), defs: vec![], toks: vec![], idents: FxMap::default(), uses: vec![], use_at: vec![], macros: vec![], use_syms: vec![], name_ix: vec![], owner_ix: vec![], slim: false, names: vec![], impls: vec![], derives: vec![], inactive: vec![], features: None }
     }
 
     /// slim なファイルを本文から作り直したもの (モジュール・クレートは同じ)
@@ -587,6 +618,7 @@ impl FileIndex {
         if !self.inactive.is_empty() {
             let ina = std::mem::take(&mut self.inactive);
             self.defs.retain(|d| !ina.iter().any(|&(a, b)| a <= d.item_start && d.item_end <= b));
+            self.index_names();
             self.inactive = ina;
             self.derives = self.collect_derives();
             self.impls = self.collect_impls();
@@ -1768,8 +1800,6 @@ fn def_at1(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
         return vec![loc(file, d)];
     }
     // (見える定義: ライブラリと src の下のファイルと、このファイル)
-    let kr = f.krate;
-    let all = || ws.iter().enumerate().filter(move |(i, w)| *i == file || w.in_src || w.lib || w.krate == kr).flat_map(|(i, w)| w.defs.iter().map(move |d| (i, d)));
     // メソッド・フィールド `x.name`
     if k >= 1 && f.sym(k - 1, b'.') && !(k >= 2 && f.sym(k - 2, b'.')) {
         let call = f.sym(k + 1, b'(') || (f.before_path(k) && f.sym(k + 3, b'<'));
@@ -1819,7 +1849,7 @@ fn def_at1(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
         if (q == "Default" && name == "default") && k >= 5 && f.sym(k - 4, b':') && !f.sym(k - 5, b':') && f.ident(k - 5) {
             if let Some(t) = f.struct_lit_at(k - 5) {
                 let field = f.tok(k - 5);
-                if let Some(ty) = all().map(|x| x.1).find(|d| d.kind == SymKind::Field && d.owner == t && d.name == field).map(|d| type_head(&d.ty)).filter(|h| !h.is_empty()) {
+                if let Some(ty) = named(ws, file, field).into_iter().map(|x| x.1).find(|d| d.kind == SymKind::Field && d.owner == t).map(|d| type_head(&d.ty)).filter(|h| !h.is_empty()) {
                     q = ty;
                 }
             }
@@ -1869,7 +1899,7 @@ fn def_at1(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
             }
         }
         let Some(last) = m.pop() else { return vec![] };
-        let c: Vec<(usize, &Def)> = all().filter(|(_, d)| d.kind == SymKind::Module && d.name == last && d.module[..] == m[..]).collect();
+        let c: Vec<(usize, &Def)> = named(ws, file, &last).into_iter().filter(|(_, d)| d.kind == SymKind::Module && d.module[..] == m[..]).collect();
         return prefer_ws(ws, c, file);
     }
     if name == "Self" {
@@ -1929,7 +1959,7 @@ fn def_at1(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
     }
     if cands.is_empty() {
         // (`Some` / `None` / `Ok` / `Err`: prelude のバリアント)
-        cands = all().filter(|(i, d)| ws[*i].lib && d.name == name && d.kind == SymKind::Variant && (d.owner == "Option" || d.owner == "Result")).collect();
+        cands = named(ws, file, &name).into_iter().filter(|(i, d)| ws[*i].lib && d.kind == SymKind::Variant && (d.owner == "Option" || d.owner == "Result")).collect();
     }
     if cands.is_empty() {
         return vec![];
@@ -2099,6 +2129,35 @@ fn exit_points(f: &FileIndex, file: usize, off: usize) -> Option<Vec<Loc>> {
     // (最後の式: match / if / ブロックなら中の腕・ブロックの最後の式をたどる)
     block_tails(f, file, open, close, &mut out);
     Some(out)
+}
+
+/// このファイルの `macro_rules! name { (..) => {{ ..; tail }} }` (腕が一つ) の、本体の最後の式の型
+fn macro_result_type(ws: &[&FileIndex], file: usize, name: &str, depth: u32) -> Option<String> {
+    let f = ws[file];
+    let d = f.defs.iter().find(|d| d.kind == SymKind::Macro && d.name == name)?;
+    let a = f.toks.partition_point(|t| (t.1 as usize) < d.start);
+    let e = f.toks.partition_point(|t| (t.1 as usize) < d.item_end);
+    // (腕の `=>` が一つだけ)
+    let arrows: Vec<usize> = (a..e).filter(|&q| f.sym(q, b'=') && f.sym(q + 1, b'>')).collect();
+    let mut q = *arrows.first()?;
+    if arrows.len() != 1 {
+        return None;
+    }
+    q += 2;
+    if !(f.sym(q, b'{') || f.sym(q, b'(')) {
+        return None;
+    }
+    // (`{{ .. }}` は内側のブロック)
+    let (o, c) = if f.sym(q + 1, b'{') && close_of(f, q + 1) + 1 == close_of(f, q) { (q + 1, close_of(f, q + 1)) } else { (q, close_of(f, q)) };
+    let mut tails = vec![];
+    block_tails(f, file, o, c, &mut tails);
+    let l = tails.first()?;
+    let k = f.toks.partition_point(|t| (t.2 as usize) < l.end);
+    // (本体の中の `$x` はわからない)
+    if (f.toks.partition_point(|t| (t.1 as usize) < l.start)..=k).any(|q| f.sym(q, b'$')) {
+        return None;
+    }
+    expr_type(ws, file, k, depth + 1)
 }
 
 /// ブロック (開き括弧 p) で終わる式の始め: `match x {` の match、`if c { } else {` の if、`loop {` / `unsafe {`、ただのブロック
@@ -2634,7 +2693,8 @@ fn expand(ws: &[&FileIndex], file: usize, t: &str) -> Vec<String> {
         let qual = strip_ref(&cur).split('<').next().unwrap_or("").rsplit("::").nth(1).map(|s| s.to_string());
         let nargs = targs(&cur).len();
         let aliases: Vec<&Def> = named(ws, file, &h).into_iter().map(|x| x.1).filter(|d| d.kind == SymKind::TypeAlias && d.owner.is_empty() && !d.ty.is_empty() && type_head(&d.ty) != h).collect();
-        let best = aliases.iter().copied().min_by_key(|d| (qual.as_ref().is_some_and(|q| d.module.last() != Some(q)), d.params.len() != nargs));
+        // (修飾がなければ型引数の数が合うものだけ: `Result<X, Y>` は enum の Result で、別名 `io::Result<T>` ではない)
+        let best = aliases.iter().copied().filter(|d| qual.is_some() || d.params.len() == nargs || nargs == 0).min_by_key(|d| (qual.as_ref().is_some_and(|q| d.module.last() != Some(q)), d.params.len() != nargs));
         let next = if let Some(d) = best {
             subst(&d.ty, &d.params, &targs(&cur))
         } else if matches!(h.as_str(), "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard" | "Box" | "Rc" | "Arc" | "Ref" | "RefMut" | "ManuallyDrop") {
@@ -2743,7 +2803,7 @@ fn named<'a>(ws: &[&'a FileIndex], file: usize, name: &str) -> Vec<(usize, &'a D
     let ids = match ids {
         Some(v) if ok(&v) => v,
         _ => {
-            let v: Vec<(u32, u32)> = ws.iter().enumerate().flat_map(|(i, w)| w.defs.iter().enumerate().filter(|(_, d)| d.name == name).map(move |(j, _)| (i as u32, j as u32))).collect();
+            let v: Vec<(u32, u32)> = ws.iter().enumerate().flat_map(|(i, w)| w.defs_named(name).map(move |j| (i as u32, j as u32))).collect();
             NAMED.with(|m| m.borrow_mut().insert(key, v.clone()));
             v
         }
@@ -2906,12 +2966,13 @@ fn member_def<'a>(ws: &[&'a FileIndex], file: usize, o: &str, name: &str, kinds:
     let os = owner_names(ws, file, &type_head(o));
     let kr = ws[file].krate;
     // (ワークスペースのものを先に。ライブラリは lib_rank の順)
+    let _ = kr;
+    let cands = named(ws, file, name);
     let find = |os: &[String]| {
-        ws.iter()
-            .enumerate()
-            .filter(|(i, w)| *i == file || w.in_src || w.lib || w.krate == kr)
-            .flat_map(|(_, w)| w.defs.iter().map(move |d| (w.lib, d)))
-            .filter(|(_, d)| d.name == name && kinds.contains(&d.kind) && os.contains(&d.owner) && !d.ty.is_empty())
+        cands
+            .iter()
+            .map(|(i, d)| (ws[*i].lib, *d))
+            .filter(|(_, d)| kinds.contains(&d.kind) && os.contains(&d.owner) && !d.ty.is_empty())
             // (持ち主が型そのもののもの (`Option::as_ref`) を trait のもの (`AsRef::as_ref`) より先に)
             // (同じ名前の別の型 (str の `Split<'a, P>` と slice の `Split<'a, T, P>`) は、型引数の数が合う impl を先に)
             .min_by_key(|(lib, d)| (*lib, d.owner != type_head(o), d.container.starts_with("impl") && targs(impl_self_full(&d.container)).len() != targs(o).len(), if *lib { lib_rank(d) } else { 0 }))
@@ -2965,8 +3026,6 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
     if depth > 32 || k >= f.toks.len() {
         return None;
     }
-    let kr = f.krate;
-    let all = || ws.iter().enumerate().filter(move |(i, w)| *i == file || w.in_src || w.lib || w.krate == kr).flat_map(|(i, w)| w.defs.iter().map(move |d| (i, d)));
     let self_ty = |at: usize| -> Option<String> { f.enclosing_fn(at).filter(|d| !d.owner.is_empty()).map(|d| impl_self_full(&d.container).to_string()) };
     let at = f.toks[k].1 as usize;
     // (タプルの添字 `x.0`: 数のトークンの前が `.`)
@@ -3002,7 +3061,7 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
             let q = if q == "Self" { self_ty(at)? } else { q };
             // (`a::b::P` / `m::CONST`: モジュールの下の単位構造体・const)
             if q.starts_with(|c: char| c.is_ascii_lowercase()) {
-                return all().map(|x| x.1).find(|d| d.name == r && d.owner.is_empty() && matches!(d.kind, SymKind::Struct | SymKind::Const | SymKind::Static)).map(|d| if d.kind == SymKind::Struct { r.to_string() } else { d.ty.clone() });
+                return named(ws, file, r).into_iter().map(|x| x.1).find(|d| d.owner.is_empty() && matches!(d.kind, SymKind::Struct | SymKind::Const | SymKind::Static)).map(|d| if d.kind == SymKind::Struct { r.to_string() } else { d.ty.clone() });
             }
             return member_type(ws, file, &q, r, &[SymKind::Const, SymKind::Variant]).or(Some(q).filter(|_| r.starts_with(|c: char| c.is_ascii_uppercase())));
         }
@@ -3018,7 +3077,7 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
             return Some(r.to_string());
         }
         // (const / static)
-        return all().map(|x| x.1).find(|d| d.name == r && d.owner.is_empty() && matches!(d.kind, SymKind::Const | SymKind::Static) && !d.ty.is_empty()).map(|d| d.ty.clone());
+        return named(ws, file, r).into_iter().map(|x| x.1).find(|d| d.owner.is_empty() && matches!(d.kind, SymKind::Const | SymKind::Static) && !d.ty.is_empty()).map(|d| d.ty.clone());
     }
     if f.sym(k, b'?') && k >= 1 {
         let t = expr_type(ws, file, k - 1, depth + 1)?;
@@ -3059,7 +3118,8 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
             return match f.tok(m - 1) {
                 "vec" => Some("Vec<_>".to_string()),
                 "format" => Some("String".to_string()),
-                _ => None,
+                // (このファイルの `macro_rules!` で腕が一つのもの: 本体のブロックの最後の式の型)
+                mname => macro_result_type(ws, file, mname, depth),
             };
         }
         // ターボフィッシュ `x.collect::<Vec<_>>()` / `x.parse::<u8>()`
@@ -3202,7 +3262,7 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
                 return None;
             }
             // (型引数のある struct: フィールドの初期化の式から型引数を決める `Wrapper { inner: Point::new() }` → Wrapper<Point>)
-            let params = all().map(|x| x.1).find(|d| d.name == name && d.owner.is_empty() && d.kind == SymKind::Struct).map(|d| d.params.clone()).unwrap_or_default();
+            let params = named(ws, file, name).into_iter().map(|x| x.1).find(|d| d.owner.is_empty() && d.kind == SymKind::Struct).map(|d| d.params.clone()).unwrap_or_default();
             if params.is_empty() {
                 return Some(name.to_string());
             }
@@ -3224,7 +3284,7 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
                         e += 1;
                     }
                     let field = f.tok(j);
-                    if let Some(fd) = all().map(|x| x.1).find(|d| d.kind == SymKind::Field && d.owner == name && d.name == field) {
+                    if let Some(fd) = named(ws, file, field).into_iter().map(|x| x.1).find(|d| d.kind == SymKind::Field && d.owner == name) {
                         if let Some(pi) = params.iter().position(|p| *p == fd.ty) {
                             if let Some(t) = expr_type(ws, file, e - 1, depth + 1) {
                                 args[pi] = t;
@@ -3278,7 +3338,7 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
             }
             return None;
         }
-        return all().map(|x| x.1).find(|d| d.name == name && d.owner.is_empty() && d.kind == SymKind::Function && !d.ty.is_empty()).map(|d| d.ty.clone());
+        return named(ws, file, name).into_iter().map(|x| x.1).find(|d| d.owner.is_empty() && d.kind == SymKind::Function && !d.ty.is_empty()).map(|d| d.ty.clone());
     }
     if f.toks[k].0 == 2 && f.text.as_bytes()[f.toks[k].1 as usize] == b'"' {
         return Some("&str".to_string());
@@ -3619,9 +3679,18 @@ pub fn complete(ws: &[&FileIndex], file: usize, off: usize) -> (Vec<Item>, bool)
                 dot_known = true;
                 let mut os = owners_of(ws, file, &o);
                 os.extend(blanket_traits(ws, file, true));
-                for (i, d) in all() {
+                // (持ち主ごとに索引で引く。順は前と同じく ファイル → 定義 の順)
+                let mut hits: Vec<(usize, usize)> = vec![];
+                for (i, w) in ws.iter().enumerate().filter(|(i, w)| *i == file || w.in_src || w.lib || w.krate == kr) {
+                    for o in &os {
+                        hits.extend(w.defs_owned(o).map(|j| (i, j)));
+                    }
+                }
+                hits.sort_unstable();
+                for (i, j) in hits {
+                    let d = &ws[i].defs[j];
                     // (`self` を取らない関連関数 (`default()`) は `.` の後に出さない: rust-analyzer と同じ)
-                    if kinds.contains(&d.kind) && os.contains(&d.owner) && (d.kind != SymKind::Method || d.has_self) {
+                    if kinds.contains(&d.kind) && (d.kind != SymKind::Method || d.has_self) {
                         add(&mut out, if ws[i].lib { 1 } else { 0 }, &d.name, Some(d.kind), false, d.container.to_string(), true);
                     }
                 }
