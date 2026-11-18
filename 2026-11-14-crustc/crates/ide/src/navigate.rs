@@ -16,7 +16,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use crustc_syntax::fxhash::FxMap;
+use crustc_syntax::fxhash::{FxMap, FxSet};
 use crustc_syntax::lexer::tokenize;
 use crate::symbols::{SymKind, Symbol, document_symbols};
 
@@ -1472,7 +1472,7 @@ fn def_at1(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
         let kinds: &[SymKind] = if call { &[SymKind::Method] } else { &[SymKind::Field] };
         let owner = k.checked_sub(2).and_then(|r| expr_type(ws, file, r, 0)).filter(|t| !type_head(t).is_empty() && type_head(t) != "_");
         let (owners, concrete) = owner.as_ref().map(|o| owners_of2(ws, file, o)).unwrap_or_default();
-        let c: Vec<(usize, &Def)> = all().filter(|(_, d)| d.name == name && kinds.contains(&d.kind) && (owner.is_none() || owners.contains(&d.owner))).collect();
+        let c: Vec<(usize, &Def)> = named(ws, file, &*name).into_iter().filter(|(_, d)| kinds.contains(&d.kind) && (owner.is_none() || owners.contains(&d.owner))).collect();
         let mut c = prefer_concrete(c, &concrete);
         if c.is_empty() && owner.is_some() {
             if let Some(l) = derive_method(ws, file, &concrete, &name) {
@@ -1480,7 +1480,7 @@ fn def_at1(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
             }
             // (ブランケットの impl の trait のメソッド: `"x".to_string()`)
             let bl = blanket_traits(ws, file, false);
-            c = all().filter(|(_, d)| d.name == name && kinds.contains(&d.kind) && bl.contains(&d.owner)).collect();
+            c = named(ws, file, &*name).into_iter().filter(|(_, d)| kinds.contains(&d.kind) && bl.contains(&d.owner)).collect();
         }
         if owner.is_none() {
             // (受け手の型が分からないときは、ライブラリも含めて一つだけのときだけ)
@@ -1510,7 +1510,7 @@ fn def_at1(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
         if !matches!(q.as_str(), "crate" | "super" | "self") {
             // (型のメンバか、モジュールの中のアイテム)
             let (qs, nc) = owner_split(ws, file, &q);
-            let c: Vec<(usize, &Def)> = all().filter(|(_, d)| d.name == name && (qs.contains(&d.owner) || (d.owner.is_empty() && d.module.last() == Some(&q)))).collect();
+            let c: Vec<(usize, &Def)> = named(ws, file, &*name).into_iter().filter(|(_, d)| qs.contains(&d.owner) || (d.owner.is_empty() && d.module.last() == Some(&q))).collect();
             let c = prefer_concrete(c, &qs[..nc]);
             // (見つからない: `use std::sync::Mutex` のように再エクスポートされた名前なら、下の use でたどる。
             // Q が知らない名前 (`syn::Pat` / `Delimiter::None` の外部クレートのもの) なら答えない)
@@ -1551,14 +1551,14 @@ fn def_at1(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
     }
     if name == "Self" {
         if let Some(o) = f.enclosing_owner(off) {
-            let c: Vec<(usize, &Def)> = all().filter(|(_, d)| d.name == o && d.owner.is_empty() && matches!(d.kind, SymKind::Struct | SymKind::Enum | SymKind::Union | SymKind::TypeAlias)).collect();
+            let c: Vec<(usize, &Def)> = named(ws, file, &*o).into_iter().filter(|(_, d)| d.owner.is_empty() && matches!(d.kind, SymKind::Struct | SymKind::Enum | SymKind::Union | SymKind::TypeAlias)).collect();
             return prefer_ws(ws, c, file);
         }
         return vec![];
     }
     // `#[derive(Name)]` の Name は derive のマクロ
     if f.in_derive(k) {
-        let c: Vec<(usize, &Def)> = all().filter(|(_, d)| d.name == name && d.kind == SymKind::Macro).collect();
+        let c: Vec<(usize, &Def)> = named(ws, file, &*name).into_iter().filter(|(_, d)| d.kind == SymKind::Macro).collect();
         return prefer_ws(ws, c, file);
     }
     // (`let x` / `let mut x` の x はそれ自身)
@@ -1576,7 +1576,7 @@ fn def_at1(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
         if let Some(t) = f.struct_lit_at(k) {
             let t = if t == "Self" { f.enclosing_owner(off).unwrap_or(t) } else { t };
             let (os, _) = owner_split(ws, file, &t);
-            let c: Vec<(usize, &Def)> = all().filter(|(_, d)| d.name == name && d.kind == SymKind::Field && os.contains(&d.owner)).collect();
+            let c: Vec<(usize, &Def)> = named(ws, file, &*name).into_iter().filter(|(_, d)| d.kind == SymKind::Field && os.contains(&d.owner)).collect();
             return prefer_ws(ws, c, file);
         }
     }
@@ -1597,11 +1597,11 @@ fn def_at1(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
         }
     }
     // アイテム: 同じモジュール → use → ワークスペースで一つ → ライブラリ (prelude の Option / Some など)
-    let mut cands: Vec<(usize, &Def)> = all().filter(|(_, d)| d.name == name && d.owner.is_empty() && ITEM_KINDS.contains(&d.kind)).collect();
+    let mut cands: Vec<(usize, &Def)> = named(ws, file, &*name).into_iter().filter(|(_, d)| d.owner.is_empty() && ITEM_KINDS.contains(&d.kind)).collect();
     if cands.is_empty() {
         // (`use a::Point as Pt` の Pt: もとの名前の定義を、その use で引く)
         if let Some(real) = f.use_alias(&name) {
-            cands = all().filter(|(_, d)| d.name == real && d.owner.is_empty() && ITEM_KINDS.contains(&d.kind)).collect();
+            cands = named(ws, file, &*real).into_iter().filter(|(_, d)| d.owner.is_empty() && ITEM_KINDS.contains(&d.kind)).collect();
         }
     }
     if cands.is_empty() {
@@ -1827,6 +1827,19 @@ fn references_in(ws: &[&FileIndex], file: usize, off: usize, include_decl: bool,
             }
         }
     }
+    // (メンバなら持ち主の型の名前と、ワークスペースの具体的な型 (struct / enum / union) の名前 (型の別名・trait は除く))
+    let owner: Option<String> = tdef.filter(|x| !x.owner.is_empty() && matches!(x.kind, SymKind::Method | SymKind::Function | SymKind::Const)).map(|x| x.owner.clone());
+    let mut concrete: FxSet<&str> = if owner.is_some() {
+        let aliases: FxSet<&str> = ws.iter().filter(|w| !w.lib).flat_map(|w| w.defs.iter()).filter(|d| matches!(d.kind, SymKind::TypeAlias | SymKind::Trait)).map(|d| d.name.as_str()).collect();
+        ws.iter().filter(|w| !w.lib).flat_map(|w| w.defs.iter()).filter(|d| matches!(d.kind, SymKind::Struct | SymKind::Enum | SymKind::Union) && !aliases.contains(d.name.as_str())).map(|d| d.name.as_str()).collect()
+    } else {
+        FxSet::default()
+    };
+    // (持ち主が trait なら `P::default()` も trait のメソッドになりうる: 絞らない)
+    let owner = owner.filter(|o| concrete.contains(o.as_str()));
+    if owner.is_none() {
+        concrete.clear();
+    }
     for (i, &w0) in ws.iter().enumerate() {
         if (is_local && i != target.file) || only.is_some_and(|o| o != i) {
             continue;
@@ -1865,6 +1878,16 @@ fn references_in(ws: &[&FileIndex], file: usize, off: usize, include_decl: bool,
                 continue;
             }
             let here = Loc { file: i, start: at, end: (w.toks[k as usize].2 as usize) };
+            // (速さのため: メンバの参照で `Q::name` の Q が持ち主でない具体的な型 (struct / enum) なら解決するまでもない)
+            if let Some(o) = owner.as_deref() {
+                let k = k as usize;
+                if w.after_path(k) && k >= 3 && w.ident(k - 3) {
+                    let q = w.tok(k - 3);
+                    if q != o && q != "Self" && concrete.contains(q) {
+                        continue;
+                    }
+                }
+            }
             if def_at(wsx, i, at).first().is_some_and(|l| targets.contains(l)) {
                 out.push(here);
             } else if is_field && shorthand_field(wsx, i, k as usize).first() == Some(&target) {
@@ -2222,12 +2245,40 @@ fn index_type(t: &str, range: bool) -> Option<String> {
 }
 
 thread_local! {
+    /// 名前 → その名前の定義 (ファイルの番号, defs の番号)。問い合わせ 1 回の間だけ (references は同じ名前を何百回も引く)。
+    /// キーはワークスペースのファイルの数と名前
+    static NAMED: RefCell<FxMap<(usize, String), Vec<(u32, u32)>>> = RefCell::new(FxMap::default());
+}
+
+/// ファイル file から見える (同じクレート・src・ライブラリ) 名前 name の定義
+fn named<'a>(ws: &[&'a FileIndex], file: usize, name: &str) -> Vec<(usize, &'a Def)> {
+    let kr = ws[file].krate;
+    let key = (ws.len(), name.to_string());
+    let ids = NAMED.with(|m| m.borrow().get(&key).cloned());
+    // (覚えた番号が今のワークスペースと合わなければ (読み直したファイルの差し替えなど) 引き直す)
+    let ok = |ids: &[(u32, u32)]| ids.iter().all(|&(i, j)| ws.get(i as usize).and_then(|w| w.defs.get(j as usize)).is_some_and(|d| d.name == name));
+    let ids = match ids {
+        Some(v) if ok(&v) => v,
+        _ => {
+            let v: Vec<(u32, u32)> = ws.iter().enumerate().flat_map(|(i, w)| w.defs.iter().enumerate().filter(|(_, d)| d.name == name).map(move |(j, _)| (i as u32, j as u32))).collect();
+            NAMED.with(|m| m.borrow_mut().insert(key, v.clone()));
+            v
+        }
+    };
+    ids.into_iter()
+        .map(|(i, j)| (i as usize, &ws[i as usize].defs[j as usize]))
+        .filter(|(i, _)| { let w = ws[*i]; *i == file || w.in_src || w.lib || w.krate == kr })
+        .collect()
+}
+
+thread_local! {
     /// owner_names の結果 (問い合わせ 1 回の間だけ: definition / references / hover / complete の入口で消す)
     static OWNERS: RefCell<FxMap<(String, u32), (Vec<String>, usize)>> = RefCell::new(FxMap::default());
 }
 
 fn clear_memo() {
     OWNERS.with(|m| m.borrow_mut().clear());
+    NAMED.with(|m| m.borrow_mut().clear());
 }
 
 /// 型 o (頭の名前) のメンバを探すときの持ち主の名前: o 自身、型の別名の右、Vec → スライス・String → str (Deref の先)、

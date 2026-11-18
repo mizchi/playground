@@ -811,7 +811,11 @@ pub fn read_msg<R: BufRead>(r: &mut R) -> io::Result<Option<String>> {
 }
 
 pub fn write_msg<W: Write>(w: &mut W, body: &str) -> io::Result<()> {
-    write!(w, "Content-Length: {}\r\n\r\n{body}", body.len())?;
+    // (ヘッダと本文を 1 回で書く: stdout は行ごとに flush するので、分けると書き込みが 3 回になる)
+    let mut m = Vec::with_capacity(body.len() + 32);
+    write!(m, "Content-Length: {}\r\n\r\n", body.len())?;
+    m.extend_from_slice(body.as_bytes());
+    w.write_all(&m)?;
     w.flush()
 }
 
