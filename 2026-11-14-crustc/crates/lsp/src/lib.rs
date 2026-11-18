@@ -528,11 +528,15 @@ impl Server {
     fn signature_help(&mut self, uri: &str, line: u32, ch: u32) -> Value {
         self.at(uri, line, ch, |srv, ws, idx, fi, off| {
             let load = |i: usize| srv.load(ws, i);
-            let Some((sig, params, active)) = navigate::signature_help(idx, fi, off, &load) else { return Value::Null };
+            let Some((sig, params, active, doc)) = navigate::signature_help(idx, fi, off, &load) else { return Value::Null };
             // (引数の範囲は UTF-16 の桁で)
             let u16 = |b: usize| sig[..b].encode_utf16().count();
             let ps: Vec<Value> = params.iter().map(|&(a, e)| json!({ "label": [u16(a), u16(e)] })).collect();
-            json!({ "signatures": [{ "label": sig, "parameters": ps, "activeParameter": active }], "activeSignature": 0, "activeParameter": active })
+            let mut sg = json!({ "label": sig, "parameters": ps, "activeParameter": active });
+            if !doc.is_empty() {
+                sg["documentation"] = json!({ "kind": "markdown", "value": doc });
+            }
+            json!({ "signatures": [sg], "activeSignature": 0, "activeParameter": active })
         })
         .unwrap_or(Value::Null)
     }

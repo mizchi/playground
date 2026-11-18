@@ -357,7 +357,8 @@ impl FileIndex {
     }
 
     /// `#[cfg(..)]` で外れるアイテムを除く (features: そのクレートで有効な feature)。slim にする前に呼ぶ。
-    /// 分かるのは feature = ".." / test / debug_assertions / unix / windows / target_os と all / any / not。ほかは成り立つとする
+    /// 分かるのは feature = ".." / test / debug_assertions / unix / windows / target_os / target_arch などと all / any / not。
+    /// ほかの cfg は (rustc と同じく) 成り立たないとする
     pub fn apply_cfg(&mut self, features: Vec<String>) {
         if self.toks.is_empty() && !self.text.is_empty() {
             return;
@@ -424,14 +425,24 @@ impl FileIndex {
                 "feature" => fs.contains(&v),
                 "target_os" => v == std::env::consts::OS,
                 "target_family" => v == std::env::consts::FAMILY,
-                _ => true,
+                "target_arch" => v == std::env::consts::ARCH,
+                "target_pointer_width" => v == (usize::BITS).to_string(),
+                "target_endian" => v == if cfg!(target_endian = "little") { "little" } else { "big" },
+                "target_env" => v == if cfg!(target_env = "gnu") { "gnu" } else if cfg!(target_env = "musl") { "musl" } else if cfg!(target_env = "msvc") { "msvc" } else { "" },
+                "target_vendor" => v == if cfg!(target_vendor = "apple") { "apple" } else if cfg!(target_vendor = "pc") { "pc" } else { "unknown" },
+                "target_has_atomic" => matches!(v.as_str(), "8" | "16" | "32" | "64" | "ptr"),
+                "panic" => v == "unwind",
+                // (rustc と同じく、設定されていない cfg は成り立たない)
+                _ => false,
             };
         }
         match w.as_str() {
             "unix" => cfg!(unix),
             "windows" => cfg!(windows),
-            "miri" => false,
-            _ => true,
+            // (rust-analyzer はワークスペースのクレートを test と debug_assertions ありで見る)
+            "test" | "debug_assertions" => true,
+            // (設定されていない cfg: `no_global_oom_handling` / `miri` / `doc` / `bootstrap` など)
+            _ => false,
         }
     }
 
@@ -1225,7 +1236,13 @@ fn prefer_ws(ws: &[&FileIndex], c: Vec<(usize, &Def)>, file: usize) -> Vec<Loc> 
     }
     let score = lib_rank;
     let best = l.iter().map(|x| score(x.1)).min().unwrap();
-    pick(l.into_iter().filter(|x| score(x.1) == best).collect(), file)
+    let l: Vec<(usize, &Def)> = l.into_iter().filter(|x| score(x.1) == best).collect();
+    // (同じファイルの同じ名前のメソッドがいくつも: 型引数の違う trait の impl (`Extend<T>` / `Extend<&T>` for Vec)。
+    // 先のもの (ふつうは総称的なもの) にする)
+    if l.len() > 1 && l.iter().all(|x| x.0 == l[0].0 && x.1.kind == SymKind::Method && x.1.name == l[0].1.name && x.1.owner == l[0].1.owner) {
+        return vec![loc(l[0].0, l[0].1)];
+    }
+    pick(l, file)
 }
 
 /// ライブラリの定義の順位 (小さいほど先): モジュールのパスが短いもの。`sys` / `os` の下や、既定でない `nonpoison` などは後
@@ -2164,6 +2181,9 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
     let all = || ws.iter().enumerate().filter(move |(i, w)| *i == file || w.in_src || w.lib || w.krate == kr).flat_map(|(i, w)| w.defs.iter().map(move |d| (i, d)));
     let self_ty = |at: usize| -> Option<String> { f.enclosing_fn(at).filter(|d| !d.owner.is_empty()).map(|d| impl_self_full(&d.container).to_string()) };
     let at = f.toks[k].1 as usize;
+    if let Some(t) = literal_type(f, k) {
+        return Some(t);
+    }
     if f.ident(k) {
         let r = f.tok(k);
         if k >= 1 && f.ident(k - 1) && f.tok(k - 1) == "as" {
@@ -3038,7 +3058,7 @@ pub fn rename(ws: &[&FileIndex], file: usize, off: usize, new: &str, load: Load)
 }
 
 /// textDocument/signatureHelp: off を囲む呼び出し `f(..|..)` の (シグネチャ, 引数の byte 範囲 (シグネチャの中), 今の引数)
-pub fn signature_help(ws: &[&FileIndex], file: usize, off: usize, load: Load) -> Option<(String, Vec<(usize, usize)>, usize)> {
+pub fn signature_help(ws: &[&FileIndex], file: usize, off: usize, load: Load) -> Option<(String, Vec<(usize, usize)>, usize, String)> {
     clear_memo();
     let f = ws[file];
     // (off より前のトークンから戻って、閉じていない `(` を探す。数えるのは深さ 0 のカンマ)
@@ -3104,17 +3124,26 @@ pub fn signature_help(ws: &[&FileIndex], file: usize, off: usize, load: Load) ->
     let method_call = c >= 1 && f.sym(c - 1, b'.');
     let t = *def_at(ws, file, f.toks[c].1 as usize).first()?;
     let tf = ws[t.file];
-    let def = tf.defs.iter().find(|x| x.start == t.start && matches!(x.kind, SymKind::Function | SymKind::Method | SymKind::Struct | SymKind::Variant))?;
-    let held;
-    let text: &str = if tf.slim {
-        held = load(t.file)?;
-        &held.text
-    } else {
-        &tf.text
+    let (sig, name_at, doc) = match tf.defs.iter().find(|x| x.start == t.start) {
+        Some(def) => {
+            if !matches!(def.kind, SymKind::Function | SymKind::Method | SymKind::Struct | SymKind::Variant) {
+                return None;
+            }
+            let held;
+            let text: &str = if tf.slim {
+                held = load(t.file)?;
+                &held.text
+            } else {
+                &tf.text
+            };
+            let sig = signature(text.get(def.item_start..def.item_end.min(text.len()))?, def.kind);
+            let at = sig.find(def.name.as_str()).unwrap_or(0) + def.name.len();
+            (sig, at, doc_comment(text, def.item_start))
+        }
+        // (ローカルの束縛: クロージャ `let f = |a: T| ..` なら `impl Fn(a: T) -> R`)
+        None => (closure_sig(ws, t)?, 0, String::new()),
     };
-    let sig = signature(text.get(def.item_start..def.item_end.min(text.len()))?, def.kind);
     // (引数の並び: 名前の後の最初の `(` .. `)`。型引数 `<..>` の中は飛ばす)
-    let name_at = sig.find(def.name.as_str()).unwrap_or(0) + def.name.len();
     let b = sig.as_bytes();
     let mut i = name_at;
     let mut dg = 0;
@@ -3164,5 +3193,107 @@ pub fn signature_help(ws: &[&FileIndex], file: usize, off: usize, load: Load) ->
     });
     // (メソッドの呼び出し `x.m(..)` では self は引数に数えない: rust-analyzer と同じ)
     let params = if method_call && has_self { params[1..].to_vec() } else { params };
-    Some((sig, params, commas))
+    Some((sig, params, commas, doc))
+}
+
+/// トークン k で終わるリテラルの型 (`"a"` → &str、`'c'` → char、`b"x"` → &[u8]、`b'x'` → u8、`1u8` → u8、`true` → bool)。
+/// 式全体がリテラルのときだけ (`x + 1` の 1 は式の型ではない)。接尾辞のない数 (`0` / `1.5`) は使い方で型が決まる
+/// (rust-analyzer は `let mut acc = 0; acc += x_i64` を i64 にする) ので答えない。
+/// (字句では数は 1 文字ずつの記号、接尾辞は続く識別子)
+fn literal_type(f: &FileIndex, k: usize) -> Option<String> {
+    let b = f.text.as_bytes();
+    let digit = |j: usize| f.toks[j].0 == 1 && b[f.toks[j].1 as usize].is_ascii_digit();
+    let adj = |j: usize| j >= 1 && f.toks[j - 1].2 == f.toks[j].1;
+    // (s から始まる式の前が、式の始まりになれる所か)
+    let whole = |s: usize| -> bool {
+        if s == 0 {
+            return true;
+        }
+        let p = s - 1;
+        if f.ident(p) {
+            return matches!(f.tok(p), "return" | "break" | "in");
+        }
+        if f.sym(p, b'=') {
+            return !(p >= 1 && f.toks[p - 1].2 == f.toks[p].1 && f.toks[p - 1].0 == 1 && b"=!<>+-*/%&|^".contains(&b[f.toks[p - 1].1 as usize]));
+        }
+        if f.sym(p, b'>') {
+            return p >= 1 && f.sym(p - 1, b'=') && f.toks[p - 1].2 == f.toks[p].1;
+        }
+        f.toks[p].0 == 1 && matches!(b[f.toks[p].1 as usize], b'(' | b',' | b'{' | b'[' | b';' | b'|')
+    };
+    if f.toks[k].0 == 2 {
+        let s = f.tok(k);
+        if !whole(k) {
+            return None;
+        }
+        return Some(
+            if s.starts_with("b'") {
+                "u8"
+            } else if s.starts_with('b') {
+                "&[u8]"
+            } else if s.starts_with('\'') {
+                "char"
+            } else {
+                "&str"
+            }
+            .to_string(),
+        );
+    }
+    if !f.ident(k) {
+        return None;
+    }
+    let w = f.tok(k);
+    if w == "true" || w == "false" {
+        return whole(k).then(|| "bool".to_string());
+    }
+    // (接尾辞 `1u8` / `2.0f32` / `1_000usize`: 前へ続く数字・`.`・`_` の始めが式の始め)
+    // (`1_000usize` は `1` と `_000usize`)
+    let suf = w.trim_start_matches(|c: char| c == '_' || c.is_ascii_digit());
+    if PRIMS.contains(&suf) && adj(k) && digit(k - 1) {
+        let mut j = k - 1;
+        while j >= 1 && adj(j) && (digit(j - 1) || f.sym(j - 1, b'.')) {
+            j -= 1;
+        }
+        return whole(j).then(|| suf.to_string());
+    }
+    None
+}
+
+/// ローカルの束縛 t がクロージャ (`let f = |a: T, b| -> R { .. }` / `move |..|`) なら、そのシグネチャ `impl Fn(a: T, b) -> R`
+/// (戻り値の型を書いていなければ、本体の式の型)
+fn closure_sig(ws: &[&FileIndex], t: Loc) -> Option<String> {
+    let f = ws[t.file];
+    if f.slim {
+        return None;
+    }
+    let b = f.toks.partition_point(|x| (x.1 as usize) < t.start);
+    if !(f.sym(b + 1, b'=') && !f.sym(b + 2, b'=')) {
+        return None;
+    }
+    let mut c = b + 2;
+    if f.tok(c) == "move" {
+        c += 1;
+    }
+    if !f.sym(c, b'|') {
+        return None;
+    }
+    let mut e = c + 1;
+    while e < f.toks.len() && !f.sym(e, b'|') {
+        e += 1;
+    }
+    if e >= f.toks.len() {
+        return None;
+    }
+    let params = if e > c + 1 { f.text[f.toks[c].2 as usize..f.toks[e].1 as usize].split_whitespace().collect::<Vec<_>>().join(" ") } else { String::new() };
+    let ret = if f.sym(e + 1, b'-') && f.sym(e + 2, b'>') {
+        let mut j = e + 3;
+        while j < f.toks.len() && !f.sym(j, b'{') {
+            j += 1;
+        }
+        let r = f.text.get(f.toks.get(e + 3)?.1 as usize..f.toks.get(j)?.1 as usize)?.trim();
+        format!(" -> {}", r.split_whitespace().collect::<Vec<_>>().join(" "))
+    } else {
+        expr_end(f, e + 1, false).and_then(|x| expr_type(ws, t.file, x, 1)).map(|r| format!(" -> {r}")).unwrap_or_default()
+    };
+    Some(format!("impl Fn({params}){ret}"))
 }

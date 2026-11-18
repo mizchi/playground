@@ -202,7 +202,7 @@ ws/src/lib.rs:86:24 Error -> ws/src/lib.rs:46:10+5 | refs 7/6 | ```rust⏎pub en
 ws/src/lib.rs:86:31 Empty -> ws/src/lib.rs:47:5+5 | refs 3/2 | ```rust⏎Error⏎Empty⏎```
 ws/src/lib.rs:88:9 let -> - | refs 0/0 | -
 ws/src/lib.rs:88:13 mut -> ws/src/lib.rs:88:13+3 | refs 1/0 [ws/src/lib.rs:88:13+3] | ```rust⏎mut⏎```
-ws/src/lib.rs:88:17 sum -> ws/src/lib.rs:88:17+3 | refs 3/2 [ws/src/lib.rs:88:17+3 ws/src/lib.rs:90:13+3 ws/src/lib.rs:95:12+3] | ```rust⏎sum⏎```
+ws/src/lib.rs:88:17 sum -> ws/src/lib.rs:88:17+3 | refs 3/2 [ws/src/lib.rs:88:17+3 ws/src/lib.rs:90:13+3 ws/src/lib.rs:95:12+3] | ```rust⏎sum: i64⏎```
 ws/src/lib.rs:88:24 i64 -> - | refs 14/14 | ```rust⏎i64⏎```
 ws/src/lib.rs:89:9 for -> - | refs 0/0 | -
 ws/src/lib.rs:89:13 p -> ws/src/lib.rs:89:13+1 | refs 2/1 [ws/src/lib.rs:89:13+1 ws/src/lib.rs:90:20+1] | ```rust⏎p: Pt⏎```
@@ -210,7 +210,7 @@ ws/src/lib.rs:89:15 in -> ws/src/lib.rs:89:15+2 | refs 1/0 [ws/src/lib.rs:89:15+
 ws/src/lib.rs:89:18 self -> - | refs 0/0 | -
 ws/src/lib.rs:89:23 items -> ws/src/lib.rs:37:9+5 | refs 6/5 | ```rust⏎Counter⏎pub items: Vec<Pt>⏎```
 ws/src/lib.rs:89:29 iter -> lib/core/src/slice/mod.rs:8:12+4 | refs 4/3 [lib/core/src/slice/mod.rs:8:12+4 ws/src/lib.rs:89:29+4 ws/src/lib.rs:92:34+4 ws/src/lib.rs:151:17+4] | ```rust⏎impl [T]⏎pub fn iter(&self) -> Iter<'_, T>⏎```
-ws/src/lib.rs:90:13 sum -> ws/src/lib.rs:88:17+3 | refs 3/2 | ```rust⏎sum⏎```
+ws/src/lib.rs:90:13 sum -> ws/src/lib.rs:88:17+3 | refs 3/2 | ```rust⏎sum: i64⏎```
 ws/src/lib.rs:90:20 p -> ws/src/lib.rs:89:13+1 | refs 2/1 | ```rust⏎p: Pt⏎```
 ws/src/lib.rs:90:22 x -> ws/src/shapes.rs:7:9+1 | refs 15/14 | ```rust⏎Point⏎pub x: i32⏎```
 ws/src/lib.rs:90:24 as -> - | refs 0/0 | -
@@ -229,7 +229,7 @@ ws/src/lib.rs:93:22 i -> ws/src/lib.rs:92:14+1 | refs 2/1 | ```rust⏎i⏎```
 ws/src/lib.rs:93:25 q -> ws/src/lib.rs:92:17+1 | refs 2/1 | ```rust⏎q⏎```
 ws/src/lib.rs:93:27 y -> ws/src/shapes.rs:8:9+1 | refs 9/8 | ```rust⏎Point⏎pub y: i32⏎```
 ws/src/lib.rs:95:9 Ok -> lib/core/src/result.rs:5:5+2 | refs 3/2 [lib/core/src/result.rs:5:5+2 ws/src/lib.rs:95:9+2 ws/src/lib.rs:106:9+2] | ```rust⏎Result⏎Ok(T)⏎```
-ws/src/lib.rs:95:12 sum -> ws/src/lib.rs:88:17+3 | refs 3/2 | ```rust⏎sum⏎```
+ws/src/lib.rs:95:12 sum -> ws/src/lib.rs:88:17+3 | refs 3/2 | ```rust⏎sum: i64⏎```
 ws/src/lib.rs:98:5 pub -> - | refs 0/0 | -
 ws/src/lib.rs:98:9 fn -> - | refs 0/0 | -
 ws/src/lib.rs:98:12 points -> ws/src/lib.rs:98:12+6 | refs 1/0 [ws/src/lib.rs:98:12+6] | ```rust⏎impl Counter⏎pub fn points(&self) -> Points⏎```

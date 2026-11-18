@@ -182,7 +182,8 @@ fn cfg_predicates() {
     if cfg!(windows) {
         want.push("windows_");
     }
-    want.extend(["other", "other_kv", "other_fn", "m", "inner"]);
+    // (設定されていない cfg `whatever` / `foo = "x"` は成り立たない: rustc と同じ)
+    want.extend(["other_fn", "m", "inner"]);
     assert_eq!(names, want);
     assert!(f.derives.is_empty());
     assert!(f.in_inactive(at(src, "any_bc", 0)));
@@ -683,7 +684,7 @@ fn signature_help_calls() {
                fn f(p: P) { p.m(1, |x| x); P::new(g::<u8>(1, vec![(1, 2)]), ); T2(1, 2); let y = [1, 2]; }\n";
     let fi = FileIndex::new(src.to_string(), vec![]);
     let ws = [&fi];
-    let sh = |p: &str, d: usize| signature_help(&ws, 0, at(src, p, 0) + d, &no).map(|(s, ps, a)| (s.clone(), ps.iter().map(|&(x, y)| s[x..y].to_string()).collect::<Vec<_>>(), a));
+    let sh = |p: &str, d: usize| signature_help(&ws, 0, at(src, p, 0) + d, &no).map(|(s, ps, a, _)| (s.clone(), ps.iter().map(|&(x, y)| s[x..y].to_string()).collect::<Vec<_>>(), a));
     let (sig, ps, a) = sh("1, |x|", 0).unwrap();
     assert_eq!(sig, "fn m(&self, a: u8, b: impl Fn(u8) -> u8) -> u8");
     assert_eq!(ps, s(&["a: u8", "b: impl Fn(u8) -> u8"]));
@@ -820,7 +821,7 @@ fn signature_help_edges() {
                fn t(p: P) { P::m(&p, 1); p.n(1); p.o(1); p.q(1); h(|x| x, 2); z(); y(1); k([0; 3], 1); h(|x| { x }, 1); }\n";
     let fi = FileIndex::new(src.to_string(), vec![]);
     let ws = [&fi];
-    let sh = |p: &str, d: usize| signature_help(&ws, 0, at(src, p, 0) + d, &no).map(|(s, ps, a)| (ps.iter().map(|&(x, y)| s[x..y].to_string()).collect::<Vec<_>>(), a));
+    let sh = |p: &str, d: usize| signature_help(&ws, 0, at(src, p, 0) + d, &no).map(|(s, ps, a, _)| (ps.iter().map(|&(x, y)| s[x..y].to_string()).collect::<Vec<_>>(), a));
     // (パスで呼ぶ `P::m(&p, ..)` は self も引数)
     assert_eq!(sh("1); p.n", 0), Some((s(&["&self", "a: u8"]), 1)));
     assert_eq!(sh("1); p.o", 0), Some((s(&["a: u8"]), 0)));
@@ -833,4 +834,60 @@ fn signature_help_edges() {
     assert_eq!(sh("1); h(|x| {", 0), Some((s(&["a: [u8; 3]", "b: u8"]), 1)));
     // (引数の中のブロックの中は答えない)
     assert_eq!(sh("x }, 1", 0), None);
+}
+
+#[test]
+fn cfg_target_keys() {
+    let src = format!(
+        "#[cfg(target_arch = \"{a}\")]\nfn arch() {{}}\n#[cfg(target_arch = \"nope\")]\nfn arch_no() {{}}\n\
+         #[cfg(target_pointer_width = \"{w}\")]\nfn width() {{}}\n#[cfg(target_pointer_width = \"7\")]\nfn width_no() {{}}\n\
+         #[cfg(target_has_atomic = \"64\")]\nfn atomic() {{}}\n#[cfg(panic = \"unwind\")]\nfn unwind() {{}}\n#[cfg(panic = \"abort\")]\nfn abort() {{}}\n\
+         #[cfg(not(no_global_oom_handling))]\nfn oom() {{}}\n#[cfg(test)]\nfn t() {{}}\n#[cfg(debug_assertions)]\nfn da() {{}}\n#[cfg(doc)]\nfn doc_() {{}}\n\
+         #[cfg(target_endian = \"little\")]\nfn little() {{}}\n#[cfg(target_endian = \"big\")]\nfn big() {{}}\n",
+        a = std::env::consts::ARCH,
+        w = usize::BITS
+    );
+    let mut f = FileIndex::new(src.clone(), vec![]);
+    f.apply_cfg(vec![]);
+    let names: Vec<&str> = f.defs.iter().map(|d| d.name.as_str()).collect();
+    let mut want = vec!["arch", "width", "atomic", "unwind", "oom", "t", "da"];
+    want.push(if cfg!(target_endian = "little") { "little" } else { "big" });
+    assert_eq!(names, want);
+}
+
+#[test]
+fn signature_help_closures_and_docs() {
+    let src = "/// 二倍にする\nfn dbl(x: u8) -> u8 { x * 2 }\nfn f() {\n    let h = |name: &str, n: u8| -> Option<u8> { None };\n    let g = move |a| dbl(a);\n    let k = || 1u8;\n    let v = 3;\n    h(\"a\", 1); g(2); k(); dbl(v);\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let sh = |p: &str| signature_help(&ws, 0, at(src, p, 0), &no).map(|(s, ps, a, d)| (s.clone(), ps.iter().map(|&(x, y)| s[x..y].to_string()).collect::<Vec<_>>(), a, d));
+    let (sig, ps, a, _) = sh("1); g").unwrap();
+    assert_eq!(sig, "impl Fn(name: &str, n: u8) -> Option<u8>");
+    assert_eq!((ps, a), (s(&["name: &str", "n: u8"]), 1));
+    let (sig, ps, _, _) = sh("2); k").unwrap();
+    assert_eq!((sig.as_str(), ps), ("impl Fn(a) -> u8", s(&["a"])));
+    let (sig, ps, _, _) = sh("); dbl").unwrap();
+    assert_eq!((sig.as_str(), ps), ("impl Fn() -> u8", vec![]));
+    // doc コメントも
+    let (sig, _, _, doc) = sh("v);").unwrap();
+    assert_eq!((sig.as_str(), doc.as_str()), ("fn dbl(x: u8) -> u8", "二倍にする"));
+    // (クロージャでないローカルの呼び出しには答えない)
+    let src2 = "fn f(p: u8) { let q = p; q(1); }\n";
+    let f2 = FileIndex::new(src2.to_string(), vec![]);
+    assert!(signature_help(&[&f2], 0, at(src2, "1)", 0), &no).is_none());
+}
+
+#[test]
+fn literal_types() {
+    let src = "fn f(x: u8) {\n    let a = \"s\";\n    let b = 'c';\n    let c = b\"x\";\n    let d = b'x';\n    let e = 1u8;\n    let g = 1.5;\n    let h = 10;\n    let i = true;\n    let j = 2.0f32;\n    let k = 1_000usize;\n    let t = (1, 2);\n    let l = t.0;\n    let m = r\"raw\";\n    let n = x + 1u16;\n    let o = x == 1;\n    let q = 3 == 3u8;\n    let r = (1u64);\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap();
+    for (p, want) in [("a =", "a: &str"), ("b =", "b: char"), ("c =", "c: &[u8]"), ("d =", "d: u8"), ("e =", "e: u8"), ("i =", "i: bool"), ("j =", "j: f32"), ("k =", "k: usize"), ("m =", "m: &str")] {
+        assert!(ty(p).contains(want), "{p}: {}", ty(p));
+    }
+    // 接尾辞のない数 (使い方で決まる)・タプルの添字・式の途中のリテラルは型にしない
+    for p in ["g =", "h =", "l =", "n =", "o =", "q ="] {
+        assert!(!ty(p).contains(':'), "{p}: {}", ty(p));
+    }
 }

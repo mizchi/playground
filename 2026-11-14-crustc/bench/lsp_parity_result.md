@@ -13,7 +13,7 @@
 | signatureHelp (名前・引数の数・今の引数の一致) | 同じ 100% (答えた 100%) | 同じ 100% (答えた 95%) |
 | completion `x.\|` (書いてある名前を含む) | 100% (候補 11) | 100% (候補 3) |
 | completion `na\|me` (同) | 97% (候補 25) | 91% (候補 145) |
-| 時間の中央値 (ms) | defi 0.8, hove 0.7, comp 1.0, refe 3.4, rena 3.3, sign 0.7 | defi 0.4, hove 0.4, comp 2.8, refe 0.8, rena 1.0, sign 0.3 |
+| 時間の中央値 (ms) | defi 0.7, hove 0.6, comp 1.1, refe 3.2, rena 3.6, sign 0.7 | defi 0.4, hove 0.6, comp 3.3, refe 0.8, rena 0.7, sign 0.3 |
 
 #### crustc (40 箇所、`.` の後 20 箇所。比べる相手は rust-analyzer)
 
@@ -24,10 +24,10 @@
 | workspace/symbol (上位 20 の一致) | 73% | 100% |
 | definition (行き先の一致) | 同じ 100% (答えた 78%) | 同じ 100% (答えた 78%) |
 | hover (名前を含む) | 82% | 88% |
-| references (数の一致) | 78% | 100% |
-| documentHighlight (数の一致) | 85% | 100% |
-| rename (書き換えの一致) | 同じ 82% (断ったのも同じ 23/23) | 同じ 100% (断ったのも同じ 23/23) |
-| signatureHelp (名前・引数の数・今の引数の一致) | 同じ 89% (答えた 85%) | 同じ 100% (答えた 95%) |
+| references (数の一致) | 92% | 100% |
+| documentHighlight (数の一致) | 100% | 100% |
+| rename (書き換えの一致) | 同じ 94% (断ったのも同じ 23/23) | 同じ 100% (断ったのも同じ 23/23) |
+| signatureHelp (名前・引数の数・今の引数の一致) | 同じ 100% (答えた 95%) | 同じ 100% (答えた 95%) |
 | completion `x.\|` (書いてある名前を含む) | 100% (候補 48) | 100% (候補 26) |
 | completion `na\|me` (同) | 80% (候補 7) | 68% (候補 85) |
-| 時間の中央値 (ms) | defi 0.9, hove 0.9, comp 1.3, refe 14.5, rena 1.3, sign 1.3 | defi 0.8, hove 1.0, comp 5.8, refe 26.4, rena 0.9, sign 0.4 |
+| 時間の中央値 (ms) | defi 1.0, hove 1.0, comp 1.3, refe 14.2, rena 1.3, sign 1.2 | defi 0.9, hove 0.9, comp 5.8, refe 25.0, rena 0.8, sign 0.5 |
