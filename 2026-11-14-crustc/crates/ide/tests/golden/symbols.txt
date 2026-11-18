@@ -282,6 +282,7 @@ flat lock in "impl Mutex" lsp=6
 Struct Ok1 [71..100] name 82..85 
   Field a [92..97] name 92..93 u8
 Function half [102..165] name 105..109 fn half(x: u8
+  Struct Open [137..164] name 148..152 
 Function after_open [167..198] name 170..180 fn after_open() -> u8
 Impl impl Ok1 [200..254] name 205..208 
   Method m [215..252] name 218..219 fn m(&self)
@@ -292,6 +293,7 @@ Const C [275..305] name 281..282 u8
 flat Ok1 in "" lsp=23
 flat a in "Ok1" lsp=8
 flat half in "" lsp=12
+flat Open in "half" lsp=23
 flat after_open in "" lsp=12
 flat impl Ok1 in "" lsp=19
 flat m in "impl Ok1" lsp=6
@@ -306,9 +308,11 @@ Function cabi [188..242] name 213..217 fn cabi(x: i32) -> i32
 Function cabi2 [243..267] name 257..262 fn cabi2()
 Function later [268..287] name 277..282 fn later()
 Function scoped [288..321] name 310..316 fn scoped()
-Function ext_a [340..362] name 343..348 fn ext_a(x: u8) -> u8
-Static EXT_B [367..385] name 374..379 u32
-Function ext_c [401..412] name 404..409 fn ext_c()
+Extern extern "C" [323..387] name 323..333 
+  Function ext_a [340..362] name 343..348 fn ext_a(x: u8) -> u8
+  Static EXT_B [367..385] name 374..379 u32
+Extern extern [388..414] name 388..394 
+  Function ext_c [401..412] name 404..409 fn ext_c()
 Union U [479..522] name 489..490 
   Field a [497..507] name 501..502 u32
   Field b [513..519] name 513..514 f32
@@ -362,9 +366,11 @@ flat cabi in "" lsp=12
 flat cabi2 in "" lsp=12
 flat later in "" lsp=12
 flat scoped in "" lsp=12
-flat ext_a in "" lsp=12
-flat EXT_B in "" lsp=13
-flat ext_c in "" lsp=12
+flat extern "C" in "" lsp=3
+flat ext_a in "extern \"C\"" lsp=12
+flat EXT_B in "extern \"C\"" lsp=14
+flat extern in "" lsp=3
+flat ext_c in "extern" lsp=12
 flat U in "" lsp=23
 flat a in "U" lsp=8
 flat b in "U" lsp=8
@@ -398,7 +404,7 @@ flat req in "impl Tr<T> for Unit" lsp=6
 flat impl !Sync for Tuple in "" lsp=19
 flat impl Clone for Unit in "" lsp=19
 flat clone in "impl Clone for Unit" lsp=6
-flat COUNTER in "" lsp=13
+flat COUNTER in "" lsp=14
 flat Alias in "" lsp=26
 flat Fnp in "" lsp=26
 flat Short in "" lsp=26
@@ -496,8 +502,8 @@ flat Bad in "Error" lsp=22
 flat Code in "Error" lsp=22
 flat n in "Code" lsp=8
 flat LIMIT in "" lsp=14
-flat ORIGIN in "" lsp=13
-flat HITS in "" lsp=13
+flat ORIGIN in "" lsp=14
+flat HITS in "" lsp=14
 flat Describe in "" lsp=11
 flat describe in "Describe" lsp=6
 flat twice in "Describe" lsp=6

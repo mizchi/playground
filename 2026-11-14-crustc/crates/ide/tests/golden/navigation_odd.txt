@@ -13,7 +13,7 @@ sym/broken.rs:7:9 y -> sym/broken.rs:7:9+1 | refs 1/0 [sym/broken.rs:7:9+1] | ``
 sym/broken.rs:7:14 x -> sym/broken.rs:6:9+1 | refs 2/1 | ```rust⏎x: u8⏎```
 sym/broken.rs:10:1 pub -> - | refs 0/0 | -
 sym/broken.rs:10:5 struct -> - | refs 0/0 | -
-sym/broken.rs:10:12 Open -> - | refs 0/0 | -
+sym/broken.rs:10:12 Open -> sym/broken.rs:10:12+4 | refs 1/0 [sym/broken.rs:10:12+4] | ```rust⏎broken⏎pub struct Open⏎```
 sym/broken.rs:11:5 a -> - | refs 0/0 | -
 sym/broken.rs:11:8 u8 -> - | refs 18/18 | ```rust⏎u8⏎```
 sym/broken.rs:13:1 fn -> - | refs 0/0 | -
@@ -192,13 +192,13 @@ sym/odd.rs:59:14 usize -> - | refs 6/6 | ```rust⏎usize⏎```
 sym/odd.rs:60:5 fn -> - | refs 0/0 | -
 sym/odd.rs:60:8 req -> sym/odd.rs:60:8+3 | refs 2/1 [sym/odd.rs:60:8+3 sym/odd.rs:79:8+3] | ```rust⏎Tr⏎fn req(&self) -> Self::Out⏎```
 sym/odd.rs:60:13 self -> - | refs 0/0 | -
-sym/odd.rs:60:22 Self -> - | refs 0/0 | -
+sym/odd.rs:60:22 Self -> sym/odd.rs:54:11+2 | refs 3/2 | -
 sym/odd.rs:60:28 Out -> sym/odd.rs:58:10+3 | refs 2/1 | ```rust⏎Tr⏎type Out;⏎```
 sym/odd.rs:61:5 fn -> - | refs 0/0 | -
 sym/odd.rs:61:8 prov -> sym/odd.rs:61:8+4 | refs 1/0 [sym/odd.rs:61:8+4] | ```rust⏎Tr⏎fn prov(&self) -> usize⏎```
 sym/odd.rs:61:14 self -> - | refs 0/0 | -
 sym/odd.rs:61:23 usize -> - | refs 6/6 | ```rust⏎usize⏎```
-sym/odd.rs:62:9 Self -> - | refs 0/0 | -
+sym/odd.rs:62:9 Self -> sym/odd.rs:54:11+2 | refs 3/2 | -
 sym/odd.rs:62:15 K -> sym/odd.rs:59:11+1 | refs 2/1 | ```rust⏎Tr⏎const K: usize = 3⏎```
 sym/odd.rs:66:1 unsafe -> - | refs 0/0 | -
 sym/odd.rs:66:8 impl -> - | refs 0/0 | -
@@ -260,7 +260,7 @@ sym/odd.rs:82:16 Unit -> sym/odd.rs:34:12+4 | refs 6/5 | ```rust⏎odd⏎pub str
 sym/odd.rs:83:5 fn -> sym/odd.rs:83:5+2 | refs 1/0 [sym/odd.rs:83:5+2] | ```rust⏎fn⏎```
 sym/odd.rs:83:8 clone -> sym/odd.rs:83:8+5 | refs 1/0 [sym/odd.rs:83:8+5] | ```rust⏎impl Clone for Unit⏎fn clone(&self) -> Self⏎```
 sym/odd.rs:83:15 self -> - | refs 0/0 | -
-sym/odd.rs:83:24 Self -> sym/odd.rs:34:12+4 | refs 6/5 | ```rust⏎odd⏎pub struct Unit⏎```
+sym/odd.rs:83:24 Self -> sym/odd.rs:82:16+4 | refs 2/1 [sym/odd.rs:82:16+4 sym/odd.rs:83:24+4] | ```rust⏎odd⏎pub struct Unit⏎```
 sym/odd.rs:84:9 Unit -> sym/odd.rs:34:12+4 | refs 6/5 | ```rust⏎odd⏎pub struct Unit⏎```
 sym/odd.rs:87:1 const -> - | refs 0/0 | -
 sym/odd.rs:87:7 _ -> - | refs 0/0 | -

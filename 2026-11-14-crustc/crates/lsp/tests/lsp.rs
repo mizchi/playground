@@ -93,25 +93,30 @@ fn symbols() {
     assert_eq!(vars, ["Circle", "Rect"]);
     assert_eq!(syms[1]["children"][1]["children"][0]["name"], "w");
 
-    // workspace/symbol: 開いたドキュメントと、開いていない src/geom.rs から。前方一致が先
-    let r = srv.handle(&json!({"jsonrpc": "2.0", "id": 3, "method": "workspace/symbol", "params": {"query": "point"}}).to_string());
-    let r: Value = serde_json::from_str(&r[0]).unwrap();
+    // workspace/symbol (rust-analyzer と同じ決まり): 開いたドキュメントと、開いていない src/geom.rs から。
+    // 型に当たれば型だけ (`point` → struct Point。関数 point_dist や impl は出さない)
+    let ask = |srv: &mut Server, id: u32, q: &str| -> Value {
+        let r = srv.handle(&json!({"jsonrpc": "2.0", "id": id, "method": "workspace/symbol", "params": {"query": q}}).to_string());
+        serde_json::from_str(&r[0]).unwrap()
+    };
+    let r = ask(&mut srv, 3, "point");
     let hits: Vec<(String, String)> = r["result"].as_array().unwrap().iter()
         .map(|s| (s["name"].as_str().unwrap().to_string(), s["location"]["uri"].as_str().unwrap().rsplit('/').next().unwrap().to_string()))
         .collect();
-    assert_eq!(hits[0], ("Point".to_string(), "geom.rs".to_string()), "{hits:?}");
-    assert!(hits.contains(&("point_dist".to_string(), "main.rs".to_string())), "{hits:?}");
-    assert!(hits.contains(&("impl Point".to_string(), "geom.rs".to_string())), "{hits:?}");
-    assert!(!hits.iter().any(|h| h.0 == "point_junk"), "{hits:?}");
+    assert_eq!(hits, vec![("Point".to_string(), "geom.rs".to_string())], "{hits:?}");
+    // 型に当たらなければ全部から (フィールドは出さない)
+    let r = ask(&mut srv, 31, "point_d");
     let pd = r["result"].as_array().unwrap().iter().find(|s| s["name"] == "point_dist").unwrap();
     assert_eq!(pd["containerName"], "util");
     assert_eq!(pd["kind"], 12);
+    assert!(!r["result"].as_array().unwrap().iter().any(|h| h["name"] == "point_junk"), "{r}");
+    // 大文字を含む問い合わせは大文字と小文字を区別する
+    assert_eq!(ask(&mut srv, 32, "POint")["result"].as_array().unwrap().len(), 0);
 
-    // 文字の順に含むもの (`nrm` → norm) と、ファイルを書き換えたら読み直す
-    let r = srv.handle(&json!({"jsonrpc": "2.0", "id": 4, "method": "workspace/symbol", "params": {"query": "nrm"}}).to_string());
-    let r: Value = serde_json::from_str(&r[0]).unwrap();
+    // 文字の順に含むもの (`nrm` → norm。impl のメンバの containerName は持ち主の型) と、ファイルを書き換えたら読み直す
+    let r = ask(&mut srv, 4, "nrm");
     assert_eq!(r["result"][0]["name"], "norm");
-    assert_eq!(r["result"][0]["containerName"], "impl Point");
+    assert_eq!(r["result"][0]["containerName"], "Point");
     std::fs::write(root.join("src/geom.rs"), "pub struct Point2 {}\n// changed file\n").unwrap();
     let r = srv.handle(&json!({"jsonrpc": "2.0", "id": 5, "method": "workspace/symbol", "params": {"query": "nrm"}}).to_string());
     let r: Value = serde_json::from_str(&r[0]).unwrap();

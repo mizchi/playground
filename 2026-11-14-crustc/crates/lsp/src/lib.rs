@@ -56,6 +56,8 @@ pub struct Server {
     budget: usize,
     /// slim なファイルを読み直したもの (uri, 索引)。新しいものが後ろ。本文の合計が budget を超えたら古いものから捨てる
     cache: RefCell<Vec<(String, Rc<FileIndex>)>>,
+    /// クレートの名前 (workspace/symbol に出す): ワークスペースのパッケージと std のクレート (uri は本体の根のファイル)
+    crates: Vec<(String, String)>,
     pub exit: bool,
     shutdown: bool,
 }
@@ -78,6 +80,7 @@ impl Server {
             feats: HashMap::new(),
             budget: std::env::var("CRUSTC_LSP_MEM_MB").ok().and_then(|v| v.parse::<f64>().ok()).map(|m| (m * 1048576.0) as usize).unwrap_or(4 << 20),
             cache: RefCell::new(vec![]),
+            crates: vec![],
             exit: false,
             shutdown: false,
         }
@@ -246,7 +249,7 @@ impl Server {
                 .map(|s| {
                     let mut o = json!({
                         "name": s.name,
-                        "kind": s.kind.lsp(),
+                        "kind": s.lsp_kind(),
                         "range": range(text, li, s.start, s.end),
                         "selectionRange": range(text, li, s.name_start, s.name_end),
                     });
@@ -327,8 +330,15 @@ impl Server {
         // (Cargo のワークスペースならそのモジュールの木のファイル、なければ根の下の .rs 全部)
         if self.layout.is_none() {
             self.layout = Some(match root.as_ref().map(|r| (r, cargo_files(r))) {
-                Some((_, Some((v, feats)))) => {
+                Some((_, Some((v, feats, names)))) => {
                     self.feats = feats;
+                    // (クレートの名前: パッケージと、std のクレート (場所は最初のパッケージの根: rust-analyzer と同じ))
+                    self.crates = names.iter().map(|(n, p)| (n.clone(), path_uri(p))).collect();
+                    if let Some((_, p)) = names.first() {
+                        for n in ["core", "alloc", "std", "test", "proc_macro"] {
+                            self.crates.push((n.to_string(), path_uri(p)));
+                        }
+                    }
                     v
                 }
                 Some((r, None)) => {
@@ -407,25 +417,61 @@ impl Server {
     }
 
     /// workspace/symbol: 名前が問い合わせに合うシンボル (SymbolInformation)。合い方の良い順に 256 個まで
+    /// workspace/symbol: rust-analyzer と同じ決まりで
+    /// - 問い合わせの文字が順に (間を空けてよい) 名前に出てくるもの。大文字を含む問い合わせは大文字と小文字を区別する
+    /// - まず型 (struct / enum / union / trait / type と、クレートの名前) だけ。なければ全部 (フィールド・impl と、
+    ///   trait の impl の中のメンバは除く)
+    /// - use の別名 (`use a::B as C` の C) と再エクスポート (`pub use a::B`) も入れる
+    /// - 名前 (小文字にしたもの) の順に 128 個まで
     fn workspace_symbols(&mut self, q: &str) -> Value {
         // (std は入れない: rust-analyzer の既定と同じくワークスペースだけ)
         let ws = self.workspace(false);
-        // (候補: (良さ, 名前, 種類, uri, 範囲, 囲むもの))
-        let mut hits: Vec<(u32, String, u32, String, [u32; 4], String)> = vec![];
-        for (uri, f) in &ws {
-            let mut li: Option<LineIndex> = None;
+        let case = q.chars().any(|c| c.is_uppercase());
+        let matches = |name: &str| -> bool {
+            let mut it = name.chars();
+            q.chars().all(|c| it.any(|x| if case { x == c } else { x.to_lowercase().eq(c.to_lowercase()) }))
+        };
+        let is_type = |k: u32| matches!(k, 23 | 10 | 11 | 26 | 4);
+        // (候補: (名前, 種類, uri, 範囲, 囲むもの))
+        let mut hits: Vec<(String, u32, String, [u32; 4], String)> = vec![];
+        // (名前 → 種類: use の別名・再エクスポートの種類に)
+        let mut kind_of: HashMap<&str, u32> = HashMap::new();
+        for (_, f) in &ws {
             for d in &f.defs {
-                if let Some(sc) = symbols::match_score(q, &d.name) {
-                    let ((l0, c0), (l1, c1)) = ends(f, &mut li, d.start, d.end);
-                    hits.push((sc, d.name.clone(), d.kind.lsp(), uri.clone(), [l0, c0, l1, c1], d.container.to_string()));
+                if d.owner.is_empty() {
+                    kind_of.entry(d.name.as_str()).or_insert(d.kind.lsp());
                 }
             }
         }
-        hits.sort_by(|a, b| (a.0, a.1.len(), &a.1, &a.3, a.4).cmp(&(b.0, b.1.len(), &b.1, &b.3, b.4)));
-        hits.truncate(256);
+        for (uri, f) in &ws {
+            let mut li: Option<LineIndex> = None;
+            for d in &f.defs {
+                if matches!(d.kind, symbols::SymKind::Impl | symbols::SymKind::Field) || (d.container.starts_with("impl") && d.container.contains(" for ")) || !matches(&d.name) {
+                    continue;
+                }
+                let ((l0, c0), (l1, c1)) = ends(f, &mut li, d.start, d.end);
+                let c = if d.container.starts_with("impl") { d.owner.clone() } else { d.container.to_string() };
+                hits.push((d.name.clone(), d.kind.lsp(), uri.clone(), [l0, c0, l1, c1], c));
+            }
+            for (name, l, c, n) in &f.use_syms {
+                if matches(name) {
+                    hits.push((name.clone(), kind_of.get(name.as_str()).copied().unwrap_or(13), uri.clone(), [*l, *c, *l, c + n], String::new()));
+                }
+            }
+        }
+        for (name, uri) in &self.crates {
+            if matches(name) {
+                hits.push((name.clone(), 4, uri.clone(), [0, 0, 0, 0], String::new()));
+            }
+        }
+        if hits.iter().any(|h| is_type(h.1)) {
+            hits.retain(|h| is_type(h.1));
+        }
+        hits.sort_by(|a, b| (a.0.to_lowercase(), &a.0, &a.2, a.3).cmp(&(b.0.to_lowercase(), &b.0, &b.2, b.3)));
+        hits.truncate(128);
         json!(hits
             .into_iter()
-            .map(|(_, name, kind, uri, r, c)| {
+            .map(|(name, kind, uri, r, c)| {
                 let mut o = json!({
                     "name": name,
                     "kind": kind,
@@ -493,7 +539,7 @@ impl Server {
     fn highlight(&mut self, uri: &str, line: u32, ch: u32) -> Value {
         self.at(uri, line, ch, |srv, ws, idx, fi, off| {
             let load = |i: usize| srv.load(ws, i);
-            let locs: Vec<Loc> = navigate::references(idx, fi, off, true, &load).into_iter().filter(|l| l.file == fi).collect();
+            let locs: Vec<Loc> = navigate::highlights(idx, fi, off, &load);
             json!(srv.ranges(ws, idx, &locs).into_iter().map(|(_, r)| json!({ "range": r, "kind": 1 })).collect::<Vec<_>>())
         })
         .unwrap_or(Value::Null)
@@ -818,7 +864,8 @@ fn default_features(toml: &str) -> Vec<String> {
     out
 }
 
-fn cargo_files(root: &Path) -> Option<(Vec<(PathBuf, Vec<String>, u32, bool)>, HashMap<u32, Vec<String>>)> {
+#[allow(clippy::type_complexity)]
+fn cargo_files(root: &Path) -> Option<(Vec<(PathBuf, Vec<String>, u32, bool)>, HashMap<u32, Vec<String>>, Vec<(String, PathBuf)>)> {
     let top = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
     let mut pkgs: Vec<PathBuf> = vec![];
     if top.contains("[package]") {
@@ -847,8 +894,15 @@ fn cargo_files(root: &Path) -> Option<(Vec<(PathBuf, Vec<String>, u32, bool)>, H
     let mut feats: HashMap<u32, Vec<String>> = HashMap::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut krate = 0u32;
+    let mut names: Vec<(String, PathBuf)> = vec![];
     for pkg in pkgs {
         let toml = std::fs::read_to_string(pkg.join("Cargo.toml")).unwrap_or_default();
+        if let Some(r) = ["src/lib.rs", "src/main.rs"].iter().map(|f| pkg.join(f)).find(|p| p.exists()) {
+            let n = pkg_name(&toml).replace('-', "_");
+            if !n.is_empty() && !names.iter().any(|x| x.0 == n) {
+                names.push((n, r));
+            }
+        }
         // (ターゲットの根: (ファイル, 本体か))
         let mut roots: Vec<(PathBuf, bool)> = vec![];
         for f in ["src/lib.rs", "src/main.rs"] {
@@ -918,11 +972,88 @@ fn cargo_files(root: &Path) -> Option<(Vec<(PathBuf, Vec<String>, u32, bool)>, H
                         stack.push((c, cm, false));
                     }
                 }
+                // (`include!("x.rs")` / `include!(concat!(env!("OUT_DIR"), "/x.rs"))`: 同じモジュールの続き。OUT_DIR は
+                // target の下のビルドスクリプトの出力 (いちばん新しいもの))
+                for (out_dir, rel) in includes(&text) {
+                    let c = if out_dir { out_dir_file(root, &pkg_name(&toml), &rel) } else { f.parent().map(|p| p.join(&rel)).filter(|c| c.exists()) };
+                    if let Some(c) = c {
+                        stack.push((c, m.clone(), false));
+                    }
+                }
                 out.push((f, m, krate, main));
             }
         }
     }
-    Some((out, feats))
+    Some((out, feats, names))
+}
+
+/// ファイルの中の `include!("x")` と `include!(concat!(env!("OUT_DIR"), "/x"))`: (OUT_DIR の下か, パス)
+fn includes(text: &str) -> Vec<(bool, String)> {
+    let mut out = vec![];
+    for (i, _) in text.match_indices("include!(") {
+        let r = text[i + 9..].trim_start();
+        let lit = |s: &str| -> Option<String> { s.strip_prefix('"').and_then(|s| s.split('"').next()).map(|x| x.to_string()) };
+        if let Some(r) = r.strip_prefix("concat!(") {
+            let r = r.trim_start();
+            if let Some(r) = r.strip_prefix("env!(\"OUT_DIR\")") {
+                if let Some(p) = r.trim_start().strip_prefix(',').and_then(|r| lit(r.trim_start())) {
+                    out.push((true, p.trim_start_matches('/').to_string()));
+                }
+            }
+        } else if let Some(p) = lit(r) {
+            if p.ends_with(".rs") {
+                out.push((false, p));
+            }
+        }
+    }
+    out
+}
+
+/// Cargo.toml の [package] の name
+fn pkg_name(toml: &str) -> String {
+    let mut in_pkg = false;
+    for l in toml.lines() {
+        let l = l.trim();
+        if l.starts_with('[') {
+            in_pkg = l == "[package]";
+        } else if in_pkg {
+            if let Some(v) = l.strip_prefix("name").map(|v| v.trim_start()).and_then(|v| v.strip_prefix('=')) {
+                return v.trim().trim_matches('"').to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// パッケージ pkg のビルドスクリプトの OUT_DIR の中のファイル rel (target/<profile>/build/<pkg>/<hash>/out/ か
+/// target/<profile>/build/<pkg>-<hash>/out/ の、いちばん新しいもの)
+fn out_dir_file(root: &Path, pkg: &str, rel: &str) -> Option<PathBuf> {
+    if pkg.is_empty() {
+        return None;
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("target"));
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut consider = |p: PathBuf| {
+        if let Ok(t) = std::fs::metadata(&p).and_then(|m| m.modified()) {
+            if best.as_ref().is_none_or(|b| t > b.0) {
+                best = Some((t, p));
+            }
+        }
+    };
+    for prof in std::fs::read_dir(&target).into_iter().flatten().flatten() {
+        let build = prof.path().join("build");
+        for e in std::fs::read_dir(&build).into_iter().flatten().flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if n == pkg {
+                for h in std::fs::read_dir(e.path()).into_iter().flatten().flatten() {
+                    consider(h.path().join("out").join(rel));
+                }
+            } else if n.strip_prefix(pkg).is_some_and(|r| r.starts_with('-') && r[1..].chars().all(|c| c.is_ascii_hexdigit())) {
+                consider(e.path().join("out").join(rel));
+            }
+        }
+    }
+    best.map(|b| b.1)
 }
 
 /// ファイルの中の `mod x;` (囲む `mod a { .. }` の名前の列, 名前, `#[path = ".."]`)

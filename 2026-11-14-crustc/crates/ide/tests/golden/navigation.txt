@@ -159,8 +159,8 @@ ws/src/lib.rs:71:9 fn -> - | refs 0/0 | -
 ws/src/lib.rs:71:12 new -> ws/src/lib.rs:71:12+3 | refs 4/3 [ws/src/lib.rs:71:12+3 ws/src/lib.rs:185:26+3 ws/src/lib.rs:246:30+3 ws/tests/it.rs:4:14+3] | ```rust⏎impl Counter⏎pub fn new(name: &str) -> Self⏎```
 ws/src/lib.rs:71:16 name -> ws/src/lib.rs:71:16+4 | refs 2/1 [ws/src/lib.rs:71:16+4 ws/src/lib.rs:72:32+4] | ```rust⏎name: &str⏎```
 ws/src/lib.rs:71:23 str -> - | refs 8/8 [ws/src/lib.rs:71:23+3 ws/src/lib.rs:114:24+3 ws/src/lib.rs:206:31+3 ws/src/lib.rs:211:31+3 ws/src/lib.rs:216:30+3 ws/src/shapes.rs:44:36+3 ws/src/util/text.rs:9:20+3 ws/src/util/text.rs:22:22+3] | ```rust⏎str⏎```
-ws/src/lib.rs:71:31 Self -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
-ws/src/lib.rs:72:9 Self -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/src/lib.rs:71:31 Self -> ws/src/lib.rs:70:6+7 | refs 4/3 [ws/src/lib.rs:70:6+7 ws/src/lib.rs:71:31+4 ws/src/lib.rs:72:9+4 ws/src/lib.rs:75:36+4] | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/src/lib.rs:72:9 Self -> ws/src/lib.rs:70:6+7 | refs 4/3 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
 ws/src/lib.rs:72:16 count -> ws/src/lib.rs:35:9+5 | refs 6/5 | ```rust⏎Counter⏎pub count: u64⏎```
 ws/src/lib.rs:72:26 name -> ws/src/lib.rs:36:9+4 | refs 4/3 | ```rust⏎Counter⏎pub name: String⏎```
 ws/src/lib.rs:72:32 name -> ws/src/lib.rs:71:16+4 | refs 2/1 | ```rust⏎name: &str⏎```
@@ -173,7 +173,7 @@ ws/src/lib.rs:75:12 bump -> ws/src/lib.rs:75:12+4 | refs 4/3 [ws/src/lib.rs:75:1
 ws/src/lib.rs:75:18 mut -> - | refs 0/0 | -
 ws/src/lib.rs:75:22 self -> - | refs 0/0 | -
 ws/src/lib.rs:75:32 mut -> - | refs 0/0 | -
-ws/src/lib.rs:75:36 Self -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/src/lib.rs:75:36 Self -> ws/src/lib.rs:70:6+7 | refs 4/3 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
 ws/src/lib.rs:76:9 self -> - | refs 0/0 | -
 ws/src/lib.rs:76:14 count -> ws/src/lib.rs:35:9+5 | refs 6/5 | ```rust⏎Counter⏎pub count: u64⏎```
 ws/src/lib.rs:77:9 self -> - | refs 0/0 | -
@@ -642,7 +642,7 @@ ws/src/lib.rs:254:5 fn -> ws/src/lib.rs:254:5+2 | refs 1/0 [ws/src/lib.rs:254:5+
 ws/src/lib.rs:254:8 from -> ws/src/lib.rs:254:8+4 | refs 2/1 [ws/src/lib.rs:254:8+4 ws/src/lib.rs:261:21+4] | ```rust⏎impl From<i32> for Hidden⏎fn from(v: i32) -> Self⏎```
 ws/src/lib.rs:254:13 v -> ws/src/lib.rs:254:13+1 | refs 2/1 [ws/src/lib.rs:254:13+1 ws/src/lib.rs:255:18+1] | ```rust⏎v: i32⏎```
 ws/src/lib.rs:254:16 i32 -> - | refs 20/20 | ```rust⏎i32⏎```
-ws/src/lib.rs:254:24 Self -> ws/src/lib.rs:13:20+6 | refs 9/8 | ```rust⏎inner::more⏎pub struct Hidden⏎```⏎⏎---⏎⏎A hidden thing.
+ws/src/lib.rs:254:24 Self -> ws/src/lib.rs:253:20+6 | refs 2/1 [ws/src/lib.rs:253:20+6 ws/src/lib.rs:254:24+4] | ```rust⏎inner::more⏎pub struct Hidden⏎```⏎⏎---⏎⏎A hidden thing.
 ws/src/lib.rs:255:9 Hidden -> ws/src/lib.rs:13:20+6 | refs 9/8 | ```rust⏎inner::more⏎pub struct Hidden⏎```⏎⏎---⏎⏎A hidden thing.
 ws/src/lib.rs:255:18 v -> ws/src/lib.rs:254:13+1 | refs 2/1 | ```rust⏎v: i32⏎```
 ws/src/lib.rs:259:1 pub -> - | refs 0/0 | -
@@ -754,8 +754,8 @@ ws/src/shapes.rs:31:12 moved -> ws/src/shapes.rs:31:12+5 | refs 1/0 [ws/src/shap
 ws/src/shapes.rs:31:18 self -> - | refs 0/0 | -
 ws/src/shapes.rs:31:24 by -> ws/src/shapes.rs:31:24+2 | refs 2/1 [ws/src/shapes.rs:31:24+2 ws/src/shapes.rs:32:28+2] | ```rust⏎by: i32⏎```
 ws/src/shapes.rs:31:28 i32 -> - | refs 20/20 | ```rust⏎i32⏎```
-ws/src/shapes.rs:31:36 Self -> ws/src/shapes.rs:6:12+5 | refs 15/14 | ```rust⏎shapes⏎pub struct Point⏎```
-ws/src/shapes.rs:32:9 Self -> ws/src/shapes.rs:6:12+5 | refs 15/14 | ```rust⏎shapes⏎pub struct Point⏎```
+ws/src/shapes.rs:31:36 Self -> ws/src/shapes.rs:18:6+5 | refs 3/2 [ws/src/shapes.rs:18:6+5 ws/src/shapes.rs:31:36+4 ws/src/shapes.rs:32:9+4] | ```rust⏎shapes⏎pub struct Point⏎```
+ws/src/shapes.rs:32:9 Self -> ws/src/shapes.rs:18:6+5 | refs 3/2 | ```rust⏎shapes⏎pub struct Point⏎```
 ws/src/shapes.rs:32:16 x -> ws/src/shapes.rs:7:9+1 | refs 15/14 | ```rust⏎Point⏎pub x: i32⏎```
 ws/src/shapes.rs:32:19 self -> - | refs 0/0 | -
 ws/src/shapes.rs:32:24 x -> ws/src/shapes.rs:7:9+1 | refs 15/14 | ```rust⏎Point⏎pub x: i32⏎```
