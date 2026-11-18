@@ -1,5 +1,7 @@
 # crustc
 
+> **移転**: 2026-11-18 以降の開発は [mizchi/zust](https://github.com/mizchi/zust) に移した (名前は zustc / zust-analyzer)。このディレクトリは移す前の記録として残す。
+
 自分用の Rust (サブセット) コンパイラ。Rust で書き、自前のフロントエンド (lexer / parser / 型推論) と、
 Cranelift (既定) か自前の minclif でコード生成する。crustc 自身で crustc をコンパイルできる (minclif の経路)。
 **インクリメンタルな開発ビルド**に特化して、次の 4 つを小さくすることを狙う。
