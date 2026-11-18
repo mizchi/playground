@@ -1109,3 +1109,15 @@ fn methods_of_bounded_type_params() {
     assert_eq!(fi.param_bounds(at(src, "self.inner", 0), "T"), s(&["Dup", "Clone"]));
     assert_eq!(fi.param_bounds(at(src, "u.show", 0), "U"), s(&["Show", "Sized"]));
 }
+
+/// match / if / ブロックの式の型
+#[test]
+fn match_and_if_expression_types() {
+    let src = "struct A;\nstruct B;\nfn g() -> A { A }\nfn f(o: Option<A>, c: bool) {\n    let a = match o { Some(v) if c => v, _ => { let z = 1; g() } };\n    let b = if c { B } else { B };\n    let d = if c { 1u8 } else if !c { 2 } else { 3 };\n    let e = { let y = 2u16; y };\n    let h = match o { None => panic!(), Some(_) => g() };\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap();
+    for (p, want) in [("a =", "a: A"), ("b =", "b: B"), ("d =", "d: u8"), ("e =", "e: u16"), ("h =", "h: A")] {
+        assert!(ty(p).contains(want), "{p}: {}", ty(p));
+    }
+}

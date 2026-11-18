@@ -13,7 +13,7 @@ ws/src/lib.rs:16:9 im|pl n=1 cut=false rank=0 [impl/-/keyword]
 ws/src/lib.rs:16:14 Hi|dden n=2 cut=false rank=1 [HITS/Static Hidden/Struct/more]
 ws/src/lib.rs:17:25 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
 ws/src/lib.rs:18:17 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/lib.rs:18:22 .|v n=5 cut=false rank=0 [v/Field/Hidden get/Method/impl Hidden from/Method/From into/Method/Into to_string/Method/ToString]
+ws/src/lib.rs:18:22 .|v n=4 cut=false rank=0 [v/Field/Hidden get/Method/impl Hidden into/Method/Into to_string/Method/ToString]
 ws/src/lib.rs:24:5 cr|ate n=1 cut=false rank=0 [crate/-/keyword]
 ws/src/lib.rs:24:12 ::|shapes n=0 cut=false rank=-1 []
 ws/src/lib.rs:24:12 ::s|hapes n=0 rank=-1
@@ -91,9 +91,9 @@ ws/src/lib.rs:65:8 de|scribe n=6 cut=false rank=-1 [deep/Function/inner Describe
 ws/src/lib.rs:65:18 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
 ws/src/lib.rs:65:27 St|ring n=7 cut=false rank=0 [String/- static/-/keyword struct/-/keyword stringify/Macro with_std/Function]
 ws/src/lib.rs:66:9 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/lib.rs:66:14 .|name n=15 cut=false rank=2 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
-ws/src/lib.rs:66:14 .n|ame n=7 rank=1
-ws/src/lib.rs:66:19 .|clone n=11 cut=false rank=5 [len/Method/impl str new/Method/impl String vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
+ws/src/lib.rs:66:14 .|name n=13 cut=false rank=1 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
+ws/src/lib.rs:66:14 .n|ame n=6 rank=0
+ws/src/lib.rs:66:19 .|clone n=10 cut=false rank=4 [len/Method/impl str vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
 ws/src/lib.rs:66:19 .c|lone n=2 rank=0
 ws/src/lib.rs:70:1 im|pl n=1 cut=false rank=0 [impl/-/keyword]
 ws/src/lib.rs:70:6 Co|unter n=7 cut=false rank=0 [Counter/Struct convert/Function counter_works/Function/tests Copy/- const/-/keyword]
@@ -112,38 +112,38 @@ ws/src/lib.rs:75:12 bu|mp n=0 cut=false rank=-1 []
 ws/src/lib.rs:75:22 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
 ws/src/lib.rs:75:36 Se|lf n=3 cut=false rank=1 [Send/- Self/-/keyword self/-/keyword]
 ws/src/lib.rs:76:9 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/lib.rs:76:14 .|count n=15 cut=false rank=3 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
+ws/src/lib.rs:76:14 .|count n=13 cut=false rank=2 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
 ws/src/lib.rs:76:14 .c|ount n=5 rank=0
 ws/src/lib.rs:77:9 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
 ws/src/lib.rs:80:12 fi|rst n=0 cut=false rank=-1 []
 ws/src/lib.rs:80:19 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
 ws/src/lib.rs:80:28 Op|tion n=1 cut=false rank=0 [Option/-]
 ws/src/lib.rs:81:9 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/lib.rs:81:14 .|items n=15 cut=false rank=5 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
+ws/src/lib.rs:81:14 .|items n=13 cut=false rank=4 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
 ws/src/lib.rs:81:14 .i|tems n=7 rank=0
-ws/src/lib.rs:81:20 .|first n=13 cut=false rank=10 [buf/Field/Vec get/Method/impl [T] len/Field/Vec new/Method/impl Vec<T> pop/Method/impl Vec<T> into/Method/Into iter/Method/impl [T] push/Method/impl Vec<T> clone/Method/impl Clone for Vec<T> deref/Method/impl Deref for Vec<T> first/Method/impl [T] is_empty/Method/impl Vec<T>]
+ws/src/lib.rs:81:20 .|first n=12 cut=false rank=9 [buf/Field/Vec get/Method/impl [T] len/Field/Vec pop/Method/impl Vec<T> into/Method/Into iter/Method/impl [T] push/Method/impl Vec<T> clone/Method/impl Clone for Vec<T> deref/Method/impl Deref for Vec<T> first/Method/impl [T] is_empty/Method/impl Vec<T> to_string/Method/ToString]
 ws/src/lib.rs:81:20 .f|irst n=3 rank=0
 ws/src/lib.rs:84:12 to|tal n=3 cut=false rank=-1 [ToOwned/- ToString/- todo/Macro]
 ws/src/lib.rs:84:19 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
 ws/src/lib.rs:85:12 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/lib.rs:85:17 .|items n=15 cut=false rank=5 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
+ws/src/lib.rs:85:17 .|items n=13 cut=false rank=4 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
 ws/src/lib.rs:85:17 .i|tems n=7 rank=0
-ws/src/lib.rs:85:23 .|is_empty n=13 cut=false rank=11 [buf/Field/Vec get/Method/impl [T] len/Field/Vec new/Method/impl Vec<T> pop/Method/impl Vec<T> into/Method/Into iter/Method/impl [T] push/Method/impl Vec<T> clone/Method/impl Clone for Vec<T> deref/Method/impl Deref for Vec<T> first/Method/impl [T] is_empty/Method/impl Vec<T>]
+ws/src/lib.rs:85:23 .|is_empty n=12 cut=false rank=10 [buf/Field/Vec get/Method/impl [T] len/Field/Vec pop/Method/impl Vec<T> into/Method/Into iter/Method/impl [T] push/Method/impl Vec<T> clone/Method/impl Clone for Vec<T> deref/Method/impl Deref for Vec<T> first/Method/impl [T] is_empty/Method/impl Vec<T> to_string/Method/ToString]
 ws/src/lib.rs:85:23 .i|s_empty n=5 rank=2
 ws/src/lib.rs:86:13 re|turn n=5 cut=false rank=3 [Res/TypeAlias Result/- ref/-/keyword return/-/keyword AsRef/-]
 ws/src/lib.rs:86:24 Er|ror n=2 cut=false rank=0 [Error/Enum Err/-]
 ws/src/lib.rs:86:31 ::|Empty n=3 cut=false rank=2 [Bad/Variant/Error Code/Variant/Error Empty/Variant/Error]
 ws/src/lib.rs:86:31 ::E|mpty n=2 rank=0
 ws/src/lib.rs:89:18 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/lib.rs:89:23 .|items n=15 cut=false rank=5 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
+ws/src/lib.rs:89:23 .|items n=13 cut=false rank=4 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
 ws/src/lib.rs:89:23 .i|tems n=7 rank=0
-ws/src/lib.rs:89:29 .|iter n=13 cut=false rank=6 [buf/Field/Vec get/Method/impl [T] len/Field/Vec new/Method/impl Vec<T> pop/Method/impl Vec<T> into/Method/Into iter/Method/impl [T] push/Method/impl Vec<T> clone/Method/impl Clone for Vec<T> deref/Method/impl Deref for Vec<T> first/Method/impl [T] is_empty/Method/impl Vec<T>]
+ws/src/lib.rs:89:29 .|iter n=12 cut=false rank=5 [buf/Field/Vec get/Method/impl [T] len/Field/Vec pop/Method/impl Vec<T> into/Method/Into iter/Method/impl [T] push/Method/impl Vec<T> clone/Method/impl Clone for Vec<T> deref/Method/impl Deref for Vec<T> first/Method/impl [T] is_empty/Method/impl Vec<T> to_string/Method/ToString]
 ws/src/lib.rs:89:29 .i|ter n=5 rank=1
-ws/src/lib.rs:90:22 .|x n=11 cut=false rank=0 [x/Field/Point y/Field/Point new/Method/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone default/Method/Default to_string/Method/ToString]
+ws/src/lib.rs:90:22 .|x n=9 cut=false rank=0 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
 ws/src/lib.rs:92:23 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/lib.rs:92:28 .|items n=15 cut=false rank=5 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
+ws/src/lib.rs:92:28 .|items n=13 cut=false rank=4 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
 ws/src/lib.rs:92:28 .i|tems n=7 rank=0
-ws/src/lib.rs:92:34 .|iter n=13 cut=false rank=6 [buf/Field/Vec get/Method/impl [T] len/Field/Vec new/Method/impl Vec<T> pop/Method/impl Vec<T> into/Method/Into iter/Method/impl [T] push/Method/impl Vec<T> clone/Method/impl Clone for Vec<T> deref/Method/impl Deref for Vec<T> first/Method/impl [T] is_empty/Method/impl Vec<T>]
+ws/src/lib.rs:92:34 .|iter n=12 cut=false rank=5 [buf/Field/Vec get/Method/impl [T] len/Field/Vec pop/Method/impl Vec<T> into/Method/Into iter/Method/impl [T] push/Method/impl Vec<T> clone/Method/impl Clone for Vec<T> deref/Method/impl Deref for Vec<T> first/Method/impl [T] is_empty/Method/impl Vec<T> to_string/Method/ToString]
 ws/src/lib.rs:92:34 .i|ter n=5 rank=1
 ws/src/lib.rs:92:41 .|enumerate n=8 cut=false rank=6 [end/Field/Iter ptr/Field/Iter into/Method/Into last/Method/Iterator next/Method/Iterator count/Method/Iterator enumerate/Method/Iterator to_string/Method/ToString]
 ws/src/lib.rs:92:41 .e|numerate n=3 rank=1
@@ -152,25 +152,25 @@ ws/src/lib.rs:98:12 po|ints n=2 cut=false rank=-1 [Point/Struct Points/TypeAlias
 ws/src/lib.rs:98:20 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
 ws/src/lib.rs:98:29 Po|ints n=2 cut=false rank=1 [Point/Struct Points/TypeAlias]
 ws/src/lib.rs:99:9 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/lib.rs:99:14 .|items n=15 cut=false rank=5 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
+ws/src/lib.rs:99:14 .|items n=13 cut=false rank=4 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
 ws/src/lib.rs:99:14 .i|tems n=7 rank=0
-ws/src/lib.rs:99:20 .|clone n=13 cut=false rank=8 [buf/Field/Vec get/Method/impl [T] len/Field/Vec new/Method/impl Vec<T> pop/Method/impl Vec<T> into/Method/Into iter/Method/impl [T] push/Method/impl Vec<T> clone/Method/impl Clone for Vec<T> deref/Method/impl Deref for Vec<T> first/Method/impl [T] is_empty/Method/impl Vec<T>]
+ws/src/lib.rs:99:20 .|clone n=12 cut=false rank=7 [buf/Field/Vec get/Method/impl [T] len/Field/Vec pop/Method/impl Vec<T> into/Method/Into iter/Method/impl [T] push/Method/impl Vec<T> clone/Method/impl Clone for Vec<T> deref/Method/impl Deref for Vec<T> first/Method/impl [T] is_empty/Method/impl Vec<T> to_string/Method/ToString]
 ws/src/lib.rs:99:20 .c|lone n=1 rank=0
 ws/src/lib.rs:102:8 ch|ecked n=0 cut=false rank=-1 []
 ws/src/lib.rs:102:17 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
 ws/src/lib.rs:103:17 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/lib.rs:103:22 .|total n=15 cut=false rank=6 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
-ws/src/lib.rs:103:22 .t|otal n=9 rank=0
+ws/src/lib.rs:103:22 .|total n=13 cut=false rank=5 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
+ws/src/lib.rs:103:22 .t|otal n=8 rank=0
 ws/src/lib.rs:104:13 fi|rst n=0 cut=false rank=-1 []
 ws/src/lib.rs:104:21 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/lib.rs:104:26 .|first n=15 cut=false rank=4 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
-ws/src/lib.rs:104:26 .f|irst n=2 rank=0
-ws/src/lib.rs:104:34 .|unwrap n=7 cut=false rank=3 [map/Method/impl Option<T> into/Method/Into as_ref/Method/impl Option<T> unwrap/Method/impl Option<T> is_some/Method/impl Option<T> to_string/Method/ToString unwrap_or/Method/impl Option<T>]
+ws/src/lib.rs:104:26 .|first n=13 cut=false rank=3 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
+ws/src/lib.rs:104:26 .f|irst n=1 rank=0
+ws/src/lib.rs:104:34 .|unwrap n=6 cut=false rank=2 [into/Method/Into as_ref/Method/impl Option<T> unwrap/Method/impl Option<T> is_some/Method/impl Option<T> to_string/Method/ToString unwrap_or/Method/impl Option<T>]
 ws/src/lib.rs:104:34 .u|nwrap n=2 rank=0
 ws/src/lib.rs:105:17 fi|rst n=1 cut=false rank=0 [first/local]
-ws/src/lib.rs:105:23 .|x n=11 cut=false rank=0 [x/Field/Point y/Field/Point new/Method/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone default/Method/Default to_string/Method/ToString]
+ws/src/lib.rs:105:23 .|x n=9 cut=false rank=0 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
 ws/src/lib.rs:106:34 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/lib.rs:106:39 .|count n=15 cut=false rank=3 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
+ws/src/lib.rs:106:39 .|count n=13 cut=false rank=2 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
 ws/src/lib.rs:106:39 .c|ount n=5 rank=0
 ws/src/lib.rs:110:8 ma|ke_pair n=6 cut=false rank=1 [matching/Function make_pair/Function match/-/keyword matches/Macro use_macro/Function]
 ws/src/lib.rs:110:29 Pa|ir n=5 cut=false rank=0 [Pair/TypeAlias PartialEq/- PartialOrd/- panic/Macro make_pair/Function]
@@ -189,10 +189,10 @@ ws/src/lib.rs:117:19 .t|rim n=4 rank=0
 ws/src/lib.rs:117:26 .|to_string n=5 cut=false rank=3 [len/Method/impl str into/Method/Into trim/Method/impl str to_string/Method/ToString starts_with/Method/impl str]
 ws/src/lib.rs:117:26 .t|o_string n=4 rank=1
 ws/src/lib.rs:118:13 _o|ld n=0 cut=false rank=-1 []
-ws/src/lib.rs:118:22 .|insert n=7 cut=false rank=5 [get/Method/impl HashMap<K, V> len/Method/impl HashMap<K, V> new/Method/impl HashMap<K, V> base/Field/HashMap into/Method/Into insert/Method/impl HashMap<K, V> to_string/Method/ToString]
+ws/src/lib.rs:118:22 .|insert n=6 cut=false rank=4 [get/Method/impl HashMap<K, V> len/Method/impl HashMap<K, V> base/Field/HashMap into/Method/Into insert/Method/impl HashMap<K, V> to_string/Method/ToString]
 ws/src/lib.rs:118:22 .i|nsert n=3 rank=1
 ws/src/lib.rs:120:12 So|me n=1 cut=false rank=0 [Some/-]
-ws/src/lib.rs:120:24 .|get n=7 cut=false rank=0 [get/Method/impl HashMap<K, V> len/Method/impl HashMap<K, V> new/Method/impl HashMap<K, V> base/Field/HashMap into/Method/Into insert/Method/impl HashMap<K, V> to_string/Method/ToString]
+ws/src/lib.rs:120:24 .|get n=6 cut=false rank=0 [get/Method/impl HashMap<K, V> len/Method/impl HashMap<K, V> base/Field/HashMap into/Method/Into insert/Method/impl HashMap<K, V> to_string/Method/ToString]
 ws/src/lib.rs:120:24 .g|et n=2 rank=0
 ws/src/lib.rs:120:29 St|ring n=7 cut=false rank=0 [String/- static/-/keyword struct/-/keyword stringify/Macro with_std/Function]
 ws/src/lib.rs:120:37 ::|new n=10 cut=false rank=1 [len/Method/impl str new/Method/impl String vec/Field/String trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String Target/TypeAlias/impl Deref for String as_str/Method/impl String push_str/Method/impl String starts_with/Method/impl str]
@@ -200,16 +200,16 @@ ws/src/lib.rs:120:37 ::n|ew n=3 rank=0
 ws/src/lib.rs:126:8 lo|cked n=2 cut=false rank=0 [locked/Function loop/-/keyword]
 ws/src/lib.rs:126:19 Mu|tex n=3 cut=false rank=0 [Mutex/Struct mut/-/keyword FnMut/-]
 ws/src/lib.rs:126:25 Co|unter n=7 cut=false rank=0 [Counter/Struct convert/Function counter_works/Function/tests Copy/- const/-/keyword]
-ws/src/lib.rs:127:15 .|lock n=7 cut=false rank=3 [new/Method/impl Mutex<T> data/Field/Mutex into/Method/Into lock/Method/impl Mutex<T> futex/Field/Mutex inner/Field/Mutex to_string/Method/ToString]
+ws/src/lib.rs:127:15 .|lock n=6 cut=false rank=2 [data/Field/Mutex into/Method/Into lock/Method/impl Mutex<T> futex/Field/Mutex inner/Field/Mutex to_string/Method/ToString]
 ws/src/lib.rs:127:15 .l|ock n=1 rank=0
-ws/src/lib.rs:127:22 .|unwrap n=6 cut=false rank=3 [ok/Method/impl Result<T, E> into/Method/Into is_ok/Method/impl Result<T, E> unwrap/Method/impl Result<T, E> map_err/Method/impl Result<T, E> to_string/Method/ToString]
+ws/src/lib.rs:127:22 .|unwrap n=5 cut=false rank=3 [ok/Method/impl Result<T, E> into/Method/Into is_ok/Method/impl Result<T, E> unwrap/Method/impl Result<T, E> to_string/Method/ToString]
 ws/src/lib.rs:127:22 .u|nwrap n=1 rank=0
-ws/src/lib.rs:128:15 .|count n=17 cut=false rank=3 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
+ws/src/lib.rs:128:15 .|count n=15 cut=false rank=2 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into lock/Field/MutexGuard]
 ws/src/lib.rs:128:15 .c|ount n=6 rank=0
 ws/src/lib.rs:129:9 na|me_len n=1 cut=false rank=-1 [os_name/Function]
-ws/src/lib.rs:129:22 .|name n=17 cut=false rank=2 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
-ws/src/lib.rs:129:22 .n|ame n=7 rank=1
-ws/src/lib.rs:129:27 .|len n=11 cut=false rank=0 [len/Method/impl str new/Method/impl String vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
+ws/src/lib.rs:129:22 .|name n=15 cut=false rank=1 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into lock/Field/MutexGuard]
+ws/src/lib.rs:129:22 .n|ame n=6 rank=0
+ws/src/lib.rs:129:27 .|len n=10 cut=false rank=0 [len/Method/impl str vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
 ws/src/lib.rs:129:27 .l|en n=2 rank=0
 ws/src/lib.rs:130:9 na|me_len n=2 cut=false rank=0 [name_len/local os_name/Function]
 ws/src/lib.rs:133:8 sh|apes_demo n=5 cut=false rank=4 [Shape/Enum shadow/Function shapes/Module shout_len/Function shapes_demo/Function]
@@ -221,11 +221,11 @@ ws/src/lib.rs:135:20 ::|Rect n=5 cut=false rank=0 [Rect/Variant/Shape name/Metho
 ws/src/lib.rs:135:20 ::R|ect n=2 rank=0
 ws/src/lib.rs:136:17 ::|new n=10 cut=false rank=2 [x/Field/Point y/Field/Point new/Method/impl Point ZERO/Const/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe clone/Method/Clone default/Method/Default]
 ws/src/lib.rs:136:17 ::n|ew n=2 rank=0
-ws/src/lib.rs:137:27 .|x n=11 cut=false rank=0 [x/Field/Point y/Field/Point new/Method/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone default/Method/Default to_string/Method/ToString]
+ws/src/lib.rs:137:27 .|x n=9 cut=false rank=0 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
 ws/src/lib.rs:137:32 OR|IGIN n=5 cut=false rank=0 [ORIGIN/Static origin/Function Ord/- extra_or_test/Function PartialOrd/-]
 ws/src/lib.rs:141:16 ar|ea n=1 cut=false rank=0 [area/Function]
-ws/src/lib.rs:143:15 .|dist2 n=11 cut=false rank=3 [x/Field/Point y/Field/Point new/Method/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone default/Method/Default to_string/Method/ToString]
-ws/src/lib.rs:143:15 .d|ist2 n=4 rank=0
+ws/src/lib.rs:143:15 .|dist2 n=9 cut=false rank=2 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
+ws/src/lib.rs:143:15 .d|ist2 n=3 rank=0
 ws/src/lib.rs:144:9 fi|rst n=0 cut=false rank=-1 []
 ws/src/lib.rs:145:22 ar|ea n=1 cut=false rank=0 [area/Function]
 ws/src/lib.rs:145:27 fi|rst n=1 cut=false rank=0 [first/local]
@@ -234,13 +234,13 @@ ws/src/lib.rs:145:42 ::|scale n=6 cut=false rank=1 [text/Module scale/Function F
 ws/src/lib.rs:145:42 ::s|cale n=1 rank=0
 ws/src/lib.rs:145:55 LI|MIT n=1 cut=false rank=0 [LIMIT/Const]
 ws/src/lib.rs:148:8 cl|osures n=2 cut=false rank=0 [closures/Function Clone/-]
-ws/src/lib.rs:151:17 .|iter n=13 cut=false rank=6 [buf/Field/Vec get/Method/impl [T] len/Field/Vec new/Method/impl Vec<T> pop/Method/impl Vec<T> into/Method/Into iter/Method/impl [T] push/Method/impl Vec<T> clone/Method/impl Clone for Vec<T> deref/Method/impl Deref for Vec<T> first/Method/impl [T] is_empty/Method/impl Vec<T>]
+ws/src/lib.rs:151:17 .|iter n=12 cut=false rank=5 [buf/Field/Vec get/Method/impl [T] len/Field/Vec pop/Method/impl Vec<T> into/Method/Into iter/Method/impl [T] push/Method/impl Vec<T> clone/Method/impl Clone for Vec<T> deref/Method/impl Deref for Vec<T> first/Method/impl [T] is_empty/Method/impl Vec<T> to_string/Method/ToString]
 ws/src/lib.rs:151:17 .i|ter n=5 rank=1
 ws/src/lib.rs:154:9 do|uble n=0 cut=false rank=-1 []
 ws/src/lib.rs:154:18 mo|ve n=3 cut=false rank=2 [more/Module/inner mod/-/keyword move/-/keyword]
 ws/src/lib.rs:155:13 Hi|dden n=2 cut=false rank=1 [HITS/Static Hidden/Struct/more]
 ws/src/lib.rs:156:5 do|uble n=1 cut=false rank=0 [double/local]
-ws/src/lib.rs:156:21 .|get n=5 cut=false rank=1 [v/Field/Hidden get/Method/impl Hidden from/Method/From into/Method/Into to_string/Method/ToString]
+ws/src/lib.rs:156:21 .|get n=4 cut=false rank=1 [v/Field/Hidden get/Method/impl Hidden into/Method/Into to_string/Method/ToString]
 ws/src/lib.rs:156:21 .g|et n=2 rank=0
 ws/src/lib.rs:156:36 in|ner n=5 cut=false rank=1 [in/-/keyword inner/Module Into/- IntoIterator/- include_str/Macro]
 ws/src/lib.rs:156:43 ::|deep n=2 cut=false rank=0 [deep/Function/inner more/Module/inner]
@@ -254,7 +254,7 @@ ws/src/lib.rs:161:16 ::E|mpty n=2 rank=0
 ws/src/lib.rs:162:9 Er|ror n=2 cut=false rank=0 [Error/Enum Err/-]
 ws/src/lib.rs:162:16 ::|Bad n=3 cut=false rank=0 [Bad/Variant/Error Code/Variant/Error Empty/Variant/Error]
 ws/src/lib.rs:162:16 ::B|ad n=1 rank=0
-ws/src/lib.rs:162:32 .|len n=11 cut=false rank=0 [len/Method/impl str new/Method/impl String vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
+ws/src/lib.rs:162:32 .|len n=10 cut=false rank=0 [len/Method/impl str vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
 ws/src/lib.rs:162:32 .l|en n=2 rank=0
 ws/src/lib.rs:163:9 Er|ror n=2 cut=false rank=0 [Error/Enum Err/-]
 ws/src/lib.rs:163:16 ::|Code n=3 cut=false rank=1 [Bad/Variant/Error Code/Variant/Error Empty/Variant/Error]
@@ -272,9 +272,9 @@ ws/src/lib.rs:184:22 Co|unter n=7 cut=false rank=0 [Counter/Struct convert/Funct
 ws/src/lib.rs:185:17 Co|unter n=7 cut=false rank=0 [Counter/Struct convert/Function counter_works/Function/tests Copy/- const/-/keyword]
 ws/src/lib.rs:185:26 ::|new n=13 cut=false rank=0 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe clone/Method/Clone]
 ws/src/lib.rs:185:26 ::n|ew n=5 rank=0
-ws/src/lib.rs:186:7 .|bump n=15 cut=false rank=1 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
+ws/src/lib.rs:186:7 .|bump n=13 cut=false rank=0 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
 ws/src/lib.rs:186:7 .b|ump n=2 rank=0
-ws/src/lib.rs:186:14 .|bump n=15 cut=false rank=1 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
+ws/src/lib.rs:186:14 .|bump n=13 cut=false rank=0 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
 ws/src/lib.rs:186:14 .b|ump n=2 rank=0
 ws/src/lib.rs:190:11 fe|ature n=0 cut=false rank=-1 []
 ws/src/lib.rs:191:8 wi|th_std n=1 cut=false rank=0 [with_std/Function]
@@ -314,11 +314,11 @@ ws/src/lib.rs:234:19 us|ize n=2 cut=false rank=-1 [use_macro/Function use/-/keyw
 ws/src/lib.rs:235:13 Wo|rd n=2 cut=false rank=0 [Word/Struct counter_works/Function/tests]
 ws/src/lib.rs:235:19 ::|new n=4 cut=false rank=1 [len/Method/impl Word new/Method/impl Word text/Field/Word upper/Method/impl Word]
 ws/src/lib.rs:235:19 ::n|ew n=2 rank=0
-ws/src/lib.rs:236:15 .|text n=6 cut=false rank=2 [len/Method/impl Word new/Method/impl Word text/Field/Word upper/Method/impl Word into/Method/Into to_string/Method/ToString]
+ws/src/lib.rs:236:15 .|text n=5 cut=false rank=1 [len/Method/impl Word text/Field/Word upper/Method/impl Word into/Method/Into to_string/Method/ToString]
 ws/src/lib.rs:236:15 .t|ext n=3 rank=0
-ws/src/lib.rs:236:20 .|len n=11 cut=false rank=0 [len/Method/impl str new/Method/impl String vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
+ws/src/lib.rs:236:20 .|len n=10 cut=false rank=0 [len/Method/impl str vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
 ws/src/lib.rs:236:20 .l|en n=2 rank=0
-ws/src/lib.rs:236:30 .|len n=6 cut=false rank=0 [len/Method/impl Word new/Method/impl Word text/Field/Word upper/Method/impl Word into/Method/Into to_string/Method/ToString]
+ws/src/lib.rs:236:30 .|len n=5 cut=false rank=0 [len/Method/impl Word text/Field/Word upper/Method/impl Word into/Method/Into to_string/Method/ToString]
 ws/src/lib.rs:236:30 .l|en n=1 rank=0
 ws/src/lib.rs:237:9 sh|out_len n=5 cut=false rank=3 [Shape/Enum shadow/Function shapes/Module shout_len/Function shapes_demo/Function]
 ws/src/lib.rs:240:7 te|st n=4 cut=false rank=-1 [text/Module tests/Module texts/Function extra_or_test/Function]
@@ -329,10 +329,10 @@ ws/src/lib.rs:245:8 co|unter_works n=7 cut=false rank=2 [Counter/Struct convert/
 ws/src/lib.rs:246:21 Co|unter n=7 cut=false rank=0 [Counter/Struct convert/Function counter_works/Function/tests Copy/- const/-/keyword]
 ws/src/lib.rs:246:30 ::|new n=13 cut=false rank=0 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe clone/Method/Clone]
 ws/src/lib.rs:246:30 ::n|ew n=5 rank=0
-ws/src/lib.rs:247:11 .|bump n=15 cut=false rank=1 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
+ws/src/lib.rs:247:11 .|bump n=13 cut=false rank=0 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
 ws/src/lib.rs:247:11 .b|ump n=2 rank=0
 ws/src/lib.rs:248:9 as|sert_eq n=8 cut=false rank=4 [as/-/keyword AsRef/- async/-/keyword assert/Macro assert_eq/Macro]
-ws/src/lib.rs:248:22 .|count n=15 cut=false rank=3 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
+ws/src/lib.rs:248:22 .|count n=13 cut=false rank=2 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
 ws/src/lib.rs:248:22 .c|ount n=5 rank=0
 ws/src/lib.rs:249:9 as|sert_eq n=8 cut=false rank=4 [as/-/keyword AsRef/- async/-/keyword assert/Macro assert_eq/Macro]
 ws/src/lib.rs:249:20 ex|tra_or_test n=3 cut=false rank=0 [extra_or_test/Function Extend/- extern/-/keyword]
@@ -344,17 +344,17 @@ ws/src/lib.rs:254:24 Se|lf n=3 cut=false rank=1 [Send/- Self/-/keyword self/-/ke
 ws/src/lib.rs:255:9 Hi|dden n=2 cut=false rank=1 [HITS/Static Hidden/Struct/more]
 ws/src/lib.rs:259:8 co|nvert n=7 cut=false rank=1 [Counter/Struct convert/Function counter_works/Function/tests Copy/- const/-/keyword]
 ws/src/lib.rs:260:12 Hi|dden n=2 cut=false rank=1 [HITS/Static Hidden/Struct/more]
-ws/src/lib.rs:260:23 .|into n=2 cut=false rank=0 [into/Method/Into to_string/Method/ToString]
+ws/src/lib.rs:260:23 .|into n=3 cut=false rank=0 [into/Method/Into clone/Method/Clone to_string/Method/ToString]
 ws/src/lib.rs:260:23 .i|nto n=2 rank=0
 ws/src/lib.rs:261:13 Hi|dden n=2 cut=false rank=1 [HITS/Static Hidden/Struct/more]
 ws/src/lib.rs:261:21 ::|from n=3 cut=false rank=2 [v/Field/Hidden get/Method/impl Hidden from/Method/From]
 ws/src/lib.rs:261:21 ::f|rom n=1 rank=0
 ws/src/lib.rs:262:19 .|to_string n=5 cut=false rank=3 [len/Method/impl str into/Method/Into trim/Method/impl str to_string/Method/ToString starts_with/Method/impl str]
 ws/src/lib.rs:262:19 .t|o_string n=4 rank=1
-ws/src/lib.rs:263:7 .|v n=5 cut=false rank=0 [v/Field/Hidden get/Method/impl Hidden from/Method/From into/Method/Into to_string/Method/ToString]
-ws/src/lib.rs:263:13 .|get n=5 cut=false rank=1 [v/Field/Hidden get/Method/impl Hidden from/Method/From into/Method/Into to_string/Method/ToString]
+ws/src/lib.rs:263:7 .|v n=4 cut=false rank=0 [v/Field/Hidden get/Method/impl Hidden into/Method/Into to_string/Method/ToString]
+ws/src/lib.rs:263:13 .|get n=4 cut=false rank=1 [v/Field/Hidden get/Method/impl Hidden into/Method/Into to_string/Method/ToString]
 ws/src/lib.rs:263:13 .g|et n=2 rank=0
-ws/src/lib.rs:263:23 .|len n=11 cut=false rank=0 [len/Method/impl str new/Method/impl String vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
+ws/src/lib.rs:263:23 .|len n=10 cut=false rank=0 [len/Method/impl str vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
 ws/src/lib.rs:263:23 .l|en n=2 rank=0
 == ws/src/shapes.rs
 ws/src/shapes.rs:3:5 su|per n=1 cut=false rank=0 [super/-/keyword]
@@ -388,17 +388,17 @@ ws/src/shapes.rs:25:12 di|st2 n=0 cut=false rank=-1 []
 ws/src/shapes.rs:25:19 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
 ws/src/shapes.rs:25:29 Po|int n=2 cut=false rank=0 [Point/Struct Points/TypeAlias]
 ws/src/shapes.rs:26:18 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/shapes.rs:26:23 .|x n=11 cut=false rank=0 [x/Field/Point y/Field/Point new/Method/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone default/Method/Default to_string/Method/ToString]
-ws/src/shapes.rs:26:29 .|x n=11 cut=false rank=0 [x/Field/Point y/Field/Point new/Method/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone default/Method/Default to_string/Method/ToString]
+ws/src/shapes.rs:26:23 .|x n=9 cut=false rank=0 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
+ws/src/shapes.rs:26:29 .|x n=9 cut=false rank=0 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
 ws/src/shapes.rs:27:18 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/shapes.rs:27:23 .|y n=11 cut=false rank=1 [x/Field/Point y/Field/Point new/Method/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone default/Method/Default to_string/Method/ToString]
-ws/src/shapes.rs:27:29 .|y n=11 cut=false rank=1 [x/Field/Point y/Field/Point new/Method/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone default/Method/Default to_string/Method/ToString]
+ws/src/shapes.rs:27:23 .|y n=9 cut=false rank=1 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
+ws/src/shapes.rs:27:29 .|y n=9 cut=false rank=1 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
 ws/src/shapes.rs:31:12 mo|ved n=3 cut=false rank=-1 [more/Module/inner mod/-/keyword move/-/keyword]
 ws/src/shapes.rs:31:18 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
 ws/src/shapes.rs:31:36 Se|lf n=3 cut=false rank=1 [Send/- Self/-/keyword self/-/keyword]
 ws/src/shapes.rs:32:9 Se|lf n=3 cut=false rank=1 [Send/- Self/-/keyword self/-/keyword]
 ws/src/shapes.rs:32:19 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/shapes.rs:32:24 .|x n=11 cut=false rank=0 [x/Field/Point y/Field/Point new/Method/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone default/Method/Default to_string/Method/ToString]
+ws/src/shapes.rs:32:24 .|x n=9 cut=false rank=0 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
 ws/src/shapes.rs:32:34 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
 ws/src/shapes.rs:36:1 im|pl n=1 cut=false rank=0 [impl/-/keyword]
 ws/src/shapes.rs:36:6 De|scribe n=6 cut=false rank=1 [deep/Function/inner Describe/Trait Default/- debug_assert/Macro debug_assert_eq/Macro]
@@ -411,10 +411,10 @@ ws/src/shapes.rs:38:24 ::|ZERO n=10 cut=false rank=3 [x/Field/Point y/Field/Poin
 ws/src/shapes.rs:38:24 ::Z|ERO n=1 rank=0
 ws/src/shapes.rs:39:9 fo|rmat n=2 cut=false rank=1 [for/-/keyword format/Macro]
 ws/src/shapes.rs:39:26 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/shapes.rs:39:31 .|x n=11 cut=false rank=0 [x/Field/Point y/Field/Point new/Method/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone default/Method/Default to_string/Method/ToString]
-ws/src/shapes.rs:39:37 .|x n=11 cut=false rank=0 [x/Field/Point y/Field/Point new/Method/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone default/Method/Default to_string/Method/ToString]
+ws/src/shapes.rs:39:31 .|x n=9 cut=false rank=0 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
+ws/src/shapes.rs:39:37 .|x n=9 cut=false rank=0 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
 ws/src/shapes.rs:39:40 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/shapes.rs:39:45 .|y n=11 cut=false rank=1 [x/Field/Point y/Field/Point new/Method/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone default/Method/Default to_string/Method/ToString]
+ws/src/shapes.rs:39:45 .|y n=9 cut=false rank=1 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
 ws/src/shapes.rs:43:1 im|pl n=1 cut=false rank=0 [impl/-/keyword]
 ws/src/shapes.rs:43:6 Sh|ape n=5 cut=false rank=0 [Shape/Enum shadow/Function shapes/Module shout_len/Function shapes_demo/Function]
 ws/src/shapes.rs:44:12 na|me n=1 cut=false rank=-1 [os_name/Function]
@@ -486,8 +486,8 @@ ws/src/util/mod.rs:24:15 .|get n=4 cut=false rank=0 [get/Method/impl Wrapper<T> 
 ws/src/util/mod.rs:24:15 .g|et n=2 rank=0
 ws/src/util/mod.rs:25:15 .|inner n=4 cut=false rank=1 [get/Method/impl Wrapper<T> inner/Field/Wrapper into/Method/Into to_string/Method/ToString]
 ws/src/util/mod.rs:25:15 .i|nner n=3 rank=0
-ws/src/util/mod.rs:25:21 .|x n=11 cut=false rank=0 [x/Field/Point y/Field/Point new/Method/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone default/Method/Default to_string/Method/ToString]
-ws/src/util/mod.rs:26:7 .|y n=11 cut=false rank=1 [x/Field/Point y/Field/Point new/Method/impl Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone default/Method/Default to_string/Method/ToString]
+ws/src/util/mod.rs:25:21 .|x n=9 cut=false rank=0 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
+ws/src/util/mod.rs:26:7 .|y n=9 cut=false rank=1 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
 == ws/src/util/text.rs
 ws/src/util/text.rs:1:5 su|per n=1 cut=false rank=0 [super/-/keyword]
 ws/src/util/text.rs:1:12 ::|scale n=0 cut=false rank=-1 []
@@ -506,9 +506,9 @@ ws/src/util/text.rs:10:24 .t|o_string n=4 rank=1
 ws/src/util/text.rs:12:17 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
 ws/src/util/text.rs:12:26 us|ize n=2 cut=false rank=-1 [use_macro/Function use/-/keyword]
 ws/src/util/text.rs:13:9 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/util/text.rs:13:14 .|text n=6 cut=false rank=2 [len/Method/impl Word new/Method/impl Word text/Field/Word upper/Method/impl Word into/Method/Into to_string/Method/ToString]
+ws/src/util/text.rs:13:14 .|text n=5 cut=false rank=1 [len/Method/impl Word text/Field/Word upper/Method/impl Word into/Method/Into to_string/Method/ToString]
 ws/src/util/text.rs:13:14 .t|ext n=3 rank=0
-ws/src/util/text.rs:13:19 .|len n=11 cut=false rank=0 [len/Method/impl str new/Method/impl String vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
+ws/src/util/text.rs:13:19 .|len n=10 cut=false rank=0 [len/Method/impl str vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
 ws/src/util/text.rs:13:19 .l|en n=2 rank=0
 ws/src/util/text.rs:15:12 up|per n=0 cut=false rank=-1 []
 ws/src/util/text.rs:15:19 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
@@ -516,12 +516,12 @@ ws/src/util/text.rs:15:28 St|ring n=7 cut=false rank=0 [String/- static/-/keywor
 ws/src/util/text.rs:16:23 St|ring n=7 cut=false rank=0 [String/- static/-/keyword struct/-/keyword stringify/Macro with_std/Function]
 ws/src/util/text.rs:16:31 ::|new n=10 cut=false rank=1 [len/Method/impl str new/Method/impl String vec/Field/String trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String Target/TypeAlias/impl Deref for String as_str/Method/impl String push_str/Method/impl String starts_with/Method/impl str]
 ws/src/util/text.rs:16:31 ::n|ew n=3 rank=0
-ws/src/util/text.rs:17:13 .|push_str n=11 cut=false rank=8 [len/Method/impl str new/Method/impl String vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
+ws/src/util/text.rs:17:13 .|push_str n=10 cut=false rank=7 [len/Method/impl str vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
 ws/src/util/text.rs:17:13 .p|ush_str n=1 rank=0
 ws/src/util/text.rs:17:22 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
-ws/src/util/text.rs:17:27 .|text n=6 cut=false rank=2 [len/Method/impl Word new/Method/impl Word text/Field/Word upper/Method/impl Word into/Method/Into to_string/Method/ToString]
+ws/src/util/text.rs:17:27 .|text n=5 cut=false rank=1 [len/Method/impl Word text/Field/Word upper/Method/impl Word into/Method/Into to_string/Method/ToString]
 ws/src/util/text.rs:17:27 .t|ext n=3 rank=0
-ws/src/util/text.rs:17:32 .|as_str n=11 cut=false rank=7 [len/Method/impl str new/Method/impl String vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
+ws/src/util/text.rs:17:32 .|as_str n=10 cut=false rank=6 [len/Method/impl str vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
 ws/src/util/text.rs:17:32 .a|s_str n=2 rank=0
 ws/src/util/text.rs:22:8 sh|out_len n=5 cut=false rank=3 [Shape/Enum shadow/Function shapes/Module shout_len/Function shapes_demo/Function]
 ws/src/util/text.rs:22:30 us|ize n=2 cut=false rank=-1 [use_macro/Function use/-/keyword]
@@ -529,9 +529,9 @@ ws/src/util/text.rs:23:13 Wo|rd n=2 cut=false rank=0 [Word/Struct counter_works/
 ws/src/util/text.rs:23:19 ::|new n=4 cut=false rank=1 [len/Method/impl Word new/Method/impl Word text/Field/Word upper/Method/impl Word]
 ws/src/util/text.rs:23:19 ::n|ew n=2 rank=0
 ws/src/util/text.rs:24:13 sc|ale n=1 cut=false rank=0 [scale/Function]
-ws/src/util/text.rs:25:7 .|upper n=6 cut=false rank=3 [len/Method/impl Word new/Method/impl Word text/Field/Word upper/Method/impl Word into/Method/Into to_string/Method/ToString]
+ws/src/util/text.rs:25:7 .|upper n=5 cut=false rank=2 [len/Method/impl Word text/Field/Word upper/Method/impl Word into/Method/Into to_string/Method/ToString]
 ws/src/util/text.rs:25:7 .u|pper n=1 rank=0
-ws/src/util/text.rs:25:15 .|len n=11 cut=false rank=0 [len/Method/impl str new/Method/impl String vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
+ws/src/util/text.rs:25:15 .|len n=10 cut=false rank=0 [len/Method/impl str vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
 ws/src/util/text.rs:25:15 .l|en n=2 rank=0
 ws/src/util/text.rs:25:28 us|ize n=2 cut=false rank=-1 [use_macro/Function use/-/keyword]
 == ws/tests/it.rs
@@ -546,15 +546,15 @@ ws/tests/it.rs:4:14 ::n|ew n=5 rank=0
 ws/tests/it.rs:7:3 te|st n=4 cut=false rank=-1 [text/Module tests/Module texts/Function extra_or_test/Function]
 ws/tests/it.rs:8:4 in|tegration n=6 cut=false rank=2 [in/-/keyword inner/Module integration/Function Into/- IntoIterator/-]
 ws/tests/it.rs:9:13 he|lper n=1 cut=false rank=0 [helper/Function]
-ws/tests/it.rs:10:15 .|describe n=15 cut=false rank=10 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
-ws/tests/it.rs:10:15 .d|escribe n=3 rank=0
+ws/tests/it.rs:10:15 .|describe n=13 cut=false rank=9 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
+ws/tests/it.rs:10:15 .d|escribe n=2 rank=0
 ws/tests/it.rs:11:5 as|sert n=8 cut=false rank=3 [as/-/keyword AsRef/- async/-/keyword assert/Macro assert_eq/Macro]
-ws/tests/it.rs:11:15 .|len n=11 cut=false rank=0 [len/Method/impl str new/Method/impl String vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
+ws/tests/it.rs:11:15 .|len n=10 cut=false rank=0 [len/Method/impl str vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
 ws/tests/it.rs:11:15 .l|en n=2 rank=0
 ws/tests/it.rs:12:5 as|sert_eq n=8 cut=false rank=4 [as/-/keyword AsRef/- async/-/keyword assert/Macro assert_eq/Macro]
-ws/tests/it.rs:12:18 .|twice n=15 cut=false rank=7 [new/Method/impl Counter bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into]
-ws/tests/it.rs:12:18 .t|wice n=9 rank=1
-ws/tests/it.rs:12:26 .|len n=11 cut=false rank=0 [len/Method/impl str new/Method/impl String vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
+ws/tests/it.rs:12:18 .|twice n=13 cut=false rank=6 [bump/Method/impl Counter name/Field/Counter count/Field/Counter first/Method/impl Counter items/Field/Counter total/Method/impl Counter twice/Method/Describe points/Method/impl Counter checked/Method/impl Counter describe/Method/Describe into/Method/Into clone/Method/Clone]
+ws/tests/it.rs:12:18 .t|wice n=8 rank=1
+ws/tests/it.rs:12:26 .|len n=10 cut=false rank=0 [len/Method/impl str vec/Field/String into/Method/Into trim/Method/impl str clone/Method/impl Clone for String deref/Method/impl Deref for String as_str/Method/impl String push_str/Method/impl String to_string/Method/ToString starts_with/Method/impl str]
 ws/tests/it.rs:12:26 .l|en n=2 rank=0
 == empty n=91
 inline@32 n=93 cut=false [abc/local f/Function Eq/- Fn/-]

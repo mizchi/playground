@@ -44,6 +44,8 @@ pub struct Def {
     /// クロージャの戻り値の形 (`U` / `Option<B>`), クロージャの引数の形 (`T` / `&Self::Item` / `B, Self::Item`))。
     /// `fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Option<U>` → [(0, F, U, T)]
     pub fnret: Vec<(u8, String, String, String)>,
+    /// メソッドが self を取るか (`.` の後の補完に出すもの)
+    pub has_self: bool,
     /// slim のとき (本文を捨てたとき): 名前の両端の (行, UTF-16 の桁)
     pub pos: [u32; 4],
 }
@@ -382,6 +384,7 @@ impl FileIndex {
                         },
                         params: params.clone(),
                         fnret: if matches!(s.kind, SymKind::Function | SymKind::Method) { fn_bounds(&s.detail) } else { vec![] },
+                        has_self: s.kind == SymKind::Method && crate::symbols::takes_self(&s.detail),
                         pos: [0; 4],
                     });
                 }
@@ -2098,6 +2101,51 @@ fn exit_points(f: &FileIndex, file: usize, off: usize) -> Option<Vec<Loc>> {
     Some(out)
 }
 
+/// ブロック (開き括弧 p) で終わる式の始め: `match x {` の match、`if c { } else {` の if、`loop {` / `unsafe {`、ただのブロック
+/// なら p。`fn` の本体・`impl` などのアイテムの `{` なら None
+fn block_expr_start(f: &FileIndex, p: usize) -> Option<usize> {
+    let mut q = p;
+    loop {
+        // (`} else {` / `} else if c {`: 前のブロックへ)
+        if q >= 2 && f.ident(q - 1) && f.tok(q - 1) == "else" && f.sym(q - 2, b'}') {
+            q = f.open_of(q - 2)?;
+            continue;
+        }
+        let mut r = q;
+        let mut d = 0;
+        while r > 0 {
+            r -= 1;
+            if f.sym(r, b')') || f.sym(r, b']') {
+                d += 1;
+            } else if f.sym(r, b'(') || f.sym(r, b'[') {
+                if d == 0 {
+                    return Some(q);
+                }
+                d -= 1;
+            } else if d == 0 && (f.sym(r, b';') || f.sym(r, b'{') || f.sym(r, b'}') || f.sym(r, b',')) {
+                return Some(q);
+            } else if d == 0 && f.ident(r) {
+                match f.tok(r) {
+                    "match" | "loop" | "unsafe" | "async" => return Some(r),
+                    "if" => {
+                        // (`else if`: さらに前の if へ)
+                        if r >= 2 && f.ident(r - 1) && f.tok(r - 1) == "else" && f.sym(r - 2, b'}') {
+                            q = f.open_of(r - 2)?;
+                            break;
+                        }
+                        return Some(r);
+                    }
+                    "fn" | "impl" | "struct" | "enum" | "trait" | "mod" | "union" | "where" | "while" | "for" => return None,
+                    _ => {}
+                }
+            }
+        }
+        if r == 0 {
+            return Some(q);
+        }
+    }
+}
+
 /// トークン j の開き括弧に対応する閉じ括弧
 fn close_of(f: &FileIndex, j: usize) -> usize {
     let mut d = 0;
@@ -2755,6 +2803,14 @@ fn owner_split(ws: &[&FileIndex], file: usize, o: &str) -> (Vec<String>, usize) 
             _ => {}
         }
     }
+    // (組み込みの型の trait (`impl Ord for usize` などは core のマクロの中で見えない): よく使う trait のメソッドを持たせる)
+    let prim_traits: &[&str] = if v.iter().any(|x| matches!(x.as_str(), "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "char" | "bool")) {
+        &["Ord", "PartialOrd", "PartialEq", "Eq", "Clone", "Copy", "Hash", "Default", "Debug", "Display", "ToString"]
+    } else if v.iter().any(|x| matches!(x.as_str(), "f32" | "f64")) {
+        &["PartialOrd", "PartialEq", "Clone", "Copy", "Default", "Debug", "Display", "ToString"]
+    } else {
+        &[]
+    };
     v.extend(extra);
     let nc = v.len();
     let mut traits: Vec<String> = vec![];
@@ -2763,6 +2819,11 @@ fn owner_split(ws: &[&FileIndex], file: usize, o: &str) -> (Vec<String>, usize) 
             if v.contains(s) && !v.contains(t) && !traits.contains(t) {
                 traits.push(t.clone());
             }
+        }
+    }
+    for tr in prim_traits {
+        if !traits.iter().any(|t| t == tr) {
+            traits.push(tr.to_string());
         }
     }
     // (繰り返しの型: slice の Iter などの `impl Iterator` は core のマクロの中にあって見えないので、Iterator のメソッドを持たせる)
@@ -3070,6 +3131,21 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
                 None => n.to_string(),
             };
             return Some(format!("[{et}; {len}]"));
+        }
+        // match / if / ブロックの式 (構造体の式 `T { .. }` でないもの): 腕・ブロックの最後の式のうち型の分かる最初のもの
+        if open == b'{' && !(f.ident(m) && (f.tok(m).starts_with(|c: char| c.is_ascii_uppercase()) || f.tok(m) == "Self")) {
+            let s = block_expr_start(f, p)?;
+            let mut tails = vec![];
+            expr_tails(f, file, s, k, &mut tails);
+            for l in tails {
+                let e = f.toks.partition_point(|t| (t.2 as usize) < l.end);
+                if e < k {
+                    if let Some(t) = expr_type(ws, file, e, depth + 1) {
+                        return Some(t);
+                    }
+                }
+            }
+            return None;
         }
         if !f.ident(m) {
             return None;
@@ -3439,7 +3515,8 @@ pub fn complete(ws: &[&FileIndex], file: usize, off: usize) -> (Vec<Item>, bool)
                 let mut os = owners_of(ws, file, &o);
                 os.extend(blanket_traits(ws, file, true));
                 for (i, d) in all() {
-                    if kinds.contains(&d.kind) && os.contains(&d.owner) {
+                    // (`self` を取らない関連関数 (`default()`) は `.` の後に出さない: rust-analyzer と同じ)
+                    if kinds.contains(&d.kind) && os.contains(&d.owner) && (d.kind != SymKind::Method || d.has_self) {
                         add(&mut out, if ws[i].lib { 1 } else { 0 }, &d.name, Some(d.kind), false, d.container.to_string(), true);
                     }
                 }
