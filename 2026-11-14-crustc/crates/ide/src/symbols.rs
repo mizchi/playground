@@ -501,6 +501,10 @@ impl Scan<'_> {
                         ch.dedup_by_key(|s| s.name_start);
                         for s in &mut ch {
                             s.in_macro = true;
+                            // (数の型の impl のメンバ)
+                            if s.kind == SymKind::Function {
+                                s.kind = SymKind::Method;
+                            }
                         }
                         let owner = match mname.as_slice() {
                             b"uint_impl" => "__uint",

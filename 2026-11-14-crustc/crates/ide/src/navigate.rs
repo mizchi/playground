@@ -3105,11 +3105,29 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
                 return Some("()".to_string());
             }
             if ends.len() == 1 && !trailing {
+                // (範囲の式 `(a..b)` / `(a..=b)`: Range<T> (T は分かる方の端の型))
+                let mut dd = 0;
+                for q in p + 1..k {
+                    if f.sym(q, b'(') || f.sym(q, b'[') || f.sym(q, b'{') {
+                        dd += 1;
+                    } else if f.sym(q, b')') || f.sym(q, b']') || f.sym(q, b'}') {
+                        dd -= 1;
+                    } else if dd == 0 && f.sym(q, b'.') && f.sym(q + 1, b'.') && !f.sym(q + 2, b'.') {
+                        let incl = f.sym(q + 2, b'=');
+                        let hi = expr_type(ws, file, k - 1, depth + 1);
+                        let lo = if q > p + 1 { expr_type(ws, file, q - 1, depth + 1) } else { None };
+                        let tt = hi.or(lo).unwrap_or_else(|| "i32".to_string());
+                        return Some(format!("{}<{tt}>", if incl { "RangeInclusive" } else { "Range" }));
+                    }
+                }
                 return expr_type(ws, file, ends[0], depth + 1);
             }
-            // (要素の型が一つでも分からなければ答えない)
-            let ts: Vec<String> = ends.iter().map(|&e| expr_type(ws, file, e, depth + 1)).collect::<Option<Vec<_>>>()?;
-            return Some(format!("({})", ts.join(", ")));
+            // (要素の型が一つも分からなければ答えない。分からない要素は `_`)
+            let ts: Vec<Option<String>> = ends.iter().map(|&e| expr_type(ws, file, e, depth + 1)).collect();
+            if ts.iter().all(|x| x.is_none()) {
+                return None;
+            }
+            return Some(format!("({})", ts.into_iter().map(|x| x.unwrap_or_else(|| "_".to_string())).collect::<Vec<_>>().join(", ")));
         }
         if open == b'[' {
             // 添字 `a[i]` (前が式の終わりのとき。`t.1[0]` のタプルの添字も)
@@ -3396,7 +3414,16 @@ fn binding_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<
                 }
                 j += 1;
             }
-            let ret = expr_end(f, j + 1, false).and_then(|e| expr_type(ws, file, e, depth + 1)).map(|r| format!(" -> {r}")).unwrap_or_default();
+            // (戻り値の型: 書いてあれば `-> T`、なければ本体の式の型)
+            let ret = if f.sym(j + 1, b'-') && f.sym(j + 2, b'>') {
+                let mut e = j + 3;
+                while e < n && !f.sym(e, b'{') {
+                    e += 1;
+                }
+                f.text.get(f.toks.get(j + 3).map(|x| x.1 as usize).unwrap_or(0)..f.toks.get(e).map(|x| x.1 as usize).unwrap_or(0)).map(|r| format!(" -> {}", r.trim())).unwrap_or_default()
+            } else {
+                expr_end(f, j + 1, false).and_then(|e| expr_type(ws, file, e, depth + 1)).map(|r| format!(" -> {r}")).unwrap_or_default()
+            };
             return Some(format!("impl Fn({}){ret}", tys.join(", ")));
         }
         if let Some(e) = expr_end(f, b + 2, false) {
@@ -4871,11 +4898,19 @@ fn variant_field(ws: &[&FileIndex], file: usize, cur: &str, vt: usize, i: usize)
         _ => q,
     };
     let kr = f.krate;
+    // (修飾 `Ty::` を use からたどった enum のモジュール: 同じ名前の enum が別のクレートにあるとき)
+    let qmod: Option<Vec<String>> = if f.after_path(vt) && vt >= 3 && f.tok(vt - 3) != "Self" {
+        def_at(ws, file, f.toks[vt - 3].1 as usize).first().and_then(|l| ws[l.file].defs.iter().find(|d| d.start == l.start && d.kind == SymKind::Enum).map(|d| d.module.to_vec()))
+    } else {
+        None
+    };
+    // (修飾の別名 `use parse::Ty as PTy` の PTy はもとの名前で)
+    let q = q.map(|q| f.use_alias(&q).map(|s| s.to_string()).unwrap_or(q));
     // (バリアント (持ち主が照合する型か修飾) か、タプル構造体 `P(a, b)`)
     let (di, d) = named(ws, file, v)
         .into_iter()
         .filter(|(_, d)| (d.kind == SymKind::Variant && (d.owner == head || q.as_deref() == Some(d.owner.as_str()))) || (d.kind == SymKind::Struct && d.owner.is_empty()))
-        .min_by_key(|(k, d)| (d.owner != head, *k != file, ws[*k].krate != kr))?;
+        .min_by_key(|(k, d)| (qmod.as_ref().is_some_and(|m| d.module[..] != m[..]), d.owner != head, *k != file, ws[*k].krate != kr))?;
     let text = &ws[di].text;
     let vtxt = text.get(d.item_start..d.item_end)?;
     let a = vtxt.find('(')?;
