@@ -2888,3 +2888,225 @@ fn g() -> u8 { 1 }
 #[cfg(test)]
 #[path = "navigate_tests.rs"]
 mod unit_tests;
+
+/// textDocument/prepareRename: off の名前が名前を変えられるものなら、その名前の範囲
+pub fn prepare_rename(ws: &[&FileIndex], file: usize, off: usize) -> Result<Loc, String> {
+    clear_memo();
+    let f = ws[file];
+    let k = f.tok_at(off).ok_or("名前の上ではない")?;
+    let w = f.tok(k);
+    if KEYWORDS.contains(&w) || PRIMS.contains(&w) {
+        return Err(format!("`{w}` は名前を変えられない"));
+    }
+    let t = *def_at(ws, file, off).first().ok_or("定義が分からない")?;
+    let tf = ws[t.file];
+    // (ライブラリのもの: `use a::B;` の B の上でだけ、別名を付ける形で変えられる (rust-analyzer と同じ))
+    if tf.lib && lib_use(f, w) != Some(f.toks[k].1 as usize) {
+        return Err("ライブラリの定義は名前を変えられない (use の名前の上なら別名を付けられる)".into());
+    }
+    if mod_file(ws, t).is_some() {
+        return Err("ファイルのモジュールの名前は変えられない (ファイルの名前も変わるので)".into());
+    }
+    // (derive の名前 `#[derive(Clone)]` に解決されたもの: derive が作るメソッド)
+    let is_def = tf.defs.iter().any(|d| d.start == t.start);
+    if !is_def && !tf.slim && tf.tok_at(t.start).is_some_and(|j| tf.in_derive(j)) {
+        return Err("derive が作るメソッドは名前を変えられない".into());
+    }
+    let (a, b) = (f.toks[k].1 as usize, f.toks[k].2 as usize);
+    Ok(Loc { file, start: a, end: b })
+}
+
+/// ファイル f の `use a::name;` (別名なし) の、パスの最後の名前の byte 位置
+fn lib_use(f: &FileIndex, name: &str) -> Option<usize> {
+    f.uses.iter().zip(&f.use_at).find(|(u, a)| u.0 == name && u.1.last().is_some_and(|l| l == name) && **a != usize::MAX).map(|(_, &a)| a)
+}
+
+/// 識別子として使える名前か (キーワードは除く。`r#` の付いたものは良い)
+fn valid_ident(s: &str) -> bool {
+    let n = s.strip_prefix("r#").unwrap_or(s);
+    let mut c = n.chars();
+    let Some(h) = c.next() else { return false };
+    (h == '_' || h.is_alphabetic()) && c.all(|x| x == '_' || x.is_alphanumeric()) && n != "_" && (s.starts_with("r#") || !KEYWORDS.contains(&n))
+}
+
+/// textDocument/rename: 書き換え (位置, 新しい文字列) の列。構造体の省略形 `S { x }` は `S { new: x }` /
+/// `S { x: new }` に書き換える
+pub fn rename(ws: &[&FileIndex], file: usize, off: usize, new: &str, load: Load) -> Result<Vec<(Loc, String)>, String> {
+    let at = prepare_rename(ws, file, off)?;
+    if !valid_ident(new) {
+        return Err(format!("`{new}` は名前にできない"));
+    }
+    let old = ws[file].text[at.start..at.end].to_string();
+    let t = *def_at(ws, file, off).first().ok_or("定義が分からない")?;
+    // `use` の名前の上: `use std::sync::Mutex;` → `use std::sync::Mutex as New;` と、このファイルの中の Mutex
+    if lib_use(ws[file], &old) == Some(at.start) {
+        let f = ws[file];
+        let u = at.start;
+        let mut out = vec![(Loc { file, start: u + old.len(), end: u + old.len() }, format!(" as {new}"))];
+        for &k in f.idents.get(old.as_str()).map(|v| v.as_slice()).unwrap_or(&[]) {
+            let a = f.toks[k as usize].1 as usize;
+            if a != u && !f.in_inactive(a) && !f.after_path(k as usize) && def_at(ws, file, a).first() == Some(&t) {
+                out.push((Loc { file, start: a, end: a + old.len() }, new.to_string()));
+            }
+        }
+        return Ok(out);
+    }
+    let is_field = ws[t.file].defs.iter().any(|d| d.start == t.start && d.kind == SymKind::Field);
+    let refs = references(ws, file, off, true, load);
+    let mut held: FxMap<usize, Rc<FileIndex>> = FxMap::default();
+    let mut out = vec![];
+    for l in refs {
+        let fi: &FileIndex = if ws[l.file].slim {
+            if !held.contains_key(&l.file) {
+                let Some(r) = load(l.file) else { continue };
+                held.insert(l.file, r);
+            }
+            &held[&l.file]
+        } else {
+            ws[l.file]
+        };
+        if fi.text.get(l.start..l.end) != Some(old.as_str()) {
+            continue;
+        }
+        let rep = match fi.tok_at(l.start) {
+            Some(k) if fi.toks[k].0 == 0 && (fi.sym(k.wrapping_sub(1), b'{') || fi.sym(k.wrapping_sub(1), b',')) && (fi.sym(k + 1, b',') || fi.sym(k + 1, b'}')) && fi.struct_lit_at(k).is_some() => {
+                if is_field { format!("{new}: {old}") } else { format!("{old}: {new}") }
+            }
+            _ => new.to_string(),
+        };
+        out.push((l, rep));
+    }
+    out.sort_by_key(|x| (x.0.file, x.0.start));
+    out.dedup_by_key(|x| (x.0.file, x.0.start));
+    Ok(out)
+}
+
+/// textDocument/signatureHelp: off を囲む呼び出し `f(..|..)` の (シグネチャ, 引数の byte 範囲 (シグネチャの中), 今の引数)
+pub fn signature_help(ws: &[&FileIndex], file: usize, off: usize, load: Load) -> Option<(String, Vec<(usize, usize)>, usize)> {
+    clear_memo();
+    let f = ws[file];
+    // (off より前のトークンから戻って、閉じていない `(` を探す。数えるのは深さ 0 のカンマ)
+    let mut j = f.toks.partition_point(|t| (t.1 as usize) < off);
+    let mut d = 0i32;
+    let mut commas = 0;
+    let open = loop {
+        if j == 0 {
+            return None;
+        }
+        j -= 1;
+        if f.toks[j].0 != 1 {
+            continue;
+        }
+        match f.text.as_bytes()[f.toks[j].1 as usize] {
+            b')' | b']' | b'}' => d += 1,
+            b'[' => {
+                // (引数の中の配列・`vec![..]`: そこまでのカンマは配列の中のもの)
+                if d == 0 {
+                    commas = 0;
+                } else {
+                    d -= 1;
+                }
+            }
+            b'{' => {
+                if d == 0 {
+                    return None;
+                }
+                d -= 1;
+            }
+            b'(' => {
+                if d == 0 {
+                    break j;
+                }
+                d -= 1;
+            }
+            b',' if d == 0 => commas += 1,
+            b';' if d == 0 => return None,
+            _ => {}
+        }
+    };
+    // (呼ぶもの: `f(` / `x.m(` / `T::f(` / `f::<T>(`)
+    let mut c = open.checked_sub(1)?;
+    if f.sym(c, b'>') {
+        let mut dd = 0;
+        while c > 0 {
+            if f.sym(c, b'>') {
+                dd += 1;
+            } else if f.sym(c, b'<') {
+                dd -= 1;
+                if dd == 0 {
+                    break;
+                }
+            }
+            c -= 1;
+        }
+        c = c.checked_sub(3)?;
+    }
+    // (宣言 `fn f(..)` / `struct T(..)` の中は呼び出しではない)
+    if !f.ident(c) || KEYWORDS.contains(&f.tok(c)) || (c >= 1 && f.ident(c - 1) && matches!(f.tok(c - 1), "fn" | "struct")) {
+        return None;
+    }
+    let method_call = c >= 1 && f.sym(c - 1, b'.');
+    let t = *def_at(ws, file, f.toks[c].1 as usize).first()?;
+    let tf = ws[t.file];
+    let def = tf.defs.iter().find(|x| x.start == t.start && matches!(x.kind, SymKind::Function | SymKind::Method | SymKind::Struct | SymKind::Variant))?;
+    let held;
+    let text: &str = if tf.slim {
+        held = load(t.file)?;
+        &held.text
+    } else {
+        &tf.text
+    };
+    let sig = signature(text.get(def.item_start..def.item_end.min(text.len()))?, def.kind);
+    // (引数の並び: 名前の後の最初の `(` .. `)`。型引数 `<..>` の中は飛ばす)
+    let name_at = sig.find(def.name.as_str()).unwrap_or(0) + def.name.len();
+    let b = sig.as_bytes();
+    let mut i = name_at;
+    let mut dg = 0;
+    while i < b.len() {
+        match b[i] {
+            b'<' => dg += 1,
+            b'>' if i > 0 && b[i - 1] != b'-' => dg -= 1,
+            b'(' if dg == 0 => break,
+            _ => {}
+        }
+        i += 1;
+    }
+    if i >= b.len() {
+        return None;
+    }
+    let mut params = vec![];
+    let mut dd = 0;
+    let mut s = i + 1;
+    let mut k = i + 1;
+    while k < b.len() {
+        match b[k] {
+            b'(' | b'[' | b'<' => dd += 1,
+            b'>' if b[k - 1] == b'-' => {}
+            b')' | b']' | b'>' if dd > 0 => dd -= 1,
+            b')' => break,
+            b',' if dd == 0 => {
+                params.push((s, k));
+                s = k + 1;
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    if k > s && !sig[s..k].trim().is_empty() {
+        params.push((s, k));
+    }
+    let params: Vec<(usize, usize)> = params
+        .into_iter()
+        .map(|(a, e)| {
+            let lead = sig[a..e].len() - sig[a..e].trim_start().len();
+            (a + lead, a + sig[a..e].trim_end().len())
+        })
+        .collect();
+    let has_self = params.first().is_some_and(|&(a, e)| {
+        let p = &sig[a..e];
+        p == "self" || p.ends_with("self") || p.starts_with("self:") || p.starts_with("mut self")
+    });
+    // (メソッドの呼び出し `x.m(..)` では self は引数に数えない: rust-analyzer と同じ)
+    let params = if method_call && has_self { params[1..].to_vec() } else { params };
+    Some((sig, params, commas))
+}

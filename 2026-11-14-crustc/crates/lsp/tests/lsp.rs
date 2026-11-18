@@ -241,3 +241,64 @@ fn hover_and_completion() {
     let c = labels(ask("textDocument/completion", 9, 6));
     assert!(!c.is_empty() && c.iter().all(|x| x.to_lowercase().contains('n')), "{c:?}");
 }
+
+/// rename (prepareRename・ほかのファイルも書き換える・理由付きの断り)、signatureHelp、documentHighlight
+#[test]
+fn rename_signature_highlight() {
+    use crustc_lsp::Server;
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lsp_rename");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/geom.rs"), "pub struct Point { pub x: f64 }\nimpl Point {\n    pub fn scale(&self, k: f64, d: f64) -> f64 { self.x * k + d }\n}\n").unwrap();
+    let uri_root = format!("file://{}", root.display());
+    let mut srv = Server::new();
+    let r = srv.handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": uri_root}}).to_string());
+    let r: Value = serde_json::from_str(&r[0]).unwrap();
+    let caps = &r["result"]["capabilities"];
+    assert_eq!(caps["renameProvider"]["prepareProvider"], true);
+    assert_eq!(caps["documentHighlightProvider"], true);
+    assert!(caps["signatureHelpProvider"]["triggerCharacters"].as_array().unwrap().contains(&json!("(")));
+    let uri = format!("{uri_root}/src/main.rs");
+    let text = "mod geom;\nuse geom::Point;\nfn main() {\n    let p = Point { x: 1.0 };\n    let s = p.scale(2.0, p.x);\n}\n";
+    srv.handle(&json!({"jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": uri, "languageId": "rust", "version": 1, "text": text}}}).to_string());
+    let mut id = 10;
+    let mut ask = |method: &str, line: u32, ch: u32, extra: Value| -> Value {
+        id += 1;
+        let mut p = json!({"textDocument": {"uri": uri}, "position": {"line": line, "character": ch}});
+        if let Value::Object(m) = extra {
+            p.as_object_mut().unwrap().extend(m);
+        }
+        let r = srv.handle(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": p}).to_string());
+        serde_json::from_str(&r[0]).unwrap()
+    };
+    // prepareRename: 名前の範囲と今の名前
+    let r = ask("textDocument/prepareRename", 4, 15, json!({}));
+    assert_eq!(r["result"]["placeholder"], "scale", "{r}");
+    assert_eq!(r["result"]["range"]["start"]["character"], 14);
+    // フィールド x: geom.rs の定義・self.x と、main.rs の `Point { x: .. }`・`p.x`
+    let r = ask("textDocument/rename", 4, 27, json!({"newName": "px"}));
+    let ch = &r["result"]["changes"];
+    let geom = ch.as_object().unwrap().iter().find(|(k, _)| k.ends_with("geom.rs")).map(|(_, v)| v.as_array().unwrap().len());
+    assert_eq!(geom, Some(2), "{r}");
+    assert_eq!(ch[&uri].as_array().unwrap().len(), 2, "{r}");
+    assert!(ch[&uri].as_array().unwrap().iter().all(|e| e["newText"] == "px"));
+    // 断るとき: 理由付きのエラー
+    let r = ask("textDocument/rename", 4, 27, json!({"newName": "fn"}));
+    assert_eq!(r["error"]["code"], -32803, "{r}");
+    let r = ask("textDocument/prepareRename", 3, 22, json!({}));
+    assert!(r["error"]["message"].as_str().is_some_and(|m| !m.is_empty()), "{r}");
+    // signatureHelp: `p.scale(2.0, |p.x)` は 2 番目 (self は数えない)
+    let r = ask("textDocument/signatureHelp", 4, 25, json!({}));
+    let sg = &r["result"]["signatures"][0];
+    assert_eq!(sg["label"], "pub fn scale(&self, k: f64, d: f64) -> f64", "{r}");
+    assert_eq!(sg["parameters"].as_array().unwrap().len(), 2);
+    assert_eq!(r["result"]["activeParameter"], 1);
+    let l = sg["label"].as_str().unwrap();
+    let p0 = &sg["parameters"][0]["label"];
+    assert_eq!(&l[p0[0].as_u64().unwrap() as usize..p0[1].as_u64().unwrap() as usize], "k: f64");
+    assert!(ask("textDocument/signatureHelp", 3, 10, json!({}))["result"].is_null());
+    // documentHighlight: このファイルの中の p (定義と 2 つの使い所)
+    let r = ask("textDocument/documentHighlight", 3, 8, json!({}));
+    assert_eq!(r["result"].as_array().unwrap().len(), 3, "{r}");
+}

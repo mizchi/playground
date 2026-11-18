@@ -606,3 +606,99 @@ fn nested_uses() {
     let u: Vec<String> = fi.uses.iter().map(|(a, b)| format!("{a}={}", b.join("::"))).collect();
     assert_eq!(u, s(&["c=a::b::c", "e=a::b::d::e", "f=a::f", "h=g::h", "j=i::j", "n=l::n"]));
 }
+
+/// 書き換えを当てた本文
+fn apply(src: &str, mut e: Vec<(Loc, String)>) -> String {
+    e.sort_by_key(|x| std::cmp::Reverse(x.0.start));
+    let mut s = src.to_string();
+    for (l, t) in e {
+        s.replace_range(l.start..l.end, &t);
+    }
+    s
+}
+
+#[test]
+fn rename_items_locals_and_shorthand() {
+    let src = "#[derive(Clone)]\nstruct P { x: u8 }\nimpl P { fn get(&self) -> u8 { self.x } }\n\
+               fn f(x: u8) -> P { let p = P { x }; let P { x } = p.clone(); println!(\"{x}\"); P { x: x + p.get() } }\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    // 型
+    let r = apply(src, rename(&ws, 0, at(src, "P {", 0), "Q", &no).unwrap());
+    assert_eq!(r.matches("Q").count(), 6);
+    assert!(!r.contains(" P"));
+    // フィールド: 省略形は `y: x` に
+    let r = apply(src, rename(&ws, 0, at(src, "x: u8 }", 0), "y", &no).unwrap());
+    assert!(r.contains("struct P { y: u8 }"), "{r}");
+    assert!(r.contains("self.y"), "{r}");
+    assert!(r.contains("P { y: x }; let P { y: x } = "), "{r}");
+    assert!(r.contains("P { y: x + p.get() }"), "{r}");
+    // 引数 x: 省略形は `x: z` に、書式の中も
+    let r = apply(src, rename(&ws, 0, at(src, "x: u8) ->", 0), "z", &no).unwrap());
+    assert!(r.contains("fn f(z: u8)"), "{r}");
+    assert!(r.contains("P { x: z };"), "{r}");
+    // (let P { x } の x は別の束縛)
+    assert!(r.contains("let P { x } = "), "{r}");
+    // メソッド
+    let r = apply(src, rename(&ws, 0, at(src, "get()", 0), "fetch", &no).unwrap());
+    assert!(r.contains("fn fetch(&self)") && r.contains("p.fetch()"), "{r}");
+    // 名前にできないもの・変えられないもの
+    assert!(rename(&ws, 0, at(src, "x: u8)", 0), "fn", &no).is_err());
+    assert!(rename(&ws, 0, at(src, "x: u8)", 0), "1a", &no).is_err());
+    assert!(rename(&ws, 0, at(src, "x: u8)", 0), "r#fn", &no).is_ok());
+    assert!(prepare_rename(&ws, 0, at(src, "self.x", 0)).is_err());
+    assert!(prepare_rename(&ws, 0, at(src, "u8 }", 0)).is_err());
+    assert!(prepare_rename(&ws, 0, at(src, "clone()", 0)).is_err());
+    assert!(prepare_rename(&ws, 0, at(src, "println", 0)).is_err());
+    assert_eq!(prepare_rename(&ws, 0, at(src, "get()", 0) + 1), Ok(Loc { file: 0, start: at(src, "get()", 0), end: at(src, "get()", 0) + 3 }));
+}
+
+#[test]
+fn rename_refuses_library_and_file_modules() {
+    let lib = FileIndex::library("pub struct Vec;\npub struct Mutex;\n".to_string(), s(&["sync"]));
+    let m = FileIndex::new("pub fn g() {}\n".to_string(), s(&["m"]));
+    let src = "mod m;\nuse std::sync::Mutex;\nfn f(v: Vec, x: Mutex) -> Mutex { m::g(); x }\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&lib, &m, &fi];
+    assert!(prepare_rename(&ws, 2, at(src, "Vec", 0)).is_err());
+    // (use したライブラリのもの: 別名を付ける)
+    let r = apply(src, rename(&ws, 2, at(src, "Mutex;", 0), "M", &no).unwrap());
+    assert_eq!(r, "mod m;\nuse std::sync::Mutex as M;\nfn f(v: Vec, x: M) -> M { m::g(); x }\n");
+    assert!(prepare_rename(&ws, 2, at(src, "Mutex)", 0)).is_err());
+    // (ワークスペースのものも、use の名前の上なら別名に)
+    let src2 = "use crate::m::g;\nfn h() { g(); crate::m::g(); }\n";
+    let f2 = FileIndex::new(src2.to_string(), vec![]);
+    let ws2 = [&lib, &m, &f2];
+    let r = apply(src2, rename(&ws2, 2, at(src2, "g;", 0), "k", &no).unwrap());
+    assert_eq!(r, "use crate::m::g as k;\nfn h() { k(); crate::m::g(); }\n");
+    assert!(prepare_rename(&ws, 2, at(src, "m;", 0)).is_err());
+    let e = rename(&ws, 2, at(src, "g()", 0), "h", &no).unwrap();
+    assert_eq!(e.iter().map(|x| x.0.file).collect::<Vec<_>>(), vec![1, 2]);
+}
+
+#[test]
+fn signature_help_calls() {
+    let src = "struct P;\nimpl P { fn m(&self, a: u8, b: impl Fn(u8) -> u8) -> u8 { 0 } fn new(x: u8) -> P { P } }\n\
+               fn g<T: Into<u8>>(t: T, v: Vec<(u8, u8)>) {}\nstruct T2(u8, u16);\n\
+               fn f(p: P) { p.m(1, |x| x); P::new(g::<u8>(1, vec![(1, 2)]), ); T2(1, 2); let y = [1, 2]; }\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let sh = |p: &str, d: usize| signature_help(&ws, 0, at(src, p, 0) + d, &no).map(|(s, ps, a)| (s.clone(), ps.iter().map(|&(x, y)| s[x..y].to_string()).collect::<Vec<_>>(), a));
+    let (sig, ps, a) = sh("1, |x|", 0).unwrap();
+    assert_eq!(sig, "fn m(&self, a: u8, b: impl Fn(u8) -> u8) -> u8");
+    assert_eq!(ps, s(&["a: u8", "b: impl Fn(u8) -> u8"]));
+    assert_eq!(a, 0);
+    assert_eq!(sh("|x| x)", 0).unwrap().2, 1);
+    // (入れ子の呼び出しの中は内側、閉じた括弧の後は外側)
+    let (sig, ps, a) = sh("(1, 2)]", 0).unwrap();
+    assert!(sig.starts_with("fn g<T: Into<u8>>"), "{sig}");
+    assert_eq!(ps, s(&["t: T", "v: Vec<(u8, u8)>"]));
+    assert_eq!(a, 1);
+    assert_eq!(sh("1, vec", 0).unwrap().2, 0);
+    let (sig, _, a) = sh(", );", 1).unwrap();
+    assert_eq!((sig.as_str(), a), ("fn new(x: u8) -> P", 1));
+    let (sig, ps, a) = sh("2); let", 0).unwrap();
+    assert_eq!((sig.as_str(), ps, a), ("struct T2(u8, u16)", s(&["u8", "u16"]), 1));
+    assert!(sh("2]; }", 0).is_none());
+    assert!(sh("p: P) {", 0).is_none());
+}

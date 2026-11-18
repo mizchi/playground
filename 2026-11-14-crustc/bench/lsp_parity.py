@@ -25,7 +25,7 @@ from lsp_compare import HERE, Lsp, make_synth, crustc_target, uri  # noqa: E402
 CAPS = [("documentSymbolProvider", "docsym"), ("workspaceSymbolProvider", "wsym"), ("definitionProvider", "definition"),
         ("hoverProvider", "hover"), ("completionProvider", "completion"), ("referencesProvider", "references"),
         ("renameProvider", "rename"), ("signatureHelpProvider", "signature"), ("semanticTokensProvider", "semantic"),
-        ("inlayHintProvider", "inlay"), ("codeActionProvider", "codeAction"), ("documentFormattingProvider", "format")]
+        ("documentHighlightProvider", "highlight"), ("inlayHintProvider", "inlay"), ("codeActionProvider", "codeAction"), ("documentFormattingProvider", "format")]
 
 
 def start(cmd, t, timeout):
@@ -108,6 +108,37 @@ def comp_labels(res):
     return [re.split(r"[(<\s]", (x.get("filterText") or x.get("label") or "").strip())[0] for x in items]
 
 
+def edits_of(res):
+    """rename の WorkspaceEdit → (ファイル名, 行, 桁, 新しい文字列) の集合"""
+    if not res:
+        return None
+    out = set()
+    for u, es in (res.get("changes") or {}).items():
+        for e in es:
+            out.add((u.rsplit("/", 1)[-1], e["range"]["start"]["line"], e["range"]["start"]["character"], e["newText"]))
+    for dc in res.get("documentChanges") or []:
+        u = dc.get("textDocument", {}).get("uri", "")
+        for e in dc.get("edits", []):
+            out.add((u.rsplit("/", 1)[-1], e["range"]["start"]["line"], e["range"]["start"]["character"], e["newText"]))
+    return out
+
+
+def call_points(text, n):
+    """呼び出し `name(a, b)` の、最初の引数の始めの位置と、引数の番号 (最初のカンマの後なら 1)"""
+    pts = []
+    for li, l in enumerate(text.split("\n")):
+        if l.lstrip().startswith("//"):
+            continue
+        for m in re.finditer(r"(?<!fn )\b([A-Za-z_][A-Za-z0-9_]*)\((?=[^)])", l):
+            if m.group(1) in ("if", "while", "match", "for", "return", "Some", "Ok", "Err", "matches", "assert", "println", "format", "write", "writeln", "vec"):
+                continue
+            pts.append((li, m.end(), m.group(1)))
+    if len(pts) > n:
+        step = len(pts) / n
+        pts = [pts[int(i * step)] for i in range(n)]
+    return pts
+
+
 def points(text, names, n):
     """ファイルの中の、names のどれかの名前の識別子の位置 (行, 桁) を n 個まで (均等に)"""
     lines = text.split("\n")
@@ -147,6 +178,7 @@ def run(servers, t, npts, timeout):
     names |= set(n for n in re.findall(r"\b([A-Z][A-Za-z0-9_]+)\b", text))
     pts = points(text, names, npts)
     dpts = dot_points(text, npts // 2)
+    cpts = call_points(text, npts // 2)
     res = {}
     for sn, cmd in servers.items():
         print(f"== {sn}", file=sys.stderr)
@@ -170,6 +202,21 @@ def run(servers, t, npts, timeout):
             r["hover"].append(bool(h) and name in hv)
             rf = req(s, "textDocument/references", dict(p, context={"includeDeclaration": True}), times)
             r["refs"].append(len(rf) if isinstance(rf, list) else None)
+        r["hl"], r["ren"] = [], []
+        for (li, col, name) in pts:
+            p = {"textDocument": {"uri": u}, "position": {"line": li, "character": col + 1}}
+            h = req(s, "textDocument/documentHighlight", p, times)
+            r["hl"].append(len(h) if isinstance(h, list) else None)
+            r["ren"].append(edits_of(req(s, "textDocument/rename", dict(p, newName="zz_renamed"), times)))
+        r["sig"] = []
+        for (li, col, name) in cpts:
+            h = req(s, "textDocument/signatureHelp", {"textDocument": {"uri": u}, "position": {"line": li, "character": col}}, times)
+            sg = (h or {}).get("signatures") or []
+            if sg:
+                act = sg[0].get("activeParameter", h.get("activeParameter"))
+                r["sig"].append((name in sg[0].get("label", ""), len(sg[0].get("parameters") or []), act))
+            else:
+                r["sig"].append(None)
         r["dot"], r["pre"], r["dot_n"], r["pre_n"], r["dot_at"], r["pre_at"] = [], [], [], [], [], []
         for (li, col, name) in dpts:
             c = comp_labels(req(s, "textDocument/completion", {"textDocument": {"uri": u}, "position": {"line": li, "character": col}}, times))
@@ -185,7 +232,7 @@ def run(servers, t, npts, timeout):
             r["pre_n"].append(len(c))
         s.close()
         res[sn] = r
-    return res, len(pts), len(dpts), pts
+    return res, len(pts), len(dpts), (pts, cpts)
 
 
 def pct(a, b):
@@ -193,7 +240,8 @@ def pct(a, b):
 
 
 def detail(tn, res, pts):
-    """--detail: rust-analyzer と違った所 (definition の行き先・references の数)"""
+    """--detail: rust-analyzer と違った所 (definition の行き先・references の数・rename・signatureHelp)"""
+    pts, cpts = pts
     ref = res.get("rust-analyzer")
     if not ref:
         return
@@ -205,8 +253,16 @@ def detail(tn, res, pts):
             ra, rb = r["refs"][i], ref["refs"][i]
             if (b and a != b) or (rb is not None and ra != rb):
                 print(f"[{tn}/{sn}] {li + 1}:{col + 1} {name}: def {sorted(a)} vs ra {sorted(b)}; refs {ra} vs ra {rb}", file=sys.stderr)
+            if r["hl"][i] != ref["hl"][i] and ref["hl"][i] is not None:
+                print(f"[{tn}/{sn}] {li + 1}:{col + 1} {name}: highlight {r['hl'][i]} vs ra {ref['hl'][i]}", file=sys.stderr)
+            if r["ren"][i] != ref["ren"][i]:
+                a, b = r["ren"][i] or set(), ref["ren"][i] or set()
+                print(f"[{tn}/{sn}] {li + 1}:{col + 1} {name}: rename {'断った' if r['ren'][i] is None else len(a)} vs ra {'断った' if ref['ren'][i] is None else len(b)}; 足りない {sorted(b - a)[:3]} 余分 {sorted(a - b)[:3]}", file=sys.stderr)
             if ref["hover"][i] and not r["hover"][i]:
                 print(f"[{tn}/{sn}] {li + 1}:{col + 1} {name}: hover なし", file=sys.stderr)
+        for i, (li, col, name) in enumerate(cpts):
+            if ref["sig"][i] and r["sig"][i] != ref["sig"][i]:
+                print(f"[{tn}/{sn}] {li + 1}:{col + 1} {name}(: signature {r['sig'][i]} vs ra {ref['sig'][i]}", file=sys.stderr)
         # (completion: rust-analyzer は候補に入れたが、こちらは入れなかった所)
         for key in ["dot", "pre"]:
             for i, (li, col, name) in enumerate(r.get(key + "_at", [])):
@@ -251,10 +307,24 @@ def report(tn, res, npts, ndots):
             ok = sum(1 for a, b in zip(r["refs"], ref["refs"]) if b is not None and a == b)
             return f"{pct(ok, sum(1 for b in ref['refs'] if b is not None))}"
         row("references (数の一致)", refs)
+        def hl(r):
+            ok = sum(1 for a, b in zip(r["hl"], ref["hl"]) if b is not None and a == b)
+            return pct(ok, sum(1 for b in ref["hl"] if b is not None))
+        row("documentHighlight (数の一致)", hl)
+        def ren(r):
+            ok = sum(1 for a, b in zip(r["ren"], ref["ren"]) if b and a == b)
+            ref_no = sum(1 for a, b in zip(r["ren"], ref["ren"]) if not b and not a)
+            return f"同じ {pct(ok, sum(1 for b in ref['ren'] if b))} (断ったのも同じ {ref_no}/{sum(1 for b in ref['ren'] if not b)})"
+        row("rename (書き換えの一致)", ren)
+        def sig(r):
+            ok = sum(1 for a, b in zip(r["sig"], ref["sig"]) if b and a == b)
+            ans = sum(1 for a in r["sig"] if a)
+            return f"同じ {pct(ok, sum(1 for b in ref['sig'] if b))} (答えた {pct(ans, len(r['sig']))})"
+        row("signatureHelp (名前・引数の数・今の引数の一致)", sig)
         row("completion `x.\\|` (書いてある名前を含む)", lambda r: f"{pct(sum(r['dot']), len(r['dot']))} (候補 {statistics.median(r['dot_n']) if r['dot_n'] else 0:.0f})")
         row("completion `na\\|me` (同)", lambda r: f"{pct(sum(r['pre']), len(r['pre']))} (候補 {statistics.median(r['pre_n']) if r['pre_n'] else 0:.0f})")
     def tm(r):
-        ks = ["textDocument/definition", "textDocument/hover", "textDocument/completion", "textDocument/references"]
+        ks = ["textDocument/definition", "textDocument/hover", "textDocument/completion", "textDocument/references", "textDocument/rename", "textDocument/signatureHelp"]
         return ", ".join(f"{k.split('/')[1][:4]} {statistics.median(r['times'][k]):.1f}" for k in ks if r["times"].get(k))
     row("時間の中央値 (ms)", tm)
     out += rows

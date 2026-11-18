@@ -111,7 +111,8 @@ impl Server {
                 }
                 vec![reply(json!({
                     "capabilities": { "textDocumentSync": 1, "documentSymbolProvider": true, "workspaceSymbolProvider": true, "definitionProvider": true, "referencesProvider": true,
-                        "hoverProvider": true, "completionProvider": { "triggerCharacters": [".", ":"] } },
+                        "hoverProvider": true, "completionProvider": { "triggerCharacters": [".", ":"] },
+                        "renameProvider": { "prepareProvider": true }, "signatureHelpProvider": { "triggerCharacters": ["(", ","] }, "documentHighlightProvider": true },
                     "serverInfo": { "name": "crustc", "version": env!("CARGO_PKG_VERSION") }
                 }))]
             }
@@ -135,6 +136,21 @@ impl Server {
                 let (line, ch) = (p["position"]["line"].as_u64().unwrap_or(0) as u32, p["position"]["character"].as_u64().unwrap_or(0) as u32);
                 let r = if method == "textDocument/hover" { self.hover(&uri, line, ch) } else { self.complete(&uri, line, ch) };
                 vec![reply(r)]
+            }
+            "textDocument/documentHighlight" | "textDocument/signatureHelp" | "textDocument/prepareRename" | "textDocument/rename" => {
+                let uri = p["textDocument"]["uri"].as_str().unwrap_or("").to_string();
+                let (line, ch) = (p["position"]["line"].as_u64().unwrap_or(0) as u32, p["position"]["character"].as_u64().unwrap_or(0) as u32);
+                let r = match method {
+                    "textDocument/documentHighlight" => Ok(self.highlight(&uri, line, ch)),
+                    "textDocument/signatureHelp" => Ok(self.signature_help(&uri, line, ch)),
+                    "textDocument/prepareRename" => self.prepare_rename(&uri, line, ch),
+                    _ => self.rename(&uri, line, ch, p["newName"].as_str().unwrap_or("")),
+                };
+                vec![match r {
+                    Ok(v) => reply(v),
+                    // (RequestFailed: 理由をエディタに出す)
+                    Err(m) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32803, "message": m}}).to_string(),
+                }]
             }
             "shutdown" => {
                 self.shutdown = true;
@@ -444,28 +460,79 @@ impl Server {
         self.at(uri, line, ch, |srv, ws, idx, fi, off| {
             let load = |i: usize| srv.load(ws, i);
             let locs: Vec<Loc> = if refs { navigate::references(idx, fi, off, decl, &load) } else { navigate::definition(idx, fi, off) };
-            let mut lis: HashMap<usize, Option<LineIndex>> = HashMap::new();
-            // (slim なファイルの中の位置は、読み直した本文で行と桁にする。定義の名前の位置は索引が覚えている)
-            let mut held: HashMap<usize, Rc<FileIndex>> = HashMap::new();
-            let out: Vec<Value> = locs
-                .iter()
-                .map(|l| {
-                    let mut f = idx[l.file];
-                    if f.slim && !f.lib && f.lib_pos(l.start).is_none() {
-                        if !held.contains_key(&l.file) {
-                            if let Some(r) = srv.load(ws, l.file) {
-                                held.insert(l.file, r);
-                            }
-                        }
-                        if let Some(r) = held.get(&l.file) {
-                            f = r;
+            let out: Vec<Value> = srv.ranges(ws, idx, &locs).into_iter().map(|(u, r)| json!({ "uri": u, "range": r })).collect();
+            if refs || out.len() != 1 { json!(out) } else { out.into_iter().next().unwrap() }
+        })
+        .unwrap_or(Value::Null)
+    }
+
+    /// 位置の列 → (uri, LSP の範囲)。slim なファイルの中の位置は、読み直した本文で行と桁にする (定義の名前の位置は索引が覚えている)
+    fn ranges(&self, ws: &[(String, &FileIndex)], idx: &[&FileIndex], locs: &[Loc]) -> Vec<(String, Value)> {
+        let mut lis: HashMap<usize, Option<LineIndex>> = HashMap::new();
+        let mut held: HashMap<usize, Rc<FileIndex>> = HashMap::new();
+        locs.iter()
+            .map(|l| {
+                let mut f = idx[l.file];
+                if f.slim && !f.lib && f.lib_pos(l.start).is_none() {
+                    if !held.contains_key(&l.file) {
+                        if let Some(r) = self.load(ws, l.file) {
+                            held.insert(l.file, r);
                         }
                     }
-                    let ((l0, c0), (l1, c1)) = ends(f, lis.entry(l.file).or_default(), l.start, l.end);
-                    json!({ "uri": ws[l.file].0, "range": { "start": {"line": l0, "character": c0}, "end": {"line": l1, "character": c1} } })
-                })
-                .collect();
-            if refs || out.len() != 1 { json!(out) } else { out.into_iter().next().unwrap() }
+                    if let Some(r) = held.get(&l.file) {
+                        f = r;
+                    }
+                }
+                let ((l0, c0), (l1, c1)) = ends(f, lis.entry(l.file).or_default(), l.start, l.end);
+                (ws[l.file].0.clone(), json!({ "start": {"line": l0, "character": c0}, "end": {"line": l1, "character": c1} }))
+            })
+            .collect()
+    }
+
+    /// textDocument/documentHighlight: 同じファイルの中の参照
+    fn highlight(&mut self, uri: &str, line: u32, ch: u32) -> Value {
+        self.at(uri, line, ch, |srv, ws, idx, fi, off| {
+            let load = |i: usize| srv.load(ws, i);
+            let locs: Vec<Loc> = navigate::references(idx, fi, off, true, &load).into_iter().filter(|l| l.file == fi).collect();
+            json!(srv.ranges(ws, idx, &locs).into_iter().map(|(_, r)| json!({ "range": r, "kind": 1 })).collect::<Vec<_>>())
+        })
+        .unwrap_or(Value::Null)
+    }
+
+    /// textDocument/prepareRename (Err は理由)
+    fn prepare_rename(&mut self, uri: &str, line: u32, ch: u32) -> Result<Value, String> {
+        self.at(uri, line, ch, |srv, ws, idx, fi, off| {
+            let l = navigate::prepare_rename(idx, fi, off)?;
+            let (_, r) = srv.ranges(ws, idx, &[l]).pop().unwrap();
+            Ok(json!({ "range": r, "placeholder": idx[fi].text[l.start..l.end] }))
+        })
+        .unwrap_or(Err("ファイルが分からない".into()))
+    }
+
+    /// textDocument/rename → WorkspaceEdit (Err は理由)
+    fn rename(&mut self, uri: &str, line: u32, ch: u32, new: &str) -> Result<Value, String> {
+        self.at(uri, line, ch, |srv, ws, idx, fi, off| {
+            let load = |i: usize| srv.load(ws, i);
+            let edits = navigate::rename(idx, fi, off, new, &load)?;
+            let locs: Vec<Loc> = edits.iter().map(|e| e.0).collect();
+            let mut changes = serde_json::Map::new();
+            for ((u, r), (_, txt)) in srv.ranges(ws, idx, &locs).into_iter().zip(edits) {
+                changes.entry(u).or_insert_with(|| json!([])).as_array_mut().unwrap().push(json!({ "range": r, "newText": txt }));
+            }
+            Ok(json!({ "changes": changes }))
+        })
+        .unwrap_or(Err("ファイルが分からない".into()))
+    }
+
+    /// textDocument/signatureHelp
+    fn signature_help(&mut self, uri: &str, line: u32, ch: u32) -> Value {
+        self.at(uri, line, ch, |srv, ws, idx, fi, off| {
+            let load = |i: usize| srv.load(ws, i);
+            let Some((sig, params, active)) = navigate::signature_help(idx, fi, off, &load) else { return Value::Null };
+            // (引数の範囲は UTF-16 の桁で)
+            let u16 = |b: usize| sig[..b].encode_utf16().count();
+            let ps: Vec<Value> = params.iter().map(|&(a, e)| json!({ "label": [u16(a), u16(e)] })).collect();
+            json!({ "signatures": [{ "label": sig, "parameters": ps, "activeParameter": active }], "activeSignature": 0, "activeParameter": active })
         })
         .unwrap_or(Value::Null)
     }
