@@ -1168,3 +1168,24 @@ fn wrapped_tuple_patterns() {
         assert!(ty(p).contains(want), "{p}: {}", ty(p));
     }
 }
+
+/// パターンの入れ子 (match の腕・let・if let・for のタプル・バリアント・構造体・スライス)
+#[test]
+fn nested_pattern_types() {
+    let src = "struct A;\nstruct S { f: u8, g: A }\nenum E { V(u16, A), W { x: char } }\nstruct P(u32, S);\n\
+               fn r() -> Result<(A, Vec<u8>), String> { todo!() }\n\
+               fn f(e: E, o: Option<(S, u8)>, v: Vec<(u8, Option<A>)>, p: P) {\n\
+               match r() { Ok((a, req)) => {}, Err(msg) => {} }\n\
+               match e { E::V(n, aa) => {}, E::W { x } => {} }\n\
+               if let Some((S { f, g: gg }, k)) = o {}\n\
+               for (i, Some(z)) in v {}\n\
+               let P(pn, S { f: pf, .. }) = p;\n\
+               let [first, ..] = [1u8, 2];\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap();
+    for (p, want) in [("a, req", "a: A"), ("req)", "req: Vec<u8>"), ("msg)", "msg: String"), ("n, aa", "n: u16"), ("aa)", "aa: A"), ("x } =>", "x: char"),
+                      ("f, g:", "f: u8"), ("gg }", "gg: A"), ("k)) =", "k: u8"), ("i, Some", "i: u8"), ("z)) in", "z: A"), ("pn,", "pn: u32"), ("pf, ..", "pf: u8"), ("first,", "first: u8")] {
+        assert!(ty(p).contains(want), "{p}: {}", ty(p));
+    }
+}

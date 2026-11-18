@@ -3316,6 +3316,10 @@ fn binding_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<
         }
         return (!type_head(&t).is_empty() || strip_ref(&t).starts_with('(')).then_some(t);
     }
+    // パターンの中の束縛 (タプル・バリアント・構造体・スライスの入れ子): パターンの置かれた所の型に、外から道筋を当てはめる
+    if let Some(t) = pattern_type(ws, file, b, depth) {
+        return Some(t);
+    }
     // `let (a, b) = EXPR;` / `let (a, b): (T, U) = ..;` (タプルのパターン)
     if let Some((after, path)) = let_tuple_pattern(f, b) {
         let ty = if f.sym(after, b':') && !f.sym(after + 1, b':') {
@@ -4659,6 +4663,252 @@ fn strip_lifetimes(t: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// パターンの中の道筋の 1 段 (外から内へ当てはめる)
+#[derive(Debug, Clone)]
+enum PatStep {
+    /// タプル `(.., x, ..)` の i 番目
+    Tuple(usize),
+    /// バリアント・タプル構造体 `Q::V(.., x, ..)` の i 番目 (V のトークン)
+    Variant(usize, usize),
+    /// 構造体のパターン `S { f: x }` のフィールド f (S のトークン)
+    Field(String, usize),
+    /// スライスのパターン `[a, b, ..]` の要素
+    Slice,
+}
+
+/// 束縛 b を含むパターンの、置かれた所の型と、外から b までの道筋を当てはめた型。パターンの置かれた所:
+/// `let PAT (: T)? = EXPR` / `if let` / `while let` / `for PAT in EXPR` / match の腕 `PAT (if ..)? =>`。
+/// 道筋のない (パターンの頭の) 束縛と、クロージャ・関数の引数は扱わない (ほかで扱う)
+fn pattern_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<String> {
+    let f = ws[file];
+    if depth > 24 {
+        return None;
+    }
+    // (後ろへ戻って、b を囲むパターンの段を集める (内から外へ))
+    let mut steps: Vec<PatStep> = vec![];
+    let mut j = b;
+    let mut idx = 0usize;
+    let mut d = 0i32;
+    // (構造体のパターンの中の `f: x` の f)
+    let mut field: Option<String> = if b >= 2 && f.sym(b - 1, b':') && !f.sym(b - 2, b':') && f.ident(b - 2) {
+        Some(f.tok(b - 2).to_string())
+    } else if f.sym(b + 1, b',') || f.sym(b + 1, b'}') {
+        Some(f.tok(b).to_string())
+    } else {
+        None
+    };
+    let root;
+    loop {
+        if j == 0 {
+            return None;
+        }
+        j -= 1;
+        if f.toks[j].0 != 1 && !f.ident(j) {
+            continue;
+        }
+        if f.sym(j, b')') || f.sym(j, b']') || f.sym(j, b'}') {
+            if d == 0 && f.sym(j, b'}') {
+                // (構造体のパターン `S { .. }` の閉じ括弧でなければ、前の腕の本体の終わり: 腕の始め)
+                let o = f.open_of(j);
+                let pat = o.is_some_and(|o| o >= 1 && f.ident(o - 1) && f.tok(o - 1).starts_with(|c: char| c.is_ascii_uppercase()));
+                if !pat {
+                    root = 'a';
+                    break;
+                }
+            }
+            d += 1;
+            continue;
+        }
+        if f.sym(j, b'(') || f.sym(j, b'[') || f.sym(j, b'{') {
+            if d > 0 {
+                d -= 1;
+                continue;
+            }
+            if f.sym(j, b'(') {
+                if j >= 1 && f.ident(j - 1) && f.tok(j - 1).starts_with(|c: char| c.is_ascii_uppercase()) {
+                    steps.push(PatStep::Variant(j - 1, idx));
+                } else if j >= 1 && f.ident(j - 1) && matches!(f.tok(j - 1), "let" | "for" | "mut" | "ref") || j >= 1 && (f.sym(j - 1, b'&') || f.sym(j - 1, b',') || f.sym(j - 1, b'(') || f.sym(j - 1, b'|') || f.sym(j - 1, b'[') || f.sym(j - 1, b'{') || f.sym(j - 1, b'>')) {
+                    steps.push(PatStep::Tuple(idx));
+                } else {
+                    // (呼び出しの括弧: パターンではない)
+                    return None;
+                }
+            } else if f.sym(j, b'[') {
+                steps.push(PatStep::Slice);
+            } else {
+                // (`S { .. }` の構造体のパターンか、腕の始めのブロック)
+                if j >= 1 && f.ident(j - 1) && f.tok(j - 1).starts_with(|c: char| c.is_ascii_uppercase()) && f.tok(j - 1) != "Self" {
+                    steps.push(PatStep::Field(field.take()?, j - 1));
+                } else {
+                    root = 'a';
+                    break;
+                }
+            }
+            idx = 0;
+            // (外の段のフィールドの名前: この段の頭 (名前・パス) の前の `f:`)
+            let mut h = if f.sym(j, b'[') || (j >= 1 && !f.ident(j - 1)) { j } else { j - 1 };
+            while h >= 3 && f.after_path(h) {
+                h -= 3;
+            }
+            field = (h >= 2 && f.sym(h - 1, b':') && !f.sym(h - 2, b':') && f.ident(h - 2)).then(|| f.tok(h - 2).to_string());
+            continue;
+        }
+        if d > 0 {
+            continue;
+        }
+        if f.sym(j, b',') {
+            idx += 1;
+            continue;
+        }
+        if f.sym(j, b'>') && j >= 1 && f.sym(j - 1, b'=') {
+            root = 'a';
+            break;
+        }
+        if f.sym(j, b'|') {
+            // (クロージャの引数ならほかで扱う。or パターン `A(x) | B(x)` は続ける)
+            if f.closure_start(j) {
+                return None;
+            }
+            continue;
+        }
+        if f.sym(j, b';') || f.sym(j, b'=') {
+            return None;
+        }
+        if f.ident(j) {
+            match f.tok(j) {
+                "let" => {
+                    root = 'l';
+                    break;
+                }
+                "for" => {
+                    root = 'f';
+                    break;
+                }
+                "match" | "if" | "while" | "fn" | "return" | "in" => return None,
+                _ => {}
+            }
+        }
+    }
+    if steps.is_empty() {
+        return None;
+    }
+    steps.reverse();
+    // (根の型)
+    let rt = match root {
+        'f' => {
+            let (in_tok, _) = for_pattern_in(f, b)?;
+            let e = expr_end(f, in_tok + 1, true)?;
+            let t = expr_type(ws, file, e, depth + 1)?;
+            if is_iter_head(&type_head(&t)) { iter_item(&t) } else { iter_item(&t).or_else(|| elem_type(&t)).or_else(|| iter_item_ws(ws, file, &t)) }?
+        }
+        'l' => {
+            // (パターンの後: 型注釈 `: T` か `= EXPR`)
+            let mut q = b + 1;
+            let mut dd = steps.len() as i32;
+            while q < f.toks.len() && dd > 0 {
+                if f.sym(q, b'(') || f.sym(q, b'[') || f.sym(q, b'{') {
+                    dd += 1;
+                } else if f.sym(q, b')') || f.sym(q, b']') || f.sym(q, b'}') {
+                    dd -= 1;
+                } else if f.sym(q, b';') {
+                    return None;
+                }
+                q += 1;
+            }
+            if f.sym(q, b':') && !f.sym(q + 1, b':') {
+                let mut e = q + 1;
+                while e < f.toks.len() && !(f.sym(e, b'=') && !f.sym(e + 1, b'=')) && !f.sym(e, b';') {
+                    e += 1;
+                }
+                f.text[f.toks.get(q + 1)?.1 as usize..f.toks.get(e - 1)?.2 as usize].trim().to_string()
+            } else if f.sym(q, b'=') && !f.sym(q + 1, b'=') {
+                let e = expr_end(f, q + 1, true)?;
+                expr_type(ws, file, e, depth + 1)?
+            } else {
+                return None;
+            }
+        }
+        _ => scrutinee_type(ws, file, b, depth + 1)?,
+    };
+    let mut ty = rt;
+    for st in &steps {
+        let cur = expand(ws, file, strip_ref(&ty)).into_iter().last().unwrap_or_else(|| strip_ref(&ty).to_string());
+        ty = match st {
+            PatStep::Tuple(i) => tuple_items(strip_ref(&cur))?.get(*i)?.clone(),
+            PatStep::Slice => elem_type(&cur).or_else(|| strip_ref(&cur).strip_prefix('[').and_then(|r| r.split([';', ']']).next()).map(|x| x.trim().to_string()))?,
+            // (構造体の形のバリアント `E::W { x }` のフィールドの持ち主はバリアント W)
+            PatStep::Field(n, st) => member_type(ws, file, &cur, n, &[SymKind::Field]).or_else(|| {
+                let w = f.tok(*st);
+                named(ws, file, n).into_iter().find(|(_, d)| d.kind == SymKind::Field && d.owner == w).map(|(_, d)| d.ty.clone())
+            })?,
+            PatStep::Variant(vt, i) => {
+                let v = f.tok(*vt);
+                match v {
+                    "Some" | "Ok" => targs(&cur).into_iter().next()?,
+                    "Err" => targs(&cur).into_iter().nth(1)?,
+                    _ => variant_field(ws, file, &cur, *vt, *i)?,
+                }
+            }
+        };
+        if ty == "_" {
+            return None;
+        }
+    }
+    Some(ty)
+}
+
+/// バリアント・タプル構造体のパターン `Q::V(..)` (V のトークン vt) の i 番目のフィールドの型。照合する型 cur の型引数を
+/// enum の型引数に当てる
+fn variant_field(ws: &[&FileIndex], file: usize, cur: &str, vt: usize, i: usize) -> Option<String> {
+    let f = ws[file];
+    let v = f.tok(vt);
+    let head = type_head(cur);
+    let q = if f.after_path(vt) && vt >= 3 { Some(f.tok(vt - 3).to_string()) } else { None };
+    let q = match q.as_deref() {
+        Some("Self") => f.enclosing_owner(f.toks[vt].1 as usize),
+        _ => q,
+    };
+    let kr = f.krate;
+    // (バリアント (持ち主が照合する型か修飾) か、タプル構造体 `P(a, b)`)
+    let (di, d) = named(ws, file, v)
+        .into_iter()
+        .filter(|(_, d)| (d.kind == SymKind::Variant && (d.owner == head || q.as_deref() == Some(d.owner.as_str()))) || (d.kind == SymKind::Struct && d.owner.is_empty()))
+        .min_by_key(|(k, d)| (d.owner != head, *k != file, ws[*k].krate != kr))?;
+    let text = &ws[di].text;
+    let vtxt = text.get(d.item_start..d.item_end)?;
+    let a = vtxt.find('(')?;
+    let inner = &vtxt[a + 1..vtxt.rfind(')')?];
+    let tys = targs(&format!("X<{inner}>"));
+    let ty = tys.get(i)?.trim_start_matches("pub ").trim().to_string();
+    let params = &d.params;
+    if !params.is_empty() && type_head(cur) == (if d.kind == SymKind::Variant { d.owner.as_str() } else { d.name.as_str() }) {
+        return Some(subst(&ty, params, &targs(cur)));
+    }
+    Some(ty)
+}
+
+/// for_pattern の `in` のトークンだけ (パターンの深さはどこでもよい)
+fn for_pattern_in(f: &FileIndex, b: usize) -> Option<(usize, ())> {
+    let mut q = b + 1;
+    let mut d = 0i32;
+    while q < f.toks.len() {
+        if f.sym(q, b'(') || f.sym(q, b'[') || f.sym(q, b'{') {
+            if f.sym(q, b'{') && d <= 0 {
+                return None;
+            }
+            d += 1;
+        } else if f.sym(q, b')') || f.sym(q, b']') || f.sym(q, b'}') {
+            d -= 1;
+        } else if d <= 0 && f.ident(q) && f.tok(q) == "in" {
+            return Some((q, ()));
+        } else if f.sym(q, b';') {
+            return None;
+        }
+        q += 1;
+    }
+    None
 }
 
 /// 束縛 b が `Some(..)` / `Ok(..)` / `Err(..)` のパターン (の中のタプル) で、その後が `= EXPR` なら
