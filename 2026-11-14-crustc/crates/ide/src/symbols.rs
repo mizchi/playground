@@ -81,6 +81,8 @@ pub struct Symbol {
     pub name_start: usize,
     pub name_end: usize,
     pub children: Vec<Symbol>,
+    /// マクロの中のもの (`thread_local! { static X .. }`): 定義には使うが、documentSymbol には出さない (rust-analyzer と同じ)
+    pub in_macro: bool,
 }
 
 type Tok = (u8, usize, usize);
@@ -277,6 +279,7 @@ impl Scan<'_> {
                     name_start: na,
                     name_end: nb,
                     children,
+                    in_macro: false,
                 }
             };
             let next = match kw.as_slice() {
@@ -384,6 +387,7 @@ impl Scan<'_> {
                         name_start: na,
                         name_end: nb,
                         children: ch,
+                        in_macro: false,
                     });
                     e + 1
                 }
@@ -403,7 +407,7 @@ impl Scan<'_> {
                     let mut ch = vec![];
                     self.items(o + 1, c, false, &mut ch);
                     let name = if o == j + 2 { format!("extern {}", String::from_utf8_lossy(self.text(j + 1))) } else { "extern".to_string() };
-                    out.push(Symbol { name, kind: SymKind::Extern, detail: String::new(), start: self.t[start].1, end: self.t[c.min(self.t.len() - 1)].2, name_start: self.t[j].1, name_end: self.t[o - 1].2, children: ch });
+                    out.push(Symbol { name, kind: SymKind::Extern, detail: String::new(), start: self.t[start].1, end: self.t[c.min(self.t.len() - 1)].2, name_start: self.t[j].1, name_end: self.t[o - 1].2, children: ch, in_macro: false });
                     c + 1
                 }
                 b"const" | b"static" if self.ident(j + 1) => {
@@ -482,7 +486,11 @@ impl Scan<'_> {
                         let c = self.close(j + 2, end);
                         // (`thread_local! { static X: T = ..; }` の static はアイテム: rust-analyzer はマクロを展開して見る)
                         if self.is(j, b"thread_local") && self.sym(j + 2, b'{') {
+                            let n = out.len();
                             self.items(j + 3, c, false, out);
+                            for s in &mut out[n..] {
+                                s.in_macro = true;
+                            }
                         }
                         if self.sym(c + 1, b';') { c + 2 } else { c + 1 }
                     } else if self.sym(j, b'{') {
@@ -543,6 +551,7 @@ impl Scan<'_> {
                     name_start: na,
                     name_end: nb,
                     children: vec![],
+                    in_macro: false,
                 });
             }
             k = e + 1;
@@ -580,6 +589,7 @@ impl Scan<'_> {
                     name_start: na,
                     name_end: nb,
                     children: ch,
+                    in_macro: false,
                 });
             }
             k = e + 1;

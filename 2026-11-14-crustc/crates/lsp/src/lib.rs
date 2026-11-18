@@ -246,6 +246,7 @@ impl Server {
         let li = LineIndex::new(&text);
         fn conv(v: &[Symbol], text: &str, li: &LineIndex) -> Vec<Value> {
             v.iter()
+                .filter(|s| !s.in_macro)
                 .map(|s| {
                     let mut o = json!({
                         "name": s.name,
