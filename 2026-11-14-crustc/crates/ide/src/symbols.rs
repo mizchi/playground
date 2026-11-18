@@ -23,6 +23,8 @@ pub enum SymKind {
     Field,
     Variant,
     Macro,
+    /// `extern "C" { .. }` のブロック (中の宣言は子。名前は `extern "C"`)
+    Extern,
 }
 
 impl SymKind {
@@ -36,13 +38,35 @@ impl SymKind {
             SymKind::Impl => 19,
             SymKind::Function | SymKind::Macro => 12,
             SymKind::Method => 6,
-            SymKind::Const => 14,
-            SymKind::Static => 13,
+            // (rust-analyzer と同じく static も Constant)
+            SymKind::Const | SymKind::Static => 14,
+            SymKind::Extern => 3,
             SymKind::TypeAlias => 26,
             SymKind::Field => 8,
             SymKind::Variant => 22,
         }
     }
+}
+
+impl Symbol {
+    /// documentSymbol の SymbolKind: rust-analyzer と同じく、impl / trait の中の `self` を取らない関数 (`fn new() -> Self`) は
+    /// Function
+    pub fn lsp_kind(&self) -> u32 {
+        if self.kind == SymKind::Method && !takes_self(&self.detail) {
+            return SymKind::Function.lsp();
+        }
+        self.kind.lsp()
+    }
+}
+
+/// fn のシグネチャ (`fn f<T>(&mut self, ..)`) の最初の引数が self か
+pub fn takes_self(sig: &str) -> bool {
+    let Some(i) = sig.find('(') else { return false };
+    let first = sig[i + 1..].split([',', ')']).next().unwrap_or("").trim();
+    let first = first.trim_start_matches('&').trim_start();
+    let first = if first.starts_with('\'') { first.split_once(' ').map(|x| x.1).unwrap_or("") } else { first };
+    let first = first.trim_start_matches("mut ").trim_start();
+    first == "self" || first.starts_with("self:") || first.starts_with("self ")
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +81,8 @@ pub struct Symbol {
     pub name_start: usize,
     pub name_end: usize,
     pub children: Vec<Symbol>,
+    /// マクロの中のもの (`thread_local! { static X .. }`): 定義には使うが、documentSymbol には出さない (rust-analyzer と同じ)
+    pub in_macro: bool,
 }
 
 type Tok = (u8, usize, usize);
@@ -166,7 +192,7 @@ impl Scan<'_> {
                     out.push_str(&String::from_utf8_lossy(&self.s[self.t[j].1..self.t[j].2]));
                 }
             }
-            if out.len() > 120 {
+            if out.len() > 1000 {
                 out.push('…');
                 break;
             }
@@ -176,6 +202,37 @@ impl Scan<'_> {
     }
 
     /// a..end のアイテムを読む。in_impl: impl / trait の中 (fn はメソッド)
+    /// 関数の本体 (トークン a..end) の中のアイテム: 文の始め (`{` / `}` / `;` / 属性の `]` の後) にあるキーワードのもの
+    fn nested_items(&self, a: usize, end: usize) -> Vec<Symbol> {
+        let mut out = vec![];
+        let mut j = a;
+        while j < end {
+            let at_stmt = j == a || self.sym(j - 1, b'{') || self.sym(j - 1, b'}') || self.sym(j - 1, b';') || self.sym(j - 1, b']');
+            let item = self.ident(j)
+                && at_stmt
+                && match self.text(j) {
+                    b"fn" | b"struct" | b"enum" | b"union" | b"trait" | b"mod" | b"type" => self.ident(j + 1),
+                    b"impl" => true,
+                    b"const" | b"static" => self.ident(j + 1) && !self.is(j + 1, b"fn") || self.is(j + 1, b"fn"),
+                    b"macro_rules" => self.sym(j + 1, b'!'),
+                    b"pub" | b"unsafe" | b"async" | b"extern" => true,
+                    _ => false,
+                }
+                // (`'static` などの寿命は字句では `'` の後の識別子)
+                && !(self.t[j].1 >= 1 && self.s[self.t[j].1 - 1] == b'\'');
+            if !item {
+                j += 1;
+                continue;
+            }
+            let n = out.len();
+            let e = self.item_end(j, end, !matches!(self.text(j), b"const" | b"static" | b"type"));
+            self.items(j, (e + 1).min(end), false, &mut out);
+            // (アイテムでなかった `unsafe { .. }` / `async move { .. }` などのブロックは中も見る)
+            j = if out.len() > n { e + 1 } else { j + 1 };
+        }
+        out
+    }
+
     fn items(&self, a: usize, end: usize, in_impl: bool, out: &mut Vec<Symbol>) {
         let mut k = a;
         while k < end {
@@ -222,6 +279,7 @@ impl Scan<'_> {
                     name_start: na,
                     name_end: nb,
                     children,
+                    in_macro: false,
                 }
             };
             let next = match kw.as_slice() {
@@ -232,7 +290,9 @@ impl Scan<'_> {
                     while se < e && !self.sym(se + 1, b'{') && !self.sym(se + 1, b';') {
                         se += 1;
                     }
-                    out.push(named(if in_impl { SymKind::Method } else { SymKind::Function }, j + 1, e, self.join(j, se), vec![]));
+                    // (本体の中のアイテム `fn helper() {}` / `struct S;` ..: rust-analyzer と同じく子に)
+                    let ch = if self.sym(se + 1, b'{') { self.nested_items(se + 2, e) } else { vec![] };
+                    out.push(named(if in_impl { SymKind::Method } else { SymKind::Function }, j + 1, e, self.join(j, se), ch));
                     e + 1
                 }
                 b"struct" | b"union" if self.ident(j + 1) => {
@@ -327,6 +387,7 @@ impl Scan<'_> {
                         name_start: na,
                         name_end: nb,
                         children: ch,
+                        in_macro: false,
                     });
                     e + 1
                 }
@@ -340,10 +401,13 @@ impl Scan<'_> {
                     e + 1
                 }
                 b"extern" if self.sym(j + 1, b'{') || (j + 2 < end && self.t[j + 1].0 == 2 && self.sym(j + 2, b'{')) => {
-                    // `extern "C" { fn f(); }` の中の宣言はトップレベルに並べる
+                    // `extern "C" { fn f(); }`: rust-analyzer と同じく `extern "C"` の子に (navigate はトップレベルのアイテムとして扱う)
                     let o = if self.sym(j + 1, b'{') { j + 1 } else { j + 2 };
                     let c = self.close(o, end);
-                    self.items(o + 1, c, false, out);
+                    let mut ch = vec![];
+                    self.items(o + 1, c, false, &mut ch);
+                    let name = if o == j + 2 { format!("extern {}", String::from_utf8_lossy(self.text(j + 1))) } else { "extern".to_string() };
+                    out.push(Symbol { name, kind: SymKind::Extern, detail: String::new(), start: self.t[start].1, end: self.t[c.min(self.t.len() - 1)].2, name_start: self.t[j].1, name_end: self.t[o - 1].2, children: ch, in_macro: false });
                     c + 1
                 }
                 b"const" | b"static" if self.ident(j + 1) => {
@@ -403,6 +467,53 @@ impl Scan<'_> {
                         e += 1;
                     }
                     out.push(named(SymKind::Macro, j + 2, e, String::from("macro_rules!"), vec![]));
+                    // (core の数の型のメソッドはマクロ `uint_impl!` / `int_impl!` の本体にある: その腕の中のアイテムを
+                    // `impl __uint` / `impl __int` のメンバにする (navigate が u8 .. / i8 .. の持ち主に足す))
+                    let mname = self.text(j + 2).to_vec();
+                    if matches!(mname.as_slice(), b"uint_impl" | b"int_impl" | b"from_str_int_impl") && self.sym(j + 3, b'{') {
+                        let mut ch = vec![];
+                        let mut q = j + 4;
+                        while q < e {
+                            if self.sym(q, b'=') && self.sym(q + 1, b'>') && self.sym(q + 2, b'{') {
+                                let c = self.close(q + 2, e);
+                                let mut part = vec![];
+                                self.items(q + 3, c, true, &mut part);
+                                // (`$( impl $int_ty { fn .. } )+` の中の impl のメンバも)
+                                part = self.nested_items(q + 3, c).into_iter().chain(part).collect();
+                                for s in part {
+                                    if s.kind == SymKind::Impl {
+                                        ch.extend(s.children.into_iter().map(|mut x| {
+                                            if x.kind == SymKind::Function {
+                                                x.kind = SymKind::Method;
+                                            }
+                                            x
+                                        }));
+                                    } else if !ch.iter().any(|x: &Symbol| x.name_start == s.name_start) {
+                                        ch.push(s);
+                                    }
+                                }
+                                q = c + 1;
+                            } else {
+                                q += 1;
+                            }
+                        }
+                        ch.sort_by_key(|s| s.name_start);
+                        ch.dedup_by_key(|s| s.name_start);
+                        for s in &mut ch {
+                            s.in_macro = true;
+                            // (数の型の impl のメンバ)
+                            if s.kind == SymKind::Function {
+                                s.kind = SymKind::Method;
+                            }
+                        }
+                        let owner = match mname.as_slice() {
+                            b"uint_impl" => "__uint",
+                            b"int_impl" => "__int",
+                            _ => "__num",
+                        };
+                        let (na, nb) = (self.t[j + 2].1, self.t[j + 2].2);
+                        out.push(Symbol { name: format!("impl {owner}"), kind: SymKind::Impl, detail: String::new(), start: self.t[start].1, end: self.t[e.min(self.t.len() - 1)].2, name_start: na, name_end: nb, children: ch, in_macro: true });
+                    }
                     e + 1
                 }
                 // (宣言マクロ 2.0 `macro name(..) { .. }` / `macro name { .. }`: std の derive など)
@@ -420,6 +531,18 @@ impl Scan<'_> {
                     // (マクロの呼び出し `m! { .. }` / `m!(..);` などは読み飛ばす。わからないトークンは 1 つ進める)
                     if self.ident(j) && self.sym(j + 1, b'!') && j + 2 < end && self.t[j + 2].0 == 1 {
                         let c = self.close(j + 2, end);
+                        // (`thread_local! { static X: T = ..; }` の static はアイテム: rust-analyzer はマクロを展開して見る)
+                        if self.is(j, b"thread_local") && self.sym(j + 2, b'{') {
+                            let n = out.len();
+                            self.items(j + 3, c, false, out);
+                            for s in &mut out[n..] {
+                                s.in_macro = true;
+                                // (thread_local の static の型は `LocalKey<T>`)
+                                if s.kind == SymKind::Static {
+                                    s.detail = format!("LocalKey<{}>", s.detail);
+                                }
+                            }
+                        }
                         if self.sym(c + 1, b';') { c + 2 } else { c + 1 }
                     } else if self.sym(j, b'{') {
                         self.close(j, end) + 1
@@ -479,6 +602,7 @@ impl Scan<'_> {
                     name_start: na,
                     name_end: nb,
                     children: vec![],
+                    in_macro: false,
                 });
             }
             k = e + 1;
@@ -516,6 +640,7 @@ impl Scan<'_> {
                     name_start: na,
                     name_end: nb,
                     children: ch,
+                    in_macro: false,
                 });
             }
             k = e + 1;

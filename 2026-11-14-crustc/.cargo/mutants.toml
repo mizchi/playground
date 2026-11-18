@@ -6,7 +6,7 @@
 profile = "mutants"
 
 # 変異を入れないもの: CLI の引数の処理・ビルドスクリプト・テストとベンチのコード
-exclude_globs = ["src/main.rs", "crates/syntax/build.rs", "benches/**", "tests/**", "crates/*/tests/**", "crates/*/benches/**"]
+exclude_globs = ["src/main.rs", "crates/syntax/build.rs", "benches/**", "tests/**", "crates/*/tests/**", "crates/*/benches/**", "crates/*/src/*_tests.rs"]
 # 表示と見積もりだけの関数 (結果に効かない)
 exclude_re = ["impl (fmt::)?Debug", "impl (fmt::)?Display", "<impl Debug", "<impl Display", "heap_bytes", "::fmt$"]
 

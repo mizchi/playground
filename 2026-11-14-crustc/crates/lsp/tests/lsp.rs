@@ -93,25 +93,30 @@ fn symbols() {
     assert_eq!(vars, ["Circle", "Rect"]);
     assert_eq!(syms[1]["children"][1]["children"][0]["name"], "w");
 
-    // workspace/symbol: 開いたドキュメントと、開いていない src/geom.rs から。前方一致が先
-    let r = srv.handle(&json!({"jsonrpc": "2.0", "id": 3, "method": "workspace/symbol", "params": {"query": "point"}}).to_string());
-    let r: Value = serde_json::from_str(&r[0]).unwrap();
+    // workspace/symbol (rust-analyzer と同じ決まり): 開いたドキュメントと、開いていない src/geom.rs から。
+    // 型に当たれば型だけ (`point` → struct Point。関数 point_dist や impl は出さない)
+    let ask = |srv: &mut Server, id: u32, q: &str| -> Value {
+        let r = srv.handle(&json!({"jsonrpc": "2.0", "id": id, "method": "workspace/symbol", "params": {"query": q}}).to_string());
+        serde_json::from_str(&r[0]).unwrap()
+    };
+    let r = ask(&mut srv, 3, "point");
     let hits: Vec<(String, String)> = r["result"].as_array().unwrap().iter()
         .map(|s| (s["name"].as_str().unwrap().to_string(), s["location"]["uri"].as_str().unwrap().rsplit('/').next().unwrap().to_string()))
         .collect();
-    assert_eq!(hits[0], ("Point".to_string(), "geom.rs".to_string()), "{hits:?}");
-    assert!(hits.contains(&("point_dist".to_string(), "main.rs".to_string())), "{hits:?}");
-    assert!(hits.contains(&("impl Point".to_string(), "geom.rs".to_string())), "{hits:?}");
-    assert!(!hits.iter().any(|h| h.0 == "point_junk"), "{hits:?}");
+    assert_eq!(hits, vec![("Point".to_string(), "geom.rs".to_string())], "{hits:?}");
+    // 型に当たらなければ全部から (フィールドは出さない)
+    let r = ask(&mut srv, 31, "point_d");
     let pd = r["result"].as_array().unwrap().iter().find(|s| s["name"] == "point_dist").unwrap();
     assert_eq!(pd["containerName"], "util");
     assert_eq!(pd["kind"], 12);
+    assert!(!r["result"].as_array().unwrap().iter().any(|h| h["name"] == "point_junk"), "{r}");
+    // 大文字を含む問い合わせは大文字と小文字を区別する
+    assert_eq!(ask(&mut srv, 32, "POint")["result"].as_array().unwrap().len(), 0);
 
-    // 文字の順に含むもの (`nrm` → norm) と、ファイルを書き換えたら読み直す
-    let r = srv.handle(&json!({"jsonrpc": "2.0", "id": 4, "method": "workspace/symbol", "params": {"query": "nrm"}}).to_string());
-    let r: Value = serde_json::from_str(&r[0]).unwrap();
+    // 文字の順に含むもの (`nrm` → norm。impl のメンバの containerName は持ち主の型) と、ファイルを書き換えたら読み直す
+    let r = ask(&mut srv, 4, "nrm");
     assert_eq!(r["result"][0]["name"], "norm");
-    assert_eq!(r["result"][0]["containerName"], "impl Point");
+    assert_eq!(r["result"][0]["containerName"], "Point");
     std::fs::write(root.join("src/geom.rs"), "pub struct Point2 {}\n// changed file\n").unwrap();
     let r = srv.handle(&json!({"jsonrpc": "2.0", "id": 5, "method": "workspace/symbol", "params": {"query": "nrm"}}).to_string());
     let r: Value = serde_json::from_str(&r[0]).unwrap();
@@ -240,4 +245,142 @@ fn hover_and_completion() {
     // 名前の途中 `no|`: ローカルの n ではなく、n で始まる / 含むもの (norm は Point のメンバなので出ない)
     let c = labels(ask("textDocument/completion", 9, 6));
     assert!(!c.is_empty() && c.iter().all(|x| x.to_lowercase().contains('n')), "{c:?}");
+}
+
+/// rename (prepareRename・ほかのファイルも書き換える・理由付きの断り)、signatureHelp、documentHighlight
+#[test]
+fn rename_signature_highlight() {
+    use crustc_lsp::Server;
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lsp_rename");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/geom.rs"), "pub struct Point { pub x: f64 }\nimpl Point {\n    pub fn scale(&self, k: f64, d: f64) -> f64 { self.x * k + d }\n}\n").unwrap();
+    let uri_root = format!("file://{}", root.display());
+    let mut srv = Server::new();
+    let r = srv.handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": uri_root}}).to_string());
+    let r: Value = serde_json::from_str(&r[0]).unwrap();
+    let caps = &r["result"]["capabilities"];
+    assert_eq!(caps["renameProvider"]["prepareProvider"], true);
+    assert_eq!(caps["documentHighlightProvider"], true);
+    assert!(caps["signatureHelpProvider"]["triggerCharacters"].as_array().unwrap().contains(&json!("(")));
+    let uri = format!("{uri_root}/src/main.rs");
+    let text = "mod geom;\nuse geom::Point;\nfn main() {\n    let p = Point { x: 1.0 };\n    let s = p.scale(2.0, p.x);\n}\n";
+    srv.handle(&json!({"jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": uri, "languageId": "rust", "version": 1, "text": text}}}).to_string());
+    let mut id = 10;
+    let mut ask = |method: &str, line: u32, ch: u32, extra: Value| -> Value {
+        id += 1;
+        let mut p = json!({"textDocument": {"uri": uri}, "position": {"line": line, "character": ch}});
+        if let Value::Object(m) = extra {
+            p.as_object_mut().unwrap().extend(m);
+        }
+        let r = srv.handle(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": p}).to_string());
+        serde_json::from_str(&r[0]).unwrap()
+    };
+    // prepareRename: 名前の範囲と今の名前
+    let r = ask("textDocument/prepareRename", 4, 15, json!({}));
+    assert_eq!(r["result"]["placeholder"], "scale", "{r}");
+    assert_eq!(r["result"]["range"]["start"]["character"], 14);
+    // フィールド x: geom.rs の定義・self.x と、main.rs の `Point { x: .. }`・`p.x`
+    let r = ask("textDocument/rename", 4, 27, json!({"newName": "px"}));
+    let ch = &r["result"]["changes"];
+    let geom = ch.as_object().unwrap().iter().find(|(k, _)| k.ends_with("geom.rs")).map(|(_, v)| v.as_array().unwrap().len());
+    assert_eq!(geom, Some(2), "{r}");
+    assert_eq!(ch[&uri].as_array().unwrap().len(), 2, "{r}");
+    assert!(ch[&uri].as_array().unwrap().iter().all(|e| e["newText"] == "px"));
+    // 断るとき: 理由付きのエラー
+    let r = ask("textDocument/rename", 4, 27, json!({"newName": "fn"}));
+    assert_eq!(r["error"]["code"], -32803, "{r}");
+    let r = ask("textDocument/prepareRename", 3, 22, json!({}));
+    assert!(r["error"]["message"].as_str().is_some_and(|m| !m.is_empty()), "{r}");
+    // signatureHelp: `p.scale(2.0, |p.x)` は 2 番目 (self は数えない)
+    let r = ask("textDocument/signatureHelp", 4, 25, json!({}));
+    let sg = &r["result"]["signatures"][0];
+    assert_eq!(sg["label"], "pub fn scale(&self, k: f64, d: f64) -> f64", "{r}");
+    assert_eq!(sg["parameters"].as_array().unwrap().len(), 2);
+    assert_eq!(r["result"]["activeParameter"], 1);
+    let l = sg["label"].as_str().unwrap();
+    let p0 = &sg["parameters"][0]["label"];
+    assert_eq!(&l[p0[0].as_u64().unwrap() as usize..p0[1].as_u64().unwrap() as usize], "k: f64");
+    assert!(ask("textDocument/signatureHelp", 3, 10, json!({}))["result"].is_null());
+    // documentHighlight: このファイルの中の p (定義と 2 つの使い所)
+    let r = ask("textDocument/documentHighlight", 3, 8, json!({}));
+    assert_eq!(r["result"].as_array().unwrap().len(), 3, "{r}");
+}
+
+/// 型推論 (hover の型) を rust-analyzer の答えと比べる: 繰り返しの要素・クロージャの戻り値からの型引数・関連型の射影・
+/// タプル・ターボフィッシュ・数の型のメソッド (core のマクロの中)。std が要るので、見つからなければ何もしない
+#[test]
+fn type_inference_like_rust_analyzer() {
+    use crustc_lsp::Server;
+    if std::env::var_os("CRUSTC_LSP_NO_STD").is_some() || std::process::Command::new("rustc").args(["--print", "sysroot"]).output().map(|o| !o.status.success()).unwrap_or(true) {
+        return;
+    }
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lsp_types");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"ty\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    let text = "pub struct D { pub name: String, pub n: u8 }\npub fn f(ws: &[&D], uses: Vec<(String, Vec<String>)>, v: Vec<D>, o: Option<D>, r: Result<D, String>) {\n    let a = uses.iter().find(|u| u.0 == \"x\");\n    let b = a.map(|u| u.1[0].as_str());\n    let c = ws.get(0);\n    let d = c.and_then(|w| w.name.chars().next());\n    let e = v.iter().enumerate().filter(|(i, x)| x.n > 0 && *i > 0).count();\n    let g = v.iter().map(|x| x.n).max();\n    let h = 3u8.wrapping_sub(1);\n    let k = v.first();\n    let l = uses[0].0.len();\n    let m = o.as_ref().map(|x| &x.name);\n    let p = v.iter().rev().next();\n    let q: Vec<u8> = v.iter().map(|x| x.n).collect();\n    let s = r.as_ref().ok();\n    let t = v.len().checked_sub(1);\n    let w = uses.iter().map(|u| &u.1).flatten().count();\n    let y = v.iter().filter_map(|x| x.name.chars().next()).last();\n    let z = k.map(|x| x.n.count_ones());\n}\npub fn g(m: std::collections::HashMap<String, Vec<u8>>, s: &str, v: Vec<D>) -> Option<u8> {\n    let a1 = m.iter().map(|(k, x)| (k.len(), x.len())).next();\n    let a2 = m.get(\"x\").map(|x| x.len());\n    let a3 = s.split(',').map(|p| p.trim()).collect::<Vec<_>>();\n    let a4 = s.chars().rev().enumerate().last();\n    let a5 = v.iter().map(|x| x.n as u32).sum::<u32>();\n    let a6 = m.values().flatten().copied().max();\n    let a7 = s.parse::<u8>().ok();\n    let a8 = v.iter().position(|x| x.n == 0);\n    let a9 = m.keys().cloned().collect::<Vec<String>>();\n    let b1 = s.lines().next().unwrap_or(\"\");\n    let b2 = v.iter().find_map(|x| x.name.find('a'));\n    let b3 = 1u32.saturating_add(2).leading_zeros();\n    let b4 = (1i64).abs().pow(2);\n    let b5 = v.iter().zip(s.bytes()).map(|(x, c)| x.n + c).max();\n    let b6 = m.into_iter().filter(|(k, _)| !k.is_empty()).map(|(_, x)| x).next();\n    let c1 = m.iter();\n    let c2 = m.iter().map(|(k, x)| k.len());\n    let c3 = m.iter().map(|(k, x)| (k.len(), 1u8));\n    let c4 = m.iter().map(|e| e.0.len());\n    let c5 = m.iter().map(|(k, x)| x.len());\n    let c6 = m.iter().map(|(aa, bb)| bb.len());\n    let c7 = m.iter().map(|(aa, bb)| bb);\n    None\n}\n";
+    std::fs::write(root.join("src/lib.rs"), text).unwrap();
+    let uri_root = format!("file://{}", root.display());
+    let mut srv = Server::new();
+    srv.handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": uri_root}}).to_string());
+    let uri = format!("{uri_root}/src/lib.rs");
+    srv.handle(&json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {"uri": uri, "languageId": "rust", "version": 1, "text": text}}}).to_string());
+    // (rust-analyzer の hover の型)
+    let want: &[(&str, &str)] = &[
+        ("a", "Option<&(String, Vec<String>)>"),
+        ("b", "Option<&str>"),
+        ("c", "Option<&&D>"),
+        ("d", "Option<char>"),
+        ("e", "usize"),
+        ("g", "Option<u8>"),
+        ("h", "u8"),
+        ("k", "Option<&D>"),
+        ("l", "usize"),
+        ("m", "Option<&String>"),
+        ("p", "Option<&D>"),
+        ("q", "Vec<u8>"),
+        ("s", "Option<&D>"),
+        ("t", "Option<usize>"),
+        ("w", "usize"),
+        ("y", "Option<char>"),
+        ("z", "Option<u32>"),
+        ("a1", "Option<(usize, usize)>"),
+        ("a2", "Option<usize>"),
+        ("a3", "Vec<&str>"),
+        ("a4", "Option<(usize, char)>"),
+        ("a5", "u32"),
+        ("a6", "Option<u8>"),
+        ("a7", "Option<u8>"),
+        ("a8", "Option<usize>"),
+        ("a9", "Vec<String>"),
+        ("b1", "&str"),
+        ("b2", "Option<usize>"),
+        ("b3", "u32"),
+        ("b4", "i64"),
+        ("b5", "Option<u8>"),
+        ("b6", "Option<Vec<u8>>"),
+        ("c1", "Iter<'_, String, Vec<u8>>"),
+        ("c2", "Map<Iter<'_, String, Vec<u8>>, impl FnMut((&String, &Vec<u8>)) -> usize>"),
+        ("c3", "Map<Iter<'_, String, Vec<u8>>, impl FnMut((&String, &Vec<u8>)) -> (usize, u8)>"),
+        ("c4", "Map<Iter<'_, String, Vec<u8>>, impl FnMut((&String, &Vec<u8>)) -> usize>"),
+        ("c5", "Map<Iter<'_, String, Vec<u8>>, impl FnMut((&String, &Vec<u8>)) -> usize>"),
+        ("c6", "Map<Iter<'_, String, Vec<u8>>, impl FnMut((&String, &Vec<u8>)) -> usize>"),
+        ("c7", "Map<Iter<'_, String, Vec<u8>>, impl FnMut((&String, &Vec<u8>)) -> &Vec<u8>>")
+    ];
+    let mut id = 10;
+    let mut bad = vec![];
+    for (name, ty) in want {
+        let (li, l) = text.lines().enumerate().find(|(_, l)| l.trim_start().starts_with(&format!("let {name} ")) || l.trim_start().starts_with(&format!("let {name}:"))).unwrap();
+        let ch = l.find(&format!("let {name}")).unwrap() + 4;
+        id += 1;
+        let r = srv.handle(&json!({"jsonrpc": "2.0", "id": id, "method": "textDocument/hover", "params": {"textDocument": {"uri": uri}, "position": {"line": li, "character": ch}}}).to_string());
+        let r: Value = serde_json::from_str(&r[0]).unwrap();
+        let h = r["result"]["contents"]["value"].as_str().unwrap_or("").to_string();
+        if !h.contains(&format!("{name}: {ty}")) {
+            bad.push(format!("{name}: want {ty}, got {h:?}"));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
 }

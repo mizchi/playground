@@ -38,6 +38,10 @@ class Lsp:
         self.diags = []  # (時刻, uri, version)
         self.alive = True
         self.tree_peak = 0
+        # (サーバの作業の進み: 終わっていない `$/progress` のトークンと、rust-analyzer の experimental/serverStatus)
+        self.progress = set()
+        self.quiescent = None
+        self.last_progress = time.time()
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._sample, daemon=True).start()
 
@@ -108,6 +112,17 @@ class Lsp:
                 if ev:
                     ev[1].append(m)
                     ev[0].set()
+            elif m.get("method") == "$/progress":
+                pr = m.get("params", {})
+                kind = (pr.get("value") or {}).get("kind")
+                if kind == "begin":
+                    self.progress.add(str(pr.get("token")))
+                elif kind == "end":
+                    self.progress.discard(str(pr.get("token")))
+                self.last_progress = time.time()
+            elif m.get("method") == "experimental/serverStatus":
+                self.quiescent = bool((m.get("params") or {}).get("quiescent"))
+                self.last_progress = time.time()
             elif m.get("method") == "textDocument/publishDiagnostics":
                 pr = m.get("params", {})
                 self.diags.append((time.time(), pr.get("uri"), pr.get("version")))
@@ -125,6 +140,16 @@ class Lsp:
         if not ok or not ev[1]:
             return None
         return ev[1][0]
+
+    def wait_idle(self, timeout, quiet=0.5):
+        """サーバの作業 (`$/progress`・serverStatus) が終わり、quiet 秒なにも来なくなるまで待つ"""
+        t0 = time.time()
+        while time.time() - t0 < timeout and self.alive:
+            busy = self.progress or self.quiescent is False
+            if not busy and time.time() - self.last_progress >= quiet:
+                return True
+            time.sleep(0.05)
+        return False
 
     def notify(self, method, params):
         self._send({"jsonrpc": "2.0", "method": method, "params": params})

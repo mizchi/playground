@@ -56,6 +56,8 @@ pub struct Server {
     budget: usize,
     /// slim なファイルを読み直したもの (uri, 索引)。新しいものが後ろ。本文の合計が budget を超えたら古いものから捨てる
     cache: RefCell<Vec<(String, Rc<FileIndex>)>>,
+    /// クレートの名前 (workspace/symbol に出す): ワークスペースのパッケージと std のクレート (uri は本体の根のファイル)
+    crates: Vec<(String, String)>,
     pub exit: bool,
     shutdown: bool,
 }
@@ -78,6 +80,7 @@ impl Server {
             feats: HashMap::new(),
             budget: std::env::var("CRUSTC_LSP_MEM_MB").ok().and_then(|v| v.parse::<f64>().ok()).map(|m| (m * 1048576.0) as usize).unwrap_or(4 << 20),
             cache: RefCell::new(vec![]),
+            crates: vec![],
             exit: false,
             shutdown: false,
         }
@@ -107,11 +110,21 @@ impl Server {
                     .or_else(|| p["workspaceFolders"][0]["uri"].as_str().and_then(uri_path));
                 self.root = root;
                 if self.lib_job.is_none() && std::env::var_os("CRUSTC_LSP_NO_STD").is_none() {
-                    self.lib_job = Some(std::thread::spawn(index_std));
+                    let r = self.root.clone();
+                    self.lib_job = Some(std::thread::spawn(move || {
+                        let mut v = index_std();
+                        if let Some(r) = r {
+                            if std::env::var_os("CRUSTC_LSP_NO_DEPS").is_none() {
+                                v.extend(index_deps(&r));
+                            }
+                        }
+                        v
+                    }));
                 }
                 vec![reply(json!({
                     "capabilities": { "textDocumentSync": 1, "documentSymbolProvider": true, "workspaceSymbolProvider": true, "definitionProvider": true, "referencesProvider": true,
-                        "hoverProvider": true, "completionProvider": { "triggerCharacters": [".", ":"] } },
+                        "hoverProvider": true, "completionProvider": { "triggerCharacters": [".", ":"] },
+                        "renameProvider": { "prepareProvider": true }, "signatureHelpProvider": { "triggerCharacters": ["(", ","] }, "documentHighlightProvider": true },
                     "serverInfo": { "name": "crustc", "version": env!("CARGO_PKG_VERSION") }
                 }))]
             }
@@ -135,6 +148,28 @@ impl Server {
                 let (line, ch) = (p["position"]["line"].as_u64().unwrap_or(0) as u32, p["position"]["character"].as_u64().unwrap_or(0) as u32);
                 let r = if method == "textDocument/hover" { self.hover(&uri, line, ch) } else { self.complete(&uri, line, ch) };
                 vec![reply(r)]
+            }
+            // (調べるための拡張: その位置のトークンで終わる式の型)
+            "crustc/typeAt" => {
+                let uri = p["textDocument"]["uri"].as_str().unwrap_or("").to_string();
+                let (line, ch) = (p["position"]["line"].as_u64().unwrap_or(0) as u32, p["position"]["character"].as_u64().unwrap_or(0) as u32);
+                let r = self.at(&uri, line, ch, |_, _, idx, fi, off| navigate::type_at(idx, fi, off)).flatten();
+                vec![reply(json!(r))]
+            }
+            "textDocument/documentHighlight" | "textDocument/signatureHelp" | "textDocument/prepareRename" | "textDocument/rename" => {
+                let uri = p["textDocument"]["uri"].as_str().unwrap_or("").to_string();
+                let (line, ch) = (p["position"]["line"].as_u64().unwrap_or(0) as u32, p["position"]["character"].as_u64().unwrap_or(0) as u32);
+                let r = match method {
+                    "textDocument/documentHighlight" => Ok(self.highlight(&uri, line, ch)),
+                    "textDocument/signatureHelp" => Ok(self.signature_help(&uri, line, ch)),
+                    "textDocument/prepareRename" => self.prepare_rename(&uri, line, ch),
+                    _ => self.rename(&uri, line, ch, p["newName"].as_str().unwrap_or("")),
+                };
+                vec![match r {
+                    Ok(v) => reply(v),
+                    // (RequestFailed: 理由をエディタに出す)
+                    Err(m) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32803, "message": m}}).to_string(),
+                }]
             }
             "shutdown" => {
                 self.shutdown = true;
@@ -227,10 +262,11 @@ impl Server {
         let li = LineIndex::new(&text);
         fn conv(v: &[Symbol], text: &str, li: &LineIndex) -> Vec<Value> {
             v.iter()
+                .filter(|s| !s.in_macro)
                 .map(|s| {
                     let mut o = json!({
                         "name": s.name,
-                        "kind": s.kind.lsp(),
+                        "kind": s.lsp_kind(),
                         "range": range(text, li, s.start, s.end),
                         "selectionRange": range(text, li, s.name_start, s.name_end),
                     });
@@ -285,7 +321,8 @@ impl Server {
             return Some(r);
         }
         let text = std::fs::read_to_string(uri_path(uri)?).ok()?;
-        let r = Rc::new(ws[i].1.reload(text));
+        // (ライブラリのファイルは本文だけ: 参照を探す対象ではなく、hover / signatureHelp がシグネチャを読むだけなので)
+        let r = Rc::new(if ws[i].1.lib { ws[i].1.text_only(text) } else { ws[i].1.reload(text) });
         c.push((uri.clone(), r.clone()));
         let mut total: usize = c.iter().map(|x| x.1.text_len()).sum();
         while total > self.budget && c.len() > 1 {
@@ -311,8 +348,15 @@ impl Server {
         // (Cargo のワークスペースならそのモジュールの木のファイル、なければ根の下の .rs 全部)
         if self.layout.is_none() {
             self.layout = Some(match root.as_ref().map(|r| (r, cargo_files(r))) {
-                Some((_, Some((v, feats)))) => {
+                Some((_, Some((v, feats, names)))) => {
                     self.feats = feats;
+                    // (クレートの名前: パッケージと、std のクレート (場所は最初のパッケージの根: rust-analyzer と同じ))
+                    self.crates = names.iter().map(|(n, p)| (n.clone(), path_uri(p))).collect();
+                    if let Some((_, p)) = names.first() {
+                        for n in ["core", "alloc", "std", "test", "proc_macro"] {
+                            self.crates.push((n.to_string(), path_uri(p)));
+                        }
+                    }
                     v
                 }
                 Some((r, None)) => {
@@ -391,25 +435,61 @@ impl Server {
     }
 
     /// workspace/symbol: 名前が問い合わせに合うシンボル (SymbolInformation)。合い方の良い順に 256 個まで
+    /// workspace/symbol: rust-analyzer と同じ決まりで
+    /// - 問い合わせの文字が順に (間を空けてよい) 名前に出てくるもの。大文字を含む問い合わせは大文字と小文字を区別する
+    /// - まず型 (struct / enum / union / trait / type と、クレートの名前) だけ。なければ全部 (フィールド・impl と、
+    ///   trait の impl の中のメンバは除く)
+    /// - use の別名 (`use a::B as C` の C) と再エクスポート (`pub use a::B`) も入れる
+    /// - 名前 (小文字にしたもの) の順に 128 個まで
     fn workspace_symbols(&mut self, q: &str) -> Value {
         // (std は入れない: rust-analyzer の既定と同じくワークスペースだけ)
         let ws = self.workspace(false);
-        // (候補: (良さ, 名前, 種類, uri, 範囲, 囲むもの))
-        let mut hits: Vec<(u32, String, u32, String, [u32; 4], String)> = vec![];
-        for (uri, f) in &ws {
-            let mut li: Option<LineIndex> = None;
+        let case = q.chars().any(|c| c.is_uppercase());
+        let matches = |name: &str| -> bool {
+            let mut it = name.chars();
+            q.chars().all(|c| it.any(|x| if case { x == c } else { x.to_lowercase().eq(c.to_lowercase()) }))
+        };
+        let is_type = |k: u32| matches!(k, 23 | 10 | 11 | 26 | 4);
+        // (候補: (名前, 種類, uri, 範囲, 囲むもの))
+        let mut hits: Vec<(String, u32, String, [u32; 4], String)> = vec![];
+        // (名前 → 種類: use の別名・再エクスポートの種類に)
+        let mut kind_of: HashMap<&str, u32> = HashMap::new();
+        for (_, f) in &ws {
             for d in &f.defs {
-                if let Some(sc) = symbols::match_score(q, &d.name) {
-                    let ((l0, c0), (l1, c1)) = ends(f, &mut li, d.start, d.end);
-                    hits.push((sc, d.name.clone(), d.kind.lsp(), uri.clone(), [l0, c0, l1, c1], d.container.to_string()));
+                if d.owner.is_empty() {
+                    kind_of.entry(d.name.as_str()).or_insert(d.kind.lsp());
                 }
             }
         }
-        hits.sort_by(|a, b| (a.0, a.1.len(), &a.1, &a.3, a.4).cmp(&(b.0, b.1.len(), &b.1, &b.3, b.4)));
-        hits.truncate(256);
+        for (uri, f) in &ws {
+            let mut li: Option<LineIndex> = None;
+            for d in &f.defs {
+                if matches!(d.kind, symbols::SymKind::Impl | symbols::SymKind::Field) || (d.container.starts_with("impl") && d.container.contains(" for ")) || !matches(&d.name) {
+                    continue;
+                }
+                let ((l0, c0), (l1, c1)) = ends(f, &mut li, d.start, d.end);
+                let c = if d.container.starts_with("impl") { d.owner.clone() } else { d.container.to_string() };
+                hits.push((d.name.clone(), d.kind.lsp(), uri.clone(), [l0, c0, l1, c1], c));
+            }
+            for (name, l, c, n) in &f.use_syms {
+                if matches(name) {
+                    hits.push((name.clone(), kind_of.get(name.as_str()).copied().unwrap_or(13), uri.clone(), [*l, *c, *l, c + n], String::new()));
+                }
+            }
+        }
+        for (name, uri) in &self.crates {
+            if matches(name) {
+                hits.push((name.clone(), 4, uri.clone(), [0, 0, 0, 0], String::new()));
+            }
+        }
+        if hits.iter().any(|h| is_type(h.1)) {
+            hits.retain(|h| is_type(h.1));
+        }
+        hits.sort_by(|a, b| (a.0.to_lowercase(), &a.0, &a.2, a.3).cmp(&(b.0.to_lowercase(), &b.0, &b.2, b.3)));
+        hits.truncate(128);
         json!(hits
             .into_iter()
-            .map(|(_, name, kind, uri, r, c)| {
+            .map(|(name, kind, uri, r, c)| {
                 let mut o = json!({
                     "name": name,
                     "kind": kind,
@@ -444,28 +524,83 @@ impl Server {
         self.at(uri, line, ch, |srv, ws, idx, fi, off| {
             let load = |i: usize| srv.load(ws, i);
             let locs: Vec<Loc> = if refs { navigate::references(idx, fi, off, decl, &load) } else { navigate::definition(idx, fi, off) };
-            let mut lis: HashMap<usize, Option<LineIndex>> = HashMap::new();
-            // (slim なファイルの中の位置は、読み直した本文で行と桁にする。定義の名前の位置は索引が覚えている)
-            let mut held: HashMap<usize, Rc<FileIndex>> = HashMap::new();
-            let out: Vec<Value> = locs
-                .iter()
-                .map(|l| {
-                    let mut f = idx[l.file];
-                    if f.slim && !f.lib && f.lib_pos(l.start).is_none() {
-                        if !held.contains_key(&l.file) {
-                            if let Some(r) = srv.load(ws, l.file) {
-                                held.insert(l.file, r);
-                            }
-                        }
-                        if let Some(r) = held.get(&l.file) {
-                            f = r;
+            let out: Vec<Value> = srv.ranges(ws, idx, &locs).into_iter().map(|(u, r)| json!({ "uri": u, "range": r })).collect();
+            if refs || out.len() != 1 { json!(out) } else { out.into_iter().next().unwrap() }
+        })
+        .unwrap_or(Value::Null)
+    }
+
+    /// 位置の列 → (uri, LSP の範囲)。slim なファイルの中の位置は、読み直した本文で行と桁にする (定義の名前の位置は索引が覚えている)
+    fn ranges(&self, ws: &[(String, &FileIndex)], idx: &[&FileIndex], locs: &[Loc]) -> Vec<(String, Value)> {
+        let mut lis: HashMap<usize, Option<LineIndex>> = HashMap::new();
+        let mut held: HashMap<usize, Rc<FileIndex>> = HashMap::new();
+        locs.iter()
+            .map(|l| {
+                let mut f = idx[l.file];
+                if f.slim && !f.lib && f.lib_pos(l.start).is_none() {
+                    if !held.contains_key(&l.file) {
+                        if let Some(r) = self.load(ws, l.file) {
+                            held.insert(l.file, r);
                         }
                     }
-                    let ((l0, c0), (l1, c1)) = ends(f, lis.entry(l.file).or_default(), l.start, l.end);
-                    json!({ "uri": ws[l.file].0, "range": { "start": {"line": l0, "character": c0}, "end": {"line": l1, "character": c1} } })
-                })
-                .collect();
-            if refs || out.len() != 1 { json!(out) } else { out.into_iter().next().unwrap() }
+                    if let Some(r) = held.get(&l.file) {
+                        f = r;
+                    }
+                }
+                let ((l0, c0), (l1, c1)) = ends(f, lis.entry(l.file).or_default(), l.start, l.end);
+                (ws[l.file].0.clone(), json!({ "start": {"line": l0, "character": c0}, "end": {"line": l1, "character": c1} }))
+            })
+            .collect()
+    }
+
+    /// textDocument/documentHighlight: 同じファイルの中の参照
+    fn highlight(&mut self, uri: &str, line: u32, ch: u32) -> Value {
+        self.at(uri, line, ch, |srv, ws, idx, fi, off| {
+            let load = |i: usize| srv.load(ws, i);
+            let locs: Vec<Loc> = navigate::highlights(idx, fi, off, &load);
+            json!(srv.ranges(ws, idx, &locs).into_iter().map(|(_, r)| json!({ "range": r, "kind": 1 })).collect::<Vec<_>>())
+        })
+        .unwrap_or(Value::Null)
+    }
+
+    /// textDocument/prepareRename (Err は理由)
+    fn prepare_rename(&mut self, uri: &str, line: u32, ch: u32) -> Result<Value, String> {
+        self.at(uri, line, ch, |srv, ws, idx, fi, off| {
+            let l = navigate::prepare_rename(idx, fi, off)?;
+            let (_, r) = srv.ranges(ws, idx, &[l]).pop().unwrap();
+            Ok(json!({ "range": r, "placeholder": idx[fi].text[l.start..l.end] }))
+        })
+        .unwrap_or(Err("ファイルが分からない".into()))
+    }
+
+    /// textDocument/rename → WorkspaceEdit (Err は理由)
+    fn rename(&mut self, uri: &str, line: u32, ch: u32, new: &str) -> Result<Value, String> {
+        self.at(uri, line, ch, |srv, ws, idx, fi, off| {
+            let load = |i: usize| srv.load(ws, i);
+            let edits = navigate::rename(idx, fi, off, new, &load)?;
+            let locs: Vec<Loc> = edits.iter().map(|e| e.0).collect();
+            let mut changes = serde_json::Map::new();
+            for ((u, r), (_, txt)) in srv.ranges(ws, idx, &locs).into_iter().zip(edits) {
+                changes.entry(u).or_insert_with(|| json!([])).as_array_mut().unwrap().push(json!({ "range": r, "newText": txt }));
+            }
+            Ok(json!({ "changes": changes }))
+        })
+        .unwrap_or(Err("ファイルが分からない".into()))
+    }
+
+    /// textDocument/signatureHelp
+    fn signature_help(&mut self, uri: &str, line: u32, ch: u32) -> Value {
+        self.at(uri, line, ch, |srv, ws, idx, fi, off| {
+            let load = |i: usize| srv.load(ws, i);
+            let Some((sig, params, active, doc)) = navigate::signature_help(idx, fi, off, &load) else { return Value::Null };
+            // (引数の範囲は UTF-16 の桁で)
+            let u16 = |b: usize| sig[..b].encode_utf16().count();
+            let ps: Vec<Value> = params.iter().map(|&(a, e)| json!({ "label": [u16(a), u16(e)] })).collect();
+            let mut sg = json!({ "label": sig, "parameters": ps, "activeParameter": active });
+            if !doc.is_empty() {
+                sg["documentation"] = json!({ "kind": "markdown", "value": doc });
+            }
+            json!({ "signatures": [sg], "activeSignature": 0, "activeParameter": active })
         })
         .unwrap_or(Value::Null)
     }
@@ -555,7 +690,86 @@ fn index_std() -> Vec<(String, FileIndex)> {
                 continue;
             }
             let Ok(text) = std::fs::read_to_string(&p) else { continue };
-            out.push((path_uri(&p), FileIndex::library(text, navigate::module_of(&rel))));
+            // (索引の作り方の不具合で 1 つのファイルが落ちても、std の索引全体を失わない: そのファイルだけ飛ばす)
+            let m = navigate::module_of(&rel);
+            match std::panic::catch_unwind(move || FileIndex::library(text, m)) {
+                Ok(ix) => out.push((path_uri(&p), ix)),
+                Err(_) => eprintln!("crustc-lsp: {rel} の索引を作れなかった (飛ばす)"),
+            }
+        }
+    }
+    out
+}
+
+/// 依存クレート (ワークスペースのパッケージの `[dependencies]` / `[dev-dependencies]` / `[build-dependencies]` のうち、
+/// path でないもの) のソース: cargo の registry (`$CARGO_HOME/registry/src/*/名前-版`) の src の下。版は Cargo.lock から。
+/// std と同じくライブラリの索引 (定義と pub use だけ) にする
+fn index_deps(root: &Path) -> Vec<(String, FileIndex)> {
+    let Ok(top) = std::fs::read_to_string(root.join("Cargo.toml")) else { return vec![] };
+    // (パッケージの Cargo.toml: 根と members)
+    let mut tomls = vec![top.clone()];
+    if let Some(i) = top.find("members") {
+        if let (Some(a), Some(b)) = (top[i..].find('['), top[i..].find(']')) {
+            for m in top[i + a + 1..i + b].split(',') {
+                let m = m.trim().trim_matches('"').trim();
+                if !m.is_empty() && !m.contains('*') {
+                    if let Ok(s) = std::fs::read_to_string(root.join(m).join("Cargo.toml")) {
+                        tomls.push(s);
+                    }
+                }
+            }
+        }
+    }
+    let mut names: Vec<String> = vec![];
+    for toml in &tomls {
+        let mut in_deps = false;
+        for l in toml.lines() {
+            let l = l.trim();
+            if l.starts_with('[') {
+                in_deps = matches!(l, "[dependencies]" | "[dev-dependencies]" | "[build-dependencies]") || l.starts_with("[target.") && l.ends_with("dependencies]");
+                continue;
+            }
+            if !in_deps || l.starts_with('#') || l.contains("path =") || l.contains("path=") || l.contains("workspace = true") {
+                continue;
+            }
+            if let Some((k, v)) = l.split_once('=') {
+                // (`foo = { package = "bar", .. }` は bar)
+                let name = v.split("package").nth(1).and_then(|r| r.split('"').nth(1)).unwrap_or(k.trim()).trim().to_string();
+                if !name.is_empty() && !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap_or_default();
+    let mut vers: HashMap<String, String> = HashMap::new();
+    let mut cur: Option<String> = None;
+    for l in lock.lines() {
+        if let Some(n) = l.strip_prefix("name = ") {
+            cur = Some(n.trim().trim_matches('"').to_string());
+        } else if let (Some(v), Some(n)) = (l.strip_prefix("version = "), cur.as_ref()) {
+            vers.entry(n.clone()).or_insert_with(|| v.trim().trim_matches('"').to_string());
+        }
+    }
+    let home = std::env::var_os("CARGO_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
+    let Some(home) = home else { return vec![] };
+    let regs: Vec<PathBuf> = std::fs::read_dir(home.join("registry/src")).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    let mut out = vec![];
+    for n in names {
+        let Some(v) = vers.get(&n) else { continue };
+        let Some(dir) = regs.iter().map(|r| r.join(format!("{n}-{v}"))).find(|d| d.join("src").exists()) else { continue };
+        let mut paths = vec![];
+        rs_files(&dir.join("src"), &mut paths, 0);
+        for p in paths {
+            let rel = p.strip_prefix(&dir).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+            if rel.contains("/tests/") || rel.contains("/benches/") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            let m = navigate::module_of(&rel);
+            if let Ok(ix) = std::panic::catch_unwind(move || FileIndex::library(text, m)) {
+                out.push((path_uri(&p), ix));
+            }
         }
     }
     out
@@ -694,7 +908,11 @@ pub fn read_msg<R: BufRead>(r: &mut R) -> io::Result<Option<String>> {
 }
 
 pub fn write_msg<W: Write>(w: &mut W, body: &str) -> io::Result<()> {
-    write!(w, "Content-Length: {}\r\n\r\n{body}", body.len())?;
+    // (ヘッダと本文を 1 回で書く: stdout は行ごとに flush するので、分けると書き込みが 3 回になる)
+    let mut m = Vec::with_capacity(body.len() + 32);
+    write!(m, "Content-Length: {}\r\n\r\n", body.len())?;
+    m.extend_from_slice(body.as_bytes());
+    w.write_all(&m)?;
     w.flush()
 }
 
@@ -747,7 +965,8 @@ fn default_features(toml: &str) -> Vec<String> {
     out
 }
 
-fn cargo_files(root: &Path) -> Option<(Vec<(PathBuf, Vec<String>, u32, bool)>, HashMap<u32, Vec<String>>)> {
+#[allow(clippy::type_complexity)]
+fn cargo_files(root: &Path) -> Option<(Vec<(PathBuf, Vec<String>, u32, bool)>, HashMap<u32, Vec<String>>, Vec<(String, PathBuf)>)> {
     let top = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
     let mut pkgs: Vec<PathBuf> = vec![];
     if top.contains("[package]") {
@@ -776,8 +995,15 @@ fn cargo_files(root: &Path) -> Option<(Vec<(PathBuf, Vec<String>, u32, bool)>, H
     let mut feats: HashMap<u32, Vec<String>> = HashMap::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut krate = 0u32;
+    let mut names: Vec<(String, PathBuf)> = vec![];
     for pkg in pkgs {
         let toml = std::fs::read_to_string(pkg.join("Cargo.toml")).unwrap_or_default();
+        if let Some(r) = ["src/lib.rs", "src/main.rs"].iter().map(|f| pkg.join(f)).find(|p| p.exists()) {
+            let n = pkg_name(&toml).replace('-', "_");
+            if !n.is_empty() && !names.iter().any(|x| x.0 == n) {
+                names.push((n, r));
+            }
+        }
         // (ターゲットの根: (ファイル, 本体か))
         let mut roots: Vec<(PathBuf, bool)> = vec![];
         for f in ["src/lib.rs", "src/main.rs"] {
@@ -815,6 +1041,13 @@ fn cargo_files(root: &Path) -> Option<(Vec<(PathBuf, Vec<String>, u32, bool)>, H
             if !r.exists() || seen.contains(&r) {
                 continue;
             }
+            // (クレートの名前: bin・tests・benches・examples はファイルの名前、build.rs は build_script_build)
+            if !r.ends_with("src/lib.rs") && !r.ends_with("src/main.rs") {
+                let n = if r.ends_with("build.rs") { "build_script_build".to_string() } else { r.file_stem().map(|s| s.to_string_lossy().replace('-', "_")).unwrap_or_default() };
+                if !n.is_empty() && !names.iter().any(|x| x.0 == n) {
+                    names.push((n, r.clone()));
+                }
+            }
             krate += 1;
             feats.insert(krate, default_features(&toml));
             let mut stack: Vec<(PathBuf, Vec<String>, bool)> = vec![(r, vec![], true)];
@@ -838,6 +1071,8 @@ fn cargo_files(root: &Path) -> Option<(Vec<(PathBuf, Vec<String>, u32, bool)>, H
                         d = d.join(x);
                     }
                     let cand = match path {
+                        // (`#[path]` はファイルのあるディレクトリから。inline の mod の中ならその下から)
+                        Some(p) if inline.is_empty() => vec![f.parent().map(|x| x.join(&p)).unwrap_or_default()],
                         Some(p) => vec![d.join(p)],
                         None => vec![d.join(format!("{name}.rs")), d.join(&name).join("mod.rs")],
                     };
@@ -845,11 +1080,99 @@ fn cargo_files(root: &Path) -> Option<(Vec<(PathBuf, Vec<String>, u32, bool)>, H
                         stack.push((c, cm, false));
                     }
                 }
+                // (`include!("x.rs")` / `include!(concat!(env!("OUT_DIR"), "/x.rs"))`: 同じモジュールの続き。OUT_DIR は
+                // target の下のビルドスクリプトの出力 (いちばん新しいもの))
+                for (out_dir, rel) in includes(&text) {
+                    let c = if out_dir { out_dir_file(root, &pkg_name(&toml), &rel) } else { f.parent().map(|p| p.join(&rel)).filter(|c| c.exists()) };
+                    if let Some(c) = c {
+                        stack.push((c, m.clone(), false));
+                    }
+                }
                 out.push((f, m, krate, main));
             }
         }
     }
-    Some((out, feats))
+    // (依存のクレート: Cargo.lock の package。場所は最初のパッケージの根 (rust-analyzer と同じ))
+    if let (Ok(lock), Some(first)) = (std::fs::read_to_string(root.join("Cargo.lock")), names.first().map(|x| x.1.clone())) {
+        for l in lock.lines() {
+            if let Some(n) = l.strip_prefix("name = ") {
+                let n = n.trim().trim_matches('"').replace('-', "_");
+                if !names.iter().any(|x| x.0 == n) {
+                    names.push((n, first.clone()));
+                }
+            }
+        }
+    }
+    Some((out, feats, names))
+}
+
+/// ファイルの中の `include!("x")` と `include!(concat!(env!("OUT_DIR"), "/x"))`: (OUT_DIR の下か, パス)
+fn includes(text: &str) -> Vec<(bool, String)> {
+    let mut out = vec![];
+    for (i, _) in text.match_indices("include!(") {
+        let r = text[i + 9..].trim_start();
+        let lit = |s: &str| -> Option<String> { s.strip_prefix('"').and_then(|s| s.split('"').next()).map(|x| x.to_string()) };
+        if let Some(r) = r.strip_prefix("concat!(") {
+            let r = r.trim_start();
+            if let Some(r) = r.strip_prefix("env!(\"OUT_DIR\")") {
+                if let Some(p) = r.trim_start().strip_prefix(',').and_then(|r| lit(r.trim_start())) {
+                    out.push((true, p.trim_start_matches('/').to_string()));
+                }
+            }
+        } else if let Some(p) = lit(r) {
+            if p.ends_with(".rs") {
+                out.push((false, p));
+            }
+        }
+    }
+    out
+}
+
+/// Cargo.toml の [package] の name
+fn pkg_name(toml: &str) -> String {
+    let mut in_pkg = false;
+    for l in toml.lines() {
+        let l = l.trim();
+        if l.starts_with('[') {
+            in_pkg = l == "[package]";
+        } else if in_pkg {
+            if let Some(v) = l.strip_prefix("name").map(|v| v.trim_start()).and_then(|v| v.strip_prefix('=')) {
+                return v.trim().trim_matches('"').to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// パッケージ pkg のビルドスクリプトの OUT_DIR の中のファイル rel (target/<profile>/build/<pkg>/<hash>/out/ か
+/// target/<profile>/build/<pkg>-<hash>/out/ の、いちばん新しいもの)
+fn out_dir_file(root: &Path, pkg: &str, rel: &str) -> Option<PathBuf> {
+    if pkg.is_empty() {
+        return None;
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("target"));
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut consider = |p: PathBuf| {
+        if let Ok(t) = std::fs::metadata(&p).and_then(|m| m.modified()) {
+            if best.as_ref().is_none_or(|b| t > b.0) {
+                best = Some((t, p));
+            }
+        }
+    };
+    for prof in std::fs::read_dir(&target).into_iter().flatten().flatten() {
+        let build = prof.path().join("build");
+        for e in std::fs::read_dir(&build).into_iter().flatten().flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if n == pkg {
+                for h in std::fs::read_dir(e.path()).into_iter().flatten().flatten() {
+                    consider(h.path().join("out").join(rel));
+                }
+            } else if n.strip_prefix(pkg).is_some_and(|r| r.starts_with('-') && r[1..].chars().all(|c| c.is_ascii_hexdigit())) {
+                consider(e.path().join("out").join(rel));
+            }
+        }
+    }
+    best.map(|b| b.1)
 }
 
 /// ファイルの中の `mod x;` (囲む `mod a { .. }` の名前の列, 名前, `#[path = ".."]`)

@@ -1,5 +1,7 @@
 # crustc
 
+> **移転**: 2026-11-18 以降の開発は [mizchi/zust](https://github.com/mizchi/zust) に移した (名前は zustc / zust-analyzer)。このディレクトリは移す前の記録として残す。
+
 自分用の Rust (サブセット) コンパイラ。Rust で書き、自前のフロントエンド (lexer / parser / 型推論) と、
 Cranelift (既定) か自前の minclif でコード生成する。crustc 自身で crustc をコンパイルできる (minclif の経路)。
 **インクリメンタルな開発ビルド**に特化して、次の 4 つを小さくすることを狙う。
@@ -2050,6 +2052,303 @@ hover・references の数、`.` の直後 (`x.|name`) と識別子の途中 (`na
 - 残りの 1 個 (`i > 0` → `i >= 0`) は等価な変異: i = 0 は前方一致で先に返るので、そこに来ない。
 - `KeyState::done` の 2 個は、ハッシュの混ぜ方 (`^` → `|`、`<<` → `>>`)。キャッシュのキーは同じ入力で同じ値になれば
   動くので、機能のテストでは見えない (衝突しにくさの劣化)。
+
+### ide の見つからなかった変異を潰す (2026-11-17)
+
+ide (crates/ide) 全体の 3,142 個を `-j 3` で回し、2 時間で打ち切った (1,897 個まで)。結果は見つかった 1,165・
+見つからない 668・時間切れ 44・ビルドできない 20。見つからない 668 個は全部 navigate.rs で、多いのは
+ローカルの束縛 (`live` 79・`arm_binding` 48・`local_type` 48・`pat_binding` 20・`fn_param` 19)、`def_at` 60、
+use の木 (`use_tree` 27・`resolve_use` 18・`reexport` 18)、文字列の小さな部品 (`targs`・`generic_names`・`captures`・
+`cfg_pred`・`macro_bodies` など)。ゴールデン (fixture) はよくある書き方しか通らず、境界や分岐の片側を見ていなかった。
+
+- 足したテスト: `crates/ide/src/navigate_tests.rs` (`#[path]` で navigate の子のモジュールにして、非公開の部品を直接呼ぶ)。
+  - 文字列の部品: `captures` / `generic_names` / `targs` / `subst` / `alias_parts` / `ret_type` / `elem_type` /
+    `index_type` / `type_head` / `name_hash` (FNV-1a の既知の値) / `mod_score` / `use_module` / `lib_rank`。
+  - cfg: `any` / `all` / `not` / `target_os` / `target_family` / `unix` / `windows` / `miri` / 知らない述語。
+  - `macro_rules!` の本体の範囲 (`{}` / `()` / 関数の中 / 閉じていないもの)、use の木 (入れ子・`as`・glob・`self`)。
+  - ローカル: let / for / if let / while let / match の腕・ガード / or パターン / クロージャ / 引数のパターン /
+    ブロックの中の束縛の寿命。束縛の判定 (`pat_binding` / `fn_param` / `arm_binding`) を正と負の両方で。
+  - 型: 注釈 (`&'static P`・`&mut a::b::P`)・`T(..)`・`T { .. }`・`U::new()`・`a::b::P`。
+  - derive のメソッド 16 個 (`clone` / `default` / `eq` / `ne` / `fmt` / `partial_cmp` / `lt` .. / `hash`)。
+  - 書式の取り込み `{x}` / `{y:?}` / `{{x}}` の定義と参照、型引数 (fn / struct / impl / trait / enum / type / union)。
+- テストで見つかった不具合 (直した):
+  - match のガード `S { f: g } if g > 0 =>` の g が解決されなかった (束縛を `=>` で入れていた)。`if` がガードかを
+    先読みし (`guard_arrow`)、ガードから見えるようにした。
+  - `let v = a::b::P;` の v の型が `b` になっていた (モジュールの名前を型にしていた)。`a::b::T(..)` / `m::f()` も同じ。
+  - 型注釈 `&'static P` の型が `static` になっていた (字句では寿命は `'` の後の識別子)。
+  - or パターン `(m, 0) | (0, m)` の m が後ろの方に行っていた。rust-analyzer と同じく前の方に。
+  - `apply_cfg` で、cfg で外れたアイテムの derive を数え直すときに、外れた範囲をまだ入れていなかった。
+  - LSP がファイルの直下の `#[path = "x.rs"] mod m;` を `<ファイル名>/x.rs` で探していた (rustc はファイルのある
+    ディレクトリから)。これで navigate_tests.rs が読まれず、crustc の参照の一致が 78% → 58% に下がって見えていた。
+- 速さ: `python3 bench/lsp_parity.py` (crustc を対象) は defi 1.0 / hove 0.9 / comp 1.2 / refe 15.1 ms で、前と同じ
+  (rust-analyzer は 0.9 / 0.9 / 5.6 / 27.3 ms)。一致も前と同じ (definition 100%・hover 82%・references 78%)。
+  残りの references の違いは、rust-analyzer が数える cfg で外れたアイテムの中・OUT_DIR の生成ファイル・build.rs と
+  共有する lexer.rs の中のもの。
+
+テストを足した後、上の部品の関数 (37 個) の変異 967 個に絞って回し直した (`-F` で関数の名前、`-j 3` で 82 分。
+見つからなかったものは、テストをさらに足して `--iterate` で回し直した):
+
+| | 見つかった | 見つからない | 時間切れ |
+|---|---:|---:|---:|
+| 足す前 (全体の途中までの回の、同じ関数の分) | — | 441 | — |
+| 1 回目 (967 個) | 715 | 213 | 39 |
+| 2 回目 (残りの 249 個を `--iterate`) | 749 | 179 | 39 |
+
+- 時間切れは `+=` → `-=` などで終わらなくなったもの (テストが止まるので見つかったのと同じ)。
+- 残りの 179 個のほとんどは結果の変わらない変異:
+  - 境界の `<` → `<=` (`sym` / `ident` が範囲の外を偽にするので同じ)。
+  - 早い打ち切り (`arm_binding` / `pat_binding` の最初の除外、`guard_arrow` の `{` / `;` での打ち切り): 後ろの走査や
+    `arm_pat` の範囲の確認でも同じ答えになる。速さのためのもの。
+  - `generic_names` の `>` を探す走査: 結果は `targs` がもう一度区切るので同じ。ファイルの残り全部を写さないためのもの。
+
+### LSP に rename / signatureHelp / documentHighlight を足す (2026-11-18)
+
+どれも、もとからある definition / references / シグネチャの部品の上に作った (`crates/ide/src/navigate.rs` の
+`prepare_rename` / `rename` / `signature_help`、`crates/lsp/src/lib.rs` のハンドラ)。
+
+- **rename** (`prepareProvider` も):
+  - references の位置を書き換える。trait のメソッドなら impl のメソッドも書き換える。
+  - 構造体の省略形は形を変える: フィールドの名前を変えると `S { x }` → `S { new: x }`、ローカルの名前を変えると
+    `S { x }` → `S { x: new }`。書式の取り込み `"{x}"` の中も書き換える。
+  - `use a::B;` の B の上なら、別名を付ける (`use a::B as New;` と、そのファイルの中の B)。rust-analyzer と同じ形。
+  - 断るもの (エラー `RequestFailed` に理由を付ける): キーワード・組み込みの型・ライブラリの定義 (use の名前の上の
+    ときを除く)・ファイルのモジュール (`mod x;`、ファイルの名前も変わるので)・derive が作るメソッド・名前にできない文字列。
+- **signatureHelp**: カーソルを囲む呼び出し `f(..)` / `x.m(..)` / `T::f(..)` / `f::<T>(..)` / タプル構造体 `T(..)`。
+  引数の範囲は UTF-16 の桁。メソッドの呼び出しでは self を引数に数えない (rust-analyzer と同じ)。引数の中の配列や
+  `vec![..]` の中でも外側の呼び出しを答える。宣言 `fn f(..)` の中では答えない。
+- **documentHighlight**: 同じファイルの中の references。
+
+rust-analyzer との比べ方を `bench/lsp_parity.py` に足した (rename は書き換えの集合が同じか、signatureHelp は
+名前を含むか・引数の数・今の引数が同じか、documentHighlight は数):
+
+| 対象 | 機能 | crustc | rust-analyzer |
+|---|---|---|---|
+| synth | rename | 100% | 100% |
+| synth | signatureHelp | 100% (答えた 100%) | 100% (答えた 95%) |
+| synth | documentHighlight | 100% | 100% |
+| crustc | rename | 82% (断ったのも同じ 23/23) | 100% |
+| crustc | signatureHelp | 89% (答えた 85%) | 100% (答えた 95%) |
+| crustc | documentHighlight | 85% | 100% |
+
+- 時間の中央値 (crustc を対象): rename 1.3 ms (rust-analyzer 0.9)、signatureHelp 1.3 ms (同 0.4)。
+  ほかの機能の時間と一致は前と同じ (references 14.5 ms、rust-analyzer 26.4 ms)。
+- 残りの違い:
+  - rename・documentHighlight: rust-analyzer が数える cfg で外れたアイテムの中 (references と同じもの)。
+    `Default::default` を rust-analyzer は依存のクレートの中まで 1,273 か所書き換える (crustc はワークスペースの 16 か所)。
+  - signatureHelp: std の trait のメソッド (`extend`) と、クロージャの呼び出し (`body_hash(..)`) に答えない。
+- 最初に測ったときは rename 71%・signatureHelp 26% だった。rust-analyzer と比べて直したもの:
+  メソッドの呼び出しの self (引数の数と今の引数が 1 ずれていた)、use の名前の上の rename (別名にする)、
+  パスで書いた `std::sync::Mutex` の上の rename は断る。
+
+### rust-analyzer との残りの違いを詰める: cfg・trait の impl の rename・signatureHelp (2026-11-18)
+
+- **cfg で外れたアイテムの中**: rust-analyzer に小さいワークスペースで聞いて確かめた振る舞いに合わせた。
+  - rust-analyzer は外れたアイテム (関数・impl・struct・enum・const・type・trait・インラインの mod・文の cfg) の中も、
+    外側のスコープから見えるアイテムへのパス (`used()` / `P` / `sub::deep` / `crate::P` / use で取り込んだ名前) は解決して、
+    definition / references / hover に答える。ローカル・フィールド・メソッド (`p.get()` / `s.x`)・関連アイテム (`P::new`)・
+    外れたアイテムの名前そのものには答えない。前の crustc は外れたものを全部除いていた。
+  - `def_at` が外れた所のトークンを `inactive_def_at` で引き、上の範囲だけを答える。references・rename・hover もこれを通る。
+  - `apply_cfg`: 設定されていない cfg を「成り立つ」としていたのを、rustc と同じく「成り立たない」にした
+    (`no_global_oom_handling` / `miri` / `doc` / 知らない `key = ".."`)。`target_arch` / `target_pointer_width` /
+    `target_endian` / `target_env` / `target_vendor` / `target_has_atomic` / `panic` を分かるようにした。`test` と
+    `debug_assertions` は rust-analyzer と同じく成り立つとする。
+- **trait の impl のメソッドの rename** (`impl Default for S` の `fn default`): rust-analyzer は std の宣言と依存のクレートの
+  ソースまで 1,273 か所書き換える (そのままでは壊れる書き換え)。crustc はここは合わせず、
+  - trait がワークスペースのもの: trait の宣言から引き直して、宣言・全部の impl・呼び出しを書き換える。
+  - ライブラリ・外部のクレートの trait: 理由を付けて断る (宣言の方を変えられないので)。
+- **signatureHelp**:
+  - `st.extend(..)` (`Vec<String>`) に答えなかったのは、std の `impl Extend<T> for Vec` と `impl Extend<&T> for Vec` の
+    2 つの候補でどちらも選ばなかったため。同じファイルの同じ持ち主・同じ名前のメソッドなら先のもの (総称的なもの) にした。
+    definition / hover も同じく答えるようになった。
+  - クロージャの呼び出し `h(..)` (`let h = |name: &str| -> Option<Key> { .. }`): `impl Fn(name: &str) -> Option<Key>` を
+    シグネチャにする (戻り値を書いていなければ本体の式の型)。rust-analyzer は `Key` を展開して `u128` にする。
+  - rust-analyzer と同じく doc コメントを `documentation` に付けた。
+- **式の型のリテラル**: `"a"` → &str、`'c'` → char、`b"x"` → &[u8]、`b'x'` → u8、`1u8` / `2.0f32` / `1_000usize`、
+  `true` → bool。式全体がリテラルのときだけ (`x + 1` の 1 は式の型ではない)。接尾辞のない数 (`0` / `1.5`) は、
+  使い方で型が決まる (rust-analyzer は `let mut acc = 0; acc = add(acc, x_i64)` の acc を i64 にする) ので型にしない。
+
+結果 (`python3 bench/lsp_parity.py`、crustc を対象。synth は全部 100% のまま):
+
+| 機能 | 前 | 後 | rust-analyzer |
+|---|---:|---:|---:|
+| references (数の一致) | 78% | 92% | 100% |
+| documentHighlight | 85% | 100% | 100% |
+| rename (書き換えの一致) | 82% | 94% | 100% |
+| signatureHelp | 89% (答えた 85%) | 100% (答えた 95%) | 100% (答えた 95%) |
+| 時間の中央値 refe / rena / sign (ms) | 14.5 / 1.3 / 1.3 | 14.2 / 1.3 / 1.2 | 25.0 / 0.8 / 0.5 |
+
+fixture (`python3 bench/ide_golden_ra.py`): definition 460 → 462/467、references 584 → 606/629 (93% → 96%)、
+hover 612 → 614/636。
+
+残りの違い: rename の `default` (上の、わざと断るもの)。references の `u8` / `Key` (rust-analyzer は OUT_DIR の生成
+ファイルと、build.rs と共有する lexer.rs の中も数える)。hover の `CRUSTC_INLINE_LOG` (文字列の中)。
+
+### LSP の比べ方を広げ、残りの違いを詰める (2026-11-18)
+
+**ベンチマーク (`bench/lsp_parity.py`) を直した**:
+
+- 対象を 4 つに: synth (生成した 40 モジュール)・fixture (ide のテストのワークスペース、新)・crustc (driver2.rs)・
+  ide (navigate.rs、新: 字句の部品が多い別の書き方のファイル)。
+- rust-analyzer の準備ができるまで待つ: 名前が引けた後も型の解析を続けているので、`$/progress` と
+  `experimental/serverStatus` (quiescent) を見て、作業が終わるまで待つ (前は fixture で rust-analyzer の補完が 0% に見えていた)。
+- 時間は p50 と p90。起動から名前が引けるまで・作業が終わるまでの時間と、メモリの最大 (サーバと子のプロセスの RSS)。
+- 「一致の平均」(機能ごとの一致の平均) を 1 つの数に。
+- `--json bench/lsp_parity.json` で crustc の数字を残し、`--compare` で前回との差 (一致は点、時間は ms) を列に足す。
+- `--detail` で workspace/symbol・documentSymbol の違いも出す。`--detail-out` でファイルに。
+
+**直したもの** (どれも rust-analyzer に小さいワークスペースで聞いて、振る舞いを確かめてから合わせた):
+
+- **std の再エクスポートが入っていなかった**: `FileIndex::library` が字句の列を捨ててから `pub use` を集めていた。
+  `use std::sync::Mu|` の補完、`std::collections::HashMap` などのパスの解決に効く。
+- **文字列・文字のリテラルの hover**: `&'static str` と値 (rust-analyzer と同じ形)。
+- **`include!` と OUT_DIR**: `include!("x.rs")` と `include!(concat!(env!("OUT_DIR"), "/x.rs"))` のファイルも読む
+  (OUT_DIR は target の下のビルドスクリプトの出力のいちばん新しいもの)。
+- **`Self`**: definition は impl の見出しの型の名前、references はそれと同じ impl の中の `Self` (rust-analyzer と同じ)。
+- **関数の中のアイテム** (`fn walk` を `fn new` の中に書いたもの) と **`thread_local! { static X }`** の static を定義にする
+  (thread_local の中のものは rust-analyzer と同じく documentSymbol には出さない)。
+- **documentSymbol の種類**: `self` を取らない関連関数は Function、static は Constant、`extern "C" { .. }` はブロックの
+  記号 (Namespace) の子に。
+- **workspace/symbol**: rust-analyzer の決まりに合わせた。
+  - まず型 (struct / enum / union / trait / type とクレートの名前) だけを探し、なければ全部 (フィールド・impl・trait の impl の
+    中のメンバは除く) から。
+  - 文字が順に出てくるもの。大文字を含む問い合わせは大文字と小文字を区別する。名前の (小文字の) 順に 128 個まで。
+  - クレートの名前: パッケージのターゲット (lib / bin / tests / benches / examples / build.rs) と Cargo.lock の依存と std。
+  - `use a::B as C` の別名と `pub use` の再エクスポートも。
+- **`fn` などのキーワードの上**: definition はその名前に。`fn` の上の references / documentHighlight は関数の出口
+  (`fn`・`return`・`?`・最後の式。最後の式が match / if なら各腕・各ブロックの最後の式)。
+- **クロージャの引数の型**: `v.iter().filter(|d| ..)` / `opt.map(|x| ..)` / `fold(0, |acc, x| ..)` の引数に、受け手の要素の型
+  (filter などは参照)。補完・hover・定義に効く。
+- **rename**: `enum E { A, B }` の宣言を構造体の省略形と取り違えて `A: new` にしていた。書き換える所がなければ断る。
+
+**速くしたもの**:
+
+- references: 候補の識別子ごとに名前の候補を全部の定義 (std を含めて 10 万個以上) から探していた。問い合わせ 1 回の間の
+  名前の索引 (`named`) にした。メンバの参照で `Q::name` の Q が持ち主でない具体的な型なら解決もしない。
+  サーバの中で 2.5 ms → 0.5 ms (synth)。
+- documentHighlight: ワークスペース全体の参照を探してから絞っていたのを、そのファイルだけ探すように (crustc で 14.9 → 1.2 ms)。
+- hover / signatureHelp: std のファイルを読み直すとき、本文だけにした (索引は作らない)。
+- 応答は 1 回の書き込みに (ヘッダと本文を分けると stdout の行ごとの flush で 3 回になっていた)。
+
+結果 (`python3 bench/lsp_parity.py --compare`、crustc / rust-analyzer。一致の平均の差は今回の前との差):
+
+| 対象 | 一致の平均 crustc | rust-analyzer | 差 | references p50 crustc / ra (ms) | 起動から名前まで / メモリ crustc | rust-analyzer |
+|---|---:|---:|---:|---|---|---|
+| synth | 99.7% | 99.1% | +1.3 点 | 0.7 / 0.7 | 13 ms / 17 MB | 2689 ms / 868 MB |
+| fixture | 97.3% | 95.6% | +15.4 点 | 0.9 / 0.9 | 7 ms / 17 MB | 332 ms / 833 MB |
+| crustc | 96.3% | 95.5% | +4.3 点 | 5.4 / 22.4 | 139 ms / 53 MB | 4932 ms / 2368 MB |
+| ide | 96.0% | 97.5% | +8.4 点 | 3.6 / 2.3 | 170 ms / 53 MB | 5391 ms / 1874 MB |
+
+- workspace/symbol は 4 つとも 100% (前は 62〜87%)、documentSymbol は種類まで 100%、documentHighlight は 100%。
+- rust-analyzer の一致の平均が 100% でないのは、答えなかった所 (definition の「答えた」など) を数えているため。
+- fixture の差が大きいのは、前の比べ方では rust-analyzer の解析が終わる前に聞いていた (補完が 0%) 分も入っている。
+- ide の `x.|` の補完は -10 点に見えるが、作業の間に navigate.rs が変わって比べる位置が違う。
+- 残りの違い:
+  - rename の `Default::default` (rust-analyzer は依存のクレートの中まで書き換える。わざと断る) と、
+    `use a::{Point as Pt}` の Point の上 (rust-analyzer は別名だけを変えて使う所を変えない。crustc は定義を変える)。
+  - references の `Key`: build.rs と共有する lexer.rs の中の別の `Key` を rust-analyzer が数える。
+  - 型が分からない受け手の補完 (`x.as_str()` など)・std のメソッドの signatureHelp (`map(` など)・数の型の
+    メソッド (`wrapping_sub`: core ではマクロで作る)。
+
+### 型推論の不足を詰める (2026-11-18)
+
+rust-analyzer の hover の型を正解にして、よく書く式 39 個 (繰り返しの鎖・Option / Result・HashMap・タプル・
+ターボフィッシュ・数の型のメソッド) を比べた。前は 17 個のうち 7 個しか合っていなかった (`Option<U>` /
+`Option<Iter<'_, ..>::Item>` / 型が出ない) のが、39 個全部 (クロージャの型の表示も) 同じになった。この比べ方は
+`crates/lsp/tests/lsp.rs` の `type_inference_like_rust_analyzer` (本物の std を使う) に残した。
+
+- **繰り返しの要素の型** (`iter_item`): `Iter<'_, T>` → &T、`IterMut` → &mut T、`IntoIter` → T、HashMap の
+  `Iter<'_, K, V>` → (&K, &V)、`Map<I, impl FnMut(..) -> R>` → R、`FilterMap` / `FlatMap` / `Flatten` / `Enumerate` /
+  `Zip` / `Cloned` / `Copied` / `Rev` / `Skip` .. 、`Chars` / `Lines` / `Range` ..。`Self::Item` / `<A as Iterator>::Item` /
+  `U::IntoIter` の射影を置き換える (`norm_proj`)。
+- **メソッドの型引数をクロージャから決める**: 定義に、シグネチャの `F: FnMut(Self::Item) -> B` などから
+  (引数の番号, 型引数, 戻り値の形, 引数の形) を持たせる (`fn_bounds`)。呼び出しの引数のクロージャの戻り値の型を形に
+  当てはめて (`unify`: `Option<U>` と `Option<char>` → U = char)、`map` / `and_then` / `filter_map` / `fold` の結果の型を
+  決める。型引数そのものの引数 (`zip(other: U)`) は引数の式の型で。ターボフィッシュ (`collect::<Vec<_>>()` /
+  `sum::<u32>()` / `parse::<u8>()`) は最初の型引数に (`_` は要素の型)。
+- **クロージャの引数の型**: シグネチャの `F: FnOnce(&T)` の引数の形から (`KEY.with(|m| ..)` の m は &T、`fold` の 2 つめは
+  要素)。分からなければ受け手の要素の型。タプルのパターン `|(k, v)|` / `for (i, x) in` / `let (a, b) =` も。
+- **式の型**: タプルの式 `(a, b)`・タプルの添字 `x.0` (の後の添字 `u.1[0]` も)・括弧の式・配列の式 `[a, b]` / `[x; n]`・
+  単位構造体の値・`match` / `if` / ブロックの式 (腕・ブロックの最後の式の型)・`&x` の参照・ローカルのクロージャの呼び出し・
+  寿命の名前を外す (`&'a str` → `&str`)。
+- **std のマクロの中の impl**: slice の `Iter` などの `impl Iterator` は core のマクロの中にあって見えないので、繰り返しの型に
+  Iterator を持たせる。数の型のメソッド (`wrapping_sub` / `checked_sub` / `count_ones` ..) は core の `uint_impl!` /
+  `int_impl!` の本体のアイテムを `impl __uint` / `impl __int` にして、u8 .. / i8 .. の持ち主に足す。数の型には `Ord` /
+  `PartialOrd` / `Clone` / `Hash` .. も (`n.min(m)`)。`Iterator for Map<I, F>` の `B` のような impl の決まらない型引数は要素の型。
+  `thread_local!` の static の型は `LocalKey<T>`。
+- **型引数の束縛**: 受け手が型引数 `T` なら、`impl<T: Clone>` / `where T: Show` の trait のメソッド。
+- **定義の行き先**: derive がある型の `Point::default()` / `x.clone()` は std の trait の宣言より derive の名前に (hover は
+  trait のメソッドのシグネチャ、参照も数える)。`let h: Hidden = n.into();` は Hidden の `impl From<i32> for Hidden` の from。
+  ライブラリの同じ持ち主・同じ名前のメソッドがいくつかのファイルにあるとき (`From` の impl) は先のもの。
+- **構造体の省略形** `T { x }`: definition はローカルとフィールドの両方、documentHighlight も両方、rename は書き足す形
+  (`x: new` / `new: x`)。`.` の後の補完には self を取らない関連関数を出さない。
+- **長いシグネチャ**: 記号の detail を 120 文字で切っていたので、引数の多い関数の戻り値の型が取れていなかった
+  (1,000 文字まで)。切ったシグネチャで std の索引のスレッドが落ちていた不具合も直し、std のファイル 1 つで索引を作るのに
+  失敗しても、そのファイルだけ飛ばすようにした。
+
+結果: fixture の definition は 462 → 465/467、references は 606 → 609/629。`python3 bench/lsp_parity.py` の一致の平均は
+synth 99.7% / fixture 97.3% / crustc 96.3% (rust-analyzer はそれぞれ 99.1% / 95.6% / 95.5%)。ide (navigate.rs。作業の間に
+本文が変わるので位置は毎回違う) は 95〜98% (rust-analyzer 95〜98%)。時間は前と同じ (references の p50 は crustc で 5.4 ms、
+rust-analyzer 27.9 ms)。std のメソッドの参照 (`Iterator::map` など) は rust-analyzer の 8 割ほどを数える (前は 0)。
+
+### std のメソッドの参照の差を詰める (2026-11-18)
+
+crustc のワークスペースで、よく使う std のメソッド 20 個の references を rust-analyzer と 1 件ずつ比べた
+(`navigate.rs` の中の呼び出しから)。
+
+| メソッド | 前 (crustc / rust-analyzer) | 今 |
+|---|---|---|
+| `Option::map` | 214 / 246 | 266 / 266 |
+| `Iterator::map` | 282 / 342 | 349 / 349 |
+| `collect` / `push` / `filter` / `starts_with` / `clone` / `is_empty` / `len` / `as_str` / `contains` / `get` / `insert` / `trim` / `find` / `first` / `extend` | 数〜十数件の差 | 全部同じ |
+| `ToString::to_string` | 0 / 607 | 605 / 613 |
+| `Option::unwrap` / `<[T]>::iter` | 341 / 346、812 / 822 | 345 / 346、831 / 832 |
+
+直した主なもの:
+
+- **名前の解決**
+  - 受け手の型と Deref の先の両方にあるメソッドは受け手に近い方を選ぶ (`String::len` と `str::len`)。前は 2 つになって答えていなかった。
+  - Deref の先は blanket impl の trait より先に見る (`RefMut<Option<T>>` の `as_ref` は Option のもの)。
+  - trait のメソッドの宣言と、その blanket impl (`impl<T: Display> ToString for T`) の両方が候補なら宣言を選ぶ。
+  - 同じ名前の const・関数がほかのファイルやクレートにもあるときは、同じファイル・同じクレートのものを選ぶ (`const PRELUDE`、テストの `fn run`)。
+  - `use .. as PTy` の別名の enum のバリアントを、同じ名前の構造体 (`Path`) と取り違えていたのを直した。
+- **型**
+  - 入れ子のアダプタの要素 (`Peekable<Skip<Args>>`)。
+  - 型の別名の受け手 (`type Cur = Option<..>`)。
+  - `<str as ToOwned>::Owned` などの射影。
+  - `get(i)` の `I::Output`。
+  - タプル構造体のフィールド (`self.0`)。
+  - `&mut T` を取る関数 (`mem::take`)。
+  - 関数の名前を渡した `and_then(str_lit)`。
+  - `Some(e)`。
+  - 本体が `if` / `match` のクロージャ。
+  - `&|t: &str| ..`。
+  - `let x;` の後の代入。
+  - 修飾つきの型 (`&std::cell::RefCell<..>`) を射影と取り違えて捨てていたのを直した。
+- **パターン**
+  - 前の腕の本体が括弧なしで `,` で終わる腕の束縛 (`"-O" => o.opt = true, s if ..`)。
+  - ガードに `==` がある腕。
+  - `matches!(e, P(g) if g..)` のガードの束縛。
+- **ライブラリの索引**
+  - 本文を捨てたライブラリでも分かるように、タプルのバリアントのフィールドの書き方を定義に残した (proc_macro2 の `TokenTree::Literal(l)`)。
+  - `macro_rules!` の結果の型の手がかりも定義に残した (`json!` → `json_internal!` → `Value`)。
+
+まだ違うもの:
+
+- `&*ptr` の型。
+- `usize::BITS` の関連 const。
+- クロージャの引数の `e.to_string()` (`map_err(|e| ..)` の `io::Error`)。
+- rust-analyzer が impl の側の `to_string` (string.rs の特殊化) に行く 1 か所。
+
+`python3 bench/lsp_parity.py` の一致の平均は前回と同じか上がった:
+
+| 対象 | crustc | rust-analyzer |
+|---|---|---|
+| synth | 99.7% | 99.1% |
+| fixture | 97.3% | 95.6% |
+| crustc | 96.3% | 95.5% |
+| ide | 98.1% (+2.8 点) | 97.9% |
+
+references の p50 は crustc で 4.2 ms、rust-analyzer では 24.1 ms。依存クレートの索引を足した分、メモリは 66 MB になった (rust-analyzer は 2.4 GB)。
 
 ### 途中で分かったこと
 
