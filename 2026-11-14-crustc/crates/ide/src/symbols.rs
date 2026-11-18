@@ -512,6 +512,10 @@ impl Scan<'_> {
                             self.items(j + 3, c, false, out);
                             for s in &mut out[n..] {
                                 s.in_macro = true;
+                                // (thread_local の static の型は `LocalKey<T>`)
+                                if s.kind == SymKind::Static {
+                                    s.detail = format!("LocalKey<{}>", s.detail);
+                                }
                             }
                         }
                         if self.sym(c + 1, b';') { c + 2 } else { c + 1 }

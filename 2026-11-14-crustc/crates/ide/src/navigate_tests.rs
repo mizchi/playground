@@ -1005,7 +1005,10 @@ fn thread_local_statics() {
 
 #[test]
 fn fn_bounds_of_signatures() {
-    let b = |s: &str| fn_bounds(s).into_iter().map(|(i, f, r)| format!("{i}:{f}:{r}")).collect::<Vec<_>>();
+    let b = |s: &str| fn_bounds(s).into_iter().map(|(i, f, r, _)| format!("{i}:{f}:{r}")).collect::<Vec<_>>();
+    let a = |s: &str| fn_bounds(s).into_iter().map(|(_, _, _, a)| a).collect::<Vec<_>>();
+    assert_eq!(a("pub fn with<F, R>(&'static self, f: F) -> R where F: FnOnce(&T) -> R"), s(&["&T"]));
+    assert_eq!(a("fn fold<B, F>(mut self, init: B, f: F) -> B where F: FnMut(B, Self::Item) -> B"), s(&["", "B, Self::Item"]));
     assert_eq!(b("pub fn map<U, F>(self, f: F) -> Option<U> where F: FnOnce(T) -> U"), s(&["0:F:U"]));
     assert_eq!(b("fn map<B, F>(self, f: F) -> Map<Self, F> where Self: Sized, F: FnMut(Self::Item) -> B,"), s(&["0:F:B"]));
     assert_eq!(b("pub const fn and_then<U, F: [const] FnOnce(T) -> Option<U> + [const] Destruct>(self, f: F) -> Option<U>"), s(&["0:F:Option<U>"]));
@@ -1064,4 +1067,18 @@ fn map_iteration_and_tuples() {
     for (p, want) in [("b =", "b: Option<&String>"), ("d =", "d: Option<(usize, usize)>"), ("k)", "k: &String"), ("x)", "x: &String"), ("e =", "e: (u8, &str)"), ("g =", "g: u16")] {
         assert!(ty(p).contains(want), "{p}: {}", ty(p));
     }
+}
+
+/// シグネチャの束縛からのクロージャの引数の型 (`KEY.with(|m| ..)` の m: &T)、関数を入れたローカルの signatureHelp
+#[test]
+fn closure_params_from_signatures() {
+    let lib = FileIndex::library("pub struct LocalKey<T> { t: T }\nimpl<T: 'static> LocalKey<T> { pub fn with<F, R>(&'static self, f: F) -> R where F: FnOnce(&T) -> R { todo!() } }\npub struct Cell<T> { t: T }\nimpl<T> Cell<T> { pub fn get(&self) -> T { todo!() } }\n".to_string(), s(&["x"]));
+    let src = "thread_local! { static K: Cell<u8> = Cell::new(0); }\nfn rank(d: &u8, e: u16) -> usize { 0 }\nfn f() {\n    let v = K.with(|m| m.get());\n    let score = rank;\n    score(&1, 2);\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi, &lib];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap();
+    assert!(ty("m| m").contains("m: &Cell<u8>"), "{}", ty("m| m"));
+    assert!(ty("v =").contains("v: u8"), "{}", ty("v ="));
+    let (sig, ps, a, _) = signature_help(&ws, 0, at(src, "2);", 0), &no).unwrap();
+    assert_eq!((sig.as_str(), ps.len(), a), ("fn rank(d: &u8, e: u16) -> usize", 2, 1));
 }

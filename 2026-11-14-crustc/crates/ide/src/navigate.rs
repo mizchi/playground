@@ -41,8 +41,9 @@ pub struct Def {
     /// 型の別名の型引数の名前 (`type R<T> = Result<T, E>` → [T])
     pub params: Vec<String>,
     /// 関数・メソッドの引数のうちクロージャを取るもの: (引数の番号 (self を除く), 型引数の名前 (`F`、`impl Fn` なら空),
-    /// クロージャの戻り値の形 (`U` / `Option<B>`))。`fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Option<U>` → [(0, F, U)]
-    pub fnret: Vec<(u8, String, String)>,
+    /// クロージャの戻り値の形 (`U` / `Option<B>`), クロージャの引数の形 (`T` / `&Self::Item` / `B, Self::Item`))。
+    /// `fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Option<U>` → [(0, F, U, T)]
+    pub fnret: Vec<(u8, String, String, String)>,
     /// slim のとき (本文を捨てたとき): 名前の両端の (行, UTF-16 の桁)
     pub pos: [u32; 4],
 }
@@ -154,10 +155,10 @@ fn generic_names(text: &str, at: usize) -> Vec<String> {
 
 /// 関数のシグネチャ `fn m<B, F: FnMut(T) -> B>(self, x: u8, f: F) -> R where F: ..` の、クロージャを取る引数
 /// (引数の番号 (self を除く), 型引数の名前, クロージャの戻り値の形)
-fn fn_bounds(sig: &str) -> Vec<(u8, String, String)> {
-    // (型引数 `<..>` と where の中の `X: Fn*(..) -> R` / `X: Fn*(..)`)
-    let mut bounds: Vec<(String, String)> = vec![];
-    let fn_ret = |b: &str| -> Option<String> {
+fn fn_bounds(sig: &str) -> Vec<(u8, String, String, String)> {
+    // (型引数 `<..>` と where の中の `X: Fn*(..) -> R` / `X: Fn*(..)`: (X, 戻り値, 引数))
+    let mut bounds: Vec<(String, String, String)> = vec![];
+    let fn_ret = |b: &str| -> Option<(String, String)> {
         let b = b.trim().trim_start_matches("[const]").trim_start_matches("~const").trim();
         let rest = ["FnOnce", "FnMut", "Fn"].iter().find_map(|k| b.strip_prefix(k))?;
         let rest = rest.trim_start();
@@ -181,8 +182,9 @@ fn fn_bounds(sig: &str) -> Vec<(u8, String, String)> {
                 _ => {}
             }
         }
+        let args = rest[1..e.saturating_sub(1).max(1)].trim().to_string();
         let after = rest[e..].trim_start();
-        Some(match after.strip_prefix("->") {
+        Some((args, match after.strip_prefix("->") {
             Some(r) => {
                 // (戻り値の型は次の `+` / `,` (深さ 0) まで)
                 let r = r.trim();
@@ -203,7 +205,7 @@ fn fn_bounds(sig: &str) -> Vec<(u8, String, String)> {
                 r[..end].trim().to_string()
             }
             None => "()".to_string(),
-        })
+        }))
     };
     let split_top = |s: &str| -> Vec<String> {
         let mut out = vec![];
@@ -241,8 +243,8 @@ fn fn_bounds(sig: &str) -> Vec<(u8, String, String)> {
         for p in g {
             if let Some((n, b)) = p.split_once(':') {
                 for part in b.split('+') {
-                    if let Some(r) = fn_ret(part) {
-                        bounds.push((n.trim().to_string(), r));
+                    if let Some((a, r)) = fn_ret(part) {
+                        bounds.push((n.trim().to_string(), r, a));
                     }
                 }
             }
@@ -269,8 +271,8 @@ fn fn_bounds(sig: &str) -> Vec<(u8, String, String)> {
         for p in split_top(&sig[w + 7..]) {
             if let Some((n, b)) = p.split_once(':') {
                 for part in b.split('+') {
-                    if let Some(r) = fn_ret(part) {
-                        bounds.push((n.trim().to_string(), r));
+                    if let Some((a, r)) = fn_ret(part) {
+                        bounds.push((n.trim().to_string(), r, a));
                     }
                 }
             }
@@ -309,13 +311,13 @@ fn fn_bounds(sig: &str) -> Vec<(u8, String, String)> {
             continue;
         }
         let ty = ty.trim();
-        if let Some(r) = ty.strip_prefix("impl ").and_then(|b| b.split('+').find_map(|x| fn_ret(x))) {
-            out.push((idx, String::new(), r));
-        } else if let Some((_, r)) = bounds.iter().find(|(n, _)| n == ty.trim_start_matches("&mut ").trim_start_matches('&')) {
-            out.push((idx, ty.to_string(), r.clone()));
+        if let Some((a, r)) = ty.strip_prefix("impl ").and_then(|b| b.split('+').find_map(|x| fn_ret(x))) {
+            out.push((idx, String::new(), r, a));
+        } else if let Some((_, r, a)) = bounds.iter().find(|(n, _, _)| n == ty.trim_start_matches("&mut ").trim_start_matches('&')) {
+            out.push((idx, ty.to_string(), r.clone(), a.clone()));
         } else if gnames.iter().any(|g| g == ty) {
             // (`other: U` のような型引数そのものの引数: 呼び出しの引数の式の型で決まる。印は "=")
-            out.push((idx, ty.to_string(), "=".to_string()));
+            out.push((idx, ty.to_string(), "=".to_string(), String::new()));
         }
         idx += 1;
     }
@@ -2692,6 +2694,12 @@ fn member_def<'a>(ws: &[&'a FileIndex], file: usize, o: &str, name: &str, kinds:
     };
     // (なければブランケットの impl の trait のメソッド)
     let d = find(&os).or_else(|| if kinds.contains(&SymKind::Method) { find(&blanket_traits(ws, file, false)) } else { None })?;
+    Some((def_subst(d, o, &d.ty), d))
+}
+
+/// 定義 d (受け手の型 o のメンバ) の型の書き方 s の中の型引数を、受け手の型から置き換える (impl の self 型の型引数・Self・
+/// 数の型のマクロの持ち主・Iterator の impl の決まらない型引数)
+fn def_subst(d: &Def, o: &str, s: &str) -> String {
     let params = if d.container.starts_with("impl") {
         targs(impl_self_full(&d.container))
     } else if d.kind == SymKind::Field {
@@ -2700,7 +2708,7 @@ fn member_def<'a>(ws: &[&'a FileIndex], file: usize, o: &str, name: &str, kinds:
         vec![]
     };
     let args = targs(o);
-    let mut t = subst(&d.ty, &params, &args);
+    let mut t = subst(s, &params, &args);
     // (impl の型引数のうち self 型から決まらないもの (`impl<B, I, F> Iterator for Map<I, F>` の B): 受け手が繰り返しなら
     // その要素の型 (Iterator の impl ではふつう Item))
     // (impl の名前は `impl<..>` の型引数を持たないので、大文字 1 文字の名前で見分ける)
@@ -2715,8 +2723,7 @@ fn member_def<'a>(ws: &[&'a FileIndex], file: usize, o: &str, name: &str, kinds:
         }
     }
     // (trait に書かれたメソッドの Self は受け手の型。数の型のマクロ (`uint_impl!`) の中のメソッドの持ち主も)
-    let t = subst(&t, &["Self".to_string(), "__uint".to_string(), "__int".to_string()], &[o.to_string(), o.to_string(), o.to_string()]).replace("$SelfT", o).replace("$ActualT", o);
-    Some((t, d))
+    subst(&t, &["Self".to_string(), "__uint".to_string(), "__int".to_string()], &[o.to_string(), o.to_string(), o.to_string()]).replace("$SelfT", o).replace("$ActualT", o)
 }
 
 /// トークン k で終わる式の型 (分かる範囲で: ローカル・self・フィールド・メソッドや関数の戻り値・構造体の式・添字・`?`)
@@ -3744,7 +3751,19 @@ pub fn signature_help(ws: &[&FileIndex], file: usize, off: usize, load: Load) ->
         return None;
     }
     let method_call = c >= 1 && f.sym(c - 1, b'.');
-    let t = *def_at(ws, file, f.toks[c].1 as usize).first()?;
+    let mut t = *def_at(ws, file, f.toks[c].1 as usize).first()?;
+    // (関数を入れたローカル `let score = lib_rank;`: その関数)
+    if !ws[t.file].defs.iter().any(|x| x.start == t.start) && !ws[t.file].slim {
+        let tf = ws[t.file];
+        let b = tf.toks.partition_point(|x| (x.1 as usize) < t.start);
+        if tf.sym(b + 1, b'=') && tf.ident(b + 2) && tf.sym(b + 3, b';') {
+            if let Some(&u) = def_at(ws, t.file, tf.toks[b + 2].1 as usize).first() {
+                if ws[u.file].defs.iter().any(|x| x.start == u.start && matches!(x.kind, SymKind::Function | SymKind::Method)) {
+                    t = u;
+                }
+            }
+        }
+    }
     let tf = ws[t.file];
     let (sig, name_at, doc) = match tf.defs.iter().find(|x| x.start == t.start) {
         Some(def) => {
@@ -3816,6 +3835,53 @@ pub fn signature_help(ws: &[&FileIndex], file: usize, off: usize, load: Load) ->
     // (メソッドの呼び出し `x.m(..)` では self は引数に数えない: rust-analyzer と同じ)
     let params = if method_call && has_self { params[1..].to_vec() } else { params };
     Some((sig, params, commas, doc))
+}
+
+/// closure_param_type の、メソッドのシグネチャから決める方: 受け手 recv のメソッド m の、`(` (open) の後の引数のうち
+/// クロージャ (`|` は j) のものの束縛の引数の形の idx 番目 (path はタプルのパターンの中の番号)
+#[allow(clippy::too_many_arguments)]
+fn closure_param_from_sig(ws: &[&FileIndex], file: usize, recv: &str, m: &str, open: usize, j: usize, idx: usize, path: &[usize], depth: u32) -> Option<String> {
+    let f = ws[file];
+    // (クロージャが何番目の引数か、と引数の始め)
+    let mut starts = vec![open + 1];
+    let mut dd = 0;
+    for q in open + 1..j {
+        if f.sym(q, b'(') || f.sym(q, b'[') || f.sym(q, b'{') {
+            dd += 1;
+        } else if f.sym(q, b')') || f.sym(q, b']') || f.sym(q, b'}') {
+            dd -= 1;
+        } else if dd == 0 && f.sym(q, b',') {
+            starts.push(q + 1);
+        }
+    }
+    let argi = starts.len() - 1;
+    let (o, d) = expand(ws, file, recv).into_iter().find_map(|t| member_def(ws, file, &t, m, &[SymKind::Method]).map(|(_, d)| (t, d)))?;
+    let (_, _, _, args) = d.fnret.iter().find(|x| x.0 as usize == argi && x.2 != "=")?;
+    let ps = tuple_items(&format!("({args})"))?;
+    let pat = ps.get(idx)?.clone();
+    let mut ty = def_subst(d, &o, &pat);
+    // (メソッドの型引数そのものの引数 `fold(init: B, ..)`: その引数の式の型)
+    for (i, g, pat, _) in &d.fnret {
+        if pat == "=" {
+            if let Some(&s) = starts.get(*i as usize) {
+                if let Some(at) = expr_end(f, s, false).and_then(|e| expr_type(ws, file, e, depth + 1)) {
+                    ty = subst(&ty, &[g.clone()], &[at]);
+                }
+            }
+        }
+    }
+    let mut ty = strip_lifetimes(&norm_proj(&ty));
+    // (形の中の型引数 (大文字 1 文字) が置き換わらずに残っていれば分からない)
+    let words = |s: &str| s.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| w.len() == 1 && w.starts_with(|c: char| c.is_ascii_uppercase())).map(|w| w.to_string()).collect::<Vec<_>>();
+    let before = words(&pat);
+    if words(&ty).iter().any(|w| before.contains(w) && !targs(&o).contains(w)) || ty.contains("::") {
+        return None;
+    }
+    for &i in &path[1..] {
+        let inner = strip_ref(&ty).to_string();
+        ty = tuple_items(&inner)?.get(i)?.clone();
+    }
+    Some(ty)
 }
 
 /// タプルの型 `(A, B<C, D>)` の要素
@@ -4127,7 +4193,7 @@ fn method_call_type_at(ws: &[&FileIndex], file: usize, o: &str, name: &str, op: 
                 starts.push(q + 1);
             }
         }
-        for (idx, fty, pat) in &d {
+        for (idx, fty, pat, _) in &d {
             let Some(&s) = starts.get(*idx as usize) else { continue };
             // (型引数そのものの引数 `zip(other)`: 引数の式の型)
             if pat == "=" {
@@ -4243,6 +4309,10 @@ fn closure_param_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> O
     }
     let m = f.tok(open - 1);
     let recv = expr_type(ws, file, open - 3, depth + 1)?;
+    // (メソッドのシグネチャの束縛 `F: FnOnce(&T) -> R` の引数の形から: `cell.with(|m| ..)` / `opt.map(|x| ..)` / `iter.fold(0, |a, x| ..)`)
+    if let Some(t) = closure_param_from_sig(ws, file, &recv, m, open, j, idx, &path, depth) {
+        return Some(t);
+    }
     let recv = expand(ws, file, &recv).into_iter().last().unwrap_or(recv);
     let h = type_head(&recv);
     let a = targs(&recv);
