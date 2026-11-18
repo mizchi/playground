@@ -22,12 +22,12 @@ ws/src/lib.rs:24:27 Po|int n=2 cut=false rank=0 [Point/Struct Points/TypeAlias]
 ws/src/lib.rs:24:40 Sh|ape n=5 cut=false rank=0 [Shape/Enum shadow/Function shapes/Module shout_len/Function shapes_demo/Function]
 ws/src/lib.rs:25:10 ::|collections n=0 cut=false rank=-1 []
 ws/src/lib.rs:25:10 ::c|ollections n=0 rank=-1
-ws/src/lib.rs:25:23 ::|HashMap n=1 cut=false rank=-1 [hash/Module]
-ws/src/lib.rs:25:23 ::H|ashMap n=1 rank=-1
+ws/src/lib.rs:25:23 ::|HashMap n=2 cut=false rank=1 [hash/Module HashMap/-]
+ws/src/lib.rs:25:23 ::H|ashMap n=2 rank=1
 ws/src/lib.rs:26:10 ::|sync n=0 cut=false rank=-1 []
 ws/src/lib.rs:26:10 ::s|ync n=0 rank=-1
-ws/src/lib.rs:26:16 ::|Mutex n=2 cut=false rank=-1 [poison/Module nonpoison/Module]
-ws/src/lib.rs:26:16 ::M|utex n=0 rank=-1
+ws/src/lib.rs:26:16 ::|Mutex n=5 cut=false rank=0 [Mutex/- poison/Module nonpoison/Module LockResult/- MutexGuard/-]
+ws/src/lib.rs:26:16 ::M|utex n=2 rank=0
 ws/src/lib.rs:27:5 ut|il n=1 cut=false rank=0 [util/Module]
 ws/src/lib.rs:27:11 ::|text n=6 cut=false rank=0 [text/Module scale/Function FACTOR/Const Wrapper/Struct wrapped/Function Word/-]
 ws/src/lib.rs:27:11 ::t|ext n=2 rank=0

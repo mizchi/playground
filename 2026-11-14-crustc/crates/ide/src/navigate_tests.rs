@@ -891,3 +891,38 @@ fn literal_types() {
         assert!(!ty(p).contains(':'), "{p}: {}", ty(p));
     }
 }
+
+/// ライブラリのファイルの `pub use` (再エクスポート): 補完 `use std::sync::Mu|` と、パスの解決
+#[test]
+fn library_reexports() {
+    let lib = FileIndex::library("#[stable]\npub use self::poison::{\n    Mutex, MutexGuard,\n};\nuse self::private::Hidden;\npub mod poison;\n".to_string(), s(&["sync"]));
+    let m = FileIndex::library("pub struct Mutex;\npub struct MutexGuard;\n".to_string(), s(&["sync", "poison"]));
+    let m2 = FileIndex::library("pub struct Mutex;\n".to_string(), s(&["sync", "nonpoison"]));
+    assert_eq!(lib.uses.iter().map(|u| u.0.as_str()).collect::<Vec<_>>(), vec!["Mutex", "MutexGuard"]);
+    let src = "use std::sync::Mu;\nuse std::sync::Mutex;\nfn f(m: Mutex) {}\n";
+    let f = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&lib, &m, &m2, &f];
+    let (it, _) = complete(&ws, 3, at(src, "Mu;", 0) + 2);
+    let labels: Vec<&str> = it.iter().map(|x| x.label.as_str()).collect();
+    assert!(labels.contains(&"Mutex") && labels.contains(&"MutexGuard") && !labels.contains(&"Hidden"), "{labels:?}");
+    // (Mutex は再エクスポートをたどって sync::poison の方: nonpoison ではない)
+    assert_eq!(definition(&ws, 3, at(src, "Mutex)", 0)).first().map(|l| l.file), Some(1));
+}
+
+#[test]
+fn literal_hovers() {
+    let src = "fn f(x: u8) {\n    let a = \"CRUSTC_LOG\";\n    let b = \"a\\n\\u{41}\\x42\";\n    let c = r#\"raw \"q\"\"#;\n    let d = b\"xy\";\n    let e = 'z';\n    let g = b'q';\n    let h = format!(\"{x}\");\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let h = |p: &str, d: usize| hover(&ws, 0, at(src, p, 0) + d, &no);
+    assert_eq!(h("CRUSTC_LOG", 2).unwrap(), "```rust\n&'static str\n```\n---\n\nvalue of literal: ` CRUSTC_LOG `");
+    assert!(h("a\\n", 0).unwrap().ends_with("` a\nAB `"), "{:?}", h("a\\n", 0));
+    assert!(h("raw", 0).unwrap().ends_with("` raw \"q\" `"));
+    assert!(h("xy", 0).unwrap().contains("&'static [u8; 2]"));
+    assert!(h("z'", 0).unwrap().contains("char"));
+    assert!(h("q'", 0).unwrap().contains("u8"));
+    // (書式の取り込み `{x}` の上はローカルの hover)
+    assert!(h("x}", 0).unwrap().contains("x: u8"));
+    // (識別子の上はふつうの hover)
+    assert!(h("a =", 0).unwrap().contains("a: &str"));
+}

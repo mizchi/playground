@@ -311,10 +311,10 @@ impl FileIndex {
     pub fn library(text: String, module: Vec<String>) -> FileIndex {
         let mut f = FileIndex::new(text, module);
         f.lib = true;
+        // (ほかのファイルから見えるのは `pub use` (再エクスポート) だけ。字句の列を捨てる前に集める)
+        f.uses = f.collect_uses(true).into_iter().map(|(a, b, _)| (a, b)).collect();
         f.toks = vec![];
         f.idents = FxMap::default();
-        // (ほかのファイルから見えるのは `pub use` (再エクスポート) だけ)
-        f.uses = f.collect_uses(true).into_iter().map(|(a, b, _)| (a, b)).collect();
         f.make_slim();
         f.names = vec![];
         f
@@ -2703,6 +2703,12 @@ pub fn complete(ws: &[&FileIndex], file: usize, off: usize) -> (Vec<Item>, bool)
 /// off の識別子の hover: 定義のシグネチャ (と囲むもの・doc コメント)、ローカルなら束縛と型
 pub fn hover(ws: &[&FileIndex], file: usize, off: usize, load: Load) -> Option<String> {
     clear_memo();
+    // (文字列・文字のリテラル: 型と値。rust-analyzer と同じ形)
+    if ws[file].tok_at(off).is_none() && ws[file].capture_at(off).is_none() {
+        if let Some(h) = literal_hover(ws[file], off) {
+            return Some(h);
+        }
+    }
     // (組み込みの型)
     if let Some(k) = ws[file].tok_at(off) {
         let w = ws[file].tok(k);
@@ -3257,6 +3263,73 @@ fn literal_type(f: &FileIndex, k: usize) -> Option<String> {
         return whole(j).then(|| suf.to_string());
     }
     None
+}
+
+/// off を含む文字列・文字のリテラルの hover (`&'static str` と値)
+fn literal_hover(f: &FileIndex, off: usize) -> Option<String> {
+    let i = f.toks.partition_point(|t| (t.2 as usize) <= off);
+    let t = *f.toks.get(i)?;
+    if t.0 != 2 || (t.1 as usize) > off {
+        return None;
+    }
+    let s = &f.text[t.1 as usize..t.2 as usize];
+    let (byte, s) = match s.strip_prefix('b') {
+        Some(r) => (true, r),
+        None => (false, s),
+    };
+    let (ty, body) = if let Some(r) = s.strip_prefix('r') {
+        // (生の文字列 `r#"..."#`: 中はそのまま)
+        let h = r.len() - r.trim_start_matches('#').len();
+        let inner = r.get(h + 1..r.len().checked_sub(h + 1)?)?;
+        (if byte { format!("&'static [u8; {}]", inner.len()) } else { "&'static str".to_string() }, inner.to_string())
+    } else if let Some(r) = s.strip_prefix('"') {
+        let v = unescape(r.strip_suffix('"').unwrap_or(r));
+        (if byte { format!("&'static [u8; {}]", v.len()) } else { "&'static str".to_string() }, v)
+    } else if let Some(r) = s.strip_prefix('\'') {
+        (if byte { "u8" } else { "char" }.to_string(), unescape(r.strip_suffix('\'').unwrap_or(r)))
+    } else {
+        return None;
+    };
+    Some(format!("```rust\n{ty}\n```\n---\n\nvalue of literal: ` {body} `"))
+}
+
+/// リテラルの中のエスケープ (`\n` / `\t` / `\\` / `\"` / `\'` / `\0` / `\u{..}` / `\x..` / 行の継続) を戻す
+fn unescape(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('0') => out.push('\0'),
+            Some('x') => {
+                let h: String = it.by_ref().take(2).collect();
+                if let Some(ch) = u8::from_str_radix(&h, 16).ok().map(char::from) {
+                    out.push(ch);
+                }
+            }
+            Some('u') => {
+                let h: String = it.by_ref().skip_while(|&c| c == '{').take_while(|&c| c != '}').collect();
+                if let Some(ch) = u32::from_str_radix(&h, 16).ok().and_then(char::from_u32) {
+                    out.push(ch);
+                }
+            }
+            // (行の継続 `\` + 改行: 次の行の頭の空白も飛ばす)
+            Some('\n') => {
+                while it.peek().is_some_and(|c| c.is_whitespace()) {
+                    it.next();
+                }
+            }
+            Some(o) => out.push(o),
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// ローカルの束縛 t がクロージャ (`let f = |a: T, b| -> R { .. }` / `move |..|`) なら、そのシグネチャ `impl Fn(a: T, b) -> R`
