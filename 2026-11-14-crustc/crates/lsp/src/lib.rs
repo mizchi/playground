@@ -140,6 +140,13 @@ impl Server {
                 let r = if method == "textDocument/hover" { self.hover(&uri, line, ch) } else { self.complete(&uri, line, ch) };
                 vec![reply(r)]
             }
+            // (調べるための拡張: その位置のトークンで終わる式の型)
+            "crustc/typeAt" => {
+                let uri = p["textDocument"]["uri"].as_str().unwrap_or("").to_string();
+                let (line, ch) = (p["position"]["line"].as_u64().unwrap_or(0) as u32, p["position"]["character"].as_u64().unwrap_or(0) as u32);
+                let r = self.at(&uri, line, ch, |_, _, idx, fi, off| navigate::type_at(idx, fi, off)).flatten();
+                vec![reply(json!(r))]
+            }
             "textDocument/documentHighlight" | "textDocument/signatureHelp" | "textDocument/prepareRename" | "textDocument/rename" => {
                 let uri = p["textDocument"]["uri"].as_str().unwrap_or("").to_string();
                 let (line, ch) = (p["position"]["line"].as_u64().unwrap_or(0) as u32, p["position"]["character"].as_u64().unwrap_or(0) as u32);

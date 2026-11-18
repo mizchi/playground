@@ -2623,24 +2623,23 @@ fn alias_parts(detail: &str) -> (Vec<String>, String) {
 /// 型の別名なら右の型にする (型引数も置き換える: `LockResult<G>` → `Result<G, PoisonError<G>>`)。Deref する包み
 /// (`MutexGuard<T>` / `Box<T>` / `Rc<T>` / `Ref<T>` ..) は中身
 fn expand(ws: &[&FileIndex], file: usize, t: &str) -> Vec<String> {
-    let kr = ws[file].krate;
     let mut out = vec![t.to_string()];
     let mut cur = t.to_string();
     for _ in 0..4 {
         let h = type_head(&cur);
-        let next = if let Some(d) = ws
-            .iter()
-            .enumerate()
-            .filter(|(i, w)| *i == file || w.in_src || w.lib || w.krate == kr)
-            .flat_map(|(_, w)| w.defs.iter())
-            .find(|d| d.kind == SymKind::TypeAlias && d.name == h && d.owner.is_empty() && !d.ty.is_empty() && type_head(&d.ty) != h)
-        {
+        if h.is_empty() {
+            break;
+        }
+        let next = if let Some((_, d)) = named(ws, file, &h).into_iter().find(|(_, d)| d.kind == SymKind::TypeAlias && d.owner.is_empty() && !d.ty.is_empty() && type_head(&d.ty) != h) {
             subst(&d.ty, &d.params, &targs(&cur))
         } else if matches!(h.as_str(), "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard" | "Box" | "Rc" | "Arc" | "Ref" | "RefMut" | "ManuallyDrop") {
             match targs(&cur).into_iter().next() {
                 Some(a) => a,
                 None => break,
             }
+        } else if let Some(tg) = assoc_type(ws, file, strip_ref(&cur), "Deref", "Target").filter(|tg| type_head(tg) != h && !tg.is_empty()) {
+            // (`impl Deref for PathBuf { type Target = Path; }` などの Deref の先)
+            tg
         } else {
             break;
         };
@@ -2908,7 +2907,8 @@ fn member_def<'a>(ws: &[&'a FileIndex], file: usize, o: &str, name: &str, kinds:
             .filter(|(i, w)| *i == file || w.in_src || w.lib || w.krate == kr)
             .flat_map(|(_, w)| w.defs.iter().map(move |d| (w.lib, d)))
             .filter(|(_, d)| d.name == name && kinds.contains(&d.kind) && os.contains(&d.owner) && !d.ty.is_empty())
-            .min_by_key(|(lib, d)| (*lib, if *lib { lib_rank(d) } else { 0 }))
+            // (持ち主が型そのもののもの (`Option::as_ref`) を trait のもの (`AsRef::as_ref`) より先に)
+            .min_by_key(|(lib, d)| (*lib, d.owner != type_head(o), if *lib { lib_rank(d) } else { 0 }))
             .map(|x| x.1)
     };
     // (なければブランケットの impl の trait のメソッド)
@@ -2919,14 +2919,22 @@ fn member_def<'a>(ws: &[&'a FileIndex], file: usize, o: &str, name: &str, kinds:
 /// 定義 d (受け手の型 o のメンバ) の型の書き方 s の中の型引数を、受け手の型から置き換える (impl の self 型の型引数・Self・
 /// 数の型のマクロの持ち主・Iterator の impl の決まらない型引数)
 fn def_subst(d: &Def, o: &str, s: &str) -> String {
-    let params = if d.container.starts_with("impl") {
-        targs(impl_self_full(&d.container))
+    let (params, args) = if d.container.starts_with("impl") {
+        // (impl の self 型 `Option<&T>` を受け手の型 `Option<&Ty>` に当てはめる (位置で並べると `&T` が名前にならない))
+        let selfty = impl_self_full(&d.container);
+        let vars: Vec<String> = selfty.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty() && w.len() <= 2 && w.starts_with(|c: char| c.is_ascii_uppercase())).map(|w| w.to_string()).collect();
+        let mut b = vec![];
+        unify(selfty, strip_ref(o), &vars, &mut b);
+        if b.is_empty() {
+            (targs(selfty), targs(o))
+        } else {
+            b.into_iter().unzip()
+        }
     } else if d.kind == SymKind::Field {
-        d.params.clone()
+        (d.params.clone(), targs(o))
     } else {
-        vec![]
+        (vec![], targs(o))
     };
-    let args = targs(o);
     let mut t = subst(s, &params, &args);
     // (impl の型引数のうち self 型から決まらないもの (`impl<B, I, F> Iterator for Map<I, F>` の B): 受け手が繰り返しなら
     // その要素の型 (Iterator の impl ではふつう Item))
@@ -3098,7 +3106,8 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
             let tuple_idx = f.toks[m].0 == 1 && f.text.as_bytes()[f.toks[m].1 as usize].is_ascii_digit() && m >= 1 && f.sym(m - 1, b'.');
             if f.ident(m) || f.sym(m, b')') || f.sym(m, b']') || tuple_idx {
                 let t = expr_type(ws, file, m, depth + 1)?;
-                return expand(ws, file, &t).iter().find_map(|t| index_type(t, range));
+                // (利用者の型の `impl Index<..> for T { type Output = .. }` も)
+                return expand(ws, file, &t).iter().find_map(|t| index_type(t, range).or_else(|| assoc_type(ws, file, strip_ref(t), "Index", "Output")));
             }
             // 配列の式 `[a, b]` / `[x; n]`: `[T; N]` (要素の型は最初の要素の)
             let mut first_end = None;
@@ -3314,7 +3323,7 @@ fn binding_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<
     if let Some((in_tok, path)) = for_pattern(f, b) {
         let e = expr_end(f, in_tok + 1, true)?;
         let t = expr_type(ws, file, e, depth + 1)?;
-        let mut ty = if is_iter_head(&type_head(&t)) { iter_item(&t) } else { iter_item(&t).or_else(|| elem_type(&t)) }?;
+        let mut ty = if is_iter_head(&type_head(&t)) { iter_item(&t) } else { iter_item(&t).or_else(|| elem_type(&t)).or_else(|| iter_item_ws(ws, file, &t)) }?;
         for &i in &path {
             let inner = strip_ref(&ty).to_string();
             ty = tuple_items(&inner)?.get(i)?.clone();
@@ -4185,7 +4194,7 @@ fn closure_param_from_sig(ws: &[&FileIndex], file: usize, recv: &str, m: &str, o
             }
         }
     }
-    let mut ty = strip_lifetimes(&norm_proj(&ty));
+    let mut ty = strip_lifetimes(&norm_proj_ws(ws, file, &ty));
     // (形の中の型引数 (大文字 1 文字) が置き換わらずに残っていれば分からない)
     let words = |s: &str| s.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| w.len() == 1 && w.starts_with(|c: char| c.is_ascii_uppercase())).map(|w| w.to_string()).collect::<Vec<_>>();
     let before = words(&pat);
@@ -4242,7 +4251,11 @@ fn iter_item(t: &str) -> Option<String> {
     let t = t.trim();
     let by_ref = t.starts_with('&');
     let h = type_head(t);
-    let a = targs(t);
+    // (末尾の決まらないアロケータ・ハッシャの型引数 `IntoIter<K, V, A>` / `HashMap<K, V, S>` の A / S は数えない)
+    let mut a = targs(t);
+    while a.len() > 1 && a.last().is_some_and(|x| x == "A" || x == "S") {
+        a.pop();
+    }
     let first = || a.first().cloned();
     // (クロージャの型 `impl FnMut(..) -> R` の R)
     let ret_of = |f: &str| -> Option<String> {
@@ -4286,8 +4299,47 @@ fn iter_item(t: &str) -> Option<String> {
     })
 }
 
+/// 型 ty の trait tr の impl の関連型 name (`impl Index<usize> for AdtTable { type Output = StructDef; }` の Output、
+/// `impl Iterator for ReadDir { type Item = io::Result<DirEntry>; }` の Item、`impl Deref for W { type Target = T; }`)
+fn assoc_type(ws: &[&FileIndex], file: usize, ty: &str, tr: &str, name: &str) -> Option<String> {
+    let h = type_head(ty);
+    if h.is_empty() {
+        return None;
+    }
+    let (_, d) = named(ws, file, name).into_iter().find(|(_, d)| {
+        d.kind == SymKind::TypeAlias && d.owner == h && !d.ty.is_empty() && d.container.strip_prefix("impl ").and_then(|n| n.rsplit_once(" for ")).is_some_and(|(t2, _)| type_head(t2.trim_start_matches('!')) == tr)
+    })?;
+    let t = def_subst(d, ty, &d.ty);
+    // (impl の self 型の型引数の名前が残ったものは分からない)
+    Some(t)
+}
+
+/// iter_item に、impl の関連型 `type Item = ..` を足したもの (利用者の型・std の ReadDir など)
+fn iter_item_ws(ws: &[&FileIndex], file: usize, t: &str) -> Option<String> {
+    iter_item(t).or_else(|| assoc_type(ws, file, strip_ref(t), "Iterator", "Item")).or_else(|| {
+        // (IntoIterator: `for x in &coll` の coll)
+        let it = assoc_type(ws, file, strip_ref(t), "IntoIterator", "Item")?;
+        Some(it)
+    })
+}
+
+/// norm_proj に、impl の関連型を足したもの
+fn norm_proj_ws(ws: &[&FileIndex], file: usize, t: &str) -> String {
+    norm_proj_with(t, &|inner: &str, into: bool| {
+        if into {
+            if assoc_type(ws, file, inner, "Iterator", "Item").is_some() { Some(inner.to_string()) } else { assoc_type(ws, file, inner, "IntoIterator", "IntoIter") }
+        } else {
+            iter_item_ws(ws, file, inner)
+        }
+    })
+}
+
 /// 型の書き方の中の関連型の射影 `<A as Iterator>::Item` / `A::Item` / `Self::Item` を、分かれば要素の型に置き換える
 fn norm_proj(t: &str) -> String {
+    norm_proj_with(t, &|_, _| None)
+}
+
+fn norm_proj_with(t: &str, more: &dyn Fn(&str, bool) -> Option<String>) -> String {
     let mut s = t.to_string();
     for _ in 0..6 {
         // (`::Item` (要素) と `::IntoIter` (IntoIterator: 繰り返しならそれ自身、集まりなら IntoIter<要素>))
@@ -4340,9 +4392,9 @@ fn norm_proj(t: &str) -> String {
             (j, s[j..i].to_string())
         };
         let rep = if into {
-            if is_iter_head(&type_head(&inner)) { Some(inner.clone()) } else { iter_item(&inner).map(|e| format!("IntoIter<{e}>")) }
+            if is_iter_head(&type_head(&inner)) { Some(inner.clone()) } else { iter_item(&inner).map(|e| format!("IntoIter<{e}>")).or_else(|| more(&inner, true)) }
         } else {
-            iter_item(&inner)
+            iter_item(&inner).or_else(|| more(&inner, false))
         };
         match rep {
             Some(item) => s = format!("{}{}{}", &s[..a], item, &s[i + plen..]),
@@ -4481,6 +4533,12 @@ fn method_call_type_at(ws: &[&FileIndex], file: usize, o: &str, name: &str, op: 
     let f = ws[file];
     let (ret, d) = expand(ws, file, o).iter().find_map(|t| member_def(ws, file, t, name, &[SymKind::Method]).map(|(r, d)| (r, d.fnret.clone())))?;
     let mut ret = ret;
+    // (ターボフィッシュのない `sum()` / `product()`: ふつうは要素の型 (の参照を外したもの))
+    if turbo.is_none() && matches!(name, "sum" | "product") && ret.len() == 1 {
+        if let Some(item) = iter_item_ws(ws, file, o) {
+            ret = strip_ref(&item).to_string();
+        }
+    }
     // (ターボフィッシュ `collect::<Vec<_>>()` / `sum::<u32>()` / `parse::<u8>()`: 戻り値の中の最初の型引数 (大文字 1 文字) に。
     // `_` は受け手の要素の型)
     if let Some(tb) = turbo {
@@ -4540,7 +4598,7 @@ fn method_call_type_at(ws: &[&FileIndex], file: usize, o: &str, name: &str, op: 
         }
     }
     let _ = m;
-    Some(strip_lifetimes(&norm_proj(&ret)))
+    Some(strip_lifetimes(&norm_proj_ws(ws, file, &ret)))
 }
 
 /// 参照の寿命の名前を外す (`&'a str` → `&str`。`'static` は残す: rust-analyzer の表示と同じ)
@@ -4736,7 +4794,7 @@ fn closure_param_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> O
         },
         "HashMap" | "BTreeMap" | "FxHashMap" => Some(format!("(&{}, &{})", a.first()?, a.get(1)?)),
         _ if is_iter_head(&h) => iter_item(&recv),
-        _ => elem_type(&recv),
+        _ => elem_type(&recv).or_else(|| iter_item_ws(ws, file, &recv)),
     }?;
     let by_ref = matches!(m, "filter" | "find" | "position" | "skip_while" | "take_while" | "inspect" | "retain" | "sort_by_key" | "max_by_key" | "min_by_key" | "is_some_and" | "is_ok_and" | "any" | "all" | "dedup_by_key" | "binary_search_by_key" | "partition")
         && !matches!(m, "any" | "all" | "position" | "partition" | "is_some_and" | "is_ok_and");
@@ -4923,4 +4981,13 @@ fn closure_sig(ws: &[&FileIndex], t: Loc) -> Option<String> {
         expr_end(f, e + 1, false).and_then(|x| expr_type(ws, t.file, x, 1)).map(|r| format!(" -> {r}")).unwrap_or_default()
     };
     Some(format!("impl Fn({params}){ret}"))
+}
+
+/// (調べるための) off のトークンで終わる式の型 (LSP の `crustc/typeAt`)
+pub fn type_at(ws: &[&FileIndex], file: usize, off: usize) -> Option<String> {
+    clear_memo();
+    let f = ws[file];
+    let k = f.toks.partition_point(|t| (t.2 as usize) <= off).min(f.toks.len().checked_sub(1)?);
+    let k = if (f.toks[k].1 as usize) > off { k.checked_sub(1)? } else { k };
+    expr_type(ws, file, k, 0)
 }
