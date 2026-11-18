@@ -1273,3 +1273,15 @@ fn same_crate_names_and_deferred_lets() {
         assert!(ty(p).contains(want), "{p}: {}", ty(p));
     }
 }
+
+#[test]
+fn macro_hints_of_library_macros() {
+    let lib = FileIndex::library("pub enum Value { Null, Bool(bool) }\n#[macro_export]\nmacro_rules! j { ($($t:tt)+) => { $crate::ji!($($t)+) }; }\n#[macro_export]\nmacro_rules! ji {\n    (@arr [$($e:expr,)*]) => { $crate::__private::vec![$($e,)*] };\n    (@arr [$($e:expr),*] , $($rest:tt)*) => { $crate::ji!(@arr [$($e,)*] $($rest)*) };\n    (null) => { $crate::Value::Null };\n    (true) => { $crate::Value::Bool(true) };\n}\n".to_string(), vec![]);
+    let src = "fn f() {\n    let v = j!(null);\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi, &lib];
+    let h = hover(&ws, 0, at(src, "v =", 0), &no).unwrap_or_default();
+    assert!(h.contains("v: Value"), "{h}");
+}
+
+

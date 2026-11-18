@@ -401,6 +401,13 @@ impl FileIndex {
                                 Some(inner) => vec![(255, String::new(), inner.to_string(), String::new())],
                                 None => vec![],
                             }
+                        } else if s.kind == SymKind::Macro {
+                            // (macro_rules! の結果の型の手がかり (本文を捨てたライブラリでも使えるように): 本体の多くが
+                            // `$crate::T::..` (`json_internal!` → Value) なら T、本体が別のマクロ `$crate::m!(..)` だけなら "!m")
+                            match macro_hint(text.get(s.start..s.end).unwrap_or("")) {
+                                Some(h) => vec![(255, String::new(), h, String::new())],
+                                None => vec![],
+                            }
                         } else if s.kind == SymKind::Variant {
                             // (タプルのバリアント `V(A, B)`: フィールドの書き方を (255, "", "A, B", "") に。本文を捨てたライブラリでも
                             // パターンのフィールドの型が分かるように)
@@ -2218,9 +2225,60 @@ fn exit_points(f: &FileIndex, file: usize, off: usize) -> Option<Vec<Loc>> {
 }
 
 /// このファイルの `macro_rules! name { (..) => {{ ..; tail }} }` (腕が一つ) の、本体の最後の式の型
+/// マクロの定義の本文から、結果の型の手がかり (FileIndex::new で Def に残す): 腕の本体の始めが `$crate::T::` / `$crate::T(`
+/// (T は大文字で始まる) のものが半分以上なら T。腕が一つで本体が `$crate::m!(..)` なら "!m"
+fn macro_hint(text: &str) -> Option<String> {
+    let bodies: Vec<&str> = text.match_indices("=>").map(|(i, _)| text[i + 2..].trim_start().trim_start_matches(['{', '(']).trim_start()).collect();
+    if bodies.is_empty() {
+        return None;
+    }
+    if bodies.len() == 1 {
+        if let Some(r) = bodies[0].strip_prefix("$crate::") {
+            let n: String = r.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            if r[n.len()..].starts_with('!') && !n.is_empty() {
+                return Some(format!("!{n}"));
+            }
+        }
+    }
+    let mut counts: Vec<(String, usize)> = vec![];
+    for b in &bodies {
+        let Some(r) = b.strip_prefix("$crate::") else { continue };
+        let n: String = r.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if n.starts_with(|c: char| c.is_ascii_uppercase()) && (r[n.len()..].starts_with("::") || r[n.len()..].starts_with('(')) {
+            match counts.iter_mut().find(|x| x.0 == n) {
+                Some(x) => x.1 += 1,
+                None => counts.push((n, 1)),
+            }
+        }
+    }
+    let (t, c) = counts.into_iter().max_by_key(|x| x.1)?;
+    // (マクロを呼ぶだけの本体 (TT muncher の途中の腕 `json_internal!(@object ..)` / `vec![..]`) を除いた腕の半分以上)
+    let finals = bodies
+        .iter()
+        .filter(|b| {
+            let r = b.strip_prefix("$crate::").unwrap_or(b);
+            let r = r.strip_prefix("__private::").unwrap_or(r);
+            let n = r.chars().take_while(|c| c.is_alphanumeric() || *c == '_').count();
+            !(n > 0 && r[n..].starts_with('!')) && !b.is_empty() && !b.starts_with('}')
+        })
+        .count();
+    (c * 2 >= finals.max(1)).then_some(t)
+}
+
 fn macro_result_type(ws: &[&FileIndex], file: usize, name: &str, depth: u32) -> Option<String> {
     let f = ws[file];
-    let d = f.defs.iter().find(|d| d.kind == SymKind::Macro && d.name == name)?;
+    let Some(d) = f.defs.iter().find(|d| d.kind == SymKind::Macro && d.name == name) else {
+        // (ほかのファイル・ライブラリの macro_rules!: 定義に残した手がかり)
+        if depth > 8 {
+            return None;
+        }
+        let d = named(ws, file, name).into_iter().map(|x| x.1).find(|d| d.kind == SymKind::Macro && d.fnret.iter().any(|x| x.0 == 255))?;
+        let h = &d.fnret.iter().find(|x| x.0 == 255)?.2;
+        return match h.strip_prefix('!') {
+            Some(m) => macro_result_type(ws, file, m, depth + 1),
+            None => Some(h.clone()),
+        };
+    };
     let a = f.toks.partition_point(|t| (t.1 as usize) < d.start);
     let e = f.toks.partition_point(|t| (t.1 as usize) < d.item_end);
     // (腕の `=>` が一つだけ)
