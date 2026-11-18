@@ -319,7 +319,7 @@ fn fn_bounds(sig: &str) -> Vec<(u8, String, String, String)> {
             out.push((idx, String::new(), r, a));
         } else if let Some((_, r, a)) = bounds.iter().find(|(n, _, _)| n == ty.trim_start_matches("&mut ").trim_start_matches('&')) {
             out.push((idx, ty.to_string(), r.clone(), a.clone()));
-        } else if gnames.iter().any(|g| g == ty) {
+        } else if gnames.iter().any(|g| g == ty) || (ty.len() == 1 && ty.starts_with(|c: char| c.is_ascii_uppercase())) {
             // (`other: U` のような型引数そのものの引数: 呼び出しの引数の式の型で決まる。印は "=")
             out.push((idx, ty.to_string(), "=".to_string(), String::new()));
         }
@@ -887,7 +887,7 @@ impl FileIndex {
         let mut out = vec![];
         let n = self.toks.len();
         // (`T:` の後: 深さ 0 の `,` / `>` まで。`+` で区切った各 trait の頭の名前)
-        let mut take = |mut q: usize, out: &mut Vec<String>| {
+        let take = |mut q: usize, out: &mut Vec<String>| {
             let mut d = 0;
             let mut first = true;
             while q < n {
@@ -3063,7 +3063,7 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
             };
         }
         // ターボフィッシュ `x.collect::<Vec<_>>()` / `x.parse::<u8>()`
-        if open == b'(' && f.sym(m, b'>') {
+        if open == b'(' && f.sym(m, b'>') && !(m >= 1 && (f.sym(m - 1, b'=') || f.sym(m - 1, b'-'))) {
             let mut q = m;
             let mut dd = 0;
             while q > 0 {
@@ -3253,7 +3253,12 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
                     return Some(t);
                 }
             }
-            return member_type(ws, file, &q, name, &[SymKind::Method, SymKind::Function, SymKind::Variant]).or_else(|| name.starts_with(|c: char| c.is_ascii_uppercase()).then(|| q.clone()));
+            // (関連関数 `Q::f(args)`: 型引数を引数から決める (`Mutex::new(x)` → Mutex<x の型>))
+            if let Some((r, d)) = expand(ws, file, &q).iter().find_map(|t| member_def(ws, file, t, name, &[SymKind::Method, SymKind::Function, SymKind::Variant])) {
+                let r = apply_call_args(ws, file, r, &d.fnret, m + 1, depth);
+                return Some(strip_lifetimes(&norm_proj_ws(ws, file, &r)));
+            }
+            return name.starts_with(|c: char| c.is_ascii_uppercase()).then(|| q.clone());
         }
         if name == "Some" {
             return Some("Option<_>".to_string());
@@ -4393,6 +4398,7 @@ fn norm_proj_ws(ws: &[&FileIndex], file: usize, t: &str) -> String {
 }
 
 /// 型の書き方の中の関連型の射影 `<A as Iterator>::Item` / `A::Item` / `Self::Item` を、分かれば要素の型に置き換える
+#[cfg(test)]
 fn norm_proj(t: &str) -> String {
     norm_proj_with(t, &|_, _| None)
 }
@@ -4588,7 +4594,6 @@ fn method_call_type(ws: &[&FileIndex], file: usize, o: &str, name: &str, m: usiz
 
 /// method_call_type の本体: op は引数の `(` のトークン、turbo はターボフィッシュ `::<T>` の型
 fn method_call_type_at(ws: &[&FileIndex], file: usize, o: &str, name: &str, op: usize, turbo: Option<&str>, depth: u32) -> Option<String> {
-    let f = ws[file];
     // (要素の型が分かる繰り返し (`Split` / `RSplit` / slice の `Iter` ..): Iterator の trait の宣言 (`Option<Self::Item>`) を先に。
     // その impl は core のマクロの中にあって見えないか、同じ名前の別の型 (slice の `RSplit`) の impl を拾ってしまうので)
     let from_trait = || -> Option<(String, Vec<(u8, String, String, String)>)> {
@@ -4619,6 +4624,21 @@ fn method_call_type_at(ws: &[&FileIndex], file: usize, o: &str, name: &str, op: 
         }
     }
     let m = op - 1;
+    ret = apply_call_args(ws, file, ret, &d, op, depth);
+    // (`get` / `get_mut` の `I::Output`: 並びの要素)
+    if ret.contains("I::Output") {
+        if let Some(e) = index_type(o, false) {
+            ret = ret.replace("I::Output", &e);
+        }
+    }
+    let _ = m;
+    Some(strip_lifetimes(&norm_proj_ws(ws, file, &ret)))
+}
+
+/// 呼び出し (引数の `(` は op) の戻り値の型 ret の型引数を、引数から決める: クロージャの戻り値 (`map(|x| ..)`) と、型引数そのものの
+/// 引数の式の型 (`Mutex::new(x)` / `zip(other)`)
+fn apply_call_args(ws: &[&FileIndex], file: usize, mut ret: String, d: &[(u8, String, String, String)], op: usize, depth: u32) -> String {
+    let f = ws[file];
     if !d.is_empty() && f.sym(op, b'(') {
         // (引数の始めのトークン: 深さ 0 のカンマで区切る)
         let close = close_of(f, op);
@@ -4633,7 +4653,7 @@ fn method_call_type_at(ws: &[&FileIndex], file: usize, o: &str, name: &str, op: 
                 starts.push(q + 1);
             }
         }
-        for (idx, fty, pat, _) in &d {
+        for (idx, fty, pat, _) in d {
             let Some(&s) = starts.get(*idx as usize) else { continue };
             // (型引数そのものの引数 `zip(other)`: 引数の式の型)
             if pat == "=" {
@@ -4661,14 +4681,7 @@ fn method_call_type_at(ws: &[&FileIndex], file: usize, o: &str, name: &str, op: 
             ret = subst(&ret, &ps, &vs);
         }
     }
-    // (`get` / `get_mut` の `I::Output`: 並びの要素)
-    if ret.contains("I::Output") {
-        if let Some(e) = index_type(o, false) {
-            ret = ret.replace("I::Output", &e);
-        }
-    }
-    let _ = m;
-    Some(strip_lifetimes(&norm_proj_ws(ws, file, &ret)))
+    ret
 }
 
 /// 参照の寿命の名前を外す (`&'a str` → `&str`。`'static` は残す: rust-analyzer の表示と同じ)
