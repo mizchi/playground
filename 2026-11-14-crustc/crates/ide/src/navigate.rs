@@ -1706,8 +1706,87 @@ pub fn highlights(ws: &[&FileIndex], file: usize, off: usize, load: Load) -> Vec
 }
 
 /// references の本体。only があればそのファイルの中だけを探す
+/// `fn` のキーワードの上: 関数の出口 (`fn` 自身・`return ..`・`?`・本体の最後の式)。rust-analyzer の references /
+/// documentHighlight と同じ
+fn exit_points(f: &FileIndex, file: usize, off: usize) -> Option<Vec<Loc>> {
+    let k = f.tok_at(off)?;
+    if f.tok(k) != "fn" || !f.ident(k + 1) {
+        return None;
+    }
+    let a = f.toks[k + 1].1 as usize;
+    let d = f.defs.iter().find(|d| d.start == a && matches!(d.kind, SymKind::Function | SymKind::Method))?;
+    let n = f.toks.len();
+    // (本体の `{`: シグネチャの括弧の外の最初の `{`)
+    let mut j = k + 2;
+    let mut dd = 0;
+    while j < n && (f.toks[j].1 as usize) < d.item_end {
+        if f.sym(j, b'(') || f.sym(j, b'[') || f.sym(j, b'<') {
+            dd += 1;
+        } else if f.sym(j, b')') || f.sym(j, b']') || (f.sym(j, b'>') && !f.sym(j - 1, b'-')) {
+            dd -= 1;
+        } else if dd <= 0 && (f.sym(j, b'{') || f.sym(j, b';')) {
+            break;
+        }
+        j += 1;
+    }
+    if !f.sym(j, b'{') {
+        return Some(vec![Loc { file, start: f.toks[k].1 as usize, end: f.toks[k].2 as usize }]);
+    }
+    let open = j;
+    let mut close = open;
+    let mut dd = 0;
+    while close < n {
+        if f.sym(close, b'{') {
+            dd += 1;
+        } else if f.sym(close, b'}') {
+            dd -= 1;
+            if dd == 0 {
+                break;
+            }
+        }
+        close += 1;
+    }
+    let inner = |at: usize| f.defs.iter().any(|x| x.start != d.start && matches!(x.kind, SymKind::Function | SymKind::Method) && x.item_start <= at && at < x.item_end);
+    let mut out = vec![Loc { file, start: f.toks[k].1 as usize, end: f.toks[k].2 as usize }];
+    for q in open + 1..close.min(n) {
+        let at = f.toks[q].1 as usize;
+        if inner(at) || f.in_macro_body(at) {
+            continue;
+        }
+        if f.sym(q, b'?') {
+            out.push(Loc { file, start: at, end: at + 1 });
+        } else if f.ident(q) && f.tok(q) == "return" {
+            out.push(Loc { file, start: at, end: f.toks[q].2 as usize });
+        }
+    }
+    // (最後の式: 閉じ括弧の前が `;` でなければ。その文の始め (深さ 0 の `;` / `{` / `}` の後) から)
+    if close < n && close > open + 1 && !f.sym(close - 1, b';') {
+        let mut s = close - 1;
+        let mut dd = 0;
+        while s > open + 1 {
+            if f.sym(s, b'}') || f.sym(s, b')') || f.sym(s, b']') {
+                dd += 1;
+            } else if f.sym(s, b'{') || f.sym(s, b'(') || f.sym(s, b'[') {
+                dd -= 1;
+            }
+            if dd == 0 && (f.sym(s - 1, b';') || (f.sym(s - 1, b'}') && !f.sym(s, b'.') && !f.ident(s) || f.ident(s) && f.sym(s - 1, b'}') && !matches!(f.tok(s), "else"))) {
+                break;
+            }
+            s -= 1;
+        }
+        let a = f.toks[s].1 as usize;
+        if !out.iter().any(|l| l.start == a) {
+            out.push(Loc { file, start: a, end: f.toks[close - 1].2 as usize });
+        }
+    }
+    Some(out)
+}
+
 fn references_in(ws: &[&FileIndex], file: usize, off: usize, include_decl: bool, load: Load, only: Option<usize>) -> Vec<Loc> {
     clear_memo();
+    if let Some(r) = exit_points(ws[file], file, off) {
+        return r;
+    }
     let off = kw_to_name(ws[file], off);
     if let Some(r) = self_refs(ws, file, off, include_decl) {
         return r;

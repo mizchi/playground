@@ -4,7 +4,7 @@ sym/broken.rs:2:5 struct -> sym/broken.rs:2:12+3 | refs 2/1 [sym/broken.rs:2:12+
 sym/broken.rs:2:12 Ok1 -> sym/broken.rs:2:12+3 | refs 2/1 | ```rust⏎broken⏎pub struct Ok1⏎```
 sym/broken.rs:3:5 a -> sym/broken.rs:3:5+1 | refs 1/0 [sym/broken.rs:3:5+1] | ```rust⏎Ok1⏎a: u8⏎```
 sym/broken.rs:3:8 u8 -> - | refs 18/18 [sym/broken.rs:3:8+2 sym/broken.rs:6:12+2 sym/broken.rs:11:8+2 sym/broken.rs:13:20+2 sym/broken.rs:24:10+2 sym/odd.rs:18:17+2 sym/odd.rs:18:24+2 sym/odd.rs:33:22+2 sym/odd.rs:41:11+2 sym/odd.rs:41:19+2 sym/odd.rs:41:23+2 sym/odd.rs:42:17+2 sym/odd.rs:49:7+2 sym/odd.rs:50:13+2 sym/odd.rs:71:14+2 sym/odd.rs:72:14+2 sym/odd.rs:91:14+2 sym/odd.rs:108:16+2] | ```rust⏎u8⏎```
-sym/broken.rs:6:1 fn -> sym/broken.rs:6:4+4 | refs 1/0 [sym/broken.rs:6:4+4] | -
+sym/broken.rs:6:1 fn -> sym/broken.rs:6:4+4 | refs 1/1 [sym/broken.rs:6:1+2] | -
 sym/broken.rs:6:4 half -> sym/broken.rs:6:4+4 | refs 1/0 | ```rust⏎broken⏎fn half(x: u8 { let y = (x; } pub struct Open { a: u8,⏎```
 sym/broken.rs:6:9 x -> sym/broken.rs:6:9+1 | refs 2/1 [sym/broken.rs:6:9+1 sym/broken.rs:7:14+1] | ```rust⏎x: u8⏎```
 sym/broken.rs:6:12 u8 -> - | refs 18/18 | ```rust⏎u8⏎```
@@ -16,12 +16,12 @@ sym/broken.rs:10:5 struct -> sym/broken.rs:10:12+4 | refs 1/0 [sym/broken.rs:10:
 sym/broken.rs:10:12 Open -> sym/broken.rs:10:12+4 | refs 1/0 | ```rust⏎broken⏎pub struct Open⏎```
 sym/broken.rs:11:5 a -> - | refs 0/0 | -
 sym/broken.rs:11:8 u8 -> - | refs 18/18 | ```rust⏎u8⏎```
-sym/broken.rs:13:1 fn -> sym/broken.rs:13:4+10 | refs 1/0 [sym/broken.rs:13:4+10] | -
+sym/broken.rs:13:1 fn -> sym/broken.rs:13:4+10 | refs 2/2 [sym/broken.rs:13:1+2 sym/broken.rs:14:5+1] | -
 sym/broken.rs:13:4 after_open -> sym/broken.rs:13:4+10 | refs 1/0 | ```rust⏎broken⏎fn after_open() -> u8⏎```
 sym/broken.rs:13:20 u8 -> - | refs 18/18 | ```rust⏎u8⏎```
 sym/broken.rs:17:1 impl -> - | refs 0/0 | -
 sym/broken.rs:17:6 Ok1 -> sym/broken.rs:2:12+3 | refs 2/1 | ```rust⏎broken⏎pub struct Ok1⏎```
-sym/broken.rs:18:5 fn -> sym/broken.rs:18:8+1 | refs 1/0 [sym/broken.rs:18:8+1] | -
+sym/broken.rs:18:5 fn -> sym/broken.rs:18:8+1 | refs 2/2 [sym/broken.rs:18:5+2 sym/broken.rs:19:9+15] | -
 sym/broken.rs:18:8 m -> sym/broken.rs:18:8+1 | refs 1/0 | ```rust⏎impl Ok1⏎fn m(&self)⏎```
 sym/broken.rs:18:11 self -> - | refs 0/0 | -
 sym/broken.rs:19:9 if -> - | refs 0/0 | -
@@ -44,7 +44,7 @@ sym/odd.rs:5:3 inline -> - | refs 0/0 | -
 sym/odd.rs:6:1 pub -> - | refs 0/0 | -
 sym/odd.rs:6:5 crate -> - | refs 0/0 | -
 sym/odd.rs:6:12 const -> - | refs 0/0 | -
-sym/odd.rs:6:18 fn -> sym/odd.rs:6:21+3 | refs 1/0 [sym/odd.rs:6:21+3] | -
+sym/odd.rs:6:18 fn -> sym/odd.rs:6:21+3 | refs 2/2 [sym/odd.rs:6:18+2 sym/odd.rs:7:5+1] | -
 sym/odd.rs:6:21 cfn -> sym/odd.rs:6:21+3 | refs 1/0 | ```rust⏎odd⏎pub(crate) const fn cfn<const N: usize>() -> usize⏎```
 sym/odd.rs:6:25 const -> - | refs 0/0 | -
 sym/odd.rs:6:31 N -> sym/odd.rs:6:31+1 | refs 2/1 [sym/odd.rs:6:31+1 sym/odd.rs:7:5+1] | ```rust⏎N: usize⏎```
@@ -54,31 +54,31 @@ sym/odd.rs:7:5 N -> sym/odd.rs:6:31+1 | refs 2/1 | ```rust⏎N: usize⏎```
 sym/odd.rs:9:1 pub -> - | refs 0/0 | -
 sym/odd.rs:9:5 const -> - | refs 0/0 | -
 sym/odd.rs:9:11 unsafe -> - | refs 0/0 | -
-sym/odd.rs:9:18 fn -> sym/odd.rs:9:21+4 | refs 1/0 [sym/odd.rs:9:21+4] | -
+sym/odd.rs:9:18 fn -> sym/odd.rs:9:21+4 | refs 1/1 [sym/odd.rs:9:18+2] | -
 sym/odd.rs:9:21 cufn -> sym/odd.rs:9:21+4 | refs 1/0 | ```rust⏎odd⏎pub const unsafe fn cufn()⏎```
 sym/odd.rs:10:1 pub -> - | refs 0/0 | -
 sym/odd.rs:10:5 unsafe -> - | refs 0/0 | -
 sym/odd.rs:10:12 extern -> - | refs 0/0 | -
-sym/odd.rs:10:23 fn -> sym/odd.rs:10:26+4 | refs 1/0 [sym/odd.rs:10:26+4] | -
+sym/odd.rs:10:23 fn -> sym/odd.rs:10:26+4 | refs 2/2 [sym/odd.rs:10:23+2 sym/odd.rs:11:5+1] | -
 sym/odd.rs:10:26 cabi -> sym/odd.rs:10:26+4 | refs 1/0 | ```rust⏎odd⏎pub unsafe extern "C" fn cabi(x: i32) -> i32⏎```
 sym/odd.rs:10:31 x -> sym/odd.rs:10:31+1 | refs 2/1 [sym/odd.rs:10:31+1 sym/odd.rs:11:5+1] | ```rust⏎x: i32⏎```
 sym/odd.rs:10:34 i32 -> - | refs 5/5 [sym/odd.rs:10:34+3 sym/odd.rs:10:42+3 sym/odd.rs:43:26+3 sym/odd.rs:43:34+3 sym/odd.rs:50:28+3] | ```rust⏎i32⏎```
 sym/odd.rs:10:42 i32 -> - | refs 5/5 | ```rust⏎i32⏎```
 sym/odd.rs:11:5 x -> sym/odd.rs:10:31+1 | refs 2/1 | ```rust⏎x: i32⏎```
 sym/odd.rs:13:1 extern -> - | refs 0/0 | -
-sym/odd.rs:13:12 fn -> sym/odd.rs:13:15+5 | refs 1/0 [sym/odd.rs:13:15+5] | -
+sym/odd.rs:13:12 fn -> sym/odd.rs:13:15+5 | refs 1/1 [sym/odd.rs:13:12+2] | -
 sym/odd.rs:13:15 cabi2 -> sym/odd.rs:13:15+5 | refs 1/0 | ```rust⏎odd⏎extern "C" fn cabi2()⏎```
 sym/odd.rs:14:1 async -> - | refs 0/0 | -
-sym/odd.rs:14:7 fn -> sym/odd.rs:14:10+5 | refs 1/0 [sym/odd.rs:14:10+5] | -
+sym/odd.rs:14:7 fn -> sym/odd.rs:14:10+5 | refs 1/1 [sym/odd.rs:14:7+2] | -
 sym/odd.rs:14:10 later -> sym/odd.rs:14:10+5 | refs 1/0 | ```rust⏎odd⏎async fn later()⏎```
 sym/odd.rs:15:1 pub -> - | refs 0/0 | -
 sym/odd.rs:15:5 in -> - | refs 0/0 | -
 sym/odd.rs:15:8 crate -> - | refs 0/0 | -
 sym/odd.rs:15:15 odd -> - | refs 0/0 | -
-sym/odd.rs:15:20 fn -> sym/odd.rs:15:23+6 | refs 1/0 [sym/odd.rs:15:23+6] | -
+sym/odd.rs:15:20 fn -> sym/odd.rs:15:23+6 | refs 1/1 [sym/odd.rs:15:20+2] | -
 sym/odd.rs:15:23 scoped -> sym/odd.rs:15:23+6 | refs 1/0 | ```rust⏎odd⏎pub(in crate::odd) fn scoped()⏎```
 sym/odd.rs:17:1 extern -> - | refs 0/0 | -
-sym/odd.rs:18:5 fn -> sym/odd.rs:18:8+5 | refs 1/0 [sym/odd.rs:18:8+5] | -
+sym/odd.rs:18:5 fn -> sym/odd.rs:18:8+5 | refs 1/1 [sym/odd.rs:18:5+2] | -
 sym/odd.rs:18:8 ext_a -> sym/odd.rs:18:8+5 | refs 1/0 | ```rust⏎odd⏎fn ext_a(x: u8) -> u8⏎```
 sym/odd.rs:18:14 x -> sym/odd.rs:18:14+1 | refs 1/0 [sym/odd.rs:18:14+1] | ```rust⏎x: u8⏎```
 sym/odd.rs:18:17 u8 -> - | refs 18/18 | ```rust⏎u8⏎```
@@ -87,7 +87,7 @@ sym/odd.rs:19:5 static -> sym/odd.rs:19:12+5 | refs 1/0 [sym/odd.rs:19:12+5] | -
 sym/odd.rs:19:12 EXT_B -> sym/odd.rs:19:12+5 | refs 1/0 | ```rust⏎odd⏎static EXT_B: u32⏎```
 sym/odd.rs:19:19 u32 -> - | refs 3/3 [sym/odd.rs:19:19+3 sym/odd.rs:28:12+3 sym/odd.rs:49:17+3] | ```rust⏎u32⏎```
 sym/odd.rs:21:1 extern -> - | refs 0/0 | -
-sym/odd.rs:22:5 fn -> sym/odd.rs:22:8+5 | refs 1/0 [sym/odd.rs:22:8+5] | -
+sym/odd.rs:22:5 fn -> sym/odd.rs:22:8+5 | refs 1/1 [sym/odd.rs:22:5+2] | -
 sym/odd.rs:22:8 ext_c -> sym/odd.rs:22:8+5 | refs 1/0 | ```rust⏎odd⏎fn ext_c()⏎```
 sym/odd.rs:24:1 extern -> - | refs 0/0 | -
 sym/odd.rs:24:8 crate -> - | refs 0/0 | -
@@ -189,12 +189,12 @@ sym/odd.rs:58:10 Out -> sym/odd.rs:58:10+3 | refs 2/1 | ```rust⏎Tr⏎type Out;
 sym/odd.rs:59:5 const -> sym/odd.rs:59:11+1 | refs 2/1 [sym/odd.rs:59:11+1 sym/odd.rs:62:15+1] | -
 sym/odd.rs:59:11 K -> sym/odd.rs:59:11+1 | refs 2/1 | ```rust⏎Tr⏎const K: usize = 3⏎```
 sym/odd.rs:59:14 usize -> - | refs 6/6 | ```rust⏎usize⏎```
-sym/odd.rs:60:5 fn -> sym/odd.rs:60:8+3 | refs 2/1 [sym/odd.rs:60:8+3 sym/odd.rs:79:8+3] | -
+sym/odd.rs:60:5 fn -> sym/odd.rs:60:8+3 | refs 1/1 [sym/odd.rs:60:5+2] | -
 sym/odd.rs:60:8 req -> sym/odd.rs:60:8+3 | refs 2/1 | ```rust⏎Tr⏎fn req(&self) -> Self::Out⏎```
 sym/odd.rs:60:13 self -> - | refs 0/0 | -
 sym/odd.rs:60:22 Self -> sym/odd.rs:54:11+2 | refs 3/2 | -
 sym/odd.rs:60:28 Out -> sym/odd.rs:58:10+3 | refs 2/1 | ```rust⏎Tr⏎type Out;⏎```
-sym/odd.rs:61:5 fn -> sym/odd.rs:61:8+4 | refs 1/0 [sym/odd.rs:61:8+4] | -
+sym/odd.rs:61:5 fn -> sym/odd.rs:61:8+4 | refs 2/2 [sym/odd.rs:61:5+2 sym/odd.rs:62:9+7] | -
 sym/odd.rs:61:8 prov -> sym/odd.rs:61:8+4 | refs 1/0 | ```rust⏎Tr⏎fn prov(&self) -> usize⏎```
 sym/odd.rs:61:14 self -> - | refs 0/0 | -
 sym/odd.rs:61:23 usize -> - | refs 6/6 | ```rust⏎usize⏎```
@@ -221,7 +221,7 @@ sym/odd.rs:67:60 where -> - | refs 0/0 | -
 sym/odd.rs:67:66 T -> sym/odd.rs:67:10+1 | refs 4/3 | ```rust⏎T: Clone + Default⏎```
 sym/odd.rs:67:69 Copy -> - | refs 0/0 | -
 sym/odd.rs:68:5 pub -> - | refs 0/0 | -
-sym/odd.rs:68:9 fn -> sym/odd.rs:68:12+1 | refs 1/0 [sym/odd.rs:68:12+1] | -
+sym/odd.rs:68:9 fn -> sym/odd.rs:68:12+1 | refs 2/2 [sym/odd.rs:68:9+2 sym/odd.rs:69:9+6] | -
 sym/odd.rs:68:12 r -> sym/odd.rs:68:12+1 | refs 1/0 | ```rust⏎impl Gen<'a, T, N>⏎pub fn r(&self) -> &'a [T⏎```
 sym/odd.rs:68:15 self -> - | refs 0/0 | -
 sym/odd.rs:68:26 a -> - | refs 0/0 | -
@@ -246,7 +246,7 @@ sym/odd.rs:76:5 T -> sym/odd.rs:74:6+1 | refs 3/2 | ```rust⏎T⏎```
 sym/odd.rs:76:8 Copy -> - | refs 0/0 | -
 sym/odd.rs:78:5 type -> sym/odd.rs:78:10+3 | refs 1/0 [sym/odd.rs:78:10+3] | ```rust⏎type⏎```
 sym/odd.rs:78:10 Out -> sym/odd.rs:78:10+3 | refs 1/0 | ```rust⏎impl Tr<T> for Unit⏎type Out = ();⏎```
-sym/odd.rs:79:5 fn -> sym/odd.rs:79:8+3 | refs 1/0 [sym/odd.rs:79:8+3] | -
+sym/odd.rs:79:5 fn -> sym/odd.rs:79:8+3 | refs 1/1 [sym/odd.rs:79:5+2] | -
 sym/odd.rs:79:8 req -> sym/odd.rs:79:8+3 | refs 1/0 | ```rust⏎impl Tr<T> for Unit⏎fn req(&self) -> ()⏎```
 sym/odd.rs:79:13 self -> - | refs 0/0 | -
 sym/odd.rs:81:1 impl -> - | refs 0/0 | -
@@ -257,7 +257,7 @@ sym/odd.rs:82:1 impl -> sym/odd.rs:82:1+4 | refs 1/0 [sym/odd.rs:82:1+4] | ```ru
 sym/odd.rs:82:6 Clone -> lib/core/src/clone.rs:2:11+5 | refs 5/4 | ```rust⏎clone⏎pub trait Clone: Sized⏎```⏎⏎---⏎⏎A common trait for the ability to explicitly duplicate an object.
 sym/odd.rs:82:12 for -> sym/odd.rs:82:12+3 | refs 1/0 [sym/odd.rs:82:12+3] | ```rust⏎for⏎```
 sym/odd.rs:82:16 Unit -> sym/odd.rs:34:12+4 | refs 6/5 | ```rust⏎odd⏎pub struct Unit⏎```
-sym/odd.rs:83:5 fn -> sym/odd.rs:83:8+5 | refs 1/0 [sym/odd.rs:83:8+5] | ```rust⏎fn⏎```
+sym/odd.rs:83:5 fn -> sym/odd.rs:83:8+5 | refs 2/2 [sym/odd.rs:83:5+2 sym/odd.rs:84:9+4] | ```rust⏎fn⏎```
 sym/odd.rs:83:8 clone -> sym/odd.rs:83:8+5 | refs 1/0 | ```rust⏎impl Clone for Unit⏎fn clone(&self) -> Self⏎```
 sym/odd.rs:83:15 self -> - | refs 0/0 | -
 sym/odd.rs:83:24 Self -> sym/odd.rs:82:16+4 | refs 2/1 [sym/odd.rs:82:16+4 sym/odd.rs:83:24+4] | ```rust⏎odd⏎pub struct Unit⏎```
@@ -317,7 +317,7 @@ sym/odd.rs:111:5 pub -> - | refs 0/0 | -
 sym/odd.rs:111:9 mod -> sym/odd.rs:111:13+3 | refs 1/0 [sym/odd.rs:111:13+3] | -
 sym/odd.rs:111:13 mid -> sym/odd.rs:111:13+3 | refs 1/0 | ```rust⏎odd::outer⏎pub mod mid⏎```
 sym/odd.rs:112:9 pub -> - | refs 0/0 | -
-sym/odd.rs:112:13 fn -> sym/odd.rs:112:16+4 | refs 1/0 [sym/odd.rs:112:16+4] | -
+sym/odd.rs:112:13 fn -> sym/odd.rs:112:16+4 | refs 2/2 [sym/odd.rs:112:13+2 sym/odd.rs:113:13+1] | -
 sym/odd.rs:112:16 leaf -> sym/odd.rs:112:16+4 | refs 1/0 | ```rust⏎odd::outer::mid⏎pub fn leaf<'a>(s: &'a str) -> &'a str⏎```
 sym/odd.rs:112:22 a -> - | refs 0/0 | -
 sym/odd.rs:112:25 s -> sym/odd.rs:112:25+1 | refs 2/1 [sym/odd.rs:112:25+1 sym/odd.rs:113:13+1] | ```rust⏎s: &'a str⏎```
@@ -326,7 +326,7 @@ sym/odd.rs:112:32 str -> - | refs 3/3 | ```rust⏎str⏎```
 sym/odd.rs:112:42 a -> - | refs 0/0 | -
 sym/odd.rs:112:44 str -> - | refs 3/3 | ```rust⏎str⏎```
 sym/odd.rs:113:13 s -> sym/odd.rs:112:25+1 | refs 2/1 | ```rust⏎s: &'a str⏎```
-sym/odd.rs:116:5 fn -> sym/odd.rs:116:8+3 | refs 1/0 [sym/odd.rs:116:8+3] | -
+sym/odd.rs:116:5 fn -> sym/odd.rs:116:8+3 | refs 1/1 [sym/odd.rs:116:5+2] | -
 sym/odd.rs:116:8 sib -> sym/odd.rs:116:8+3 | refs 1/0 | ```rust⏎odd::outer⏎fn sib()⏎```
 sym/odd.rs:118:1 mod -> sym/odd.rs:118:5+8 | refs 1/0 [sym/odd.rs:118:5+8] | -
 sym/odd.rs:118:5 external -> sym/odd.rs:118:5+8 | refs 1/0 | ```rust⏎odd⏎mod external⏎```

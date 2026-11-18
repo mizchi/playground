@@ -963,9 +963,23 @@ fn keyword_of_item() {
     let fi = FileIndex::new(src.to_string(), vec![]);
     let ws = [&fi];
     assert_eq!(def1(&fi, 0), Some(3));
-    assert_eq!(references(&ws, 0, 0, true, &no).len(), 2);
+    // (`fn` の上の参照は関数の出口: rust-analyzer と同じ。`fn f() {}` は fn だけ)
+    assert_eq!(references(&ws, 0, 0, true, &no).len(), 1);
+    assert_eq!(references(&ws, 0, at(src, "f()", 0), true, &no).len(), 2);
     assert_eq!(def1(&fi, at(src, "struct", 0)), Some(at(src, "S;", 0)));
     assert_eq!(highlights(&ws, 0, at(src, "struct", 0), &no).len(), 2);
     // (キーワードでない所はそのまま)
     assert_eq!(def1(&fi, at(src, "let", 0)), None);
+}
+
+/// `fn` のキーワードの上: 関数の出口 (fn・return・?・最後の式)
+#[test]
+fn exit_points_of_fn() {
+    let src = "fn f(x: Option<u8>) -> Option<u8> {\n    let y = x?;\n    if y > 3 {\n        return None;\n    }\n    fn inner() -> Option<u8> { None? }\n    Some(y + 1)\n}\nfn g() { h(); }\nfn k() -> u8 { if true { 1 } else { 2 } }\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let ex = |p: &str| highlights(&ws, 0, at(src, p, 0), &no).iter().map(|l| src[l.start..l.end].to_string()).collect::<Vec<_>>();
+    assert_eq!(ex("fn f"), s(&["fn", "?", "return", "Some(y + 1)"]));
+    assert_eq!(ex("fn g"), s(&["fn"]));
+    assert_eq!(ex("fn k"), s(&["fn", "if true { 1 } else { 2 }"]));
 }

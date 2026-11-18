@@ -940,6 +940,13 @@ fn cargo_files(root: &Path) -> Option<(Vec<(PathBuf, Vec<String>, u32, bool)>, H
             if !r.exists() || seen.contains(&r) {
                 continue;
             }
+            // (クレートの名前: bin・tests・benches・examples はファイルの名前、build.rs は build_script_build)
+            if !r.ends_with("src/lib.rs") && !r.ends_with("src/main.rs") {
+                let n = if r.ends_with("build.rs") { "build_script_build".to_string() } else { r.file_stem().map(|s| s.to_string_lossy().replace('-', "_")).unwrap_or_default() };
+                if !n.is_empty() && !names.iter().any(|x| x.0 == n) {
+                    names.push((n, r.clone()));
+                }
+            }
             krate += 1;
             feats.insert(krate, default_features(&toml));
             let mut stack: Vec<(PathBuf, Vec<String>, bool)> = vec![(r, vec![], true)];
@@ -981,6 +988,17 @@ fn cargo_files(root: &Path) -> Option<(Vec<(PathBuf, Vec<String>, u32, bool)>, H
                     }
                 }
                 out.push((f, m, krate, main));
+            }
+        }
+    }
+    // (依存のクレート: Cargo.lock の package。場所は最初のパッケージの根 (rust-analyzer と同じ))
+    if let (Ok(lock), Some(first)) = (std::fs::read_to_string(root.join("Cargo.lock")), names.first().map(|x| x.1.clone())) {
+        for l in lock.lines() {
+            if let Some(n) = l.strip_prefix("name = ") {
+                let n = n.trim().trim_matches('"').replace('-', "_");
+                if !names.iter().any(|x| x.0 == n) {
+                    names.push((n, first.clone()));
+                }
             }
         }
     }
