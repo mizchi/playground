@@ -1085,3 +1085,27 @@ fn closure_params_from_signatures() {
     let (sig, ps, a, _) = signature_help(&ws, 0, at(src, "2);", 0), &no).unwrap();
     assert_eq!((sig.as_str(), ps.len(), a), ("fn rank(d: &u8, e: u16) -> usize", 2, 1));
 }
+
+/// 配列の式の型
+#[test]
+fn array_literal_types() {
+    let src = "struct K;\nfn f() {\n    let a = [K, K];\n    let b = [0u8; 4];\n    let c = [\"x\", \"y\", \"z\",];\n    let d = a[0];\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap();
+    for (p, want) in [("a =", "a: [K; 2]"), ("b =", "b: [u8; 4]"), ("c =", "c: [&str; 3]"), ("d =", "d: K")] {
+        assert!(ty(p).contains(want), "{p}: {}", ty(p));
+    }
+}
+
+/// 型引数の束縛の trait のメソッド (`impl<T: Clone>` の `x.clone()`、`where T: Show`)
+#[test]
+fn methods_of_bounded_type_params() {
+    let src = "trait Show { fn show(&self) -> u8; }\ntrait Dup { fn dup(&self) -> Self; }\nstruct W<T> { inner: T }\n\
+               impl<T: Dup + Clone> W<T> { fn get(&self) -> T { self.inner.dup() } }\nfn f<U>(u: &U) -> u8 where U: Show + Sized { u.show() }\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    assert_eq!(def1(&fi, at(src, "dup() }", 0)), Some(at(src, "dup(&self)", 0)));
+    assert_eq!(def1(&fi, at(src, "show() }", 0)), Some(at(src, "show(&self)", 0)));
+    assert_eq!(fi.param_bounds(at(src, "self.inner", 0), "T"), s(&["Dup", "Clone"]));
+    assert_eq!(fi.param_bounds(at(src, "u.show", 0), "U"), s(&["Show", "Sized"]));
+}

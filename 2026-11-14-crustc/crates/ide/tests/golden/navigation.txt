@@ -166,7 +166,7 @@ ws/src/lib.rs:72:26 name -> ws/src/lib.rs:36:9+4 | refs 4/3 | ```rust⏎Counter�
 ws/src/lib.rs:72:32 name -> ws/src/lib.rs:71:16+4 | refs 2/1 | ```rust⏎name: &str⏎```
 ws/src/lib.rs:72:37 to_string -> lib/alloc/src/string.rs:32:8+9 | refs 5/4 [lib/alloc/src/string.rs:32:8+9 ws/src/lib.rs:72:37+9 ws/src/lib.rs:117:26+9 ws/src/lib.rs:262:19+9 ws/src/util/text.rs:10:24+9] | ```rust⏎ToString⏎fn to_string(&self) -> String⏎```
 ws/src/lib.rs:72:52 Default -> lib/core/src/default.rs:1:11+7 | refs 2/1 [lib/core/src/default.rs:1:11+7 ws/src/lib.rs:72:52+7] | ```rust⏎default⏎pub trait Default: Sized⏎```
-ws/src/lib.rs:72:61 default -> lib/core/src/default.rs:2:8+7 | refs 3/2 [lib/core/src/default.rs:2:8+7 ws/src/lib.rs:72:61+7 ws/src/shapes.rs:63:12+7] | ```rust⏎Default⏎fn default() -> Self⏎```
+ws/src/lib.rs:72:61 default -> ws/src/lib.rs:33:24+7 | refs 2/1 [ws/src/lib.rs:33:24+7 ws/src/lib.rs:72:61+7] | ```rust⏎Default⏎fn default() -> Self⏎```
 ws/src/lib.rs:75:5 pub -> - | refs 0/0 | -
 ws/src/lib.rs:75:9 fn -> ws/src/lib.rs:75:12+4 | refs 2/2 [ws/src/lib.rs:75:9+2 ws/src/lib.rs:77:9+4] | -
 ws/src/lib.rs:75:12 bump -> ws/src/lib.rs:75:12+4 | refs 4/3 | ```rust⏎impl Counter⏎pub fn bump(&mut self) -> &mut Self⏎```
@@ -465,7 +465,7 @@ ws/src/lib.rs:162:38 as -> - | refs 0/0 | -
 ws/src/lib.rs:162:41 i32 -> - | refs 20/20 | ```rust⏎i32⏎```
 ws/src/lib.rs:163:9 Error -> ws/src/lib.rs:46:10+5 | refs 7/6 | ```rust⏎pub enum Error⏎```
 ws/src/lib.rs:163:16 Code -> ws/src/lib.rs:49:5+4 | refs 2/1 | ```rust⏎Error⏎Code { n: i32 }⏎```
-ws/src/lib.rs:163:23 n -> ws/src/lib.rs:163:23+1 | refs 2/1 [ws/src/lib.rs:163:23+1 ws/src/lib.rs:163:30+1] | ```rust⏎n⏎```
+ws/src/lib.rs:163:23 n -> ws/src/lib.rs:163:23+1 ws/src/lib.rs:49:12+1 | refs 2/1 [ws/src/lib.rs:163:23+1 ws/src/lib.rs:163:30+1] | ```rust⏎n⏎```
 ws/src/lib.rs:163:30 n -> ws/src/lib.rs:163:23+1 | refs 2/1 | ```rust⏎n⏎```
 ws/src/lib.rs:167:1 pub -> - | refs 0/0 | -
 ws/src/lib.rs:167:5 fn -> ws/src/lib.rs:167:8+6 | refs 3/3 [ws/src/lib.rs:167:5+2 ws/src/lib.rs:175:9+6 ws/src/lib.rs:180:5+1] | -
@@ -644,7 +644,7 @@ ws/src/lib.rs:254:13 v -> ws/src/lib.rs:254:13+1 | refs 2/1 [ws/src/lib.rs:254:1
 ws/src/lib.rs:254:16 i32 -> - | refs 20/20 | ```rust⏎i32⏎```
 ws/src/lib.rs:254:24 Self -> ws/src/lib.rs:253:20+6 | refs 2/1 [ws/src/lib.rs:253:20+6 ws/src/lib.rs:254:24+4] | ```rust⏎inner::more⏎pub struct Hidden⏎```⏎⏎---⏎⏎A hidden thing.
 ws/src/lib.rs:255:9 Hidden -> ws/src/lib.rs:13:20+6 | refs 9/8 | ```rust⏎inner::more⏎pub struct Hidden⏎```⏎⏎---⏎⏎A hidden thing.
-ws/src/lib.rs:255:18 v -> ws/src/lib.rs:254:13+1 | refs 2/1 | ```rust⏎v: i32⏎```
+ws/src/lib.rs:255:18 v -> ws/src/lib.rs:254:13+1 ws/src/lib.rs:14:17+1 | refs 2/1 | ```rust⏎v: i32⏎```
 ws/src/lib.rs:259:1 pub -> - | refs 0/0 | -
 ws/src/lib.rs:259:5 fn -> ws/src/lib.rs:259:8+7 | refs 2/2 [ws/src/lib.rs:259:5+2 ws/src/lib.rs:263:5+30] | -
 ws/src/lib.rs:259:8 convert -> ws/src/lib.rs:259:8+7 | refs 1/0 | ```rust⏎pub fn convert(n: i32) -> i32⏎```
@@ -655,7 +655,7 @@ ws/src/lib.rs:260:5 let -> - | refs 0/0 | -
 ws/src/lib.rs:260:9 h -> ws/src/lib.rs:260:9+1 | refs 2/1 [ws/src/lib.rs:260:9+1 ws/src/lib.rs:263:5+1] | ```rust⏎h: Hidden⏎```
 ws/src/lib.rs:260:12 Hidden -> ws/src/lib.rs:13:20+6 | refs 9/8 | ```rust⏎inner::more⏎pub struct Hidden⏎```⏎⏎---⏎⏎A hidden thing.
 ws/src/lib.rs:260:21 n -> ws/src/lib.rs:259:16+1 | refs 3/2 | ```rust⏎n: i32⏎```
-ws/src/lib.rs:260:23 into -> lib/core/src/convert/mod.rs:2:8+4 | refs 2/1 [lib/core/src/convert/mod.rs:2:8+4 ws/src/lib.rs:260:23+4] | ```rust⏎Into⏎fn into(self) -> T⏎```
+ws/src/lib.rs:260:23 into -> ws/src/lib.rs:254:8+4 | refs 2/1 | ```rust⏎impl From<i32> for Hidden⏎fn from(v: i32) -> Self⏎```
 ws/src/lib.rs:261:5 let -> - | refs 0/0 | -
 ws/src/lib.rs:261:9 g -> ws/src/lib.rs:261:9+1 | refs 2/1 [ws/src/lib.rs:261:9+1 ws/src/lib.rs:263:11+1] | ```rust⏎g: Hidden⏎```
 ws/src/lib.rs:261:13 Hidden -> ws/src/lib.rs:13:20+6 | refs 9/8 | ```rust⏎inner::more⏎pub struct Hidden⏎```⏎⏎---⏎⏎A hidden thing.
@@ -723,8 +723,8 @@ ws/src/shapes.rs:21:24 y -> ws/src/shapes.rs:21:24+1 | refs 2/1 [ws/src/shapes.r
 ws/src/shapes.rs:21:27 i32 -> - | refs 20/20 | ```rust⏎i32⏎```
 ws/src/shapes.rs:21:35 Point -> ws/src/shapes.rs:6:12+5 | refs 15/14 | ```rust⏎shapes⏎pub struct Point⏎```
 ws/src/shapes.rs:22:9 Point -> ws/src/shapes.rs:6:12+5 | refs 15/14 | ```rust⏎shapes⏎pub struct Point⏎```
-ws/src/shapes.rs:22:17 x -> ws/src/shapes.rs:21:16+1 | refs 2/1 | ```rust⏎x: i32⏎```
-ws/src/shapes.rs:22:20 y -> ws/src/shapes.rs:21:24+1 | refs 2/1 | ```rust⏎y: i32⏎```
+ws/src/shapes.rs:22:17 x -> ws/src/shapes.rs:21:16+1 ws/src/shapes.rs:7:9+1 | refs 2/1 | ```rust⏎x: i32⏎```
+ws/src/shapes.rs:22:20 y -> ws/src/shapes.rs:21:24+1 ws/src/shapes.rs:8:9+1 | refs 2/1 | ```rust⏎y: i32⏎```
 ws/src/shapes.rs:25:5 pub -> - | refs 0/0 | -
 ws/src/shapes.rs:25:9 fn -> ws/src/shapes.rs:25:12+5 | refs 2/2 | -
 ws/src/shapes.rs:25:12 dist2 -> ws/src/shapes.rs:25:12+5 | refs 2/1 | ```rust⏎impl Point⏎pub fn dist2(&self, o: &Point) -> i32⏎```
@@ -812,8 +812,8 @@ ws/src/shapes.rs:56:35 r -> ws/src/shapes.rs:56:23+1 | refs 3/2 | ```rust⏎r: f
 ws/src/shapes.rs:56:39 r -> ws/src/shapes.rs:56:23+1 | refs 3/2 | ```rust⏎r: f64⏎```
 ws/src/shapes.rs:57:9 Shape -> ws/src/shapes.rs:12:10+5 | refs 12/11 | ```rust⏎shapes⏎pub enum Shape⏎```
 ws/src/shapes.rs:57:16 Rect -> ws/src/shapes.rs:14:5+4 | refs 4/3 | ```rust⏎Shape⏎Rect { w: f64, h: f64 }⏎```
-ws/src/shapes.rs:57:23 w -> ws/src/shapes.rs:57:23+1 | refs 2/1 [ws/src/shapes.rs:57:23+1 ws/src/shapes.rs:57:33+1] | ```rust⏎w⏎```
-ws/src/shapes.rs:57:26 h -> ws/src/shapes.rs:57:26+1 | refs 2/1 [ws/src/shapes.rs:57:26+1 ws/src/shapes.rs:57:37+1] | ```rust⏎h⏎```
+ws/src/shapes.rs:57:23 w -> ws/src/shapes.rs:57:23+1 ws/src/shapes.rs:14:12+1 | refs 2/1 [ws/src/shapes.rs:57:23+1 ws/src/shapes.rs:57:33+1] | ```rust⏎w⏎```
+ws/src/shapes.rs:57:26 h -> ws/src/shapes.rs:57:26+1 ws/src/shapes.rs:14:20+1 | refs 2/1 [ws/src/shapes.rs:57:26+1 ws/src/shapes.rs:57:37+1] | ```rust⏎h⏎```
 ws/src/shapes.rs:57:33 w -> ws/src/shapes.rs:57:23+1 | refs 2/1 | ```rust⏎w⏎```
 ws/src/shapes.rs:57:37 h -> ws/src/shapes.rs:57:26+1 | refs 2/1 | ```rust⏎h⏎```
 ws/src/shapes.rs:58:9 Shape -> ws/src/shapes.rs:12:10+5 | refs 12/11 | ```rust⏎shapes⏎pub enum Shape⏎```
@@ -824,7 +824,7 @@ ws/src/shapes.rs:62:12 fn -> ws/src/shapes.rs:62:15+6 | refs 2/2 [ws/src/shapes.
 ws/src/shapes.rs:62:15 origin -> ws/src/shapes.rs:62:15+6 | refs 1/0 | ```rust⏎shapes⏎pub(crate) fn origin() -> Point⏎```
 ws/src/shapes.rs:62:27 Point -> ws/src/shapes.rs:6:12+5 | refs 15/14 | ```rust⏎shapes⏎pub struct Point⏎```
 ws/src/shapes.rs:63:5 Point -> ws/src/shapes.rs:6:12+5 | refs 15/14 | ```rust⏎shapes⏎pub struct Point⏎```
-ws/src/shapes.rs:63:12 default -> lib/core/src/default.rs:2:8+7 | refs 3/2 | ```rust⏎Default⏎fn default() -> Self⏎```
+ws/src/shapes.rs:63:12 default -> ws/src/shapes.rs:5:41+7 | refs 2/1 [ws/src/shapes.rs:5:41+7 ws/src/shapes.rs:63:12+7] | ```rust⏎Default⏎fn default() -> Self⏎```
 == ws/src/util/mod.rs
 ws/src/util/mod.rs:1:1 pub -> - | refs 0/0 | -
 ws/src/util/mod.rs:1:5 mod -> ws/src/util/text.rs:1:1+0 | refs 4/3 | -
@@ -864,7 +864,7 @@ ws/src/util/mod.rs:17:17 self -> - | refs 0/0 | -
 ws/src/util/mod.rs:17:26 T -> ws/src/util/mod.rs:16:6+1 | refs 3/2 | ```rust⏎T: Clone⏎```
 ws/src/util/mod.rs:18:9 self -> - | refs 0/0 | -
 ws/src/util/mod.rs:18:14 inner -> ws/src/util/mod.rs:13:9+5 | refs 4/3 | ```rust⏎Wrapper⏎pub inner: T⏎```
-ws/src/util/mod.rs:18:20 clone -> - | refs 0/0 | -
+ws/src/util/mod.rs:18:20 clone -> lib/core/src/clone.rs:3:8+5 | refs 4/3 [lib/core/src/clone.rs:3:8+5 ws/src/lib.rs:66:19+5 ws/src/lib.rs:99:20+5 ws/src/util/mod.rs:18:20+5] | ```rust⏎Clone⏎fn clone(&self) -> Self⏎```
 ws/src/util/mod.rs:22:1 pub -> - | refs 0/0 | -
 ws/src/util/mod.rs:22:5 fn -> ws/src/util/mod.rs:22:8+7 | refs 2/2 [ws/src/util/mod.rs:22:5+2 ws/src/util/mod.rs:26:5+7] | -
 ws/src/util/mod.rs:22:8 wrapped -> ws/src/util/mod.rs:22:8+7 | refs 1/0 | ```rust⏎util⏎pub fn wrapped() -> i32⏎```

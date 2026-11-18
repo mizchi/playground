@@ -878,6 +878,57 @@ impl FileIndex {
         None
     }
 
+    /// at を囲むアイテムの型引数 name の束縛の trait の名前 (`<T: Clone + Debug>` と `where T: Hash`)
+    fn param_bounds(&self, at: usize, name: &str) -> Vec<String> {
+        let Some(j) = self.generic_param(at, name) else { return vec![] };
+        let mut out = vec![];
+        let n = self.toks.len();
+        // (`T:` の後: 深さ 0 の `,` / `>` まで。`+` で区切った各 trait の頭の名前)
+        let mut take = |mut q: usize, out: &mut Vec<String>| {
+            let mut d = 0;
+            let mut first = true;
+            while q < n {
+                if self.sym(q, b'<') || self.sym(q, b'(') {
+                    d += 1;
+                } else if (self.sym(q, b'>') && !self.sym(q - 1, b'-')) || self.sym(q, b')') {
+                    if d == 0 {
+                        break;
+                    }
+                    d -= 1;
+                } else if d == 0 && (self.sym(q, b',') || self.sym(q, b'{') || self.sym(q, b';') || self.sym(q, b'=')) {
+                    break;
+                } else if d == 0 && self.sym(q, b'+') {
+                    first = true;
+                } else if d == 0 && first && self.ident(q) && !self.before_path(q) && !matches!(self.tok(q), "dyn" | "const" | "for") && !(q >= 1 && self.sym(q - 1, b'?')) {
+                    out.push(self.tok(q).to_string());
+                    first = false;
+                }
+                q += 1;
+            }
+        };
+        if self.sym(j + 1, b':') && !self.sym(j + 2, b':') {
+            take(j + 2, &mut out);
+        }
+        // (囲むアイテムの where: 本体の `{` の前)
+        for d in self.defs.iter().filter(|d| matches!(d.kind, SymKind::Function | SymKind::Method | SymKind::Impl | SymKind::Struct | SymKind::Enum | SymKind::Trait) && d.item_start <= at && at < d.item_end) {
+            let mut q = self.toks.partition_point(|t| (t.1 as usize) < d.item_start);
+            while q < n && (self.toks[q].1 as usize) < d.item_end && !self.sym(q, b'{') {
+                if self.ident(q) && self.tok(q) == "where" {
+                    let mut w = q + 1;
+                    while w < n && !self.sym(w, b'{') && !self.sym(w, b';') {
+                        if self.ident(w) && self.tok(w) == name && self.sym(w + 1, b':') && !self.sym(w + 2, b':') {
+                            take(w + 2, &mut out);
+                        }
+                        w += 1;
+                    }
+                    break;
+                }
+                q += 1;
+            }
+        }
+        out
+    }
+
     /// `use a::B as C` で取り込んだ別名 C の、もとの名前 B
     fn use_alias(&self, name: &str) -> Option<&str> {
         self.uses.iter().find(|u| u.0 == name && u.1.len() >= 2 && u.1.last().is_some_and(|l| l != name)).map(|u| u.1[u.1.len() - 1].as_str())
@@ -1592,7 +1643,72 @@ pub fn definition(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
         return vec![Loc { file, start: f.toks[h].1 as usize, end: f.toks[h].2 as usize }];
     }
     clear_memo();
-    def_at(ws, file, off).into_iter().map(|l| mod_file(ws, l).unwrap_or(l)).collect()
+    let d: Vec<Loc> = def_at(ws, file, off).into_iter().map(|l| mod_file(ws, l).unwrap_or(l)).collect();
+    // (構造体の省略形 `T { x }` の x: ローカルとフィールドの両方 (rust-analyzer と同じくローカルが先))
+    if let (Some(k), [local]) = (ws[file].tok_at(off), d.as_slice()) {
+        if !ws[local.file].defs.iter().any(|x| x.start == local.start) {
+            if let Some(&fl) = shorthand_field(ws, file, k).first() {
+                return vec![*local, fl];
+            }
+        }
+    }
+    d
+}
+
+/// `recv.into()` (into のトークン k、受け手の型 recv) の行き先: 期待する型 T (`let x: T = ..` の注釈) の `impl From<R> for T` の
+/// from (R が受け手の型に合うものを先に)
+fn into_from(ws: &[&FileIndex], file: usize, k: usize, recv: Option<&str>) -> Option<Loc> {
+    let f = ws[file];
+    // (文の始めまで戻って `let NAME: TYPE =`)
+    let mut j = k;
+    let mut d = 0;
+    let mut eq = None;
+    while j > 0 {
+        j -= 1;
+        if f.sym(j, b')') || f.sym(j, b']') {
+            d += 1;
+        } else if f.sym(j, b'(') || f.sym(j, b'[') {
+            if d == 0 {
+                return None;
+            }
+            d -= 1;
+        } else if d == 0 && (f.sym(j, b';') || f.sym(j, b'{') || f.sym(j, b'}')) {
+            return None;
+        } else if d == 0 && f.sym(j, b'=') && !f.sym(j + 1, b'=') && !f.sym(j - 1, b'=') {
+            eq = Some(j);
+        } else if d == 0 && f.ident(j) && f.tok(j) == "let" {
+            break;
+        }
+    }
+    let eq = eq?;
+    let c = (j + 1..eq).find(|&q| f.sym(q, b':') && !f.sym(q + 1, b':') && !f.sym(q - 1, b':'))?;
+    let ty = type_head(&f.text[f.toks[c + 1].1 as usize..f.toks[eq - 1].2 as usize]);
+    let rh = recv.map(type_head);
+    let mut best: Option<(bool, Loc)> = None;
+    for (i, d) in named(ws, file, "from") {
+        if d.owner != ty || !d.container.starts_with("impl") {
+            continue;
+        }
+        let Some(tr) = d.container.strip_prefix("impl ").and_then(|n| n.split(" for ").next()) else { continue };
+        if type_head(tr) != "From" {
+            continue;
+        }
+        let fits = rh.as_ref().is_some_and(|r| targs(tr).first().is_some_and(|a| type_head(a) == *r));
+        if best.is_none_or(|b| fits && !b.0) {
+            best = Some((fits, loc(i, d)));
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// トークン k が構造体の省略形 `T { x }` の x で、ローカルの x を指すなら、そのフィールドの定義
+fn shorthand_pair(ws: &[&FileIndex], file: usize, k: usize) -> Option<Loc> {
+    let f = ws[file];
+    let l = *def_at(ws, file, f.toks[k].1 as usize).first()?;
+    if ws[l.file].defs.iter().any(|x| x.start == l.start) {
+        return None;
+    }
+    shorthand_field(ws, file, k).first().copied()
 }
 
 /// `mod x;` (ファイルのモジュール) の定義の行き先はそのファイルの始め (rust-analyzer と同じ)
@@ -1656,13 +1772,26 @@ fn def_at1(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
         let call = f.sym(k + 1, b'(') || (f.before_path(k) && f.sym(k + 3, b'<'));
         let kinds: &[SymKind] = if call { &[SymKind::Method] } else { &[SymKind::Field] };
         let owner = k.checked_sub(2).and_then(|r| expr_type(ws, file, r, 0)).filter(|t| !type_head(t).is_empty() && type_head(t) != "_");
-        let (owners, concrete) = owner.as_ref().map(|o| owners_of2(ws, file, o)).unwrap_or_default();
+        let (mut owners, concrete) = owner.as_ref().map(|o| owners_of2(ws, file, o)).unwrap_or_default();
+        // (受け手の型が型引数 `T` なら、その束縛の trait (`impl<T: Clone>` / `where T: Clone`) のメソッド)
+        if let Some(o) = owner.as_deref() {
+            owners.extend(f.param_bounds(start, strip_ref(o)));
+        }
         let c: Vec<(usize, &Def)> = named(ws, file, &*name).into_iter().filter(|(_, d)| kinds.contains(&d.kind) && (owner.is_none() || owners.contains(&d.owner))).collect();
         let mut c = prefer_concrete(c, &concrete);
-        if c.is_empty() && owner.is_some() {
+        // (`let h: Hidden = n.into();`: 期待する型 Hidden の `impl From<..> for Hidden` の from (rust-analyzer と同じ))
+        if call && name == "into" {
+            if let Some(l) = into_from(ws, file, k, owner.as_deref()) {
+                return vec![l];
+            }
+        }
+        // (derive で作られるメソッド: 具体的な型の持ち主の候補がなければ、ライブラリの trait の宣言より derive の名前)
+        if owner.is_some() && !c.iter().any(|x| concrete.contains(&x.1.owner)) {
             if let Some(l) = derive_method(ws, file, &concrete, &name) {
                 return vec![l];
             }
+        }
+        if c.is_empty() && owner.is_some() {
             // (ブランケットの impl の trait のメソッド: `"x".to_string()`)
             let bl = blanket_traits(ws, file, false);
             c = named(ws, file, &*name).into_iter().filter(|(_, d)| kinds.contains(&d.kind) && bl.contains(&d.owner)).collect();
@@ -1697,6 +1826,12 @@ fn def_at1(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
             let (qs, nc) = owner_split(ws, file, &q);
             let c: Vec<(usize, &Def)> = named(ws, file, &*name).into_iter().filter(|(_, d)| qs.contains(&d.owner) || (d.owner.is_empty() && d.module.last() == Some(&q))).collect();
             let c = prefer_concrete(c, &qs[..nc]);
+            // (derive で作られるメソッド `Point::default()`: 具体的な型の持ち主の候補がなければ derive の名前)
+            if !c.iter().any(|x| qs[..nc].contains(&x.1.owner)) {
+                if let Some(l) = derive_method(ws, file, &qs[..nc], &name) {
+                    return vec![l];
+                }
+            }
             // (見つからない: `use std::sync::Mutex` のように再エクスポートされた名前なら、下の use でたどる。
             // Q が知らない名前 (`syn::Pat` / `Delimiter::None` の外部クレートのもの) なら答えない)
             if !c.is_empty() {
@@ -1887,7 +2022,21 @@ pub fn references(ws: &[&FileIndex], file: usize, off: usize, include_decl: bool
 
 /// textDocument/documentHighlight: ファイル file の中の参照だけ (ほかのファイルは探さない)
 pub fn highlights(ws: &[&FileIndex], file: usize, off: usize, load: Load) -> Vec<Loc> {
-    references_in(ws, file, off, true, load, Some(file))
+    let mut v = references_in(ws, file, off, true, load, Some(file));
+    // (省略形 `T { x }` の x の上: ローカルの参照とフィールドの参照の両方 (rust-analyzer と同じ))
+    if let Some(k) = ws[file].tok_at(off) {
+        if let Some(fl) = shorthand_pair(ws, file, k) {
+            if !ws[fl.file].slim {
+                for l in references_in(ws, fl.file, fl.start, true, load, Some(file)) {
+                    if l.file == file && !v.contains(&l) {
+                        v.push(l);
+                    }
+                }
+                v.sort_by_key(|l| l.start);
+            }
+        }
+    }
+    v
 }
 
 /// references の本体。only があればそのファイルの中だけを探す
@@ -1999,6 +2148,8 @@ fn expr_tails(f: &FileIndex, file: usize, s: usize, e: usize, out: &mut Vec<Loc>
     };
     if f.sym(s, b'{') && close_of(f, s) == e {
         block_tails(f, file, s, e, out);
+    } else if f.ident(s) && matches!(f.tok(s), "while" | "for") {
+        // (値のないループ: 出口ではない (rust-analyzer と同じ))
     } else if f.ident(s) && f.tok(s) == "match" {
         // (腕: `pat => 式,` / `pat => { .. }`)
         let mut b = s + 1;
@@ -2075,15 +2226,19 @@ fn references_in(ws: &[&FileIndex], file: usize, off: usize, include_decl: bool,
         return prim_refs(ws, file, off, load, only);
     };
     let tf = ws[target.file];
+    // (行き先が `#[derive(Default)]` の名前 (derive が作るメソッド): 問い合わせた名前 (`default`) で探す)
+    let via_derive = !tf.slim && tf.tok_at(target.start).is_some_and(|j| tf.in_derive(j));
+    let qname = ws[file].tok_at(off).map(|k| ws[file].tok(k).to_string()).unwrap_or_default();
     let name = match tf.defs.iter().find(|x| x.start == target.start) {
+        _ if via_derive => qname.as_str(),
         Some(d) if tf.slim => d.name.as_str(),
         _ => &tf.text[target.start..target.end],
     };
     // (ローカルなら定義のある関数の中だけ)
-    let is_local = !tf.defs.iter().any(|x| x.start == target.start && x.kind != SymKind::Impl);
+    let is_local = !via_derive && !tf.defs.iter().any(|x| x.start == target.start && x.kind != SymKind::Impl);
     let mut out = vec![];
-    // (ライブラリの索引はトークンを持たないので、宣言はここで足す)
-    if include_decl && tf.lib && only.is_none() {
+    // (ライブラリの索引はトークンを持たないので、宣言はここで足す。derive の名前も (名前が違うので下では見つからない))
+    if include_decl && ((tf.lib && only.is_none()) || (via_derive && only.is_none_or(|o| o == target.file))) {
         out.push(target);
     }
     // (型なら、その impl の中の `Self` も参照: rust-analyzer と同じ)
@@ -2244,8 +2399,8 @@ fn prim_refs(ws: &[&FileIndex], file: usize, off: usize, load: Load, only: Optio
             let k = k as usize;
             let at = w.toks[k].1 as usize;
             // (メソッド・フィールドの名前 `x.u8` やマクロの本体の中は除く)
-            // (`0u8` の接尾辞も除く: 数のすぐ後ろ)
-            if w.in_macro_body(at) || (k > 0 && (w.sym(k - 1, b'.') || (w.toks[k - 1].2 as usize == at && w.text.as_bytes()[w.toks[k - 1].1 as usize].is_ascii_digit()))) {
+            // (`0u8` の接尾辞も除く: 数のすぐ後ろ。`std::str::from_utf8` の str はモジュール)
+            if w.in_macro_body(at) || w.after_path(k) || (k > 0 && (w.sym(k - 1, b'.') || (w.toks[k - 1].2 as usize == at && w.text.as_bytes()[w.toks[k - 1].1 as usize].is_ascii_digit()))) {
                 continue;
             }
             // (同じ名前の定義 `fn u8(..)` の名前)
@@ -2779,6 +2934,10 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
         if let Some(b) = f.local(k, r) {
             return binding_type(ws, file, b, depth + 1);
         }
+        // (単位構造体の値 `K`)
+        if r.starts_with(|c: char| c.is_ascii_uppercase()) && named(ws, file, r).iter().any(|(_, d)| d.kind == SymKind::Struct && d.owner.is_empty()) {
+            return Some(r.to_string());
+        }
         // (const / static)
         return all().map(|x| x.1).find(|d| d.name == r && d.owner.is_empty() && matches!(d.kind, SymKind::Const | SymKind::Static) && !d.ty.is_empty()).map(|d| d.ty.clone());
     }
@@ -2880,7 +3039,37 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
                 let t = expr_type(ws, file, m, depth + 1)?;
                 return expand(ws, file, &t).iter().find_map(|t| index_type(t, range));
             }
-            return None;
+            // 配列の式 `[a, b]` / `[x; n]`: `[T; N]` (要素の型は最初の要素の)
+            let mut first_end = None;
+            let mut n = 0;
+            let mut rep: Option<usize> = None;
+            let mut dd = 0;
+            for q in p + 1..k {
+                if f.sym(q, b'(') || f.sym(q, b'[') || f.sym(q, b'{') {
+                    dd += 1;
+                } else if f.sym(q, b')') || f.sym(q, b']') || f.sym(q, b'}') {
+                    dd -= 1;
+                } else if dd == 0 && f.sym(q, b',') {
+                    first_end.get_or_insert(q - 1);
+                    n += 1;
+                } else if dd == 0 && f.sym(q, b';') {
+                    first_end.get_or_insert(q - 1);
+                    rep = Some(q);
+                }
+            }
+            if k == p + 1 {
+                return None;
+            }
+            if !f.sym(k - 1, b',') && rep.is_none() {
+                n += 1;
+            }
+            let e0 = first_end.unwrap_or(k - 1);
+            let et = expr_type(ws, file, e0, depth + 1)?;
+            let len = match rep {
+                Some(q) => f.text[f.toks[q + 1].1 as usize..f.toks[k - 1].2 as usize].trim().to_string(),
+                None => n.to_string(),
+            };
+            return Some(format!("[{et}; {len}]"));
         }
         if !f.ident(m) {
             return None;
@@ -3340,7 +3529,16 @@ pub fn hover(ws: &[&FileIndex], file: usize, off: usize, load: Load) -> Option<S
         }
     }
     let d = def_at(ws, file, off);
-    let t = *d.first()?;
+    let mut t = *d.first()?;
+    // (derive が作るメソッド (行き先は `#[derive(Default)]` の名前): その trait のメソッドの宣言を見せる)
+    if !ws[t.file].slim && ws[t.file].tok_at(t.start).is_some_and(|j| ws[t.file].in_derive(j)) {
+        let tr = ws[t.file].text[t.start..t.end].to_string();
+        if let Some(name) = ws[file].tok_at(off).map(|k| ws[file].tok(k).to_string()) {
+            if let Some((i, d)) = named(ws, file, &name).into_iter().find(|(_, d)| d.owner == tr) {
+                t = loc(i, d);
+            }
+        }
+    }
     let tf = ws[t.file];
     let held;
     let text: &str = if tf.slim {
@@ -3673,13 +3871,17 @@ pub fn rename(ws: &[&FileIndex], file: usize, off: usize, new: &str, load: Load)
         if fi.text.get(l.start..l.end) != Some(old.as_str()) {
             continue;
         }
-        let rep = match fi.tok_at(l.start) {
+        // (省略形 `T { x }`: rust-analyzer と同じく書き足す形に。フィールドなら前に `new: `、ローカルなら後ろに `: new`)
+        match fi.tok_at(l.start) {
             Some(k) if fi.toks[k].0 == 0 && (fi.sym(k.wrapping_sub(1), b'{') || fi.sym(k.wrapping_sub(1), b',')) && (fi.sym(k + 1, b',') || fi.sym(k + 1, b'}')) && fi.struct_lit_at(k).is_some() => {
-                if is_field { format!("{new}: {old}") } else { format!("{old}: {new}") }
+                if is_field {
+                    out.push((Loc { file: l.file, start: l.start, end: l.start }, format!("{new}: ")));
+                } else {
+                    out.push((Loc { file: l.file, start: l.end, end: l.end }, format!(": {new}")));
+                }
             }
-            _ => new.to_string(),
-        };
-        out.push((l, rep));
+            _ => out.push((l, new.to_string())),
+        }
     }
     out.sort_by_key(|x| (x.0.file, x.0.start));
     out.dedup_by_key(|x| (x.0.file, x.0.start));
