@@ -1457,7 +1457,8 @@ fn prefer_ws(ws: &[&FileIndex], c: Vec<(usize, &Def)>, file: usize) -> Vec<Loc> 
     let l: Vec<(usize, &Def)> = l.into_iter().filter(|x| score(x.1) == best).collect();
     // (同じファイルの同じ名前のメソッドがいくつも: 型引数の違う trait の impl (`Extend<T>` / `Extend<&T>` for Vec)。
     // 先のもの (ふつうは総称的なもの) にする)
-    if l.len() > 1 && l.iter().all(|x| x.0 == l[0].0 && x.1.kind == SymKind::Method && x.1.name == l[0].1.name && x.1.owner == l[0].1.owner) {
+    // (別のファイルにあってもよい: `impl From<String> for Arc<str>` (string.rs) / `impl<T> From<T> for Arc<T>` (sync.rs))
+    if l.len() > 1 && l.iter().all(|x| x.1.kind == SymKind::Method && x.1.name == l[0].1.name && x.1.owner == l[0].1.owner) {
         return vec![loc(l[0].0, l[0].1)];
     }
     pick(l, file)
