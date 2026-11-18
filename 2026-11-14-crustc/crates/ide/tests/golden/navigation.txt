@@ -63,7 +63,7 @@ ws/src/lib.rs:33:24 Default -> lib/core/src/fmt/macros.rs:8:11+7 | refs 3/2 [lib
 ws/src/lib.rs:33:33 PartialEq -> lib/core/src/fmt/macros.rs:11:11+9 | refs 3/2 [lib/core/src/fmt/macros.rs:11:11+9 ws/src/lib.rs:33:33+9 ws/src/shapes.rs:5:30+9] | ```rust⏎fmt::macros⏎pub macro PartialEq($item:item)⏎```
 ws/src/lib.rs:34:1 pub -> - | refs 0/0 | -
 ws/src/lib.rs:34:5 struct -> - | refs 0/0 | -
-ws/src/lib.rs:34:12 Counter -> ws/src/lib.rs:34:12+7 | refs 13/12 [ws/src/lib.rs:34:12+7 ws/src/lib.rs:64:19+7 ws/src/lib.rs:70:6+7 ws/src/lib.rs:126:25+7 ws/src/lib.rs:184:22+7 ws/src/lib.rs:185:17+7 ws/src/lib.rs:246:21+7 ws/src/lib.rs:71:31+4 ws/src/lib.rs:72:9+4 ws/src/lib.rs:75:36+4 ws/tests/it.rs:1:15+7 ws/tests/it.rs:3:16+7 ws/tests/it.rs:4:5+7] | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/src/lib.rs:34:12 Counter -> ws/src/lib.rs:34:12+7 | refs 15/14 [ws/src/lib.rs:34:12+7 ws/src/lib.rs:64:19+7 ws/src/lib.rs:70:6+7 ws/src/lib.rs:126:25+7 ws/src/lib.rs:184:22+7 ws/src/lib.rs:185:17+7 ws/src/lib.rs:191:22+7 ws/src/lib.rs:192:5+7 ws/src/lib.rs:246:21+7 ws/src/lib.rs:71:31+4 ws/src/lib.rs:72:9+4 ws/src/lib.rs:75:36+4 ws/tests/it.rs:1:15+7 ws/tests/it.rs:3:16+7 ws/tests/it.rs:4:5+7] | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
 ws/src/lib.rs:35:5 pub -> - | refs 0/0 | -
 ws/src/lib.rs:35:9 count -> ws/src/lib.rs:35:9+5 | refs 6/5 [ws/src/lib.rs:35:9+5 ws/src/lib.rs:72:16+5 ws/src/lib.rs:76:14+5 ws/src/lib.rs:106:39+5 ws/src/lib.rs:128:15+5 ws/src/lib.rs:248:22+5] | ```rust⏎Counter⏎pub count: u64⏎```
 ws/src/lib.rs:35:16 u64 -> - | refs 6/6 [ws/src/lib.rs:35:16+3 ws/src/lib.rs:102:30+3 ws/src/lib.rs:106:17+3 ws/src/lib.rs:106:28+3 ws/src/lib.rs:126:38+3 ws/src/lib.rs:130:21+3] | ```rust⏎u64⏎```
@@ -144,7 +144,7 @@ ws/src/lib.rs:60:9 format -> - | refs 0/0 | -
 ws/src/lib.rs:64:1 impl -> - | refs 0/0 | -
 ws/src/lib.rs:64:6 Describe -> ws/src/lib.rs:56:11+8 | refs 5/4 | ```rust⏎pub trait Describe⏎```
 ws/src/lib.rs:64:15 for -> - | refs 0/0 | -
-ws/src/lib.rs:64:19 Counter -> ws/src/lib.rs:34:12+7 | refs 13/12 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/src/lib.rs:64:19 Counter -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
 ws/src/lib.rs:65:5 fn -> ws/src/lib.rs:65:5+2 | refs 1/0 [ws/src/lib.rs:65:5+2] | ```rust⏎fn⏎```
 ws/src/lib.rs:65:8 describe -> ws/src/lib.rs:65:8+8 | refs 2/1 [ws/src/lib.rs:65:8+8 ws/tests/it.rs:10:15+8] | ```rust⏎impl Describe for Counter⏎fn describe(&self) -> String⏎```
 ws/src/lib.rs:65:18 self -> - | refs 0/0 | -
@@ -153,14 +153,14 @@ ws/src/lib.rs:66:9 self -> - | refs 0/0 | -
 ws/src/lib.rs:66:14 name -> ws/src/lib.rs:36:9+4 | refs 4/3 | ```rust⏎Counter⏎pub name: String⏎```
 ws/src/lib.rs:66:19 clone -> lib/alloc/src/string.rs:26:8+5 | refs 2/1 [lib/alloc/src/string.rs:26:8+5 ws/src/lib.rs:66:19+5] | ```rust⏎impl Clone for String⏎fn clone(&self) -> Self⏎```
 ws/src/lib.rs:70:1 impl -> - | refs 0/0 | -
-ws/src/lib.rs:70:6 Counter -> ws/src/lib.rs:34:12+7 | refs 13/12 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/src/lib.rs:70:6 Counter -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
 ws/src/lib.rs:71:5 pub -> - | refs 0/0 | -
 ws/src/lib.rs:71:9 fn -> - | refs 0/0 | -
 ws/src/lib.rs:71:12 new -> ws/src/lib.rs:71:12+3 | refs 4/3 [ws/src/lib.rs:71:12+3 ws/src/lib.rs:185:26+3 ws/src/lib.rs:246:30+3 ws/tests/it.rs:4:14+3] | ```rust⏎impl Counter⏎pub fn new(name: &str) -> Self⏎```
 ws/src/lib.rs:71:16 name -> ws/src/lib.rs:71:16+4 | refs 2/1 [ws/src/lib.rs:71:16+4 ws/src/lib.rs:72:32+4] | ```rust⏎name: &str⏎```
-ws/src/lib.rs:71:23 str -> - | refs 7/7 [ws/src/lib.rs:71:23+3 ws/src/lib.rs:114:24+3 ws/src/lib.rs:206:31+3 ws/src/lib.rs:216:30+3 ws/src/shapes.rs:44:36+3 ws/src/util/text.rs:9:20+3 ws/src/util/text.rs:22:22+3] | ```rust⏎str⏎```
-ws/src/lib.rs:71:31 Self -> ws/src/lib.rs:34:12+7 | refs 13/12 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
-ws/src/lib.rs:72:9 Self -> ws/src/lib.rs:34:12+7 | refs 13/12 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/src/lib.rs:71:23 str -> - | refs 8/8 [ws/src/lib.rs:71:23+3 ws/src/lib.rs:114:24+3 ws/src/lib.rs:206:31+3 ws/src/lib.rs:211:31+3 ws/src/lib.rs:216:30+3 ws/src/shapes.rs:44:36+3 ws/src/util/text.rs:9:20+3 ws/src/util/text.rs:22:22+3] | ```rust⏎str⏎```
+ws/src/lib.rs:71:31 Self -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/src/lib.rs:72:9 Self -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
 ws/src/lib.rs:72:16 count -> ws/src/lib.rs:35:9+5 | refs 6/5 | ```rust⏎Counter⏎pub count: u64⏎```
 ws/src/lib.rs:72:26 name -> ws/src/lib.rs:36:9+4 | refs 4/3 | ```rust⏎Counter⏎pub name: String⏎```
 ws/src/lib.rs:72:32 name -> ws/src/lib.rs:71:16+4 | refs 2/1 | ```rust⏎name: &str⏎```
@@ -173,7 +173,7 @@ ws/src/lib.rs:75:12 bump -> ws/src/lib.rs:75:12+4 | refs 4/3 [ws/src/lib.rs:75:1
 ws/src/lib.rs:75:18 mut -> - | refs 0/0 | -
 ws/src/lib.rs:75:22 self -> - | refs 0/0 | -
 ws/src/lib.rs:75:32 mut -> - | refs 0/0 | -
-ws/src/lib.rs:75:36 Self -> ws/src/lib.rs:34:12+7 | refs 13/12 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/src/lib.rs:75:36 Self -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
 ws/src/lib.rs:76:9 self -> - | refs 0/0 | -
 ws/src/lib.rs:76:14 count -> ws/src/lib.rs:35:9+5 | refs 6/5 | ```rust⏎Counter⏎pub count: u64⏎```
 ws/src/lib.rs:77:9 self -> - | refs 0/0 | -
@@ -278,7 +278,7 @@ ws/src/lib.rs:114:1 pub -> - | refs 0/0 | -
 ws/src/lib.rs:114:5 fn -> - | refs 0/0 | -
 ws/src/lib.rs:114:8 tally -> ws/src/lib.rs:114:8+5 | refs 1/0 [ws/src/lib.rs:114:8+5] | ```rust⏎pub fn tally(words: &[&str]) -> Table<usize>⏎```
 ws/src/lib.rs:114:14 words -> ws/src/lib.rs:114:14+5 | refs 2/1 [ws/src/lib.rs:114:14+5 ws/src/lib.rs:116:14+5] | ```rust⏎words: &[&str]⏎```
-ws/src/lib.rs:114:24 str -> - | refs 7/7 | ```rust⏎str⏎```
+ws/src/lib.rs:114:24 str -> - | refs 8/8 | ```rust⏎str⏎```
 ws/src/lib.rs:114:33 Table -> ws/src/lib.rs:43:10+5 | refs 3/2 | ```rust⏎pub type Table<V> = HashMap<String, V>;⏎```
 ws/src/lib.rs:114:39 usize -> - | refs 7/7 | ```rust⏎usize⏎```
 ws/src/lib.rs:115:5 let -> - | refs 0/0 | -
@@ -319,7 +319,7 @@ ws/src/lib.rs:126:5 fn -> - | refs 0/0 | -
 ws/src/lib.rs:126:8 locked -> ws/src/lib.rs:126:8+6 | refs 1/0 [ws/src/lib.rs:126:8+6] | ```rust⏎pub fn locked(m: &Mutex<Counter>) -> u64⏎```
 ws/src/lib.rs:126:15 m -> ws/src/lib.rs:126:15+1 | refs 2/1 [ws/src/lib.rs:126:15+1 ws/src/lib.rs:127:13+1] | ```rust⏎m: &Mutex<Counter>⏎```
 ws/src/lib.rs:126:19 Mutex -> lib/std/src/sync/poison/mutex.rs:2:12+5 | refs 3/2 | ```rust⏎sync::poison::mutex⏎pub struct Mutex<T: ?Sized>⏎```⏎⏎---⏎⏎A mutual exclusion primitive.
-ws/src/lib.rs:126:25 Counter -> ws/src/lib.rs:34:12+7 | refs 13/12 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/src/lib.rs:126:25 Counter -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
 ws/src/lib.rs:126:38 u64 -> - | refs 6/6 | ```rust⏎u64⏎```
 ws/src/lib.rs:127:5 let -> - | refs 0/0 | -
 ws/src/lib.rs:127:9 g -> ws/src/lib.rs:127:9+1 | refs 3/2 [ws/src/lib.rs:127:9+1 ws/src/lib.rs:128:13+1 ws/src/lib.rs:129:20+1] | ```rust⏎g: MutexGuard<'_, Counter>⏎```
@@ -512,11 +512,11 @@ ws/src/lib.rs:183:7 feature -> - | refs 0/0 | -
 ws/src/lib.rs:184:1 pub -> - | refs 0/0 | -
 ws/src/lib.rs:184:5 fn -> - | refs 0/0 | -
 ws/src/lib.rs:184:8 with_std -> ws/src/lib.rs:184:8+8 | refs 1/0 [ws/src/lib.rs:184:8+8] | ```rust⏎pub fn with_std() -> Counter⏎```
-ws/src/lib.rs:184:22 Counter -> ws/src/lib.rs:34:12+7 | refs 13/12 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/src/lib.rs:184:22 Counter -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
 ws/src/lib.rs:185:5 let -> - | refs 0/0 | -
 ws/src/lib.rs:185:9 mut -> ws/src/lib.rs:185:9+3 | refs 1/0 [ws/src/lib.rs:185:9+3] | ```rust⏎mut⏎```
 ws/src/lib.rs:185:13 c -> ws/src/lib.rs:185:13+1 | refs 3/2 [ws/src/lib.rs:185:13+1 ws/src/lib.rs:186:5+1 ws/src/lib.rs:187:5+1] | ```rust⏎c: Counter⏎```
-ws/src/lib.rs:185:17 Counter -> ws/src/lib.rs:34:12+7 | refs 13/12 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/src/lib.rs:185:17 Counter -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
 ws/src/lib.rs:185:26 new -> ws/src/lib.rs:71:12+3 | refs 4/3 | ```rust⏎impl Counter⏎pub fn new(name: &str) -> Self⏎```
 ws/src/lib.rs:186:5 c -> ws/src/lib.rs:185:13+1 | refs 3/2 | ```rust⏎c: Counter⏎```
 ws/src/lib.rs:186:7 bump -> ws/src/lib.rs:75:12+4 | refs 4/3 | ```rust⏎impl Counter⏎pub fn bump(&mut self) -> &mut Self⏎```
@@ -528,8 +528,8 @@ ws/src/lib.rs:190:11 feature -> - | refs 0/0 | -
 ws/src/lib.rs:191:1 pub -> - | refs 0/0 | -
 ws/src/lib.rs:191:5 fn -> - | refs 0/0 | -
 ws/src/lib.rs:191:8 with_std -> - | refs 0/0 | -
-ws/src/lib.rs:191:22 Counter -> - | refs 0/0 | -
-ws/src/lib.rs:192:5 Counter -> - | refs 0/0 | -
+ws/src/lib.rs:191:22 Counter -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/src/lib.rs:192:5 Counter -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
 ws/src/lib.rs:192:14 new -> - | refs 0/0 | -
 ws/src/lib.rs:195:3 cfg -> - | refs 0/0 | -
 ws/src/lib.rs:195:7 all -> - | refs 0/0 | -
@@ -538,7 +538,7 @@ ws/src/lib.rs:195:28 feature -> - | refs 0/0 | -
 ws/src/lib.rs:196:1 pub -> - | refs 0/0 | -
 ws/src/lib.rs:196:5 fn -> - | refs 0/0 | -
 ws/src/lib.rs:196:8 extra_only -> - | refs 0/0 | -
-ws/src/lib.rs:196:24 u8 -> - | refs 0/0 | ```rust⏎u8⏎```
+ws/src/lib.rs:196:24 u8 -> - | refs 2/2 [ws/src/lib.rs:196:24+2 ws/src/lib.rs:201:27+2] | ```rust⏎u8⏎```
 ws/src/lib.rs:200:3 cfg -> - | refs 0/0 | -
 ws/src/lib.rs:200:7 any -> - | refs 0/0 | -
 ws/src/lib.rs:200:11 feature -> - | refs 0/0 | -
@@ -546,28 +546,28 @@ ws/src/lib.rs:200:30 test -> - | refs 0/0 | -
 ws/src/lib.rs:201:1 pub -> - | refs 0/0 | -
 ws/src/lib.rs:201:5 fn -> - | refs 0/0 | -
 ws/src/lib.rs:201:8 extra_or_test -> ws/src/lib.rs:201:8+13 | refs 2/1 [ws/src/lib.rs:201:8+13 ws/src/lib.rs:249:20+13] | ```rust⏎pub fn extra_or_test() -> u8⏎```
-ws/src/lib.rs:201:27 u8 -> - | refs 1/1 | ```rust⏎u8⏎```
+ws/src/lib.rs:201:27 u8 -> - | refs 2/2 | ```rust⏎u8⏎```
 ws/src/lib.rs:205:3 cfg -> - | refs 0/0 | -
 ws/src/lib.rs:205:7 unix -> - | refs 0/0 | -
 ws/src/lib.rs:206:1 pub -> - | refs 0/0 | -
 ws/src/lib.rs:206:5 fn -> - | refs 0/0 | -
 ws/src/lib.rs:206:8 platform -> ws/src/lib.rs:206:8+8 | refs 1/0 [ws/src/lib.rs:206:8+8] | ```rust⏎pub fn platform() -> &'static str⏎```
 ws/src/lib.rs:206:24 static -> - | refs 0/0 | -
-ws/src/lib.rs:206:31 str -> - | refs 7/7 | ```rust⏎str⏎```
+ws/src/lib.rs:206:31 str -> - | refs 8/8 | ```rust⏎str⏎```
 ws/src/lib.rs:210:3 cfg -> - | refs 0/0 | -
 ws/src/lib.rs:210:7 windows -> - | refs 0/0 | -
 ws/src/lib.rs:211:1 pub -> - | refs 0/0 | -
 ws/src/lib.rs:211:5 fn -> - | refs 0/0 | -
 ws/src/lib.rs:211:8 platform -> - | refs 0/0 | -
 ws/src/lib.rs:211:24 static -> - | refs 0/0 | -
-ws/src/lib.rs:211:31 str -> - | refs 0/0 | ```rust⏎str⏎```
+ws/src/lib.rs:211:31 str -> - | refs 8/8 | ```rust⏎str⏎```
 ws/src/lib.rs:215:3 cfg -> - | refs 0/0 | -
 ws/src/lib.rs:215:7 target_os -> - | refs 0/0 | -
 ws/src/lib.rs:216:1 pub -> - | refs 0/0 | -
 ws/src/lib.rs:216:5 fn -> - | refs 0/0 | -
 ws/src/lib.rs:216:8 os_name -> ws/src/lib.rs:216:8+7 | refs 1/0 [ws/src/lib.rs:216:8+7] | ```rust⏎pub fn os_name() -> &'static str⏎```
 ws/src/lib.rs:216:23 static -> - | refs 0/0 | -
-ws/src/lib.rs:216:30 str -> - | refs 7/7 | ```rust⏎str⏎```
+ws/src/lib.rs:216:30 str -> - | refs 8/8 | ```rust⏎str⏎```
 ws/src/lib.rs:220:3 cfg -> - | refs 0/0 | -
 ws/src/lib.rs:220:7 miri -> - | refs 0/0 | -
 ws/src/lib.rs:221:1 pub -> - | refs 0/0 | -
@@ -624,7 +624,7 @@ ws/src/lib.rs:245:8 counter_works -> ws/src/lib.rs:245:8+13 | refs 1/0 [ws/src/l
 ws/src/lib.rs:246:9 let -> - | refs 0/0 | -
 ws/src/lib.rs:246:13 mut -> ws/src/lib.rs:246:13+3 | refs 1/0 [ws/src/lib.rs:246:13+3] | ```rust⏎mut⏎```
 ws/src/lib.rs:246:17 c -> ws/src/lib.rs:246:17+1 | refs 3/2 [ws/src/lib.rs:246:17+1 ws/src/lib.rs:247:9+1 ws/src/lib.rs:248:20+1] | ```rust⏎c: Counter⏎```
-ws/src/lib.rs:246:21 Counter -> ws/src/lib.rs:34:12+7 | refs 13/12 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/src/lib.rs:246:21 Counter -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
 ws/src/lib.rs:246:30 new -> ws/src/lib.rs:71:12+3 | refs 4/3 | ```rust⏎impl Counter⏎pub fn new(name: &str) -> Self⏎```
 ws/src/lib.rs:247:9 c -> ws/src/lib.rs:246:17+1 | refs 3/2 | ```rust⏎c: Counter⏎```
 ws/src/lib.rs:247:11 bump -> ws/src/lib.rs:75:12+4 | refs 4/3 | ```rust⏎impl Counter⏎pub fn bump(&mut self) -> &mut Self⏎```
@@ -787,7 +787,7 @@ ws/src/shapes.rs:44:9 fn -> - | refs 0/0 | -
 ws/src/shapes.rs:44:12 name -> ws/src/shapes.rs:44:12+4 | refs 1/0 [ws/src/shapes.rs:44:12+4] | ```rust⏎impl Shape⏎pub fn name(&self) -> &'static str⏎```
 ws/src/shapes.rs:44:18 self -> - | refs 0/0 | -
 ws/src/shapes.rs:44:29 static -> - | refs 0/0 | -
-ws/src/shapes.rs:44:36 str -> - | refs 7/7 | ```rust⏎str⏎```
+ws/src/shapes.rs:44:36 str -> - | refs 8/8 | ```rust⏎str⏎```
 ws/src/shapes.rs:45:9 match -> - | refs 0/0 | -
 ws/src/shapes.rs:45:15 self -> - | refs 0/0 | -
 ws/src/shapes.rs:46:13 Shape -> ws/src/shapes.rs:12:10+5 | refs 12/11 | ```rust⏎shapes⏎pub enum Shape⏎```
@@ -905,7 +905,7 @@ ws/src/util/text.rs:9:5 pub -> - | refs 0/0 | -
 ws/src/util/text.rs:9:9 fn -> - | refs 0/0 | -
 ws/src/util/text.rs:9:12 new -> ws/src/util/text.rs:9:12+3 | refs 3/2 | ```rust⏎impl Word⏎pub fn new(s: &str) -> Word⏎```
 ws/src/util/text.rs:9:16 s -> ws/src/util/text.rs:9:16+1 | refs 2/1 [ws/src/util/text.rs:9:16+1 ws/src/util/text.rs:10:22+1] | ```rust⏎s: &str⏎```
-ws/src/util/text.rs:9:20 str -> - | refs 7/7 | ```rust⏎str⏎```
+ws/src/util/text.rs:9:20 str -> - | refs 8/8 | ```rust⏎str⏎```
 ws/src/util/text.rs:9:28 Word -> ws/src/util/text.rs:4:12+4 | refs 7/6 | ```rust⏎util::text⏎pub struct Word⏎```⏎⏎---⏎⏎A word.
 ws/src/util/text.rs:10:9 Word -> ws/src/util/text.rs:4:12+4 | refs 7/6 | ```rust⏎util::text⏎pub struct Word⏎```⏎⏎---⏎⏎A word.
 ws/src/util/text.rs:10:16 text -> ws/src/util/text.rs:5:9+4 | refs 5/4 | ```rust⏎Word⏎pub text: String⏎```
@@ -939,7 +939,7 @@ ws/src/util/text.rs:22:1 pub -> - | refs 0/0 | -
 ws/src/util/text.rs:22:5 fn -> - | refs 0/0 | -
 ws/src/util/text.rs:22:8 shout_len -> ws/src/util/text.rs:22:8+9 | refs 3/2 | ```rust⏎util::text⏎pub fn shout_len(s: &str) -> usize⏎```
 ws/src/util/text.rs:22:18 s -> ws/src/util/text.rs:22:18+1 | refs 2/1 [ws/src/util/text.rs:22:18+1 ws/src/util/text.rs:23:23+1] | ```rust⏎s: &str⏎```
-ws/src/util/text.rs:22:22 str -> - | refs 7/7 | ```rust⏎str⏎```
+ws/src/util/text.rs:22:22 str -> - | refs 8/8 | ```rust⏎str⏎```
 ws/src/util/text.rs:22:30 usize -> - | refs 7/7 | ```rust⏎usize⏎```
 ws/src/util/text.rs:23:5 let -> - | refs 0/0 | -
 ws/src/util/text.rs:23:9 w -> ws/src/util/text.rs:23:9+1 | refs 2/1 [ws/src/util/text.rs:23:9+1 ws/src/util/text.rs:25:5+1] | ```rust⏎w: Word⏎```
@@ -958,12 +958,12 @@ ws/src/util/text.rs:25:28 usize -> - | refs 7/7 | ```rust⏎usize⏎```
 == ws/tests/it.rs
 ws/tests/it.rs:1:1 use -> - | refs 0/0 | -
 ws/tests/it.rs:1:5 fixture -> - | refs 0/0 | -
-ws/tests/it.rs:1:15 Counter -> ws/src/lib.rs:34:12+7 | refs 13/12 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/tests/it.rs:1:15 Counter -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
 ws/tests/it.rs:1:24 Describe -> ws/src/lib.rs:56:11+8 | refs 5/4 | ```rust⏎pub trait Describe⏎```
 ws/tests/it.rs:3:1 fn -> - | refs 0/0 | -
 ws/tests/it.rs:3:4 helper -> ws/tests/it.rs:3:4+6 | refs 2/1 [ws/tests/it.rs:3:4+6 ws/tests/it.rs:9:13+6] | ```rust⏎tests::it⏎fn helper() -> Counter⏎```
-ws/tests/it.rs:3:16 Counter -> ws/src/lib.rs:34:12+7 | refs 13/12 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
-ws/tests/it.rs:4:5 Counter -> ws/src/lib.rs:34:12+7 | refs 13/12 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/tests/it.rs:3:16 Counter -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
+ws/tests/it.rs:4:5 Counter -> ws/src/lib.rs:34:12+7 | refs 15/14 | ```rust⏎pub struct Counter⏎```⏎⏎---⏎⏎A counter type.⏎It counts things.
 ws/tests/it.rs:4:14 new -> ws/src/lib.rs:71:12+3 | refs 4/3 | ```rust⏎impl Counter⏎pub fn new(name: &str) -> Self⏎```
 ws/tests/it.rs:7:3 test -> - | refs 0/0 | -
 ws/tests/it.rs:8:1 fn -> - | refs 0/0 | -

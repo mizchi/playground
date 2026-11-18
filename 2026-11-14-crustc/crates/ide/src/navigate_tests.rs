@@ -702,3 +702,135 @@ fn signature_help_calls() {
     assert!(sh("2]; }", 0).is_none());
     assert!(sh("p: P) {", 0).is_none());
 }
+
+/// cfg で外れたアイテムの中: rust-analyzer と同じく、外側のスコープから見えるアイテムへのパスだけ解決する
+#[test]
+fn inactive_code_paths_only() {
+    let src = "pub struct P { pub x: u8 }
+pub fn used() {}
+impl P { pub fn get(&self) -> u8 { self.x } }
+pub mod sub { pub fn deep() {} }
+use sub::deep;
+#[cfg(feature = \"b\")]
+fn inact(p: P) -> u8 {
+    let loc = p.get();
+    used(); deep(); sub::deep(); P::get(&p);
+    let s = P { x: loc };
+    loc + s.x
+}
+#[cfg(feature = \"b\")]
+mod gone { fn used() {} fn k(_: &crate::P) { crate::used(); } }
+#[cfg(feature = \"b\")]
+fn caller() {}
+pub fn caller() { used(); }
+";
+    let mut fi = FileIndex::new(src.to_string(), vec![]);
+    fi.apply_cfg(vec![]);
+    let f = &fi;
+    let d = |p: &str, n: usize| def1(f, at(src, p, n));
+    // パス: 外側のスコープで
+    assert_eq!(d("used(); deep", 0), Some(at(src, "used()", 0)));
+    assert_eq!(d("deep(); sub", 0), Some(at(src, "deep()", 0)));
+    assert_eq!(d("deep(); P", 0), Some(at(src, "deep()", 0)));
+    assert_eq!(d("sub::deep(); P", 0), Some(at(src, "sub {", 0)));
+    assert_eq!(d("P) -> u8", 0), Some(at(src, "P {", 0)));
+    assert_eq!(d("P { x: loc", 0), Some(at(src, "P {", 0)));
+    assert_eq!(d("P::get", 0), Some(at(src, "P {", 0)));
+    assert_eq!(d("used(); } }", 0), Some(at(src, "used()", 0)));
+    // ローカル・メソッド・フィールド・関連アイテム・外れたアイテムの名前は答えない
+    for (p, n) in [("loc =", 0), ("loc + ", 0), ("get();", 0), ("get(&p)", 0), ("x: loc", 0), ("s.x", 0), ("p.get", 0), ("inact", 0), ("caller() {}", 0), ("used() {} fn k", 0)] {
+        assert_eq!(d(p, n), None, "{p}");
+    }
+    // 参照: used は定義・外れた inact の中・外れた gone の中・caller の中 (gone の中の `fn used` の名前は数えない)
+    let r = references(&[f], 0, at(src, "used()", 0), true, &no);
+    assert_eq!(r.iter().map(|l| l.start).collect::<Vec<_>>(), vec![at(src, "used()", 0), at(src, "used(); deep", 0), at(src, "used(); } }", 0), at(src, "used(); }\n", 0)]);
+    // P: 定義・impl・外れた inact の中の 3 つ・gone の中の crate::P
+    assert_eq!(references(&[f], 0, at(src, "P {", 0), true, &no).len(), 6);
+    // フィールド x: 定義と self.x (外れた中の `x: loc` / `s.x` は数えない)
+    assert_eq!(references(&[f], 0, at(src, "x: u8", 0), true, &no).len(), 2);
+    // hover も答える
+    assert!(hover(&[f], 0, at(src, "used(); deep", 0), &no).is_some_and(|h| h.contains("pub fn used()")));
+}
+
+/// trait の impl のメソッドの rename: ワークスペースの trait なら宣言と全部の impl、ライブラリの trait なら断る
+#[test]
+fn rename_trait_impl_methods() {
+    let lib = FileIndex::library("pub trait Default { fn default() -> Self; }\n".to_string(), s(&["default"]));
+    let src = "trait Shape { fn area(&self) -> u8; }\nstruct A;\nstruct B;\n\
+               impl Shape for A { fn area(&self) -> u8 { 1 } }\nimpl Shape for B { fn area(&self) -> u8 { 2 } }\n\
+               impl Default for A { fn default() -> Self { A } }\n\
+               fn f(a: A, b: B) -> u8 { a.area() + b.area() }\nfn g() -> A { A::default() }\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&lib, &fi];
+    // impl A の area から: trait の宣言・impl B の area・両方の呼び出しも
+    let r = apply(src, rename(&ws, 1, at(src, "area(&self) -> u8 { 1", 0), "size", &no).unwrap());
+    assert_eq!(r.matches("size").count(), 5, "{r}");
+    assert!(!r.contains("area"), "{r}");
+    // 呼び出しの上からも同じ
+    let r2 = apply(src, rename(&ws, 1, at(src, "area() + b", 0), "size", &no).unwrap());
+    assert_eq!(r, r2);
+    // ライブラリの trait の impl のメソッドは断る (宣言の上でも、呼び出しの上でも)
+    let e = prepare_rename(&ws, 1, at(src, "default() -> Self { A", 0)).unwrap_err();
+    assert!(e.contains("Default"), "{e}");
+    assert!(rename(&ws, 1, at(src, "default() }", 0), "make", &no).is_err());
+}
+
+#[test]
+fn rename_edges() {
+    let src = "struct P { x: u8, y: u8 }\nimpl P { fn new() -> Self { Self { x: 1, y: 2 } } }\nuse std::sync::Mutex as Mx;\nfn f(x: u8) -> P { let y = 2; P { x, y } }\n";
+    let lib = FileIndex::library("pub struct Mutex;\n".to_string(), s(&["sync"]));
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    {
+        let ws = [&lib, &fi];
+        // (キーワードの Self は型に解決されても変えない)
+        assert!(prepare_rename(&ws, 1, at(src, "Self {", 0)).is_err());
+        // (別名で取り込んだライブラリのもの: 別名の付いた use の上でも変えない)
+        assert!(prepare_rename(&ws, 1, at(src, "Mutex as", 0)).is_err());
+        assert!(rename(&ws, 1, at(src, "x: u8)", 0), "_", &no).is_err());
+        // 省略形 `P { x, y }`: カンマの前の x も
+        let r = apply(src, rename(&ws, 1, at(src, "x: u8)", 0), "z", &no).unwrap());
+        assert!(r.ends_with("P { x: z, y } }\n"), "{r}");
+        let r = apply(src, rename(&ws, 1, at(src, "y: u8 }", 0), "w", &no).unwrap());
+        assert!(r.contains("Self { x: 1, w: 2 }") && r.ends_with("P { x, w: y } }\n"), "{r}");
+    }
+    // メモリから外したファイル (slim) の中の参照も、読み直して書き換える
+    let other = "fn g() -> u8 { let p = P::new(); p.x }\n";
+    let mut fo = FileIndex::new(other.to_string(), vec![]);
+    fo.make_slim();
+
+    let fresh = Rc::new(FileIndex::new(src.to_string(), vec![]));
+    let fo2 = Rc::new(FileIndex::new(other.to_string(), vec![]));
+    let full = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&lib, &full, &fo];
+    let load = |i: usize| match i {
+        1 => Some(fresh.clone()),
+        2 => Some(fo2.clone()),
+        _ => None,
+    };
+    let e = rename(&ws, 1, at(src, "x: u8,", 0), "xx", &load).unwrap();
+    let in_other: Vec<&str> = e.iter().filter(|x| x.0.file == 2).map(|x| &other[x.0.start..x.0.end]).collect();
+    assert_eq!(in_other, vec!["x"]);
+    assert_eq!(e.iter().filter(|x| x.0.file == 1).count(), 3);
+}
+
+#[test]
+fn signature_help_edges() {
+    let src = "struct P;\nimpl P {\n    fn m(&self, a: u8) {}\n    fn n(mut self, a: u8) {}\n    fn o(self: &Self, a: u8) {}\n    fn q(self, a: u8) {}\n}\n\
+               fn h<F: Fn(u8) -> u8>(f: F, g: u8) {}\nfn z() {}\nfn y(a: u8,) {}\nfn k(a: [u8; 3], b: u8) {}\n\
+               fn t(p: P) { P::m(&p, 1); p.n(1); p.o(1); p.q(1); h(|x| x, 2); z(); y(1); k([0; 3], 1); h(|x| { x }, 1); }\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let sh = |p: &str, d: usize| signature_help(&ws, 0, at(src, p, 0) + d, &no).map(|(s, ps, a)| (ps.iter().map(|&(x, y)| s[x..y].to_string()).collect::<Vec<_>>(), a));
+    // (パスで呼ぶ `P::m(&p, ..)` は self も引数)
+    assert_eq!(sh("1); p.n", 0), Some((s(&["&self", "a: u8"]), 1)));
+    assert_eq!(sh("1); p.o", 0), Some((s(&["a: u8"]), 0)));
+    assert_eq!(sh("1); p.q", 0), Some((s(&["a: u8"]), 0)));
+    assert_eq!(sh("1); h(", 0), Some((s(&["a: u8"]), 0)));
+    assert_eq!(sh("2); z", 0), Some((s(&["f: F", "g: u8"]), 1)));
+    assert_eq!(sh("); y(", 0), Some((vec![], 0)));
+    assert_eq!(sh("1); k", 0), Some((s(&["a: u8"]), 0)));
+    // (`[0; 3]` の `;` は文の終わりではない)
+    assert_eq!(sh("1); h(|x| {", 0), Some((s(&["a: [u8; 3]", "b: u8"]), 1)));
+    // (引数の中のブロックの中は答えない)
+    assert_eq!(sh("x }, 1", 0), None);
+}

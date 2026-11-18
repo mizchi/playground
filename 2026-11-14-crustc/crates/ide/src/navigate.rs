@@ -1302,13 +1302,38 @@ fn def_at(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
         return vec![];
     }
     let f = ws[file];
+    if let Some(k) = f.tok_at(off) {
+        if f.in_inactive(f.toks[k].1 as usize) {
+            return inactive_def_at(ws, file, k);
+        }
+    }
+    def_at1(ws, file, off)
+}
+
+/// cfg で外れたコードの中のトークン k: rust-analyzer と同じく、外側のスコープから見えるアイテムへのパス
+/// (`used()` / `P` / `sub::deep` / `crate::P`) だけを解決する。ローカル・フィールド・メソッド・関連アイテム (`P::new`)・
+/// 外れたアイテムの名前には答えない
+fn inactive_def_at(ws: &[&FileIndex], file: usize, k: usize) -> Vec<Loc> {
+    let f = ws[file];
+    let decl = k > 0 && f.ident(k - 1) && matches!(f.tok(k - 1), "fn" | "struct" | "enum" | "union" | "trait" | "type" | "const" | "static" | "mod" | "let" | "mut");
+    if decl || (k > 0 && f.sym(k - 1, b'.')) || (f.sym(k + 1, b':') && !f.sym(k + 2, b':') && f.struct_lit_at(k).is_some()) {
+        return vec![];
+    }
+    // (`T::name` の T が型 (大文字で始まる・Self) なら関連アイテム)
+    if f.after_path(k) && k >= 3 && (f.tok(k - 3) == "Self" || f.tok(k - 3).starts_with(|c: char| c.is_ascii_uppercase())) {
+        return vec![];
+    }
+    let r = def_at1(ws, file, f.toks[k].1 as usize);
+    r.into_iter()
+        .filter(|l| ws[l.file].defs.iter().any(|d| d.start == l.start && (d.owner.is_empty() || d.kind == SymKind::Variant) && d.kind != SymKind::Field) || (l.start == 0 && l.end == 0))
+        .collect()
+}
+
+fn def_at1(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
+    let f = ws[file];
     let Some(k) = f.tok_at(off) else { return f.capture_at(off).map(|(_, b, _)| vec![Loc { file, start: f.toks[b].1 as usize, end: f.toks[b].2 as usize }]).unwrap_or_default() };
     let name = f.tok(k).to_string();
     let start = f.toks[k].1 as usize;
-    // (cfg で外れたコードの中は答えない: rust-analyzer と同じ)
-    if f.in_inactive(start) {
-        return vec![];
-    }
     // (組み込みの型には定義がない)
     if PRIMS.contains(&name.as_str()) {
         return vec![];
@@ -1555,7 +1580,7 @@ pub fn references(ws: &[&FileIndex], file: usize, off: usize, include_decl: bool
     clear_memo();
     let d = def_at(ws, file, off);
     let Some(&target) = d.first() else {
-        if ws[file].tok_at(off).is_some_and(|k| ws[file].in_inactive(ws[file].toks[k].1 as usize)) {
+        if ws[file].tok_at(off).is_some_and(|k| ws[file].in_inactive(ws[file].toks[k].1 as usize) && !PRIMS.contains(&ws[file].tok(k))) {
             return vec![];
         }
         return prim_refs(ws, file, off, load);
@@ -1615,8 +1640,8 @@ pub fn references(ws: &[&FileIndex], file: usize, off: usize, include_decl: bool
         // (`use a::Point as Pt` の Pt は数えない: rust-analyzer と同じ。Pt の参照は Pt で引く)
         for &k in ks.iter().chain(selfs.iter()).chain(mods) {
             let at = w.toks[k as usize].1 as usize;
-            // (macro_rules! の本体と、cfg で外れたアイテムの中は名前を解決しない: rust-analyzer と同じ)
-            if w.in_macro_body(at) || w.in_inactive(at) {
+            // (macro_rules! の本体は名前を解決しない: rust-analyzer と同じ。cfg で外れたアイテムの中は def_at がパスだけ解決する)
+            if w.in_macro_body(at) {
                 continue;
             }
             if !include_decl && i == target.file && at == target.start {
@@ -1708,7 +1733,7 @@ fn prim_refs(ws: &[&FileIndex], file: usize, off: usize, load: Load) -> Vec<Loc>
             let at = w.toks[k].1 as usize;
             // (メソッド・フィールドの名前 `x.u8` やマクロの本体の中は除く)
             // (`0u8` の接尾辞も除く: 数のすぐ後ろ)
-            if w.in_macro_body(at) || w.in_inactive(at) || (k > 0 && (w.sym(k - 1, b'.') || (w.toks[k - 1].2 as usize == at && w.text.as_bytes()[w.toks[k - 1].1 as usize].is_ascii_digit()))) {
+            if w.in_macro_body(at) || (k > 0 && (w.sym(k - 1, b'.') || (w.toks[k - 1].2 as usize == at && w.text.as_bytes()[w.toks[k - 1].1 as usize].is_ascii_digit()))) {
                 continue;
             }
             // (同じ名前の定義 `fn u8(..)` の名前)
@@ -2871,15 +2896,17 @@ fn g() -> u8 { 1 }
         fi.apply_cfg(vec![]);
         let ws = [&fi];
         let no = &|_: usize| None;
-        // P: 定義・impl の名前・`Self` 2 つ (cfg で外れた g の中の 2 つは数えない。`syn::P` は外部のもの)
-        assert_eq!(references(&ws, 0, at(src, "P {", 0), true, no).len(), 4);
+        // P: 定義・impl の名前・`Self` 2 つと、cfg で外れた g の中の 2 つ (`-> P` と `P::new`。rust-analyzer は外れた
+        // アイテムの中もパスは解決する)。`syn::P` は外部のもの
+        assert_eq!(references(&ws, 0, at(src, "P {", 0), true, no).len(), 6);
         // `fn f(concrete: ..)` と `let (a, concrete)` は束縛そのもの: 関数 concrete の参照ではない
         assert_eq!(references(&ws, 0, 3, true, no).len(), 1);
         assert_eq!(def_text(&ws, 0, at(src, "concrete) =", 0)).map(|x| x.2), Some(at(src, "concrete) =", 0)));
         // `Delimiter::None` は Option の None ではない (Delimiter を知らない)
         assert!(definition(&ws, 0, at(src, "None", 0)).is_empty());
-        // cfg で外れた g には答えない
+        // cfg で外れた g の中の関連アイテム `P::new` には答えない (パスの P には答える)
         assert!(definition(&ws, 0, at(src, "new()", 1)).is_empty());
+        assert_eq!(definition(&ws, 0, at(src, "P::new", 0)).first().map(|l| l.start), Some(at(src, "P {", 0)));
         // u8: 型の位置だけ (`0u8` の接尾辞と `fn u8` の名前は除く)
         assert_eq!(references(&ws, 0, at(src, "u8 }", 0), true, no).len(), 2);
     }
@@ -2907,6 +2934,15 @@ pub fn prepare_rename(ws: &[&FileIndex], file: usize, off: usize) -> Result<Loc,
     if mod_file(ws, t).is_some() {
         return Err("ファイルのモジュールの名前は変えられない (ファイルの名前も変わるので)".into());
     }
+    // (trait の impl のメソッド: trait がワークスペースのものなら trait の宣言と全部の impl を変える。ライブラリ・外部の
+    // クレートの trait (`impl Default for S` の default) なら断る: 宣言の方を変えられないので)
+    if let Some(d) = tf.defs.iter().find(|d| d.start == t.start && d.kind == SymKind::Method) {
+        if let Some(tr) = impl_trait(&d.container) {
+            if trait_method(ws, tr, &d.name).is_none() {
+                return Err(format!("`{tr}` (ライブラリか外部のクレートの trait) のメソッドは名前を変えられない"));
+            }
+        }
+    }
     // (derive の名前 `#[derive(Clone)]` に解決されたもの: derive が作るメソッド)
     let is_def = tf.defs.iter().any(|d| d.start == t.start);
     if !is_def && !tf.slim && tf.tok_at(t.start).is_some_and(|j| tf.in_derive(j)) {
@@ -2914,6 +2950,13 @@ pub fn prepare_rename(ws: &[&FileIndex], file: usize, off: usize) -> Result<Loc,
     }
     let (a, b) = (f.toks[k].1 as usize, f.toks[k].2 as usize);
     Ok(Loc { file, start: a, end: b })
+}
+
+/// ワークスペースの trait tr の宣言の中のメソッド name
+fn trait_method(ws: &[&FileIndex], tr: &str, name: &str) -> Option<Loc> {
+    ws.iter().enumerate().filter(|(_, w)| !w.lib).find_map(|(i, w)| {
+        w.defs.iter().find(|d| d.kind == SymKind::Method && d.name == name && !d.container.starts_with("impl") && &d.container[..] == tr && w.defs.iter().any(|x| x.kind == SymKind::Trait && x.name == tr)).map(|d| loc(i, d))
+    })
 }
 
 /// ファイル f の `use a::name;` (別名なし) の、パスの最後の名前の byte 位置
@@ -2952,7 +2995,20 @@ pub fn rename(ws: &[&FileIndex], file: usize, off: usize, new: &str, load: Load)
         return Ok(out);
     }
     let is_field = ws[t.file].defs.iter().any(|d| d.start == t.start && d.kind == SymKind::Field);
-    let refs = references(ws, file, off, true, load);
+    // (trait の impl のメソッド: trait の宣言から引く (宣言・全部の impl・呼び出し))
+    let root = ws[t.file].defs.iter().find(|d| d.start == t.start && d.kind == SymKind::Method).and_then(|d| impl_trait(&d.container).and_then(|tr| trait_method(ws, tr, &d.name)));
+    let refs = match root {
+        Some(r) if (r.file, r.start) != (t.file, t.start) => {
+            let held;
+            let mut ws2: Vec<&FileIndex> = ws.to_vec();
+            if ws[r.file].slim {
+                held = load(r.file).ok_or("ファイルを読めない")?;
+                ws2[r.file] = &held;
+            }
+            references(&ws2, r.file, r.start, true, load)
+        }
+        _ => references(ws, file, off, true, load),
+    };
     let mut held: FxMap<usize, Rc<FileIndex>> = FxMap::default();
     let mut out = vec![];
     for l in refs {
