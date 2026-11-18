@@ -1386,7 +1386,22 @@ fn self_refs(ws: &[&FileIndex], file: usize, off: usize, include_decl: bool) -> 
     Some(out)
 }
 
+/// アイテムのキーワード (`fn` / `struct` / `enum` / `trait` ..) の上なら、その後の名前の位置 (rust-analyzer はキーワードの上でも
+/// そのアイテムに答える)
+fn kw_to_name(f: &FileIndex, off: usize) -> usize {
+    if let Some(k) = f.tok_at(off) {
+        if matches!(f.tok(k), "fn" | "struct" | "enum" | "union" | "trait" | "type" | "const" | "static" | "mod") && f.ident(k + 1) {
+            let a = f.toks[k + 1].1 as usize;
+            if f.defs.iter().any(|d| d.start == a) {
+                return a;
+            }
+        }
+    }
+    off
+}
+
 pub fn definition(ws: &[&FileIndex], file: usize, off: usize) -> Vec<Loc> {
+    let off = kw_to_name(ws[file], off);
     if let Some((h, _, _)) = self_owner(ws[file], off) {
         let f = ws[file];
         return vec![Loc { file, start: f.toks[h].1 as usize, end: f.toks[h].2 as usize }];
@@ -1693,6 +1708,7 @@ pub fn highlights(ws: &[&FileIndex], file: usize, off: usize, load: Load) -> Vec
 /// references の本体。only があればそのファイルの中だけを探す
 fn references_in(ws: &[&FileIndex], file: usize, off: usize, include_decl: bool, load: Load, only: Option<usize>) -> Vec<Loc> {
     clear_memo();
+    let off = kw_to_name(ws[file], off);
     if let Some(r) = self_refs(ws, file, off, include_decl) {
         return r;
     }
@@ -2519,6 +2535,10 @@ fn binding_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<
     if let Some(t) = variant_binding_type(ws, file, b, depth) {
         return Some(t);
     }
+    // クロージャの引数 `x.iter().map(|d| ..)` / `opt.map(|v| ..)`: 受け手の要素の型
+    if let Some(t) = closure_param_type(ws, file, b, depth) {
+        return Some(t);
+    }
     // `let x = EXPR;`
     if f.sym(b + 1, b'=') && !f.sym(b + 2, b'=') && b >= 1 && (f.tok(b - 1) == "let" || f.tok(b - 1) == "mut") {
         // (クロージャ `|a: T, b: U| body` → `impl Fn(T, U) -> R`)
@@ -3304,6 +3324,74 @@ pub fn signature_help(ws: &[&FileIndex], file: usize, off: usize, load: Load) ->
     // (メソッドの呼び出し `x.m(..)` では self は引数に数えない: rust-analyzer と同じ)
     let params = if method_call && has_self { params[1..].to_vec() } else { params };
     Some((sig, params, commas, doc))
+}
+
+/// クロージャの引数 b (`recv.m(|a, b| ..)` の a / b) の型: 繰り返し (`Iter<T>` / `Vec<T>` / `[T]` / `Option<T>` ..) の要素の型。
+/// `filter` / `find` / `position` ... の引数は要素への参照、`fold` は 2 つめが要素、`map_err` / `unwrap_or_else` は Result の E
+fn closure_param_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<String> {
+    let f = ws[file];
+    if depth > 8 {
+        return None;
+    }
+    // (b の前の `|`: 引数の並びの始め。その間のカンマの数が引数の番号)
+    let mut j = b;
+    let mut idx = 0;
+    loop {
+        j = j.checked_sub(1)?;
+        if f.sym(j, b'|') {
+            break;
+        }
+        if f.sym(j, b',') {
+            idx += 1;
+        } else if !(f.ident(j) || f.sym(j, b'&') || f.sym(j, b'(') || f.sym(j, b')')) {
+            return None;
+        }
+    }
+    if !f.closure_start(j) || (j >= 1 && f.sym(j - 1, b'|')) {
+        return None;
+    }
+    // (`recv.m(` の m と、受け手の式の終わり。クロージャは後ろの引数でもよい: `fold(0, |acc, x| ..)`)
+    let mut open = if j >= 1 && f.ident(j - 1) && f.tok(j - 1) == "move" { j.checked_sub(2)? } else { j.checked_sub(1)? };
+    let mut d = 0;
+    while !(d == 0 && f.sym(open, b'(')) {
+        if f.sym(open, b')') || f.sym(open, b']') || f.sym(open, b'}') {
+            d += 1;
+        } else if f.sym(open, b'(') || f.sym(open, b'[') || f.sym(open, b'{') {
+            if d == 0 {
+                return None;
+            }
+            d -= 1;
+        } else if d == 0 && f.sym(open, b';') {
+            return None;
+        }
+        open = open.checked_sub(1)?;
+    }
+    if open < 3 || !f.ident(open - 1) || !f.sym(open - 2, b'.') {
+        return None;
+    }
+    let m = f.tok(open - 1);
+    let recv = expr_type(ws, file, open - 3, depth + 1)?;
+    let recv = expand(ws, file, &recv).into_iter().last().unwrap_or(recv);
+    let h = type_head(&recv);
+    let a = targs(&recv);
+    let elem = match h.as_str() {
+        "Result" => match m {
+            "map_err" | "unwrap_or_else" | "or_else" => a.get(1).cloned(),
+            _ => a.first().cloned(),
+        },
+        "HashMap" | "BTreeMap" | "FxHashMap" => Some(format!("(&{}, &{})", a.first()?, a.get(1)?)),
+        _ => elem_type(&recv),
+    }?;
+    let by_ref = matches!(m, "filter" | "find" | "position" | "skip_while" | "take_while" | "inspect" | "retain" | "sort_by_key" | "max_by_key" | "min_by_key" | "is_some_and" | "is_ok_and" | "any" | "all" | "dedup_by_key" | "binary_search_by_key" | "partition")
+        && !matches!(m, "any" | "all" | "position" | "partition" | "is_some_and" | "is_ok_and");
+    let ty = match (m, idx) {
+        ("fold" | "try_fold" | "scan", 0) => return None,
+        ("fold" | "try_fold", 1) => elem,
+        ("sort_by" | "max_by" | "min_by" | "dedup_by", _) => format!("&{elem}"),
+        (_, 0) => if by_ref { format!("&{elem}") } else { elem },
+        _ => return None,
+    };
+    Some(ty)
 }
 
 /// トークン k で終わるリテラルの型 (`"a"` → &str、`'c'` → char、`b"x"` → &[u8]、`b'x'` → u8、`1u8` → u8、`true` → bool)。

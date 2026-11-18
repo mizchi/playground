@@ -926,3 +926,46 @@ fn literal_hovers() {
     // (識別子の上はふつうの hover)
     assert!(h("a =", 0).unwrap().contains("a: &str"));
 }
+
+/// クロージャの引数の型: 受け手の要素の型 (補完・hover・定義に効く)
+#[test]
+fn closure_params_from_receivers() {
+    let src = "struct D { a: u8 }\nimpl D { fn get(&self) -> u8 { self.a } }\n\
+               fn f(v: Vec<D>, o: Option<D>, r: Result<D, String>) {\n    v.iter().filter(|d| d.a > 0);\n    v.iter().map(|e| e.get());\n    v.into_iter().for_each(move |g| { g.a; });\n    o.map(|x| x.a);\n    r.map_err(|s| s.len());\n    v.iter().fold(0, |acc, h| acc + h.a);\n}\n";
+    let lib = FileIndex::library(
+        "pub struct Vec<T> { b: T }\nimpl<T> Vec<T> {\n    pub fn iter(&self) -> Iter<'_, T> { todo!() }\n    pub fn into_iter(self) -> IntoIter<T> { todo!() }\n}\n\
+         pub struct Iter<'a, T> { r: &'a T }\npub struct IntoIter<T> { t: T }\npub struct String;\nimpl String { pub fn len(&self) -> usize { 0 } }\n"
+            .to_string(),
+        s(&["vec"]),
+    );
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi, &lib];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap();
+    assert!(ty("d| d.a").contains("d: &D"), "{}", ty("d| d.a"));
+    assert!(ty("e| e").contains("e: D"), "{}", ty("e| e"));
+    assert!(ty("g| {").contains("g: D"), "{}", ty("g| {"));
+    assert!(ty("x| x").contains("x: D"), "{}", ty("x| x"));
+    assert!(ty("s| s").contains("s: String"), "{}", ty("s| s"));
+    assert!(ty("h| acc").contains("h: D"), "{}", ty("h| acc"));
+    assert!(!ty("acc, h").contains(':'), "{}", ty("acc, h"));
+    // d.a のフィールド・e.get() のメソッドの定義
+    assert_eq!(definition(&ws, 0, at(src, "a > 0", 0)).first().map(|l| l.start), Some(at(src, "a: u8", 0)));
+    assert_eq!(definition(&ws, 0, at(src, "get());", 0)).first().map(|l| l.start), Some(at(src, "get(&self)", 0)));
+    // 補完 `d.|`
+    let (it, _) = complete(&ws, 0, at(src, "a > 0", 0));
+    assert!(it.iter().any(|x| x.label == "a") && it.iter().any(|x| x.label == "get"), "{:?}", it.iter().map(|x| &x.label).collect::<Vec<_>>());
+}
+
+/// アイテムのキーワードの上 (`fn f` の fn): その名前の定義と参照
+#[test]
+fn keyword_of_item() {
+    let src = "fn f() {}\nstruct S;\nfn g() { f(); let _ = S; }\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    assert_eq!(def1(&fi, 0), Some(3));
+    assert_eq!(references(&ws, 0, 0, true, &no).len(), 2);
+    assert_eq!(def1(&fi, at(src, "struct", 0)), Some(at(src, "S;", 0)));
+    assert_eq!(highlights(&ws, 0, at(src, "struct", 0), &no).len(), 2);
+    // (キーワードでない所はそのまま)
+    assert_eq!(def1(&fi, at(src, "let", 0)), None);
+}
