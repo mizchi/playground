@@ -167,14 +167,14 @@ fn fn_bounds(sig: &str) -> Vec<(u8, String, String, String)> {
         }
         // (対応する `)` の後の `-> R`)
         let mut d = 0;
-        let mut e = rest.len();
+        let mut e = None;
         for (i, c) in rest.char_indices() {
             match c {
                 '(' | '<' | '[' => d += 1,
                 ')' | ']' => {
                     d -= 1;
                     if d == 0 {
-                        e = i + 1;
+                        e = Some(i + 1);
                         break;
                     }
                 }
@@ -182,7 +182,9 @@ fn fn_bounds(sig: &str) -> Vec<(u8, String, String, String)> {
                 _ => {}
             }
         }
-        let args = rest[1..e.saturating_sub(1).max(1)].trim().to_string();
+        // (閉じていない (長いシグネチャを `…` で切ったもの) なら分からない)
+        let e = e?;
+        let args = rest.get(1..e - 1)?.trim().to_string();
         let after = rest[e..].trim_start();
         Some((args, match after.strip_prefix("->") {
             Some(r) => {

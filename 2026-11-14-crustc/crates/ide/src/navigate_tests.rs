@@ -1018,6 +1018,9 @@ fn fn_bounds_of_signatures() {
     assert_eq!(b("pub fn unwrap_or_else(self, op: impl FnOnce(E) -> T) -> T"), s(&["0::T"]));
     assert_eq!(b("fn find<P>(&mut self, predicate: P) -> Option<Self::Item> where P: FnMut(&Self::Item) -> bool"), s(&["0:P:bool"]));
     assert_eq!(b("fn len(&self) -> usize"), Vec::<String>::new());
+    // (長いシグネチャを途中で切ったもの: 落ちない)
+    assert_eq!(b("fn g<F: FnMut(u8, …"), Vec::<String>::new());
+    assert_eq!(b("fn h<F>(f: F) where F: Fn(&[u8; 4], …"), s(&["0:F:="]));
 }
 
 /// 繰り返しの要素の型・射影の置き換え・タプル

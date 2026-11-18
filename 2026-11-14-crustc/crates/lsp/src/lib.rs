@@ -674,7 +674,12 @@ fn index_std() -> Vec<(String, FileIndex)> {
                 continue;
             }
             let Ok(text) = std::fs::read_to_string(&p) else { continue };
-            out.push((path_uri(&p), FileIndex::library(text, navigate::module_of(&rel))));
+            // (索引の作り方の不具合で 1 つのファイルが落ちても、std の索引全体を失わない: そのファイルだけ飛ばす)
+            let m = navigate::module_of(&rel);
+            match std::panic::catch_unwind(move || FileIndex::library(text, m)) {
+                Ok(ix) => out.push((path_uri(&p), ix)),
+                Err(_) => eprintln!("crustc-lsp: {rel} の索引を作れなかった (飛ばす)"),
+            }
         }
     }
     out
