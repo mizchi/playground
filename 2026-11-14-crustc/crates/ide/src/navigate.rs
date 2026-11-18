@@ -3219,6 +3219,15 @@ fn expr_type(ws: &[&FileIndex], file: usize, k: usize, depth: u32) -> Option<Str
         if name.starts_with(|c: char| c.is_ascii_uppercase()) {
             return Some(name.to_string());
         }
+        // (ローカルのクロージャの呼び出し `all()`: そのクロージャの戻り値の型)
+        if let Some(b) = f.local(m, name) {
+            if let Some(ty) = binding_type(ws, file, b, depth + 1) {
+                if ty.starts_with("impl Fn") {
+                    return ty.find(") -> ").map(|i| ty[i + 5..].trim().to_string());
+                }
+            }
+            return None;
+        }
         return all().map(|x| x.1).find(|d| d.name == name && d.owner.is_empty() && d.kind == SymKind::Function && !d.ty.is_empty()).map(|d| d.ty.clone());
     }
     if f.toks[k].0 == 2 && f.text.as_bytes()[f.toks[k].1 as usize] == b'"' {
@@ -3280,14 +3289,16 @@ fn binding_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<
         }
         return (!type_head(&t).is_empty() || strip_ref(&t).starts_with('(')).then_some(t);
     }
-    // `for x in EXPR {`
-    if b >= 1 && f.tok(b - 1) == "for" && f.ident(b + 1) && f.tok(b + 1) == "in" {
-        let e = expr_end(f, b + 2, true)?;
+    // `for x in EXPR {` / `for (i, x) in EXPR {` (タプルのパターンなら要素の中の番号)
+    if let Some((in_tok, path)) = for_pattern(f, b) {
+        let e = expr_end(f, in_tok + 1, true)?;
         let t = expr_type(ws, file, e, depth + 1)?;
-        return elem_type(&t).or_else(|| {
-            // (`.iter()` などの名前で: 型の引数を追えないとき)
-            None
-        });
+        let mut ty = if is_iter_head(&type_head(&t)) { iter_item(&t) } else { iter_item(&t).or_else(|| elem_type(&t)) }?;
+        for &i in &path {
+            let inner = strip_ref(&ty).to_string();
+            ty = tuple_items(&inner)?.get(i)?.clone();
+        }
+        return Some(ty);
     }
     // `if let Some(x) = EXPR` / `while let Some(x) = EXPR` / `let Some(x) = EXPR else`
     if b >= 2 && f.sym(b - 1, b'(') && f.ident(b - 2) && matches!(f.tok(b - 2), "Some" | "Ok") && f.sym(b + 1, b')') && f.sym(b + 2, b'=') && !f.sym(b + 3, b'=') {
@@ -3310,7 +3321,8 @@ fn binding_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<
     if f.sym(b + 1, b'=') && !f.sym(b + 2, b'=') && b >= 1 && (f.tok(b - 1) == "let" || f.tok(b - 1) == "mut") {
         // (クロージャ `|a: T, b: U| body` → `impl Fn(T, U) -> R`)
         let c = if f.tok(b + 2) == "move" { b + 3 } else { b + 2 };
-        if f.sym(c, b'|') && !f.sym(c + 1, b'|') {
+        // (引数のない `|| ..` も)
+        if f.sym(c, b'|') {
             let mut j = c + 1;
             let mut tys = vec![];
             while j < n && !f.sym(j, b'|') {
@@ -4529,6 +4541,55 @@ fn strip_lifetimes(t: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// 束縛 b が `for PAT in` の PAT の中なら (`in` のトークン, タプルの中の番号の並び)
+fn for_pattern(f: &FileIndex, b: usize) -> Option<(usize, Vec<usize>)> {
+    // (前へ: `for` まで。カンマとタプルの括弧を数える)
+    let mut j = b;
+    let mut idx = 0;
+    let mut path = vec![];
+    let mut d = 0;
+    loop {
+        j = j.checked_sub(1)?;
+        if f.ident(j) && f.tok(j) == "for" {
+            break;
+        }
+        if f.sym(j, b')') {
+            d += 1;
+        } else if f.sym(j, b'(') {
+            if d == 0 {
+                path.push(idx);
+                idx = 0;
+            } else {
+                d -= 1;
+            }
+        } else if f.sym(j, b',') && d == 0 {
+            idx += 1;
+        } else if !(f.ident(j) || f.sym(j, b'&') || f.sym(j, b',')) || matches!(f.tok(j), "in" | "let") {
+            return None;
+        }
+    }
+    if idx != 0 {
+        return None;
+    }
+    path.reverse();
+    // (後ろへ: `in`。b はタプルの括弧の中 (path の深さ) にいる)
+    let mut q = b + 1;
+    let mut d = path.len() as i32;
+    while q < f.toks.len() {
+        if f.sym(q, b'(') {
+            d += 1;
+        } else if f.sym(q, b')') {
+            d -= 1;
+        } else if d == 0 && f.ident(q) && f.tok(q) == "in" {
+            return Some((q, path));
+        } else if d < 0 || f.sym(q, b'{') || f.sym(q, b';') {
+            return None;
+        }
+        q += 1;
+    }
+    None
 }
 
 /// クロージャの引数 b (`recv.m(|a, b| ..)` の a / b) の型: 繰り返し (`Iter<T>` / `Vec<T>` / `[T]` / `Option<T>` ..) の要素の型。

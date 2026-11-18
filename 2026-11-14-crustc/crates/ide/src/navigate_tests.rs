@@ -1121,3 +1121,17 @@ fn match_and_if_expression_types() {
         assert!(ty(p).contains(want), "{p}: {}", ty(p));
     }
 }
+
+/// ローカルのクロージャの呼び出しの型と、`for (i, x) in ..` のタプルのパターン
+#[test]
+fn local_closure_calls_and_for_tuples() {
+    let lib = FileIndex::library("pub struct Vec<T> { b: T }\nimpl<T> Vec<T> { pub fn iter(&self) -> Iter<'_, T> { todo!() } }\npub struct Iter<'a, T> { r: &'a T }\npub struct Enumerate<I> { i: I }\npub trait Iterator { type Item; fn enumerate(self) -> Enumerate<Self> { todo!() } }\n".to_string(), s(&["x"]));
+    let src = "struct D { n: u8 }\nfn f(v: Vec<D>) {\n    let all = || v.iter().enumerate();\n    let a = all();\n    for (i, d) in all() { d.n; }\n    for e in v.iter() { e.n; }\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi, &lib];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap();
+    for (p, want) in [("a =", "a: Enumerate<Iter<'_, D>>"), ("i, d", "i: usize"), ("d) in", "d: &D"), ("e in", "e: &D")] {
+        assert!(ty(p).contains(want), "{p}: {}", ty(p));
+    }
+    assert_eq!(definition(&ws, 0, at(src, "n; }", 0)).first().map(|l| l.start), Some(at(src, "n: u8", 0)));
+}

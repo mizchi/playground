@@ -205,28 +205,28 @@ ws/src/lib.rs:88:13 mut -> ws/src/lib.rs:88:13+3 | refs 1/0 [ws/src/lib.rs:88:13
 ws/src/lib.rs:88:17 sum -> ws/src/lib.rs:88:17+3 | refs 3/2 [ws/src/lib.rs:88:17+3 ws/src/lib.rs:90:13+3 ws/src/lib.rs:95:12+3] | ```rust⏎sum: i64⏎```
 ws/src/lib.rs:88:24 i64 -> - | refs 14/14 | ```rust⏎i64⏎```
 ws/src/lib.rs:89:9 for -> - | refs 0/0 | -
-ws/src/lib.rs:89:13 p -> ws/src/lib.rs:89:13+1 | refs 2/1 [ws/src/lib.rs:89:13+1 ws/src/lib.rs:90:20+1] | ```rust⏎p: Pt⏎```
+ws/src/lib.rs:89:13 p -> ws/src/lib.rs:89:13+1 | refs 2/1 [ws/src/lib.rs:89:13+1 ws/src/lib.rs:90:20+1] | ```rust⏎p: &Pt⏎```
 ws/src/lib.rs:89:15 in -> ws/src/lib.rs:89:15+2 | refs 1/0 [ws/src/lib.rs:89:15+2] | ```rust⏎in⏎```
 ws/src/lib.rs:89:18 self -> - | refs 0/0 | -
 ws/src/lib.rs:89:23 items -> ws/src/lib.rs:37:9+5 | refs 6/5 | ```rust⏎Counter⏎pub items: Vec<Pt>⏎```
 ws/src/lib.rs:89:29 iter -> lib/core/src/slice/mod.rs:8:12+4 | refs 4/3 [lib/core/src/slice/mod.rs:8:12+4 ws/src/lib.rs:89:29+4 ws/src/lib.rs:92:34+4 ws/src/lib.rs:151:17+4] | ```rust⏎impl [T]⏎pub fn iter(&self) -> Iter<'_, T>⏎```
 ws/src/lib.rs:90:13 sum -> ws/src/lib.rs:88:17+3 | refs 3/2 | ```rust⏎sum: i64⏎```
-ws/src/lib.rs:90:20 p -> ws/src/lib.rs:89:13+1 | refs 2/1 | ```rust⏎p: Pt⏎```
+ws/src/lib.rs:90:20 p -> ws/src/lib.rs:89:13+1 | refs 2/1 | ```rust⏎p: &Pt⏎```
 ws/src/lib.rs:90:22 x -> ws/src/shapes.rs:7:9+1 | refs 15/14 | ```rust⏎Point⏎pub x: i32⏎```
 ws/src/lib.rs:90:24 as -> - | refs 0/0 | -
 ws/src/lib.rs:90:27 i64 -> - | refs 14/14 | ```rust⏎i64⏎```
 ws/src/lib.rs:92:9 for -> - | refs 0/0 | -
-ws/src/lib.rs:92:14 i -> ws/src/lib.rs:92:14+1 | refs 2/1 [ws/src/lib.rs:92:14+1 ws/src/lib.rs:93:22+1] | ```rust⏎i⏎```
-ws/src/lib.rs:92:17 q -> ws/src/lib.rs:92:17+1 | refs 2/1 [ws/src/lib.rs:92:17+1 ws/src/lib.rs:93:25+1] | ```rust⏎q⏎```
+ws/src/lib.rs:92:14 i -> ws/src/lib.rs:92:14+1 | refs 2/1 [ws/src/lib.rs:92:14+1 ws/src/lib.rs:93:22+1] | ```rust⏎i: usize⏎```
+ws/src/lib.rs:92:17 q -> ws/src/lib.rs:92:17+1 | refs 2/1 [ws/src/lib.rs:92:17+1 ws/src/lib.rs:93:25+1] | ```rust⏎q: &Pt⏎```
 ws/src/lib.rs:92:20 in -> ws/src/lib.rs:92:20+2 | refs 1/0 [ws/src/lib.rs:92:20+2] | ```rust⏎in⏎```
 ws/src/lib.rs:92:23 self -> - | refs 0/0 | -
 ws/src/lib.rs:92:28 items -> ws/src/lib.rs:37:9+5 | refs 6/5 | ```rust⏎Counter⏎pub items: Vec<Pt>⏎```
 ws/src/lib.rs:92:34 iter -> lib/core/src/slice/mod.rs:8:12+4 | refs 4/3 | ```rust⏎impl [T]⏎pub fn iter(&self) -> Iter<'_, T>⏎```
 ws/src/lib.rs:92:41 enumerate -> lib/core/src/iter/traits.rs:10:8+9 | refs 2/1 [lib/core/src/iter/traits.rs:10:8+9 ws/src/lib.rs:92:41+9] | ```rust⏎Iterator⏎fn enumerate(self) -> Enumerate<Self> where Self: Sized,⏎```
 ws/src/lib.rs:93:13 let -> - | refs 0/0 | -
-ws/src/lib.rs:93:17 _ -> ws/src/lib.rs:93:17+1 | refs 1/0 [ws/src/lib.rs:93:17+1] | ```rust⏎_⏎```
-ws/src/lib.rs:93:22 i -> ws/src/lib.rs:92:14+1 | refs 2/1 | ```rust⏎i⏎```
-ws/src/lib.rs:93:25 q -> ws/src/lib.rs:92:17+1 | refs 2/1 | ```rust⏎q⏎```
+ws/src/lib.rs:93:17 _ -> ws/src/lib.rs:93:17+1 | refs 1/0 [ws/src/lib.rs:93:17+1] | ```rust⏎_: (usize, i32)⏎```
+ws/src/lib.rs:93:22 i -> ws/src/lib.rs:92:14+1 | refs 2/1 | ```rust⏎i: usize⏎```
+ws/src/lib.rs:93:25 q -> ws/src/lib.rs:92:17+1 | refs 2/1 | ```rust⏎q: &Pt⏎```
 ws/src/lib.rs:93:27 y -> ws/src/shapes.rs:8:9+1 | refs 9/8 | ```rust⏎Point⏎pub y: i32⏎```
 ws/src/lib.rs:95:9 Ok -> lib/core/src/result.rs:5:5+2 | refs 3/2 [lib/core/src/result.rs:5:5+2 ws/src/lib.rs:95:9+2 ws/src/lib.rs:106:9+2] | ```rust⏎Result⏎Ok(T)⏎```
 ws/src/lib.rs:95:12 sum -> ws/src/lib.rs:88:17+3 | refs 3/2 | ```rust⏎sum: i64⏎```
@@ -289,12 +289,12 @@ ws/src/lib.rs:115:22 usize -> - | refs 7/7 | ```rust⏎usize⏎```
 ws/src/lib.rs:115:31 HashMap -> lib/std/src/collections/hash/map.rs:2:12+7 | refs 4/3 | ```rust⏎collections::hash::map⏎pub struct HashMap<K, V>⏎```⏎⏎---⏎⏎A hash map.
 ws/src/lib.rs:115:40 new -> lib/std/src/collections/hash/map.rs:7:12+3 | refs 2/1 [lib/std/src/collections/hash/map.rs:7:12+3 ws/src/lib.rs:115:40+3] | ```rust⏎impl HashMap<K, V>⏎pub fn new() -> HashMap<K, V>⏎```
 ws/src/lib.rs:116:5 for -> - | refs 0/0 | -
-ws/src/lib.rs:116:9 w -> ws/src/lib.rs:116:9+1 | refs 2/1 [ws/src/lib.rs:116:9+1 ws/src/lib.rs:117:17+1] | ```rust⏎w: &str⏎```
+ws/src/lib.rs:116:9 w -> ws/src/lib.rs:116:9+1 | refs 2/1 [ws/src/lib.rs:116:9+1 ws/src/lib.rs:117:17+1] | ```rust⏎w: &&str⏎```
 ws/src/lib.rs:116:11 in -> ws/src/lib.rs:116:11+2 | refs 1/0 [ws/src/lib.rs:116:11+2] | ```rust⏎in⏎```
 ws/src/lib.rs:116:14 words -> ws/src/lib.rs:114:14+5 | refs 2/1 | ```rust⏎words: &[&str]⏎```
 ws/src/lib.rs:117:9 let -> - | refs 0/0 | -
 ws/src/lib.rs:117:13 k -> ws/src/lib.rs:117:13+1 | refs 2/1 [ws/src/lib.rs:117:13+1 ws/src/lib.rs:118:29+1] | ```rust⏎k: String⏎```
-ws/src/lib.rs:117:17 w -> ws/src/lib.rs:116:9+1 | refs 2/1 | ```rust⏎w: &str⏎```
+ws/src/lib.rs:117:17 w -> ws/src/lib.rs:116:9+1 | refs 2/1 | ```rust⏎w: &&str⏎```
 ws/src/lib.rs:117:19 trim -> lib/core/src/str/mod.rs:5:12+4 | refs 2/1 [lib/core/src/str/mod.rs:5:12+4 ws/src/lib.rs:117:19+4] | ```rust⏎impl str⏎pub fn trim(&self) -> &str⏎```
 ws/src/lib.rs:117:26 to_string -> lib/alloc/src/string.rs:32:8+9 | refs 5/4 | ```rust⏎ToString⏎fn to_string(&self) -> String⏎```
 ws/src/lib.rs:118:9 let -> - | refs 0/0 | -
@@ -418,14 +418,14 @@ ws/src/lib.rs:150:5 let -> - | refs 0/0 | -
 ws/src/lib.rs:150:9 mut -> ws/src/lib.rs:150:9+3 | refs 1/0 [ws/src/lib.rs:150:9+3] | ```rust⏎mut⏎```
 ws/src/lib.rs:150:13 acc -> ws/src/lib.rs:150:13+3 | refs 4/3 [ws/src/lib.rs:150:13+3 ws/src/lib.rs:152:9+3 ws/src/lib.rs:152:19+3 ws/src/lib.rs:156:12+3] | ```rust⏎acc⏎```
 ws/src/lib.rs:151:5 for -> - | refs 0/0 | -
-ws/src/lib.rs:151:9 x -> ws/src/lib.rs:151:9+1 | refs 2/1 [ws/src/lib.rs:151:9+1 ws/src/lib.rs:152:25+1] | ```rust⏎x: i64⏎```
+ws/src/lib.rs:151:9 x -> ws/src/lib.rs:151:9+1 | refs 2/1 [ws/src/lib.rs:151:9+1 ws/src/lib.rs:152:25+1] | ```rust⏎x: &i64⏎```
 ws/src/lib.rs:151:11 in -> ws/src/lib.rs:151:11+2 | refs 1/0 [ws/src/lib.rs:151:11+2] | ```rust⏎in⏎```
 ws/src/lib.rs:151:14 xs -> ws/src/lib.rs:148:17+2 | refs 2/1 | ```rust⏎xs: Vec<i64>⏎```
 ws/src/lib.rs:151:17 iter -> lib/core/src/slice/mod.rs:8:12+4 | refs 4/3 | ```rust⏎impl [T]⏎pub fn iter(&self) -> Iter<'_, T>⏎```
 ws/src/lib.rs:152:9 acc -> ws/src/lib.rs:150:13+3 | refs 4/3 | ```rust⏎acc⏎```
 ws/src/lib.rs:152:15 add -> ws/src/lib.rs:149:9+3 | refs 2/1 | ```rust⏎add: impl Fn(i64, i64) -> i64⏎```
 ws/src/lib.rs:152:19 acc -> ws/src/lib.rs:150:13+3 | refs 4/3 | ```rust⏎acc⏎```
-ws/src/lib.rs:152:25 x -> ws/src/lib.rs:151:9+1 | refs 2/1 | ```rust⏎x: i64⏎```
+ws/src/lib.rs:152:25 x -> ws/src/lib.rs:151:9+1 | refs 2/1 | ```rust⏎x: &i64⏎```
 ws/src/lib.rs:154:5 let -> - | refs 0/0 | -
 ws/src/lib.rs:154:9 double -> ws/src/lib.rs:154:9+6 | refs 2/1 [ws/src/lib.rs:154:9+6 ws/src/lib.rs:156:5+6] | ```rust⏎double: impl Fn(i64)⏎```
 ws/src/lib.rs:154:18 move -> - | refs 0/0 | -

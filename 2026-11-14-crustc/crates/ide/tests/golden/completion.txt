@@ -147,7 +147,7 @@ ws/src/lib.rs:92:34 .|iter n=12 cut=false rank=5 [buf/Field/Vec get/Method/impl 
 ws/src/lib.rs:92:34 .i|ter n=5 rank=1
 ws/src/lib.rs:92:41 .|enumerate n=8 cut=false rank=6 [end/Field/Iter ptr/Field/Iter into/Method/Into last/Method/Iterator next/Method/Iterator count/Method/Iterator enumerate/Method/Iterator to_string/Method/ToString]
 ws/src/lib.rs:92:41 .e|numerate n=3 rank=1
-ws/src/lib.rs:93:27 .|y n=25 cut=false rank=5 [h/Field/Rect n/Field/Code v/Field/Hidden w/Field/Rect x/Field/Point y/Field/Point get/Method/impl Hidden len/Method/impl Word new/Method/impl Counter bump/Method/impl Counter from/Method/impl From<i32> for Hidden name/Field/Counter]
+ws/src/lib.rs:93:27 .|y n=9 cut=false rank=1 [x/Field/Point y/Field/Point dist2/Method/impl Point moved/Method/impl Point twice/Method/Describe describe/Method/Describe into/Method/Into clone/Method/Clone to_string/Method/ToString]
 ws/src/lib.rs:98:12 po|ints n=2 cut=false rank=-1 [Point/Struct Points/TypeAlias]
 ws/src/lib.rs:98:20 se|lf n=3 cut=false rank=2 [Send/- Self/-/keyword self/-/keyword]
 ws/src/lib.rs:98:29 Po|ints n=2 cut=false rank=1 [Point/Struct Points/TypeAlias]
