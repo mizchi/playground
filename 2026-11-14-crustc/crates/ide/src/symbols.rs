@@ -470,22 +470,43 @@ impl Scan<'_> {
                     // (core の数の型のメソッドはマクロ `uint_impl!` / `int_impl!` の本体にある: その腕の中のアイテムを
                     // `impl __uint` / `impl __int` のメンバにする (navigate が u8 .. / i8 .. の持ち主に足す))
                     let mname = self.text(j + 2).to_vec();
-                    if matches!(mname.as_slice(), b"uint_impl" | b"int_impl") && self.sym(j + 3, b'{') {
+                    if matches!(mname.as_slice(), b"uint_impl" | b"int_impl" | b"from_str_int_impl") && self.sym(j + 3, b'{') {
                         let mut ch = vec![];
                         let mut q = j + 4;
                         while q < e {
                             if self.sym(q, b'=') && self.sym(q + 1, b'>') && self.sym(q + 2, b'{') {
                                 let c = self.close(q + 2, e);
-                                self.items(q + 3, c, true, &mut ch);
+                                let mut part = vec![];
+                                self.items(q + 3, c, true, &mut part);
+                                // (`$( impl $int_ty { fn .. } )+` の中の impl のメンバも)
+                                part = self.nested_items(q + 3, c).into_iter().chain(part).collect();
+                                for s in part {
+                                    if s.kind == SymKind::Impl {
+                                        ch.extend(s.children.into_iter().map(|mut x| {
+                                            if x.kind == SymKind::Function {
+                                                x.kind = SymKind::Method;
+                                            }
+                                            x
+                                        }));
+                                    } else if !ch.iter().any(|x: &Symbol| x.name_start == s.name_start) {
+                                        ch.push(s);
+                                    }
+                                }
                                 q = c + 1;
                             } else {
                                 q += 1;
                             }
                         }
+                        ch.sort_by_key(|s| s.name_start);
+                        ch.dedup_by_key(|s| s.name_start);
                         for s in &mut ch {
                             s.in_macro = true;
                         }
-                        let owner = if mname.as_slice() == b"uint_impl" { "__uint" } else { "__int" };
+                        let owner = match mname.as_slice() {
+                            b"uint_impl" => "__uint",
+                            b"int_impl" => "__int",
+                            _ => "__num",
+                        };
                         let (na, nb) = (self.t[j + 2].1, self.t[j + 2].2);
                         out.push(Symbol { name: format!("impl {owner}"), kind: SymKind::Impl, detail: String::new(), start: self.t[start].1, end: self.t[e.min(self.t.len() - 1)].2, name_start: na, name_end: nb, children: ch, in_macro: true });
                     }

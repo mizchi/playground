@@ -1156,3 +1156,15 @@ fn let_tuple_patterns() {
         assert!(ty(p).contains(want), "{p}: {}", ty(p));
     }
 }
+
+/// `Some((a, b))` / `Ok(x)` / `Err(e)` のパターンの束縛
+#[test]
+fn wrapped_tuple_patterns() {
+    let src = "struct P;\nfn g() -> Option<(P, u8)> { None }\nfn h() -> Result<u16, P> { todo!() }\nfn f() {\n    while let Some((a, n)) = g() {}\n    if let Ok(x) = h() {}\n    let Err(e) = h() else { return };\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap();
+    for (p, want) in [("a, n", "a: P"), ("n)) =", "n: u8"), ("x) =", "x: u16"), ("e) =", "e: P")] {
+        assert!(ty(p).contains(want), "{p}: {}", ty(p));
+    }
+}
