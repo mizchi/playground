@@ -1135,3 +1135,24 @@ fn local_closure_calls_and_for_tuples() {
     }
     assert_eq!(definition(&ws, 0, at(src, "n; }", 0)).first().map(|l| l.start), Some(at(src, "n: u8", 0)));
 }
+
+/// 引数の多い関数のシグネチャも切らない (戻り値の型を取れるように)
+#[test]
+fn long_signatures_keep_return_type() {
+    let src = "fn long_one(aaaaaaaaaa: &[(String, Vec<String>)], bbbbbbbbbb: &[String], cccccccccc: &str, dddddddddd: &[(usize, u8)], eeeeeeeeee: u32) -> Option<Vec<u8>> { None }\nfn f() { let z = long_one(&[], &[], \"\", &[], 0); }\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    assert!(hover(&ws, 0, at(src, "z =", 0), &no).unwrap().contains("z: Option<Vec<u8>>"));
+}
+
+/// `let (a, b) = ..;` のタプルのパターン
+#[test]
+fn let_tuple_patterns() {
+    let src = "struct A;\nfn g() -> (A, u8) { todo!() }\nfn f() {\n    let (a, n) = g();\n    let (x, (y, z)): (u8, (A, u16)) = todo!();\n    let (p, q) = (1u8, A);\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap();
+    for (p, want) in [("a, n", "a: A"), ("n) =", "n: u8"), ("x, (", "x: u8"), ("y, z", "y: A"), ("z))", "z: u16"), ("p, q", "p: u8"), ("q) =", "q: A")] {
+        assert!(ty(p).contains(want), "{p}: {}", ty(p));
+    }
+}

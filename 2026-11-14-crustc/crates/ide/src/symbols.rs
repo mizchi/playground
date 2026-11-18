@@ -192,7 +192,7 @@ impl Scan<'_> {
                     out.push_str(&String::from_utf8_lossy(&self.s[self.t[j].1..self.t[j].2]));
                 }
             }
-            if out.len() > 120 {
+            if out.len() > 1000 {
                 out.push('…');
                 break;
             }

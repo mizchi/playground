@@ -3289,6 +3289,27 @@ fn binding_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<
         }
         return (!type_head(&t).is_empty() || strip_ref(&t).starts_with('(')).then_some(t);
     }
+    // `let (a, b) = EXPR;` / `let (a, b): (T, U) = ..;` (タプルのパターン)
+    if let Some((after, path)) = let_tuple_pattern(f, b) {
+        let ty = if f.sym(after, b':') && !f.sym(after + 1, b':') {
+            let mut e = after + 1;
+            while e < f.toks.len() && !(f.sym(e, b'=') && !f.sym(e + 1, b'=')) && !f.sym(e, b';') {
+                e += 1;
+            }
+            f.text[f.toks.get(after + 1)?.1 as usize..f.toks.get(e - 1)?.2 as usize].trim().to_string()
+        } else if f.sym(after, b'=') {
+            let e = expr_end(f, after + 1, false)?;
+            expr_type(ws, file, e, depth + 1)?
+        } else {
+            return None;
+        };
+        let mut ty = expand(ws, file, &ty).into_iter().last().unwrap_or(ty);
+        for &i in &path {
+            let inner = strip_ref(&ty).to_string();
+            ty = tuple_items(&inner)?.get(i)?.clone();
+        }
+        return Some(ty);
+    }
     // `for x in EXPR {` / `for (i, x) in EXPR {` (タプルのパターンなら要素の中の番号)
     if let Some((in_tok, path)) = for_pattern(f, b) {
         let e = expr_end(f, in_tok + 1, true)?;
@@ -4541,6 +4562,55 @@ fn strip_lifetimes(t: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// 束縛 b が `let (..) =` のタプルのパターンの中なら (パターンの後のトークン (`=` か `:`), タプルの中の番号の並び)
+fn let_tuple_pattern(f: &FileIndex, b: usize) -> Option<(usize, Vec<usize>)> {
+    let mut j = b;
+    let mut idx = 0;
+    let mut path = vec![];
+    let mut d = 0;
+    loop {
+        j = j.checked_sub(1)?;
+        if f.ident(j) && f.tok(j) == "let" {
+            break;
+        }
+        if f.sym(j, b')') {
+            d += 1;
+        } else if f.sym(j, b'(') {
+            if d == 0 {
+                path.push(idx);
+                idx = 0;
+            } else {
+                d -= 1;
+            }
+        } else if f.sym(j, b',') && d == 0 {
+            idx += 1;
+        } else if !(f.ident(j) || f.sym(j, b'&')) || matches!(f.tok(j), "in" | "for" | "if" | "while" | "match" | "else") {
+            return None;
+        }
+    }
+    // (`let mut (..)` ではなく `let (..)`: パターンの最初は `(`)
+    if idx != 0 || path.is_empty() || (j >= 1 && f.ident(j - 1) && matches!(f.tok(j - 1), "if" | "while")) {
+        return None;
+    }
+    path.reverse();
+    let mut q = b + 1;
+    let mut d = path.len() as i32;
+    while q < f.toks.len() {
+        if f.sym(q, b'(') {
+            d += 1;
+        } else if f.sym(q, b')') {
+            d -= 1;
+            if d == 0 {
+                return Some((q + 1, path));
+            }
+        } else if f.sym(q, b';') || f.sym(q, b'{') {
+            return None;
+        }
+        q += 1;
+    }
+    None
 }
 
 /// 束縛 b が `for PAT in` の PAT の中なら (`in` のトークン, タプルの中の番号の並び)
