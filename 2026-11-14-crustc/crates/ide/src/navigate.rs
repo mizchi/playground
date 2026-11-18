@@ -357,6 +357,12 @@ impl FileIndex {
         self.slim = true;
     }
 
+    /// ライブラリのファイルの本文だけを持つもの (hover / signatureHelp がシグネチャと doc コメントを読むのに使う。定義は
+    /// もとの索引のものを使うので、字句の列も定義も作らない)
+    pub fn text_only(&self, text: String) -> FileIndex {
+        FileIndex { text, lib: self.lib, in_src: self.in_src, krate: self.krate, module: self.module.clone(), defs: vec![], toks: vec![], idents: FxMap::default(), uses: vec![], use_at: vec![], macros: vec![], use_syms: vec![], slim: false, names: vec![], impls: vec![], derives: vec![], inactive: vec![], features: None }
+    }
+
     /// slim なファイルを本文から作り直したもの (モジュール・クレートは同じ)
     pub fn reload(&self, text: String) -> FileIndex {
         let mut f = FileIndex::new(text, self.module.clone());
@@ -1759,27 +1765,118 @@ fn exit_points(f: &FileIndex, file: usize, off: usize) -> Option<Vec<Loc>> {
             out.push(Loc { file, start: at, end: f.toks[q].2 as usize });
         }
     }
-    // (最後の式: 閉じ括弧の前が `;` でなければ。その文の始め (深さ 0 の `;` / `{` / `}` の後) から)
-    if close < n && close > open + 1 && !f.sym(close - 1, b';') {
-        let mut s = close - 1;
-        let mut dd = 0;
-        while s > open + 1 {
-            if f.sym(s, b'}') || f.sym(s, b')') || f.sym(s, b']') {
-                dd += 1;
-            } else if f.sym(s, b'{') || f.sym(s, b'(') || f.sym(s, b'[') {
-                dd -= 1;
+    // (最後の式: match / if / ブロックなら中の腕・ブロックの最後の式をたどる)
+    block_tails(f, file, open, close, &mut out);
+    Some(out)
+}
+
+/// トークン j の開き括弧に対応する閉じ括弧
+fn close_of(f: &FileIndex, j: usize) -> usize {
+    let mut d = 0;
+    let mut q = j;
+    while q < f.toks.len() {
+        if f.sym(q, b'{') || f.sym(q, b'(') || f.sym(q, b'[') {
+            d += 1;
+        } else if f.sym(q, b'}') || f.sym(q, b')') || f.sym(q, b']') {
+            d -= 1;
+            if d == 0 {
+                return q;
             }
-            if dd == 0 && (f.sym(s - 1, b';') || (f.sym(s - 1, b'}') && !f.sym(s, b'.') && !f.ident(s) || f.ident(s) && f.sym(s - 1, b'}') && !matches!(f.tok(s), "else"))) {
-                break;
-            }
-            s -= 1;
         }
+        q += 1;
+    }
+    f.toks.len().saturating_sub(1)
+}
+
+/// ブロック `{ .. }` (open..close) の最後の式 (の出口) を out に足す
+fn block_tails(f: &FileIndex, file: usize, open: usize, close: usize, out: &mut Vec<Loc>) {
+    if close >= f.toks.len() || close <= open + 1 || f.sym(close - 1, b';') {
+        return;
+    }
+    // (最後の文の始め: 深さ 0 で前が `;` か、ブロックの式 `}` の後 (`.` / `else` が続かない))
+    let mut s = close - 1;
+    let mut dd = 0;
+    while s > open + 1 {
+        if f.sym(s, b'}') || f.sym(s, b')') || f.sym(s, b']') {
+            dd += 1;
+        } else if f.sym(s, b'{') || f.sym(s, b'(') || f.sym(s, b'[') {
+            dd -= 1;
+        }
+        if dd == 0 && (f.sym(s - 1, b';') || (f.sym(s - 1, b'}') && !f.sym(s, b'.') && !f.sym(s, b'?') && !(f.ident(s) && f.tok(s) == "else"))) {
+            break;
+        }
+        s -= 1;
+    }
+    expr_tails(f, file, s, close - 1, out);
+}
+
+/// 式 (トークン s..=e) の出口: match の腕・if / else のブロック・ブロックならその中の最後の式、ほかは式そのもの
+fn expr_tails(f: &FileIndex, file: usize, s: usize, e: usize, out: &mut Vec<Loc>) {
+    let whole = |out: &mut Vec<Loc>| {
         let a = f.toks[s].1 as usize;
         if !out.iter().any(|l| l.start == a) {
-            out.push(Loc { file, start: a, end: f.toks[close - 1].2 as usize });
+            out.push(Loc { file, start: a, end: f.toks[e].2 as usize });
         }
+    };
+    if f.sym(s, b'{') && close_of(f, s) == e {
+        block_tails(f, file, s, e, out);
+    } else if f.ident(s) && f.tok(s) == "match" {
+        // (腕: `pat => 式,` / `pat => { .. }`)
+        let mut b = s + 1;
+        while b < e && !(f.sym(b, b'{') && !(b >= 1 && f.ident(b - 1) && f.tok(b - 1).starts_with(|c: char| c.is_ascii_uppercase()))) {
+            b += 1;
+        }
+        if b >= e || close_of(f, b) != e {
+            return whole(out);
+        }
+        let mut q = b + 1;
+        while q < e {
+            // (`=>` を探して、その後の腕の式の終わり (深さ 0 の `,` か、閉じ括弧の前))
+            if f.sym(q, b'=') && f.sym(q + 1, b'>') {
+                let a = q + 2;
+                let mut z = a;
+                let mut dd = 0;
+                while z < e {
+                    if f.sym(z, b'{') || f.sym(z, b'(') || f.sym(z, b'[') {
+                        dd += 1;
+                    } else if f.sym(z, b'}') || f.sym(z, b')') || f.sym(z, b']') {
+                        dd -= 1;
+                    }
+                    if dd == 0 && (f.sym(z + 1, b',') || z + 1 == e || (f.sym(z, b'}') && f.sym(a, b'{'))) {
+                        break;
+                    }
+                    z += 1;
+                }
+                if a <= z && z < e {
+                    expr_tails(f, file, a, z, out);
+                }
+                q = z + 1;
+            } else {
+                q += 1;
+            }
+        }
+    } else if f.ident(s) && f.tok(s) == "if" {
+        // (`if c { A } else if d { B } else { C }`: 各ブロック)
+        let mut q = s + 1;
+        let mut any = false;
+        while q <= e {
+            if f.sym(q, b'{') {
+                let c = close_of(f, q);
+                block_tails(f, file, q, c, out);
+                any = true;
+                q = c + 1;
+                if !(q <= e && f.ident(q) && f.tok(q) == "else") {
+                    break;
+                }
+            }
+            q += 1;
+        }
+        if !any {
+            whole(out);
+        }
+    } else {
+        whole(out);
     }
-    Some(out)
 }
 
 fn references_in(ws: &[&FileIndex], file: usize, off: usize, include_decl: bool, load: Load, only: Option<usize>) -> Vec<Loc> {

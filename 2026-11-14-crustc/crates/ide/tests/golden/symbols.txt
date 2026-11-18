@@ -355,6 +355,7 @@ Macro paren_mac [1710..1743] name 1723..1732 macro_rules!
 Macro brack_mac [1744..1777] name 1757..1766 macro_rules!
 Macro m2 [1778..1810] name 1788..1790 macro
 Macro m3 [1811..1840] name 1821..1823 macro
+Static TL [1870..1888] name 1877..1879 u8
 Module outer [1891..2017] name 1895..1900 
   Module mid [1907..1999] name 1915..1918 
     Function leaf [1929..1993] name 1936..1940 fn leaf<'a>(s: &'a str) -> &'a str
@@ -413,6 +414,7 @@ flat paren_mac in "" lsp=12
 flat brack_mac in "" lsp=12
 flat m2 in "" lsp=12
 flat m3 in "" lsp=12
+flat TL in "" lsp=14
 flat outer in "" lsp=2
 flat mid in "outer" lsp=2
 flat leaf in "mid" lsp=12

@@ -21,7 +21,7 @@ sym/broken.rs:13:4 after_open -> sym/broken.rs:13:4+10 | refs 1/0 | ```rust⏎br
 sym/broken.rs:13:20 u8 -> - | refs 18/18 | ```rust⏎u8⏎```
 sym/broken.rs:17:1 impl -> - | refs 0/0 | -
 sym/broken.rs:17:6 Ok1 -> sym/broken.rs:2:12+3 | refs 2/1 | ```rust⏎broken⏎pub struct Ok1⏎```
-sym/broken.rs:18:5 fn -> sym/broken.rs:18:8+1 | refs 2/2 [sym/broken.rs:18:5+2 sym/broken.rs:19:9+15] | -
+sym/broken.rs:18:5 fn -> sym/broken.rs:18:8+1 | refs 1/1 [sym/broken.rs:18:5+2] | -
 sym/broken.rs:18:8 m -> sym/broken.rs:18:8+1 | refs 1/0 | ```rust⏎impl Ok1⏎fn m(&self)⏎```
 sym/broken.rs:18:11 self -> - | refs 0/0 | -
 sym/broken.rs:19:9 if -> - | refs 0/0 | -
@@ -308,8 +308,8 @@ sym/odd.rs:103:5 macro -> - | refs 0/0 | -
 sym/odd.rs:103:11 m3 -> sym/odd.rs:103:11+2 | refs 1/0 [sym/odd.rs:103:11+2] | ```rust⏎odd⏎pub macro m3⏎```
 sym/odd.rs:106:1 mac -> sym/odd.rs:93:14+3 | refs 2/1 | ```rust⏎odd⏎macro_rules! mac⏎```
 sym/odd.rs:107:1 thread_local -> - | refs 0/0 | -
-sym/odd.rs:108:5 static -> - | refs 0/0 | -
-sym/odd.rs:108:12 TL -> - | refs 0/0 | -
+sym/odd.rs:108:5 static -> sym/odd.rs:108:12+2 | refs 1/0 [sym/odd.rs:108:12+2] | -
+sym/odd.rs:108:12 TL -> sym/odd.rs:108:12+2 | refs 1/0 | ```rust⏎odd⏎static TL: u8 = 0⏎```
 sym/odd.rs:108:16 u8 -> - | refs 18/18 | ```rust⏎u8⏎```
 sym/odd.rs:110:1 mod -> sym/odd.rs:110:5+5 | refs 1/0 [sym/odd.rs:110:5+5] | -
 sym/odd.rs:110:5 outer -> sym/odd.rs:110:5+5 | refs 1/0 | ```rust⏎odd⏎mod outer⏎```

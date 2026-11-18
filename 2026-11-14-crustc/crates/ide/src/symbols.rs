@@ -480,6 +480,10 @@ impl Scan<'_> {
                     // (マクロの呼び出し `m! { .. }` / `m!(..);` などは読み飛ばす。わからないトークンは 1 つ進める)
                     if self.ident(j) && self.sym(j + 1, b'!') && j + 2 < end && self.t[j + 2].0 == 1 {
                         let c = self.close(j + 2, end);
+                        // (`thread_local! { static X: T = ..; }` の static はアイテム: rust-analyzer はマクロを展開して見る)
+                        if self.is(j, b"thread_local") && self.sym(j + 2, b'{') {
+                            self.items(j + 3, c, false, out);
+                        }
                         if self.sym(c + 1, b';') { c + 2 } else { c + 1 }
                     } else if self.sym(j, b'{') {
                         self.close(j, end) + 1

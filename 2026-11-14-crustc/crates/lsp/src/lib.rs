@@ -304,7 +304,8 @@ impl Server {
             return Some(r);
         }
         let text = std::fs::read_to_string(uri_path(uri)?).ok()?;
-        let r = Rc::new(ws[i].1.reload(text));
+        // (ライブラリのファイルは本文だけ: 参照を探す対象ではなく、hover / signatureHelp がシグネチャを読むだけなので)
+        let r = Rc::new(if ws[i].1.lib { ws[i].1.text_only(text) } else { ws[i].1.reload(text) });
         c.push((uri.clone(), r.clone()));
         let mut total: usize = c.iter().map(|x| x.1.text_len()).sum();
         while total > self.budget && c.len() > 1 {

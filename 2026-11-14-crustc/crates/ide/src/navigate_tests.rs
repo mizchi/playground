@@ -981,5 +981,23 @@ fn exit_points_of_fn() {
     let ex = |p: &str| highlights(&ws, 0, at(src, p, 0), &no).iter().map(|l| src[l.start..l.end].to_string()).collect::<Vec<_>>();
     assert_eq!(ex("fn f"), s(&["fn", "?", "return", "Some(y + 1)"]));
     assert_eq!(ex("fn g"), s(&["fn"]));
-    assert_eq!(ex("fn k"), s(&["fn", "if true { 1 } else { 2 }"]));
+    // (最後の式が if / match なら、その中の各ブロック・各腕の最後の式: rust-analyzer と同じ)
+    assert_eq!(ex("fn k"), s(&["fn", "1", "2"]));
+    let src2 = "fn m(x: u8) -> u8 {\n    match x {\n        0 => 1,\n        1 => { let y = 2; y }\n        _ => match x { 2 => 3, _ => 4 },\n    }\n}\n";
+    let f2 = FileIndex::new(src2.to_string(), vec![]);
+    let w2 = [&f2];
+    let got: Vec<String> = highlights(&w2, 0, 0, &no).iter().map(|l| src2[l.start..l.end].to_string()).collect();
+    assert_eq!(got, s(&["fn", "1", "y", "3", "4"]));
+}
+
+/// `thread_local! { static X: .. }` の static
+#[test]
+fn thread_local_statics() {
+    let src = "thread_local! {\n    /// 覚え\n    static MEMO: RefCell<u8> = RefCell::new(0);\n    pub static OTHER: u8 = 1;\n}\nfn f() { MEMO.with(|m| m); OTHER.with(|o| o); }\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    assert_eq!(def1(&fi, at(src, "MEMO.with", 0)), Some(at(src, "MEMO:", 0)));
+    assert_eq!(def1(&fi, at(src, "OTHER.with", 0)), Some(at(src, "OTHER:", 0)));
+    assert_eq!(references(&ws, 0, at(src, "MEMO:", 0), true, &no).len(), 2);
+    assert!(hover(&ws, 0, at(src, "MEMO.with", 0), &no).unwrap().contains("覚え"));
 }
