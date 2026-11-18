@@ -520,3 +520,89 @@ fn module_scopes() {
     assert_eq!(fi.tok_at(at(src, "()", 2) + 1), None);
 }
 
+
+#[test]
+fn guards_and_arm_edges() {
+    let src = "fn f(o: Option<u8>) -> u8 {
+    match o { Some(x) if g(x, 1) => x, _ => 0 };
+    match o { Some(y) if h([y, 2]) => y, _ => 0 };
+    match o { m::V(z) => z, k!(w) => w, _ => 0 };
+    if o.is_some() { 1 } else { 2 }
+}
+";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let f = &fi;
+    assert_eq!(def1(f, at(src, "x, 1", 0)), Some(at(src, "x) if", 0)));
+    assert_eq!(def1(f, at(src, "y, 2", 0)), Some(at(src, "y) if", 0)));
+    assert_eq!(def1(f, at(src, "x, _", 0)), Some(at(src, "x) if", 0)));
+    assert_eq!(def1(f, at(src, "z, k", 0)), Some(at(src, "z) =>", 0)));
+    let tk = |p: &str| fi.tok_at(at(src, p, 0)).unwrap();
+    assert!(!fi.arm_binding(tk("m::V")));
+    assert!(!fi.arm_binding(tk("k!")));
+    assert!(fi.arm_binding(tk("w) =>")));
+    assert_eq!(fi.guard_arrow(tk("if o.")), None);
+    assert!(fi.guard_arrow(tk("if g")).is_some());
+    let p = |s: &str| fi.toks.iter().position(|t| t.1 as usize == at(src, s, 0)).unwrap();
+    assert_eq!(fi.guard_arrow(tk("if g")), Some(p("=> x,")));
+    assert_eq!(fi.guard_arrow(tk("if h")), Some(p("=> y,")));
+}
+
+#[test]
+fn derive_across_files() {
+    let a = "#[derive(Clone)]\npub struct D;\n";
+    let b = "fn t(d: D) { d.clone(); }\n";
+    let fa = FileIndex::new(a.to_string(), vec![]);
+    let mut fb = FileIndex::new(b.to_string(), vec![]);
+    let at_clone = at(a, "Clone", 0);
+    let want = Some(Loc { file: 0, start: at_clone, end: at_clone + 5 });
+    // (src のファイル・同じクレートのファイルの derive は見える。ほかのクレートの tests の中のものは見えない)
+    assert_eq!(derive_method(&[&fa, &fb], 1, &s(&["D"]), "clone"), want);
+    let mut fa2 = FileIndex::new(a.to_string(), vec![]);
+    fa2.in_src = false;
+    fa2.krate = 3;
+    fb.krate = 3;
+    assert_eq!(derive_method(&[&fa2, &fb], 1, &s(&["D"]), "clone"), want);
+    fb.krate = 4;
+    assert_eq!(derive_method(&[&fa2, &fb], 1, &s(&["D"]), "clone"), None);
+    assert_eq!(derive_method(&[&fa2, &fb], 0, &s(&["D"]), "clone"), want);
+}
+
+#[test]
+fn boundaries() {
+    let src = "macro_rules! m { () => {} }\nfn f(x: u8) { let s = format!(\"{x}\"); }\nmod a { fn g() {} }\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let (a, b) = fi.macros[0];
+    assert!(fi.in_macro_body(a));
+    assert!(fi.in_macro_body(b - 1));
+    assert!(!fi.in_macro_body(b));
+    assert!(!fi.in_macro_body(at(src, "m {", 0)));
+    assert!(fi.in_macro_body(a - 1));
+    // 取り込み `{x}` の両端
+    let xa = at(src, "x}", 0);
+    assert!(fi.capture_at(xa).is_some());
+    assert!(fi.capture_at(xa + 1).is_some());
+    assert!(fi.capture_at(xa - 1).is_none());
+    assert!(fi.capture_at(xa + 2).is_none());
+    assert!(fi.capture_at(at(src, "\"{x", 0)).is_none());
+    // mod の範囲の端
+    let ma = fi.defs.iter().find(|d| d.name == "a").unwrap();
+    assert_eq!(fi.module_at(ma.item_start), s(&["a"]));
+    assert_eq!(fi.module_at(ma.item_end - 1), s(&["a"]));
+    assert_eq!(fi.module_at(ma.item_end), Vec::<String>::new());
+    let ff = fi.defs.iter().find(|d| d.name == "f").unwrap();
+    assert_eq!(fi.enclosing_fn(ff.item_start).map(|d| d.name.as_str()), Some("f"));
+    assert!(fi.enclosing_fn(ff.item_end).is_none());
+    assert_eq!(fi.enclosing_fn(ff.item_end - 1).map(|d| d.name.as_str()), Some("f"));
+    // tok_at: 識別子の終わりの位置もその識別子
+    let g = at(src, "g()", 0);
+    assert_eq!(fi.tok_at(g + 1).map(|k| fi.tok(k)), Some("g"));
+    assert_eq!(fi.tok_at(g - 1).map(|k| fi.tok(k)), Some("fn"));
+}
+
+#[test]
+fn nested_uses() {
+    let src = "use a::{b::{c, d::{e}}, f};\npub(crate) use g::h;\n#[cfg(x)]\nuse i::j;\nfn k() { use l::n; }\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let u: Vec<String> = fi.uses.iter().map(|(a, b)| format!("{a}={}", b.join("::"))).collect();
+    assert_eq!(u, s(&["c=a::b::c", "e=a::b::d::e", "f=a::f", "h=g::h", "j=i::j", "n=l::n"]));
+}
