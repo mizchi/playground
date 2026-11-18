@@ -307,3 +307,80 @@ fn rename_signature_highlight() {
     let r = ask("textDocument/documentHighlight", 3, 8, json!({}));
     assert_eq!(r["result"].as_array().unwrap().len(), 3, "{r}");
 }
+
+/// 型推論 (hover の型) を rust-analyzer の答えと比べる: 繰り返しの要素・クロージャの戻り値からの型引数・関連型の射影・
+/// タプル・ターボフィッシュ・数の型のメソッド (core のマクロの中)。std が要るので、見つからなければ何もしない
+#[test]
+fn type_inference_like_rust_analyzer() {
+    use crustc_lsp::Server;
+    if std::env::var_os("CRUSTC_LSP_NO_STD").is_some() || std::process::Command::new("rustc").args(["--print", "sysroot"]).output().map(|o| !o.status.success()).unwrap_or(true) {
+        return;
+    }
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lsp_types");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"ty\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    let text = "pub struct D { pub name: String, pub n: u8 }\npub fn f(ws: &[&D], uses: Vec<(String, Vec<String>)>, v: Vec<D>, o: Option<D>, r: Result<D, String>) {\n    let a = uses.iter().find(|u| u.0 == \"x\");\n    let b = a.map(|u| u.1[0].as_str());\n    let c = ws.get(0);\n    let d = c.and_then(|w| w.name.chars().next());\n    let e = v.iter().enumerate().filter(|(i, x)| x.n > 0 && *i > 0).count();\n    let g = v.iter().map(|x| x.n).max();\n    let h = 3u8.wrapping_sub(1);\n    let k = v.first();\n    let l = uses[0].0.len();\n    let m = o.as_ref().map(|x| &x.name);\n    let p = v.iter().rev().next();\n    let q: Vec<u8> = v.iter().map(|x| x.n).collect();\n    let s = r.as_ref().ok();\n    let t = v.len().checked_sub(1);\n    let w = uses.iter().map(|u| &u.1).flatten().count();\n    let y = v.iter().filter_map(|x| x.name.chars().next()).last();\n    let z = k.map(|x| x.n.count_ones());\n}\npub fn g(m: std::collections::HashMap<String, Vec<u8>>, s: &str, v: Vec<D>) -> Option<u8> {\n    let a1 = m.iter().map(|(k, x)| (k.len(), x.len())).next();\n    let a2 = m.get(\"x\").map(|x| x.len());\n    let a3 = s.split(',').map(|p| p.trim()).collect::<Vec<_>>();\n    let a4 = s.chars().rev().enumerate().last();\n    let a5 = v.iter().map(|x| x.n as u32).sum::<u32>();\n    let a6 = m.values().flatten().copied().max();\n    let a7 = s.parse::<u8>().ok();\n    let a8 = v.iter().position(|x| x.n == 0);\n    let a9 = m.keys().cloned().collect::<Vec<String>>();\n    let b1 = s.lines().next().unwrap_or(\"\");\n    let b2 = v.iter().find_map(|x| x.name.find('a'));\n    let b3 = 1u32.saturating_add(2).leading_zeros();\n    let b4 = (1i64).abs().pow(2);\n    let b5 = v.iter().zip(s.bytes()).map(|(x, c)| x.n + c).max();\n    let b6 = m.into_iter().filter(|(k, _)| !k.is_empty()).map(|(_, x)| x).next();\n    let c1 = m.iter();\n    let c2 = m.iter().map(|(k, x)| k.len());\n    let c3 = m.iter().map(|(k, x)| (k.len(), 1u8));\n    let c4 = m.iter().map(|e| e.0.len());\n    let c5 = m.iter().map(|(k, x)| x.len());\n    let c6 = m.iter().map(|(aa, bb)| bb.len());\n    let c7 = m.iter().map(|(aa, bb)| bb);\n    None\n}\n";
+    std::fs::write(root.join("src/lib.rs"), text).unwrap();
+    let uri_root = format!("file://{}", root.display());
+    let mut srv = Server::new();
+    srv.handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": uri_root}}).to_string());
+    let uri = format!("{uri_root}/src/lib.rs");
+    srv.handle(&json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {"uri": uri, "languageId": "rust", "version": 1, "text": text}}}).to_string());
+    // (rust-analyzer の hover の型)
+    let want: &[(&str, &str)] = &[
+        ("a", "Option<&(String, Vec<String>)>"),
+        ("b", "Option<&str>"),
+        ("c", "Option<&&D>"),
+        ("d", "Option<char>"),
+        ("e", "usize"),
+        ("g", "Option<u8>"),
+        ("h", "u8"),
+        ("k", "Option<&D>"),
+        ("l", "usize"),
+        ("m", "Option<&String>"),
+        ("p", "Option<&D>"),
+        ("q", "Vec<u8>"),
+        ("s", "Option<&D>"),
+        ("t", "Option<usize>"),
+        ("w", "usize"),
+        ("y", "Option<char>"),
+        ("z", "Option<u32>"),
+        ("a1", "Option<(usize, usize)>"),
+        ("a2", "Option<usize>"),
+        ("a3", "Vec<&str>"),
+        ("a4", "Option<(usize, char)>"),
+        ("a5", "u32"),
+        ("a6", "Option<u8>"),
+        ("a7", "Option<u8>"),
+        ("a8", "Option<usize>"),
+        ("a9", "Vec<String>"),
+        ("b1", "&str"),
+        ("b2", "Option<usize>"),
+        ("b3", "u32"),
+        ("b4", "i64"),
+        ("b5", "Option<u8>"),
+        ("b6", "Option<Vec<u8>>"),
+        ("c1", "Iter<'_, String, Vec<u8>>"),
+        ("c2", "Map<Iter<'_, String, Vec<u8>>, impl FnMut((&String, &Vec<u8>)) -> usize>"),
+        ("c3", "Map<Iter<'_, String, Vec<u8>>, impl FnMut((&String, &Vec<u8>)) -> (usize, u8)>"),
+        ("c4", "Map<Iter<'_, String, Vec<u8>>, impl FnMut((&String, &Vec<u8>)) -> usize>"),
+        ("c5", "Map<Iter<'_, String, Vec<u8>>, impl FnMut((&String, &Vec<u8>)) -> usize>"),
+        ("c6", "Map<Iter<'_, String, Vec<u8>>, impl FnMut((&String, &Vec<u8>)) -> usize>"),
+        ("c7", "Map<Iter<'_, String, Vec<u8>>, impl FnMut((&String, &Vec<u8>)) -> &Vec<u8>>")
+    ];
+    let mut id = 10;
+    let mut bad = vec![];
+    for (name, ty) in want {
+        let (li, l) = text.lines().enumerate().find(|(_, l)| l.trim_start().starts_with(&format!("let {name} ")) || l.trim_start().starts_with(&format!("let {name}:"))).unwrap();
+        let ch = l.find(&format!("let {name}")).unwrap() + 4;
+        id += 1;
+        let r = srv.handle(&json!({"jsonrpc": "2.0", "id": id, "method": "textDocument/hover", "params": {"textDocument": {"uri": uri}, "position": {"line": li, "character": ch}}}).to_string());
+        let r: Value = serde_json::from_str(&r[0]).unwrap();
+        let h = r["result"]["contents"]["value"].as_str().unwrap_or("").to_string();
+        if !h.contains(&format!("{name}: {ty}")) {
+            bad.push(format!("{name}: want {ty}, got {h:?}"));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}

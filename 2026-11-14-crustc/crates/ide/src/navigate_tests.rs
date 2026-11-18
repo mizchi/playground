@@ -941,12 +941,13 @@ fn closure_params_from_receivers() {
     let fi = FileIndex::new(src.to_string(), vec![]);
     let ws = [&fi, &lib];
     let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap();
-    assert!(ty("d| d.a").contains("d: &D"), "{}", ty("d| d.a"));
-    assert!(ty("e| e").contains("e: D"), "{}", ty("e| e"));
+    // (`iter()` の要素は &D、filter の引数はその参照: rust-analyzer と同じ)
+    assert!(ty("d| d.a").contains("d: &&D"), "{}", ty("d| d.a"));
+    assert!(ty("e| e").contains("e: &D"), "{}", ty("e| e"));
     assert!(ty("g| {").contains("g: D"), "{}", ty("g| {"));
     assert!(ty("x| x").contains("x: D"), "{}", ty("x| x"));
     assert!(ty("s| s").contains("s: String"), "{}", ty("s| s"));
-    assert!(ty("h| acc").contains("h: D"), "{}", ty("h| acc"));
+    assert!(ty("h| acc").contains("h: &D"), "{}", ty("h| acc"));
     assert!(!ty("acc, h").contains(':'), "{}", ty("acc, h"));
     // d.a のフィールド・e.get() のメソッドの定義
     assert_eq!(definition(&ws, 0, at(src, "a > 0", 0)).first().map(|l| l.start), Some(at(src, "a: u8", 0)));
@@ -1000,4 +1001,67 @@ fn thread_local_statics() {
     assert_eq!(def1(&fi, at(src, "OTHER.with", 0)), Some(at(src, "OTHER:", 0)));
     assert_eq!(references(&ws, 0, at(src, "MEMO:", 0), true, &no).len(), 2);
     assert!(hover(&ws, 0, at(src, "MEMO.with", 0), &no).unwrap().contains("覚え"));
+}
+
+#[test]
+fn fn_bounds_of_signatures() {
+    let b = |s: &str| fn_bounds(s).into_iter().map(|(i, f, r)| format!("{i}:{f}:{r}")).collect::<Vec<_>>();
+    assert_eq!(b("pub fn map<U, F>(self, f: F) -> Option<U> where F: FnOnce(T) -> U"), s(&["0:F:U"]));
+    assert_eq!(b("fn map<B, F>(self, f: F) -> Map<Self, F> where Self: Sized, F: FnMut(Self::Item) -> B,"), s(&["0:F:B"]));
+    assert_eq!(b("pub const fn and_then<U, F: [const] FnOnce(T) -> Option<U> + [const] Destruct>(self, f: F) -> Option<U>"), s(&["0:F:Option<U>"]));
+    // (`init: B` は型引数そのものの引数: 印は "=")
+    assert_eq!(b("fn fold<B, F>(mut self, init: B, f: F) -> B where F: FnMut(B, Self::Item) -> B"), s(&["0:B:=", "1:F:B"]));
+    assert_eq!(b("fn for_each<F: FnMut(Self::Item)>(self, f: F)"), s(&["0:F:()"]));
+    assert_eq!(b("pub fn unwrap_or_else(self, op: impl FnOnce(E) -> T) -> T"), s(&["0::T"]));
+    assert_eq!(b("fn find<P>(&mut self, predicate: P) -> Option<Self::Item> where P: FnMut(&Self::Item) -> bool"), s(&["0:P:bool"]));
+    assert_eq!(b("fn len(&self) -> usize"), Vec::<String>::new());
+}
+
+/// 繰り返しの要素の型・射影の置き換え・タプル
+#[test]
+fn iterator_items_and_projections() {
+    assert_eq!(iter_item("Iter<'_, D>").as_deref(), Some("&D"));
+    assert_eq!(iter_item("Map<Iter<'_, D>, impl FnMut() -> u8>").as_deref(), Some("u8"));
+    assert_eq!(iter_item("Enumerate<Iter<'_, D>>").as_deref(), Some("(usize, &D)"));
+    assert_eq!(iter_item("FilterMap<Iter<'_, D>, impl FnMut() -> Option<char>>").as_deref(), Some("char"));
+    assert_eq!(iter_item("Rev<Chars<'_>>").as_deref(), Some("char"));
+    assert_eq!(iter_item("Cloned<Iter<'_, u8>>").as_deref(), Some("u8"));
+    assert_eq!(iter_item("Zip<IntoIter<u8>, Range<usize>>").as_deref(), Some("(u8, usize)"));
+    assert_eq!(iter_item("Iter<'_, K, V>").as_deref(), Some("(&K, &V)"));
+    assert_eq!(iter_item("&Vec<D>").as_deref(), Some("&D"));
+    assert_eq!(iter_item("Flatten<Iter<'_, Vec<u8>>>").as_deref(), Some("&u8"));
+    assert_eq!(iter_item("Foo<u8>"), None);
+    assert_eq!(norm_proj("Option<Map<Iter<'_, D>, impl FnMut() -> u8>::Item>"), "Option<u8>");
+    assert_eq!(norm_proj("Option<<Rev<Iter<'_, D>> as Iterator>::Item>"), "Option<&D>");
+    assert_eq!(norm_proj("Option<X::Item>"), "Option<X::Item>");
+    assert_eq!(tuple_items("(String, Vec<(u8, u8)>)"), Some(s(&["String", "Vec<(u8, u8)>"])));
+    let mut b = vec![];
+    unify("Option<U>", "Option<char>", &s(&["U"]), &mut b);
+    assert_eq!(b, vec![("U".to_string(), "char".to_string())]);
+}
+
+/// タプルの添字の後の添字・メソッド (`u.1[0].as_str()`) とクロージャの戻り値からの型引数 (`a.map(|u| ..)`)
+#[test]
+fn tuple_index_and_closure_returns() {
+    let lib = FileIndex::library("pub struct String;\nimpl String { pub fn as_str(&self) -> &str { todo!() } }\npub enum Option<T> { Some(T), None }\nimpl<T> Option<T> { pub fn map<U, F>(self, f: F) -> Option<U> where F: FnOnce(T) -> U { todo!() } }\n".to_string(), s(&["x"]));
+    let src = "fn f(a: Option<&(String, Vec<String>)>, u: &(String, Vec<String>)) {\n    let b = a.map(|u| u.1[0].as_str());\n    let c = u.1[0].as_str();\n    let d = u.1[0];\n    let e = u.1;\n    let g = a.map(|u| &u.0);\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi, &lib];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap();
+    for (p, want) in [("b =", "b: Option<&str>"), ("c =", "c: &str"), ("d =", "d: String"), ("e =", "e: Vec<String>"), ("g =", "g: Option<&String>")] {
+        assert!(ty(p).contains(want), "{p}: {}", ty(p));
+    }
+}
+
+/// HashMap の繰り返しとタプルのパターン・タプルの式 (`m.iter().map(|(k, x)| (k.len(), x.len())).next()`)
+#[test]
+fn map_iteration_and_tuples() {
+    let lib = FileIndex::library("pub struct HashMap<K, V> { k: K, v: V }\nimpl<K, V> HashMap<K, V> { pub fn iter(&self) -> Iter<'_, K, V> { todo!() } }\npub struct Iter<'a, K, V> { k: &'a K, v: V }\npub struct Map<I, F> { i: I, f: F }\npub trait Iterator { type Item; fn map<B, F>(self, f: F) -> Map<Self, F> where F: FnMut(Self::Item) -> B { todo!() } fn next(&mut self) -> Option<Self::Item>; }\npub struct String;\nimpl String { pub fn len(&self) -> usize { 0 } }\n".to_string(), s(&["x"]));
+    let src = "fn f(m: HashMap<String, String>) {\n    let b = m.iter().map(|(k, x)| k).next();\n    let c = m.iter().map(|(k, x)| (k.len(), x.len()));\n    let d = c.next();\n    let e = (1u8, \"a\");\n    let g = (2u16);\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi, &lib];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap();
+    for (p, want) in [("b =", "b: Option<&String>"), ("d =", "d: Option<(usize, usize)>"), ("k)", "k: &String"), ("x)", "x: &String"), ("e =", "e: (u8, &str)"), ("g =", "g: u16")] {
+        assert!(ty(p).contains(want), "{p}: {}", ty(p));
+    }
 }

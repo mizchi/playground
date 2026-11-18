@@ -467,6 +467,28 @@ impl Scan<'_> {
                         e += 1;
                     }
                     out.push(named(SymKind::Macro, j + 2, e, String::from("macro_rules!"), vec![]));
+                    // (core の数の型のメソッドはマクロ `uint_impl!` / `int_impl!` の本体にある: その腕の中のアイテムを
+                    // `impl __uint` / `impl __int` のメンバにする (navigate が u8 .. / i8 .. の持ち主に足す))
+                    let mname = self.text(j + 2).to_vec();
+                    if matches!(mname.as_slice(), b"uint_impl" | b"int_impl") && self.sym(j + 3, b'{') {
+                        let mut ch = vec![];
+                        let mut q = j + 4;
+                        while q < e {
+                            if self.sym(q, b'=') && self.sym(q + 1, b'>') && self.sym(q + 2, b'{') {
+                                let c = self.close(q + 2, e);
+                                self.items(q + 3, c, true, &mut ch);
+                                q = c + 1;
+                            } else {
+                                q += 1;
+                            }
+                        }
+                        for s in &mut ch {
+                            s.in_macro = true;
+                        }
+                        let owner = if mname.as_slice() == b"uint_impl" { "__uint" } else { "__int" };
+                        let (na, nb) = (self.t[j + 2].1, self.t[j + 2].2);
+                        out.push(Symbol { name: format!("impl {owner}"), kind: SymKind::Impl, detail: String::new(), start: self.t[start].1, end: self.t[e.min(self.t.len() - 1)].2, name_start: na, name_end: nb, children: ch, in_macro: true });
+                    }
                     e + 1
                 }
                 // (宣言マクロ 2.0 `macro name(..) { .. }` / `macro name { .. }`: std の derive など)
