@@ -3532,6 +3532,13 @@ fn binding_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<
         }
         if let Some(e) = expr_end(f, b + 2, false) {
             if let Some(t) = expr_type(ws, file, e, depth + 1) {
+                // (`let mut v = vec![];` / `Vec::new()` のように要素が分からないもの: 後の `v.push(x)` / `v = EXPR` から)
+                let bare = targs(&t).is_empty() && matches!(type_head(&t).as_str(), "Vec" | "VecDeque" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "Option");
+                if t.contains('_') || bare {
+                    if let Some(r) = refine_by_use(ws, file, b, &t, depth) {
+                        return Some(r);
+                    }
+                }
                 // (`let p = &v["x"];` / `&mut x`: 前の参照。式の終わりの型がそのまま全体の型のとき (`&a.b` / `&v[i]`))
                 if f.sym(b + 2, b'&') && !f.sym(b + 3, b'&') && !t.starts_with('&') && (b + 3..e).all(|q| !(f.toks[q].0 == 1 && b"+-*/%<>=!|^".contains(&f.text.as_bytes()[f.toks[q].1 as usize]) && !f.sym(q, b'>'))) {
                     return Some(if f.tok(b + 3) == "mut" { format!("&mut {t}") } else { format!("&{t}") });
@@ -3540,7 +3547,14 @@ fn binding_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<
             }
         }
     }
-    f.local_type(b)
+    let t = f.local_type(b)?;
+    // (`let mut v = Vec::new();`: 型引数のない集まりは後の使い方から)
+    if targs(&t).is_empty() && matches!(t.as_str(), "Vec" | "VecDeque" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet") {
+        if let Some(r) = refine_by_use(ws, file, b, &t, depth) {
+            return Some(r);
+        }
+    }
+    Some(t)
 }
 
 /// パターンの中の束縛 b の型: `E::V(.., b, ..)` の V の宣言の、その位置の型。照合する式の型が分かれば型引数を当てる
@@ -4853,6 +4867,94 @@ fn strip_lifetimes(t: &str) -> String {
     out
 }
 
+/// 束縛 b の型 t (`Vec<_>` など、分からない所のあるもの) を、同じ関数の中の後の使い方から決める: `v.push(x)` /
+/// `v.insert(k, x)` (Vec の要素) と、`v = EXPR;` (代入した式の型)
+fn refine_by_use(ws: &[&FileIndex], file: usize, b: usize, t: &str, depth: u32) -> Option<String> {
+    let f = ws[file];
+    if depth > 16 {
+        return None;
+    }
+    let name = f.tok(b);
+    let fe = f.enclosing_fn(f.toks[b].1 as usize)?.item_end;
+    for &q in f.idents.get(name)? {
+        let q = q as usize;
+        if q <= b || (f.toks[q].1 as usize) >= fe || f.local(q, name) != Some(b) {
+            continue;
+        }
+        // (`v.push(x)`)
+        if f.sym(q + 1, b'.') && f.ident(q + 2) && f.tok(q + 2) == "push" && f.sym(q + 3, b'(') && type_head(t) == "Vec" {
+            let c = close_of(f, q + 3);
+            if c > q + 4 {
+                if let Some(et) = expr_type(ws, file, c - 1, depth + 1) {
+                    return Some(format!("Vec<{et}>"));
+                }
+            }
+        }
+        // (分かった型か: `_` も、型の定義のない 1 文字の名前 (残った型引数 `B`) も含まない)
+        let known = |x: &String| {
+            !x.contains('_')
+                && !x.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| w.len() == 1 && w.starts_with(|c: char| c.is_ascii_uppercase()) && !named(ws, file, w).iter().any(|(_, d)| matches!(d.kind, SymKind::Struct | SymKind::Enum | SymKind::TypeAlias | SymKind::Union)))
+        };
+        // (`v = EXPR;`)
+        if f.sym(q + 1, b'=') && !f.sym(q + 2, b'=') && !(q >= 1 && (f.sym(q - 1, b'.') || f.ident(q - 1) && f.tok(q - 1) == "let")) {
+            if let Some(e) = expr_end(f, q + 2, false) {
+                if let Some(et) = expr_type(ws, file, e, depth + 1).filter(known) {
+                    return Some(et);
+                }
+            }
+        }
+        // (`f(.., &mut v, ..)` / `x.m(.., &mut v)`: 呼んだ関数の引数の型 (ワークスペースの関数))
+        if q >= 2 && f.sym(q - 2, b'&') && f.tok(q - 1) == "mut" && (f.sym(q + 1, b',') || f.sym(q + 1, b')')) {
+            if let Some(pt) = arg_param_type(ws, file, q - 2) {
+                let pt = pt.trim_start_matches("&mut ").trim().to_string();
+                if type_head(&pt) == type_head(t) && known(&pt) {
+                    return Some(pt);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 呼び出しの引数 (始めのトークン a) を受け取る、呼んだ関数の引数の型 (ワークスペースの関数のシグネチャから。self は数えない)
+fn arg_param_type(ws: &[&FileIndex], file: usize, a: usize) -> Option<String> {
+    let f = ws[file];
+    // (囲む `(` と、何番目の引数か)
+    let mut j = a;
+    let mut d = 0;
+    let mut idx = 0;
+    loop {
+        j = j.checked_sub(1)?;
+        if f.sym(j, b')') || f.sym(j, b']') || f.sym(j, b'}') {
+            d += 1;
+        } else if f.sym(j, b'(') || f.sym(j, b'[') || f.sym(j, b'{') {
+            if d == 0 {
+                break;
+            }
+            d -= 1;
+        } else if d == 0 && f.sym(j, b',') {
+            idx += 1;
+        } else if d == 0 && f.sym(j, b';') {
+            return None;
+        }
+    }
+    if !f.sym(j, b'(') || j == 0 || !f.ident(j - 1) {
+        return None;
+    }
+    let l = *def_at(ws, file, f.toks[j - 1].1 as usize).first()?;
+    let w = ws[l.file];
+    if w.slim {
+        return None;
+    }
+    let d = w.defs.iter().find(|d| d.start == l.start && matches!(d.kind, SymKind::Function | SymKind::Method))?;
+    let sig = signature(w.text.get(d.item_start..d.item_end)?, d.kind);
+    let o = sig.find('(')?;
+    let ps = tuple_items(&format!("({})", &sig[o + 1..sig.rfind(')')?]))?;
+    let ps: Vec<&String> = ps.iter().filter(|p| !p.trim_start_matches('&').trim_start_matches("mut ").trim_start().starts_with("self")).collect();
+    let p = ps.get(idx)?;
+    Some(p.split_once(':')?.1.trim().to_string())
+}
+
 /// パターンの中の道筋の 1 段 (外から内へ当てはめる)
 #[derive(Debug, Clone)]
 enum PatStep {
@@ -4980,6 +5082,10 @@ fn pattern_type(ws: &[&FileIndex], file: usize, b: usize, depth: u32) -> Option<
         }
     }
     if steps.is_empty() {
+        // (match の腕のパターンが束縛だけ `s if .. =>` / `n =>`: 照合する式の型)
+        if root == 'a' && f.sym(b + 1, b'=') && f.sym(b + 2, b'>') || root == 'a' && f.ident(b + 1) && f.tok(b + 1) == "if" {
+            return scrutinee_type(ws, file, b, depth + 1);
+        }
         return None;
     }
     steps.reverse();

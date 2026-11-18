@@ -1208,3 +1208,16 @@ fn if_let_rhs_scope() {
     assert_eq!(def1(&fi, at(src, "req; }", 0)), Some(at(src, "req), Some(bh", 0)));
     assert_eq!(def1(&fi, at(src, "x) {}", 0)), None);
 }
+
+/// 腕の頭の束縛 (`s if .. =>`) と、要素の分からない Vec の後の使い方
+#[test]
+fn arm_bindings_and_refined_vecs() {
+    let src = "struct A;\nfn g() -> Vec<A> { vec![] }\nfn f(x: Option<u8>) {\n    match x { s if s.is_some() => {}, _ => {} }\n    let mut v = vec![];\n    v.push(A);\n    let mut w = Vec::new();\n    w = g();\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap();
+    for (p, want) in [("s if", "s: Option<u8>"), ("v =", "v: Vec<A>"), ("w =", "w: Vec<A>")] {
+        assert!(ty(p).contains(want), "{p}: {}", ty(p));
+    }
+}
+
