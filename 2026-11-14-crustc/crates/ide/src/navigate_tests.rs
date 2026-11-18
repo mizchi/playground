@@ -1221,3 +1221,31 @@ fn arm_bindings_and_refined_vecs() {
     }
 }
 
+
+#[test]
+fn arm_bindings_after_bare_bodies() {
+    let src = "struct O { b: bool }\nfn f(x: Option<u8>, o: &mut O) {\n    match x { None => o.b = true, s if s.is_some() => {}, _ => {} }\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let h = hover(&ws, 0, at(src, "s if", 0), &no).unwrap();
+    assert!(h.contains("s: Option<u8>"), "{h}");
+}
+
+#[test]
+fn alias_receivers_and_matches_guards() {
+    let src = "mod p {\n    pub struct Path { pub segs: Vec<u8> }\n    pub enum Ty { Path(Option<u8>, Path) }\n}\nuse p::Ty as PTy;\nenum E { M(u8, String) }\ntype Cur = Option<(usize, Vec<u8>)>;\nstruct L { cur: Cur }\nimpl<T> Option<T> { fn as_mut(&mut self) -> Option<&mut T> { None } fn unwrap(self) -> T { loop {} } }\nfn f(t: &PTy, e: E, l: &mut L) {\n    match t { PTy::Path(_, pa) => {} }\n    let _ = matches!(e, E::M(_, g) if g.is_empty());\n    let it = l.cur.as_mut().unwrap();\n}\n";
+    let fi = FileIndex::new(src.to_string(), vec![]);
+    let ws = [&fi];
+    let ty = |p: &str| hover(&ws, 0, at(src, p, 0), &no).unwrap_or_default();
+    for (p, want) in [("pa)", "pa: Path"), ("g.is_empty", "g: String"), ("it =", "it: &mut (usize, Vec<u8>)")] {
+        assert!(ty(p).contains(want), "{p}: {}", ty(p));
+    }
+}
+
+#[test]
+fn qualified_projections_are_not_holes() {
+    assert!(!has_proj("&std::cell::RefCell<Option<u8>>"));
+    assert!(has_proj("Option<I::Item>"));
+    assert!(has_proj("Self::Output"));
+    assert!(has_proj("<A as Tr>::B"));
+}

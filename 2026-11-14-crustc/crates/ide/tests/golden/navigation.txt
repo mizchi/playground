@@ -298,21 +298,21 @@ ws/src/lib.rs:117:17 w -> ws/src/lib.rs:116:9+1 | refs 2/1 | ```rust⏎w: &&str�
 ws/src/lib.rs:117:19 trim -> lib/core/src/str/mod.rs:5:12+4 | refs 2/1 [lib/core/src/str/mod.rs:5:12+4 ws/src/lib.rs:117:19+4] | ```rust⏎impl str⏎pub fn trim(&self) -> &str⏎```
 ws/src/lib.rs:117:26 to_string -> lib/alloc/src/string.rs:32:8+9 | refs 5/4 | ```rust⏎ToString⏎fn to_string(&self) -> String⏎```
 ws/src/lib.rs:118:9 let -> - | refs 0/0 | -
-ws/src/lib.rs:118:13 _old -> ws/src/lib.rs:118:13+4 | refs 1/0 [ws/src/lib.rs:118:13+4] | ```rust⏎_old: Option<V>⏎```
+ws/src/lib.rs:118:13 _old -> ws/src/lib.rs:118:13+4 | refs 1/0 [ws/src/lib.rs:118:13+4] | ```rust⏎_old: Option<usize>⏎```
 ws/src/lib.rs:118:20 t -> ws/src/lib.rs:115:13+1 | refs 4/3 | ```rust⏎t: Table<usize>⏎```
 ws/src/lib.rs:118:22 insert -> lib/std/src/collections/hash/map.rs:10:12+6 | refs 2/1 [lib/std/src/collections/hash/map.rs:10:12+6 ws/src/lib.rs:118:22+6] | ```rust⏎impl HashMap<K, V>⏎pub fn insert(&mut self, k: K, v: V) -> Option<V>⏎```
 ws/src/lib.rs:118:29 k -> ws/src/lib.rs:117:13+1 | refs 2/1 | ```rust⏎k: String⏎```
 ws/src/lib.rs:120:5 if -> - | refs 0/0 | -
 ws/src/lib.rs:120:8 let -> - | refs 0/0 | -
 ws/src/lib.rs:120:12 Some -> lib/core/src/option.rs:8:5+4 | refs 5/4 [lib/core/src/option.rs:8:5+4 ws/src/lib.rs:120:12+4 ws/src/lib.rs:174:12+4 ws/src/lib.rs:174:22+4 ws/src/lib.rs:177:15+4] | ```rust⏎Option⏎Some(T)⏎```⏎⏎---⏎⏎Some value of type `T`.
-ws/src/lib.rs:120:17 v -> ws/src/lib.rs:120:17+1 | refs 2/1 [ws/src/lib.rs:120:17+1 ws/src/lib.rs:121:18+1] | ```rust⏎v: &V⏎```
+ws/src/lib.rs:120:17 v -> ws/src/lib.rs:120:17+1 | refs 2/1 [ws/src/lib.rs:120:17+1 ws/src/lib.rs:121:18+1] | ```rust⏎v: &usize⏎```
 ws/src/lib.rs:120:22 t -> ws/src/lib.rs:115:13+1 | refs 4/3 | ```rust⏎t: Table<usize>⏎```
 ws/src/lib.rs:120:24 get -> lib/std/src/collections/hash/map.rs:13:12+3 | refs 2/1 [lib/std/src/collections/hash/map.rs:13:12+3 ws/src/lib.rs:120:24+3] | ```rust⏎impl HashMap<K, V>⏎pub fn get(&self, k: &K) -> Option<&V>⏎```
 ws/src/lib.rs:120:29 String -> lib/alloc/src/string.rs:2:12+6 | refs 12/11 | ```rust⏎string⏎pub struct String⏎```⏎⏎---⏎⏎A UTF-8–encoded, growable string.
 ws/src/lib.rs:120:37 new -> lib/alloc/src/string.rs:7:18+3 | refs 3/2 [lib/alloc/src/string.rs:7:18+3 ws/src/lib.rs:120:37+3 ws/src/util/text.rs:16:31+3] | ```rust⏎impl String⏎pub const fn new() -> String⏎```
 ws/src/lib.rs:121:9 let -> - | refs 0/0 | -
 ws/src/lib.rs:121:13 _ -> ws/src/lib.rs:121:13+1 | refs 1/0 [ws/src/lib.rs:121:13+1] | ```rust⏎_⏎```
-ws/src/lib.rs:121:18 v -> ws/src/lib.rs:120:17+1 | refs 2/1 | ```rust⏎v: &V⏎```
+ws/src/lib.rs:121:18 v -> ws/src/lib.rs:120:17+1 | refs 2/1 | ```rust⏎v: &usize⏎```
 ws/src/lib.rs:123:5 t -> ws/src/lib.rs:115:13+1 | refs 4/3 | ```rust⏎t: Table<usize>⏎```
 ws/src/lib.rs:126:1 pub -> - | refs 0/0 | -
 ws/src/lib.rs:126:5 fn -> ws/src/lib.rs:126:8+6 | refs 2/2 [ws/src/lib.rs:126:5+2 ws/src/lib.rs:130:5+19] | -
