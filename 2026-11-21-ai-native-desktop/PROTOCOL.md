@@ -63,18 +63,39 @@ README の「宣言的 UI ツリー」を一歩進め、**アクセシビリテ�
 - LLM がそのまま読み書きできる
 - WIT には型が固まってから写す (README の `wit/shell.wit` はその前段のスケッチ)
 
-語彙 (role, action, state) は **AccessKit / WAI-ARIA に揃える**。ワイヤ形式は自前の単純な JSON にし、Rust 側では AccessKit の `TreeUpdate` / `ActionRequest` と相互変換する。こうすると OS の a11y (macOS の NSAccessibility, Linux の AT-SPI, Windows の UIA) にもアダプタ経由でそのまま出せる。VoiceOver や既存の computer use から見える状態も無料で手に入る。
+### 語彙: WAI-ARIA を基準にし、AccessKit は変換先にする
+
+- **role と state は WAI-ARIA の名前を使う** (`button`, `checkbox`, `textbox`, `list`, `listitem` / `checked`, `expanded`, `disabled` ...)。ARIA は Web 標準で、LLM が最もよく知っている語彙なので、UI 生成やツリーの読解の精度が上がる
+- **action は ARIA に定義がない**。そのため AccessKit の `Action` の名前を camelCase で借りる (`click`, `focus`, `blur`, `setValue`, `replaceSelectedText`, `setTextSelection`, `increment`, `decrement`, `expand`, `collapse`, `scrollIntoView`, `showContextMenu`)
+- ARIA にない概念は、少数の拡張 role として明示する (`x-window`, `x-canvas` など)。拡張は `x-` 接頭辞で区別する
+- ワイヤ形式は自前の単純な JSON にする。AccessKit は Rust backend の**外側に付けるアダプタ**としてだけ使い、`TreeUpdate` / `ActionRequest` に変換して OS の a11y (NSAccessibility / AT-SPI / UIA) に出す。外しても全体は動く
+
+| ワイヤ (ARIA 基準) | AccessKit | 備考 |
+|---|---|---|
+| `button` | `Role::Button` | |
+| `checkbox` + `checked: true\|false\|"mixed"` | `Role::CheckBox` + `Toggled` | |
+| `switch` | `Role::Switch` + `Toggled` | |
+| `textbox` + `value` | `Role::TextInput` (複数行は `MultilineTextInput`) | `multiline: true` で区別する |
+| `list` / `listitem` | `Role::List` / `Role::ListItem` | |
+| `tablist` / `tab` / `tabpanel` | `Role::TabList` / `Tab` / `TabPanel` | |
+| `dialog` | `Role::Dialog` | |
+| `x-window` | `Role::Window` | 拡張 |
+| `x-canvas` | `Role::Canvas` | 拡張。ピクセル直描きの逃げ道 |
+| `label` (accessible name) | `label` | ARIA の accname に相当 |
+| `disabled` / `expanded` / `selected` | 同名のプロパティ | |
+
+対応表は実装時に網羅する。ARIA の role で対応が曖昧なもの (`application` など) は使わない。
 
 ### P1: Semantic Tree (app → shell)
 
 ```json
 {"t":"tree-update","app":"todo","focus":"n3",
  "nodes":[
-  {"id":"root","role":"window","label":"Todo","children":["n1","n2"]},
+  {"id":"root","role":"x-window","label":"Todo","children":["n1","n2"]},
   {"id":"n1","role":"list","label":"Tasks","children":["i1","i2"]},
-  {"id":"i1","role":"checkBox","label":"牛乳を買う","toggled":false,"actions":["click"]},
-  {"id":"i2","role":"checkBox","label":"税金","toggled":true,"actions":["click"],"sensitive":true},
-  {"id":"n2","role":"textInput","label":"新しいタスク","value":"","actions":["focus","setValue","replaceSelectedText"]}
+  {"id":"i1","role":"checkbox","label":"牛乳を買う","checked":false,"actions":["click"]},
+  {"id":"i2","role":"checkbox","label":"税金","checked":true,"actions":["click"],"sensitive":true},
+  {"id":"n2","role":"textbox","label":"新しいタスク","value":"","actions":["focus","setValue","replaceSelectedText"]}
  ]}
 ```
 
@@ -96,7 +117,7 @@ README の「宣言的 UI ツリー」を一歩進め、**アクセシビリテ�
 json-render 風。カタログ (`stack`, `card`, `checkbox`, `textField`, `badge` ...) の範囲内で書かせる。
 
 ```json
-{"t":"template","match":{"role":"list","children":{"role":"checkBox"}},
+{"t":"template","match":{"role":"list","children":{"role":"checkbox"}},
  "view":{"type":"card","title":{"bind":"label"},
          "body":{"type":"stack","axis":"vertical","gap":4,
                  "each":{"type":"checkbox","node":{"bind":"$child"}}}}}
