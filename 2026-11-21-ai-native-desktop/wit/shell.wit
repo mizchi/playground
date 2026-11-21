@@ -1,0 +1,105 @@
+// 未検証のスケッチ。wasm-tools での検証はまだしていない。
+package gui:shell@0.1.0;
+
+interface types {
+  type node-id = u64;
+  type window-id = u64;
+
+  /// 操作の主体。全イベント・全アクションに付く
+  enum actor { human, agent }
+
+  record rect { x: s32, y: s32, w: u32, h: u32 }
+}
+
+/// アプリ -> shell: 宣言的 UI ツリーを差分で渡す
+interface ui {
+  use types.{node-id};
+
+  enum axis { horizontal, vertical }
+
+  record canvas-info { width: u32, height: u32 }
+
+  variant node-kind {
+    stack(axis),
+    text(string),
+    button(string),
+    text-field(string),
+    /// ピクセル直描きの逃げ道
+    canvas(canvas-info),
+  }
+
+  record node {
+    id: node-id,
+    kind: node-kind,
+    children: list<node-id>,
+    /// AI / a11y 向けの意味ラベル
+    label: option<string>,
+    /// このノードが受け付けるアクション ("press", "set-text" ...)
+    actions: list<string>,
+    /// 機密度。高いノードは agent からの読み取り/操作に承認が要る
+    sensitive: bool,
+  }
+
+  variant patch {
+    upsert(node),
+    remove(node-id),
+    set-root(node-id),
+  }
+
+  commit: func(patches: list<patch>);
+  blit: func(target: node-id, rgba: list<u8>);
+}
+
+/// shell -> アプリ: ライフサイクルとアクション通知
+interface app {
+  use types.{node-id, actor};
+
+  record action-event {
+    target: node-id,
+    action: string,
+    value: option<string>,
+    by: actor,
+  }
+
+  init: func();
+  on-action: func(ev: action-event);
+}
+
+/// agent -> shell: 意味レベルの操作 API (ピクセル/合成入力ではない)
+interface agent {
+  use types.{node-id, window-id, rect};
+
+  record window-info { id: window-id, title: string, workspace: string, bounds: rect }
+
+  variant step {
+    invoke(tuple<window-id, node-id, string, option<string>>),
+    focus(window-id),
+    move-to-workspace(tuple<window-id, string>),
+    split(tuple<window-id, string>),
+  }
+
+  enum verdict { approved, rejected, auto-approved }
+
+  /// 提案された操作のまとまり。人間がプレビューして承認する
+  resource proposal {
+    describe: func() -> string;
+    /// 承認されるまで待つ (WASI 0.3 なら async func にする)
+    wait: func() -> verdict;
+  }
+
+  list-windows: func() -> list<window-info>;
+  /// UI ツリーを JSON で取得 (sensitive ノードは権限がなければ伏せる)
+  read-tree: func(win: window-id) -> result<string, string>;
+  propose: func(intent: string, steps: list<step>) -> proposal;
+}
+
+/// 通常のアプリ
+world gui-app {
+  import ui;
+  export app;
+}
+
+/// AI ツール (MCP サーバ等) として shell を操作する側
+world agent-tool {
+  import agent;
+}
