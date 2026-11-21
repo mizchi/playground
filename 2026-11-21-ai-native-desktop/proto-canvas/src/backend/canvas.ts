@@ -10,11 +10,12 @@ export interface CanvasBackend {
   ime(state: ImeToHost): void;
   size(): { w: number; h: number };
   focusInput(): void;
+  setCursor(c: string): void;
 }
 
 export interface BackendEvents {
   pointerDown(x: number, y: number): void;
-  pointerMove(x: number): void;
+  pointerMove(x: number, y: number): void;
   pointerUp(): void;
   input(msg: ImeFromHost): void;
   resize(): void;
@@ -70,7 +71,10 @@ export function createCanvasBackend(canvas: HTMLCanvasElement, sink: HTMLTextAre
     e.preventDefault();
     sink.focus({ preventScroll: true });
   });
-  canvas.addEventListener('pointermove', (e) => ev.pointerMove(local(e).x));
+  canvas.addEventListener('pointermove', (e) => {
+    const p = local(e);
+    ev.pointerMove(p.x, p.y);
+  });
   canvas.addEventListener('pointerup', () => ev.pointerUp());
 
   // ---- IME: OS の IME はブラウザの textarea に任せ、結果だけを P5 で shell に渡す ----
@@ -104,6 +108,9 @@ export function createCanvasBackend(canvas: HTMLCanvasElement, sink: HTMLTextAre
       return { w: r.width, h: r.height };
     },
     focusInput: () => sink.focus({ preventScroll: true }),
+    setCursor: (c) => {
+      if (canvas.style.cursor !== c) canvas.style.cursor = c;
+    },
     ime(state) {
       imeEnabled = state.t === 'ime-enable';
       // 変換候補ウィンドウを OS が正しい位置に出せるよう、textarea をキャレットに重ねる
@@ -149,6 +156,10 @@ export function createCanvasBackend(canvas: HTMLCanvasElement, sink: HTMLTextAre
             ctx.beginPath();
             ctx.rect(op[1].x, op[1].y, op[1].w, op[1].h);
             ctx.clip();
+            break;
+          case 'layer':
+            ctx.save();
+            ctx.globalAlpha *= op[1].alpha;
             break;
           case 'pop':
             ctx.restore();

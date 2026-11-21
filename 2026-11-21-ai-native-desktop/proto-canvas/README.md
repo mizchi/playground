@@ -17,7 +17,7 @@
 | P4b 描画 | `src/render.ts`, `src/backend/canvas.ts` | display list → Canvas 2D |
 | P5 IME | `src/backend/canvas.ts` | 隠し textarea に OS の IME を任せる。preedit は表示だけで木に入れず、確定文字列を `replaceSelectedText` にする |
 | veriss への lowering | `src/lower.ts` | View Tree → HTML + CSS + 文字の契約 ([VERISS.md](../VERISS.md)) |
-| タイル | `src/shell.ts` `frame` | 2 枚の横分割。境界をドラッグできる。最小幅を下回ると「はみ出し」を出す |
+| タイル | `src/tiling.ts`, `src/anim.ts`, `src/shell.ts` | 分割ツリー。窓のタイトルバーを掴んで運ぶと分割・入れ替えができる (下記)。境界はドラッグで動かせる。最小幅を下回ると「はみ出し」を出す |
 
 右のパネルでは、次のことができる。
 
@@ -27,6 +27,24 @@
 
 ブラウザのコンソールからは `agent.getTree()` と `agent.propose(intent, steps)` が使える。どちらも MCP の tool にそのまま写せる形にしてある。
 
+## 窓のドラッグ&ドロップ
+
+![ドロップ先のプレビュー](docs/dnd-preview.png)
+
+VS Code のエディタ分割と同じ要領で、タイトルバー (左の ⠿) を掴んで運ぶ。
+
+| 落とす場所 | 結果 |
+|---|---|
+| 別のペーンの端 (各辺から 28% の帯) | そのペーンをその向きに 2 分割し、運んだ窓を入れる |
+| 別のペーンの中央 | 2 つの窓を入れ替える |
+| ワークスペースの外周 (28px の帯) | 全体をその向きに 2 分割し、端に置く |
+| Escape | 取り消す |
+
+- ドラッグ中は、ドロップ先が青い半透明の矩形と「右に分割」などのラベルでプレビューされる。プレビューは、ポインタの位置から広がって現れる。候補が変わると、少し弾むばねで次の候補へ滑る
+- 離すと、すべてのタイルが臨界減衰のばねで新しい位置へ動く。中身は、各フレームでその時点の幅に合わせて配置し直す
+- 分割すると、どれかの窓が自分の最小幅を下回る場合は、プレビューが赤くなる。理由 (「Notes が最小幅 252px を下回る」) が出て、離しても何も変わらない。最小幅は veriss で証明している下限と同じ値 ([VERISS.md](../VERISS.md))
+- アニメーションは時刻を外から渡して進めるので、単体テストで決定的に確かめられる (`test/tiling.test.ts`)
+
 ## 動かし方
 
 ```sh
@@ -35,6 +53,7 @@ pnpm dev          # http://127.0.0.1:8123
 pnpm test         # 単体テスト (node --test、型ストリップで .ts をそのまま実行)
 pnpm typecheck
 pnpm build && pnpm e2e   # Chromium で通し確認。--shots で screenshots/ に保存
+pnpm build && pnpm e2e:dnd   # 窓のドラッグ&ドロップ。--video で screenshots/dnd.webm と dnd.gif を保存
 pnpm build && pnpm veriss-diff   # veriss・Chromium・layout.ts の 3 者照合 (../VERISS.md)
 pnpm veriss-repro        # veriss に報告した Unknown の最小再現
 ```
@@ -43,7 +62,7 @@ Node 24 以上が必要 (`.node-version`)。veriss がそれを要求する。�
 
 ## 結果
 
-- 単体テスト 13 件 (うち veriss の検証 3 件) と E2E 11 件が通る (Node 24、Playwright の Chromium)
+- 単体テスト 22 件 (うち veriss の検証 3 件)、E2E 11 件、ドラッグ&ドロップの E2E 7 件が通る (Node 24、Playwright の Chromium)
 - E2E の IME は、CDP の `Input.imeSetComposition` で実際の composition イベントを起こして確かめた。preedit は木に入らず、確定した `卵` だけが値になる
 - LLM の template の代わりに「カード」template を適用すると、件数が変わっても (3 件 → 5 件) 同じキャッシュに当たる。pin すると再読み込み後も残る
 - 操作を落とす template は、既定レンダラに戻り、理由がパネルに出る

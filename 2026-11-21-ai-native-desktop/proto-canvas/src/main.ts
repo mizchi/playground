@@ -1,4 +1,5 @@
 import { createSettingsApp } from './apps/settings.ts';
+import { createNotesApp } from './apps/notes.ts';
 import { createTodoApp } from './apps/todo.ts';
 import { createCanvasBackend } from './backend/canvas.ts';
 import type { CacheEntry, Storage } from './cache.ts';
@@ -42,13 +43,13 @@ const schedule = () => {
 let measureImpl: Measure = () => 0;
 const backend = createCanvasBackend(canvas, sink, {
   pointerDown: (x, y) => shell.pointerDown(x, y),
-  pointerMove: (x) => shell.pointerMove(x, backend.size().w),
+  pointerMove: (x, y) => shell.pointerMove(x, y),
   pointerUp: () => shell.pointerUp(),
   input: (m) => shell.input(m),
   resize: () => schedule(),
 });
 measureImpl = backend.measure;
-shell = new Shell([createTodoApp(), createSettingsApp()], (s, z, w) => measureImpl(s, z, w), storage);
+shell = new Shell([createTodoApp(), createSettingsApp(), createNotesApp()], (s, z, w) => measureImpl(s, z, w), storage);
 shell.onChange = schedule;
 
 // ---- agent API: MCP の tool にそのまま写せる形で window に出す ----
@@ -120,7 +121,7 @@ panel.innerHTML = `
   <div id="wins"></div>
 
   <h2>Semantic Tree (agent から見える形)</h2>
-  <div class="row"><select id="treeApp"><option>todo</option><option>settings</option></select></div>
+  <div class="row"><select id="treeApp"><option>todo</option><option>settings</option><option>notes</option></select></div>
   <pre id="tree"></pre>
 
   <h2>監査ログ</h2>
@@ -155,7 +156,7 @@ $('proposals').addEventListener('click', (e) => {
 const sigSel = $<HTMLSelectElement>('sigSel');
 const fillSigs = () => {
   const prev = sigSel.value;
-  sigSel.innerHTML = ['todo', 'settings']
+  sigSel.innerHTML = ['todo', 'settings', 'notes']
     .flatMap((app) => shell.signatures(app).map((s) => ({ app, ...s })))
     .filter((s) => s.role !== 'paragraph' && s.role !== 'heading')
     .map((s) => `<option value="${escapeHtml(s.sig)}">${s.app}/${s.node} (${s.role}${s.label ? ` "${escapeHtml(s.label)}"` : ''})</option>`)
@@ -225,10 +226,17 @@ function renderPanel(frame: ReturnType<Shell['frame']>) {
 function render() {
   dirty = false;
   const { w, h } = backend.size();
-  const frame = shell.frame(w, h);
+  const frame = shell.frame(w, h, performance.now());
+  Object.assign(window, { lastFrame: { windows: frame.windows, animating: frame.animating, cursor: frame.cursor } });
   backend.draw(frame.ops);
   backend.ime(frame.ime);
-  renderPanel(frame);
+  backend.setCursor(frame.cursor);
+  // パネルの DOM はアニメーション中は更新しない (重い)。止まったら更新する
+  if (!frame.animating && !shell.windowDrag()?.active) renderPanel(frame);
+  if (frame.animating) {
+    dirty = true;
+    requestAnimationFrame(render);
+  }
 }
 render();
 backend.focusInput();

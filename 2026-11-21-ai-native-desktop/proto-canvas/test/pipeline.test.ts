@@ -154,10 +154,13 @@ test('template: 操作できるノードを落とす・重複させる・role �
 
 test('タイルが最小幅を下回るとはみ出しを報告する', () => {
   const shell = make();
-  shell.split = 0.15;
+  shell.animations = false;
+  const root = shell.tiles;
+  assert.equal(root.kind, 'split');
+  shell.tiles = { ...(root as Extract<typeof root, { kind: 'split' }>), ratio: 0.15 };
   const { windows } = shell.frame(800, 600);
   assert.ok(windows[0].overflow.length > 0);
   assert.ok(windows[0].minWidth > windows[0].tile.w);
-  shell.split = 0.5;
+  shell.tiles = { ...(root as Extract<typeof root, { kind: 'split' }>), ratio: 0.5 };
   assert.equal(shell.frame(800, 600).windows[0].overflow.length, 0);
 });

@@ -79,6 +79,8 @@ export type DrawOp =
   | ['rect', Rect & { fill?: ColorToken; stroke?: ColorToken; radius?: number; dash?: boolean; lineWidth?: number }]
   | ['text', { x: number; y: number; str: string; size: number; weight?: number; color: ColorToken; underline?: boolean }]
   | ['clip', Rect]
+  /** 不透明度を掛けた層を始める。pop で戻す */
+  | ['layer', { alpha: number }]
   | ['pop'];
 
 /** 文字幅の計測 (今は backend に委譲。veriss 統合時は shell 側の font metrics に置き換える) */
