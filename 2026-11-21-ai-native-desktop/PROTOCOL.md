@@ -175,3 +175,11 @@ Wayland の `text-input-v3` を手本にした最小の形。
 2. **Odin + SDL3**: 同じ JSON ログを再生して、プロトコルが backend 非依存かを確かめる。mac ネイティブで IME が委譲できることも確認する
 3. **wgpu (winit + accesskit_winit)**: OS a11y への露出を確認する
 4. **gpui**: widget 系 backend (P4a) として比較する
+
+## veriss 統合で変わる予定の点
+
+詳細は [VERISS.md](./VERISS.md)。
+
+- P1: 動的な文字列に長さの契約 (`maxLength` など) を足す。veriss が文字の幅の上界を出すのに使う
+- P4b: `measure` を backend から shell に移す。証明と実行時で同じ font・同じ計測値を使うため
+- P1 の最初の更新は `root` を持つ。不要になったノードは `remove` で消す (試作の `src/protocol.ts` に合わせた)

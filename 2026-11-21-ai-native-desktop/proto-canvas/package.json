@@ -1,0 +1,17 @@
+{
+  "name": "ai-native-desktop-proto-canvas",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "esbuild src/main.ts --bundle --format=esm --sourcemap --outdir=www --servedir=www --serve=127.0.0.1:8123",
+    "build": "esbuild src/main.ts --bundle --format=esm --sourcemap --outdir=www",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "e2e": "node e2e/smoke.cjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "@types/node": "^22.20.5"
+  }
+}
