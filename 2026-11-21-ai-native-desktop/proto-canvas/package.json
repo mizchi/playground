@@ -1,0 +1,24 @@
+{
+  "name": "ai-native-desktop-proto-canvas",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "esbuild src/main.ts --bundle --format=esm --sourcemap --outdir=www --servedir=www --serve=127.0.0.1:8123",
+    "build": "esbuild src/main.ts --bundle --format=esm --sourcemap --outdir=www",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "e2e": "node e2e/smoke.cjs",
+    "veriss-diff": "node e2e/veriss-diff.cjs",
+    "veriss-repro": "node e2e/veriss-repro.mjs",
+    "e2e:dnd": "node e2e/dnd.cjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "@types/node": "^24.0.0",
+    "@mizchi/veriss": "github:mizchi/veriss#ee4cb5a559856f475e379335e3200b353c465242&path:packages/veriss"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
