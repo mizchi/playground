@@ -13,14 +13,38 @@ import { paint } from './render.ts';
 import type { HitRegion } from './render.ts';
 import { signature } from './signature.ts';
 import { SemanticTree } from './tree.ts';
-import { applyDrop, computeRects, describeDrop, hitDrop, leaf, leaves, setRatio } from './tiling.ts';
-import type { Divider, Drop, TileNode } from './tiling.ts';
+import { activateTab, addToLargest, allApps, applyDrop, computeRects, describeDrop, equalize, groupOf, hitDrop, leaf, leaves, neighbor, removeApp, setRatio } from './tiling.ts';
+import type { Divider, Drop, Edge, TileNode } from './tiling.ts';
 
-export interface Step {
+/** アプリへの操作 */
+export interface ActionStep {
+  kind?: 'action';
   app: AppId;
   target: NodeId;
   action: ActionName;
   data?: string;
+}
+
+/** レイアウトの操作 (agent は人のドラッグを真似ず、意味のある操作として提案する) */
+export type LayoutOp =
+  | { type: 'move'; app: AppId; drop: Exclude<Drop, { kind: 'minimize' }> }
+  | { type: 'zoom'; app: AppId | null }
+  | { type: 'minimize'; app: AppId }
+  | { type: 'restore'; app: AppId }
+  | { type: 'equalize' };
+
+export interface LayoutStep {
+  kind: 'layout';
+  op: LayoutOp;
+}
+
+export type Step = ActionStep | LayoutStep;
+export const isLayoutStep = (s: Step): s is LayoutStep => s.kind === 'layout';
+
+interface LayoutState {
+  tiles: TileNode;
+  minimized: AppId[];
+  zoomed: AppId | null;
 }
 
 export interface Proposal {
@@ -37,7 +61,7 @@ export interface AuditEntry {
   by: Actor;
   app: AppId;
   target: NodeId;
-  action: ActionName;
+  action: ActionName | 'layout';
   data?: string;
   proposal?: string;
   result: 'ok' | 'denied';
@@ -91,6 +115,12 @@ export class Shell {
   policy = { autoApproveSafe: false };
   /** タイルの分割ツリー */
   tiles: TileNode;
+  /** ドックに入っている窓 (木から外れている) */
+  minimized: AppId[] = [];
+  /** 全体に広げている窓 */
+  zoomed: AppId | null = null;
+  /** overlay: 落とす先を青い矩形で示す / live: ほかの窓が実際に場所を空けて見せる */
+  previewMode: 'overlay' | 'live' = 'overlay';
   /** false にするとアニメーションせず、すぐに目標の位置へ (テスト用) */
   animations = true;
   onChange: () => void = () => {};
@@ -101,15 +131,21 @@ export class Shell {
   private hits: { app: AppId; hit: HitRegion }[] = [];
   private dividers: Divider[] = [];
   private dividerDrag: Divider | null = null;
-  private drag: (WindowDrag & { sx: number; sy: number }) | null = null;
+  private drag: (WindowDrag & { sx: number; sy: number; fromTab: boolean; next: TileNode | null }) | null = null;
   private hover = { x: -1, y: -1 };
   private titles = new Map<AppId, Rect>();
+  private tabRects: { app: AppId; rect: Rect }[] = [];
+  private chips: { app: AppId; rect: Rect }[] = [];
+  private size = { w: 0, h: 0 };
   private area: Rect = { x: 0, y: 0, w: 0, h: 0 };
   private minWidths = new Map<AppId, number>();
   private anims = new Map<AppId, AnimatedRect>();
-  private preview: { rect: AnimatedRect; alpha: Spring; last: Rect | null; valid: boolean; label: string } | null = null;
+  private leaving = new Map<AppId, { rect: AnimatedRect; alpha: Spring }>();
+  private preview: { rect: AnimatedRect; alpha: Spring; valid: boolean; label: string } | null = null;
+  private pill = new Spring(0, PREVIEW_SPRING);
   private lastNow = 0;
   private lastSize = '';
+  private snapTiles = false;
   private seq = 1;
   private measure: Measure;
 
@@ -168,7 +204,7 @@ export class Shell {
     if (req.by === 'agent') {
       const p = this.proposals.find((x) => x.id === req.proposal);
       if (!p || p.status !== 'approved') return deny('承認された提案がない');
-      if (!p.steps.some((s) => s.app === req.app && s.target === req.target && s.action === req.action && s.data === req.data))
+      if (!p.steps.some((s) => !isLayoutStep(s) && s.app === req.app && s.target === req.target && s.action === req.action && s.data === req.data))
         return deny('提案に含まれない操作');
     }
     this.audit.push(entry);
@@ -178,25 +214,45 @@ export class Shell {
 
   // ---- 人間の入力 (意味的な入力に変換する) ----
   pointerDown(x: number, y: number): void {
-    const div = this.dividers.find((d) => inside(grow(d.rect, 3), x, y));
+    const chip = this.chips.find((c) => inside(c.rect, x, y));
+    if (chip) {
+      this.restoreApp(chip.app, 'human');
+      return;
+    }
+    const div = this.zoomed ? undefined : this.dividers.find((d) => inside(grow(d.rect, 3), x, y));
     if (div) {
       this.dividerDrag = div;
       return;
     }
-    // タイトルバーを掴む: 少し動かすまではフォーカスの移動だけ
-    for (const [app, r] of this.titles) {
-      if (!inside(r, x, y)) continue;
-      this.focusedWin = this.wins.findIndex((w) => w.app.id === app);
-      this.drag = { app, x, y, sx: x, sy: y, active: false, drop: null, valid: false, reason: '', label: '' };
+    // タブ / タイトルバーを掴む: 少し動かすまではフォーカスの移動 (タブは切り替え) だけ
+    const tab = this.tabRects.find((t) => inside(t.rect, x, y));
+    const title = tab ? null : [...this.titles].find(([, r]) => inside(r, x, y));
+    const app = tab?.app ?? title?.[0];
+    if (app) {
+      this.focusApp(app);
+      this.drag = { app, x, y, sx: x, sy: y, active: false, drop: null, valid: false, reason: '', label: '', fromTab: !!tab, next: null };
       this.onChange();
       return;
     }
     const h = [...this.hits].reverse().find((e) => inside(e.hit.rect, x, y));
     if (!h) return;
-    this.focusedWin = this.wins.findIndex((w) => w.app.id === h.app);
+    this.focusApp(h.app);
     this.preedit = '';
     this.dispatch({ app: h.app, target: h.hit.node, action: 'focus', by: 'human' });
     if (h.hit.widget !== 'textField') this.dispatch({ app: h.app, target: h.hit.node, action: 'click', by: 'human' });
+  }
+
+  /** タイトルバーのダブルクリックでズーム、境界のダブルクリックで均等にする */
+  doubleClick(x: number, y: number): void {
+    const div = this.dividers.find((d) => inside(grow(d.rect, 3), x, y));
+    if (div) {
+      const node = nodeAtPath(this.tiles, div.path);
+      if (node) this.tiles = setRatio(this.tiles, div.path, (equalize(node) as Extract<TileNode, { kind: 'split' }>).ratio);
+      this.onChange();
+      return;
+    }
+    const title = [...this.titles].find(([, r]) => inside(r, x, y));
+    if (title) this.applyLayout({ type: 'zoom', app: this.zoomed === title[0] ? null : title[0] }, 'human');
   }
 
   pointerMove(x: number, y: number): void {
@@ -213,7 +269,10 @@ export class Shell {
     if (g) {
       g.x = x;
       g.y = y;
-      if (!g.active && Math.hypot(x - g.sx, y - g.sy) > 5) g.active = true;
+      if (!g.active && Math.hypot(x - g.sx, y - g.sy) > 5) {
+        g.active = true;
+        if (this.zoomed) this.zoomed = null; // ズーム中に掴んだら、元に戻してから運ぶ
+      }
       if (g.active) this.updateDrop();
     }
     this.onChange();
@@ -223,63 +282,193 @@ export class Shell {
     this.dividerDrag = null;
     const g = this.drag;
     this.drag = null;
+    if (g && !g.active && g.fromTab) this.tiles = activateTab(this.tiles, g.app);
     if (g?.active && g.drop && g.valid) {
-      const next = applyDrop(this.tiles, g.app, g.drop);
-      if (next) this.tiles = next;
+      const from = this.preview?.rect.value;
+      if (g.drop.kind === 'minimize') this.minimizeApp(g.app, 'human');
+      else if (g.next) {
+        this.tiles = g.next;
+        // 運んだ窓は、プレビューの位置から本来の位置へ広がる
+        if (from && g.drop.kind !== 'tab') this.anims.set(g.app, new AnimatedRect(from, TILE_SPRING));
+        if (g.drop.kind === 'tab') this.anims.delete(g.app);
+        this.focusApp(g.app);
+        this.logLayout('human', `move ${g.app}: ${describeDrop(g.drop)}`, g.app, 'ok');
+      }
     }
     if (this.preview) this.preview.alpha.target = 0;
+    this.pill.target = 0;
     this.onChange();
   }
 
   /** ドラッグ中の窓 (テストと UI 用) */
   windowDrag(): WindowDrag | null {
     if (!this.drag) return null;
-    const { sx: _sx, sy: _sy, ...rest } = this.drag;
+    const { sx: _sx, sy: _sy, fromTab: _t, next: _n, ...rest } = this.drag;
     return rest;
   }
 
-  private snapTiles = false;
+  private dockRect(count: number): Rect | null {
+    return count > 0 ? { x: GAP, y: this.size.h - GAP - DOCK_H, w: this.size.w - 2 * GAP, h: DOCK_H } : null;
+  }
+
+  private areaFor(minimizedCount: number): Rect {
+    const dock = count(minimizedCount);
+    return { x: GAP, y: GAP, w: this.size.w - 2 * GAP, h: this.size.h - 2 * GAP - dock };
+    function count(n: number) {
+      return n > 0 ? DOCK_H + GAP : 0;
+    }
+  }
+
+  /** ドラッグ中に出る「最小化」の受け口 (ドックがあればドックそのもの) */
+  private dropDock(): Rect {
+    return (
+      this.dockRect(this.minimized.length) ?? { x: this.size.w / 2 - 90, y: this.area.y + this.area.h - 36 - 40, w: 180, h: 36 }
+    );
+  }
 
   private updateDrop() {
     const g = this.drag!;
-    const hit = hitDrop(this.tiles, this.area, GAP, g.app, g.x, g.y);
+    const hit = hitDrop(this.tiles, this.area, GAP, g.app, g.x, g.y, { titleH: TITLE_H, dock: this.dropDock() });
+    this.pill.target = 1;
     g.drop = hit?.drop ?? null;
+    g.next = null;
     g.valid = false;
     g.reason = '';
     g.label = '';
     if (!hit) return;
     g.label = describeDrop(hit.drop);
-    const next = applyDrop(this.tiles, g.app, hit.drop);
-    if (!next) {
-      g.drop = null;
-      return;
-    }
-    // 分割後に、どの窓も検証済みの最小幅を下回らないこと (veriss で証明する範囲と同じ下限)
-    const { tiles } = computeRects(next, this.area, GAP);
-    for (const [app, r] of tiles) {
-      const min = this.minWidths.get(app) ?? 0;
-      if (r.w < min) {
-        g.reason = `${this.titleOf(app)} が最小幅 ${min}px を下回る`;
-        break;
+    let preview = hit.preview;
+    if (hit.drop.kind === 'minimize') {
+      g.reason = removeApp(this.tiles, g.app) ? this.invalidReason(removeApp(this.tiles, g.app)!, this.minimized.length + 1) : '最後の窓は最小化できない';
+    } else {
+      const next = applyDrop(this.tiles, g.app, hit.drop);
+      if (!next) {
+        g.drop = null;
+        return;
       }
-      if (r.h - TITLE_H < 80) {
-        g.reason = `${this.titleOf(app)} の高さが足りない`;
-        break;
-      }
+      g.next = next;
+      g.reason = this.invalidReason(next, this.minimized.length);
+      // 差し込みとライブプレビューでは、落とした後の実際の位置をプレビューにする
+      if (hit.drop.kind === 'insert' || (this.previewMode === 'live' && hit.drop.kind !== 'tab')) preview = computeRects(next, this.area, GAP).tiles.get(g.app) ?? preview;
     }
     g.valid = g.reason === '';
-    const p = (this.preview ??= { rect: new AnimatedRect(hit.preview, PREVIEW_SPRING), alpha: new Spring(0, PREVIEW_SPRING), last: null, valid: true, label: '' });
-    if (p.alpha.x < 0.02) p.rect = new AnimatedRect(shrinkFrom(hit.preview, g.x, g.y), PREVIEW_SPRING); // 現れるときはポインタの位置から広がる
-    p.rect.target = hit.preview;
+    const p = (this.preview ??= { rect: new AnimatedRect(preview, PREVIEW_SPRING), alpha: new Spring(0, PREVIEW_SPRING), valid: true, label: '' });
+    if (p.alpha.x < 0.02) p.rect = new AnimatedRect({ x: g.x - 20, y: g.y - 20, w: 40, h: 40 }, PREVIEW_SPRING); // 現れるときはポインタの位置から広がる
+    p.rect.target = preview;
     p.alpha.target = 1;
-    p.last = hit.preview;
     p.valid = g.valid;
-    p.label = g.valid ? g.label : g.reason;
+    // 最小化は受け口そのものが状態を示すので、プレビューにラベルを重ねない
+    p.label = hit.drop.kind === 'minimize' ? '' : g.valid ? g.label : g.reason;
+  }
+
+  /** 分割後に、どの窓も検証済みの最小幅 (veriss で証明する範囲と同じ下限) と最低限の高さを保てるか */
+  private invalidReason(next: TileNode, minimizedCount: number): string {
+    const { tiles } = computeRects(next, this.areaFor(minimizedCount), GAP);
+    for (const [app, r] of tiles) {
+      const min = this.minWidths.get(app) ?? 0;
+      if (r.w < min) return `${this.titleOf(app)} が最小幅 ${min}px を下回る`;
+      if (r.h - TITLE_H < MIN_CONTENT_H) return `${this.titleOf(app)} の高さが足りない`;
+    }
+    return '';
   }
 
   private titleOf(app: AppId): string {
     const t = this.win(app).tree;
     return (t.root && t.get(t.root)?.label) || app;
+  }
+
+  private focusApp(app: AppId) {
+    this.focusedWin = this.wins.findIndex((w) => w.app.id === app);
+  }
+
+  // ---- レイアウトの操作 (人のキー操作・ドラッグと、agent の提案の両方がここを通る) ----
+  private logLayout(by: Actor, what: string, app: AppId, result: 'ok' | 'denied', reason?: string, proposal?: string) {
+    this.audit.push({ at: Date.now(), by, app, target: what, action: 'layout', result, reason, proposal });
+  }
+
+  /** 状態に操作を当てた結果 (検証込み)。失敗なら理由の文字列 */
+  private simulate(st: LayoutState, op: LayoutOp): LayoutState | string {
+    const visible = (a: AppId) => allApps(st.tiles).includes(a);
+    switch (op.type) {
+      case 'move': {
+        if (!visible(op.app)) return `${op.app} は配置されていない`;
+        const next = applyDrop(st.tiles, op.app, op.drop);
+        if (!next) return `${op.app} をそこへは動かせない`;
+        const why = this.invalidReason(next, st.minimized.length);
+        return why || { ...st, tiles: next };
+      }
+      case 'zoom':
+        if (op.app && !leaves(st.tiles).includes(op.app)) return `${op.app} は表示されていない`;
+        return { ...st, zoomed: op.app };
+      case 'minimize': {
+        if (!visible(op.app)) return `${op.app} は配置されていない`;
+        const next = removeApp(st.tiles, op.app);
+        if (!next) return '最後の窓は最小化できない';
+        const why = this.invalidReason(next, st.minimized.length + 1);
+        return why || { tiles: next, minimized: [...st.minimized, op.app], zoomed: st.zoomed === op.app ? null : st.zoomed };
+      }
+      case 'restore': {
+        if (!st.minimized.includes(op.app)) return `${op.app} はドックにない`;
+        const rest = st.minimized.filter((a) => a !== op.app);
+        const area = this.areaFor(rest.length);
+        let next = addToLargest(st.tiles, op.app, area, GAP);
+        if (this.invalidReason(next, rest.length)) {
+          // 分けると狭すぎるなら、一番大きいペーンのタブに入れる
+          const { tiles } = computeRects(st.tiles, area, GAP);
+          const largest = [...tiles].sort((p, q) => q[1].w * q[1].h - p[1].w * p[1].h)[0][0];
+          const g = groupOf(st.tiles, largest)!;
+          next = mapGroup(st.tiles, g.app, (l) => ({ kind: 'leaf', app: op.app, tabs: [...(l.tabs ?? [l.app]), op.app] }));
+        }
+        return { ...st, tiles: next, minimized: rest };
+      }
+      case 'equalize':
+        return { ...st, tiles: equalize(st.tiles) };
+    }
+  }
+
+  private state(): LayoutState {
+    return { tiles: this.tiles, minimized: [...this.minimized], zoomed: this.zoomed };
+  }
+
+  /** 操作を当てる。成功なら ''、失敗なら理由 */
+  applyLayout(op: LayoutOp, by: Actor, proposal?: string): string {
+    const before = this.state();
+    const r = this.simulate(before, op);
+    const app = 'app' in op && op.app ? op.app : '*';
+    const what = describeOp(op);
+    if (typeof r === 'string') {
+      this.logLayout(by, what, app, 'denied', r, proposal);
+      this.onChange();
+      return r;
+    }
+    // 最小化: 窓はドックの札に縮みながら消える
+    if (op.type === 'minimize') {
+      const cur = this.anims.get(op.app)?.value;
+      if (cur) this.leaving.set(op.app, { rect: new AnimatedRect(cur, TILE_SPRING), alpha: new Spring(1, TILE_SPRING) });
+      this.anims.delete(op.app);
+    }
+    // 元に戻す: ドックの札の位置から広がる
+    if (op.type === 'restore') {
+      const chip = this.chips.find((c) => c.app === op.app)?.rect;
+      if (chip) this.anims.set(op.app, new AnimatedRect(chip, TILE_SPRING));
+    }
+    this.tiles = r.tiles;
+    this.minimized = r.minimized;
+    this.zoomed = r.zoomed;
+    if (op.type === 'restore' || op.type === 'zoom' && op.app) this.focusApp((op as { app: AppId }).app);
+    const focused = this.wins[this.focusedWin]?.app.id;
+    if (focused && !leaves(this.tiles).includes(focused)) this.focusApp(leaves(this.tiles)[0]);
+    this.logLayout(by, what, app, 'ok', undefined, proposal);
+    this.onChange();
+    return '';
+  }
+
+  minimizeApp(app: AppId, by: Actor = 'human'): string {
+    return this.applyLayout({ type: 'minimize', app }, by);
+  }
+
+  restoreApp(app: AppId, by: Actor = 'human'): string {
+    return this.applyLayout({ type: 'restore', app }, by);
   }
 
   input(msg: ImeFromHost): void {
@@ -298,6 +487,7 @@ export class Shell {
       else this.onChange();
       return;
     }
+    const dirs: Record<string, Edge> = { MoveLeft: 'left', MoveRight: 'right', MoveUp: 'top', MoveDown: 'bottom' };
     switch (msg.key) {
       case 'Tab':
       case 'ShiftTab':
@@ -316,22 +506,43 @@ export class Shell {
         if (this.drag) {
           this.drag = null;
           if (this.preview) this.preview.alpha.target = 0;
-        }
+          this.pill.target = 0;
+        } else if (this.zoomed) this.zoomed = null;
         this.onChange();
+        break;
+      case 'MoveLeft':
+      case 'MoveRight':
+      case 'MoveUp':
+      case 'MoveDown': {
+        // AeroSpace の move のように、向きの隣の窓と入れ替える
+        if (this.zoomed) break;
+        const other = neighbor(this.tiles, this.area, GAP, app, dirs[msg.key]);
+        if (other) this.applyLayout({ type: 'move', app, drop: { kind: 'swap', target: other } }, 'human');
+        break;
+      }
+      case 'Zoom':
+        this.applyLayout({ type: 'zoom', app: this.zoomed === app ? null : app }, 'human');
+        break;
+      case 'Minimize':
+        this.minimizeApp(app, 'human');
+        break;
+      case 'Equalize':
+        this.applyLayout({ type: 'equalize' }, 'human');
         break;
     }
   }
 
-  /** フォーカス順は木の順。窓をまたいで巡回する */
+  /** フォーカス順は木の順。表示中の窓をまたいで巡回する */
   private moveFocus(dir: 1 | -1) {
-    const order: { app: AppId; node: SemanticNode }[] = this.wins.flatMap((w) =>
-      w.tree.actionable().filter((n) => n.actions?.includes('focus')).map((node) => ({ app: w.app.id, node })),
-    );
+    const shown = leaves(this.tiles);
+    const order: { app: AppId; node: SemanticNode }[] = this.wins
+      .filter((w) => shown.includes(w.app.id))
+      .flatMap((w) => w.tree.actionable().filter((n) => n.actions?.includes('focus')).map((node) => ({ app: w.app.id, node })));
     if (order.length === 0) return;
     const w = this.wins[this.focusedWin];
     const cur = order.findIndex((o) => o.app === w.app.id && o.node.id === w.tree.focus);
     const next = order[(cur + dir + order.length) % order.length];
-    this.focusedWin = this.wins.findIndex((x) => x.app.id === next.app);
+    this.focusApp(next.app);
     this.preedit = '';
     this.dispatch({ app: next.app, target: next.node.id, action: 'focus', by: 'human' });
   }
@@ -348,10 +559,22 @@ export class Shell {
       }));
   }
 
+  /** agent から見えるレイアウト (木・ドック・ズーム) */
+  getLayout(): LayoutState {
+    return structuredClone(this.state());
+  }
+
   propose(intent: string, steps: Step[]): { ok: true; proposal: Proposal } | { ok: false; errors: string[] } {
     const errors: string[] = [];
     let sensitive = false;
+    let st = this.state();
     steps.forEach((s, i) => {
+      if (isLayoutStep(s)) {
+        const r = this.simulate(st, s.op);
+        if (typeof r === 'string') return errors.push(`steps[${i}]: ${r}`);
+        st = r;
+        return;
+      }
       const w = this.wins.find((x) => x.app.id === s.app);
       const n = w?.tree.get(s.target);
       if (!n) return errors.push(`steps[${i}]: ${s.app}/${s.target} がない`);
@@ -372,7 +595,10 @@ export class Shell {
     const p = this.proposals.find((x) => x.id === id);
     if (!p || p.status !== 'pending') return;
     p.status = 'approved';
-    for (const s of p.steps) this.dispatch({ ...s, by: 'agent', proposal: p.id });
+    for (const s of p.steps) {
+      if (isLayoutStep(s)) this.applyLayout(s.op, 'agent', p.id);
+      else this.dispatch({ app: s.app, target: s.target, action: s.action, data: s.data, by: 'agent', proposal: p.id });
+    }
     p.status = 'done';
     this.onChange();
   }
@@ -404,38 +630,48 @@ export class Shell {
   frame(width: number, height: number, now: number = Date.now()): Frame {
     const dt = this.lastNow ? Math.min(0.064, Math.max(0, (now - this.lastNow) / 1000)) : 0;
     this.lastNow = now;
-    const size = `${width}x${height}`;
-    const resized = size !== this.lastSize;
-    this.lastSize = size;
-    this.area = { x: GAP, y: GAP, w: width - 2 * GAP, h: height - 2 * GAP };
+    const sizeKey = `${width}x${height}`;
+    const resized = sizeKey !== this.lastSize;
+    this.lastSize = sizeKey;
+    this.size = { w: width, h: height };
+    this.area = this.areaFor(this.minimized.length);
 
     const ops: DrawOp[] = [['rect', { x: 0, y: 0, w: width, h: height, fill: 'bg' }]];
     this.hits = [];
     this.titles.clear();
+    this.tabRects = [];
     const windows: WindowInfo[] = [];
     let ime: ImeToHost = { t: 'ime-disable' };
     let animating = false;
-
-    const { tiles: targets, dividers } = computeRects(this.tiles, this.area, GAP);
-    this.dividers = dividers;
     const snap = !this.animations || resized || this.snapTiles;
     this.snapTiles = false;
+
+    // ライブプレビュー: ドラッグ中は、落とした後の配置へほかの窓が動いて場所を空ける
+    const g = this.drag?.active ? this.drag : null;
+    const live = !!(g && g.valid && g.next && g.drop && (g.drop.kind === 'insert' || (this.previewMode === 'live' && g.drop.kind !== 'tab')));
+    const shownTree = live ? g!.next! : this.tiles;
+    const { tiles: targets, dividers } = computeRects(shownTree, this.area, GAP);
+    this.dividers = live ? [] : dividers;
 
     const ghosts = new Map<string, Map<NodeId, number>>();
     for (const p of this.proposals.filter((p) => p.status === 'pending'))
       p.steps.forEach((s, i) => {
+        if (isLayoutStep(s)) return;
         if (!ghosts.has(s.app)) ghosts.set(s.app, new Map());
         ghosts.get(s.app)!.set(s.target, i + 1);
       });
 
-    const dragging = this.drag?.active ? this.drag.app : null;
-    const order = leaves(this.tiles);
-    // ドラッグ中の窓は最後に描く (下に隠れない)
-    const paintOrder = dragging ? [...order.filter((a) => a !== dragging), dragging] : order;
-    let dragTitle = '';
+    const dragging = g?.app ?? null;
+    const order = leaves(shownTree);
+    // ズーム中の窓、ドラッグ中の窓は最後に描く (下に隠れない)
+    const last = this.zoomed && order.includes(this.zoomed) ? this.zoomed : dragging && order.includes(dragging) ? dragging : null;
+    const paintOrder = last ? [...order.filter((a) => a !== last), last] : order;
+    let dragTitle = dragging ? this.titleOf(dragging) : '';
     for (const app of paintOrder) {
       const w = this.win(app);
-      const target = targets.get(app)!;
+      // ライブプレビュー中、運んでいる窓は青いプレビューが代わりに示す
+      if (live && app === dragging) continue;
+      const target = this.zoomed === app ? this.area : targets.get(app)!;
       let a = this.anims.get(app);
       if (!a) this.anims.set(app, (a = new AnimatedRect(target, TILE_SPRING)));
       a.target = target;
@@ -447,21 +683,39 @@ export class Shell {
       const { view, issues } = expandTree(w.tree, this.source);
       const content = { x: tile.x, y: tile.y + TITLE_H, w: tile.w, h: tile.h - TITLE_H };
       const lo = layout(view, content.w, this.measure, content);
-      this.minWidths.set(app, lo.minWidth);
+      if (this.zoomed !== app) this.minWidths.set(app, lo.minWidth);
       const focused = i === this.focusedWin;
       const pt = paint(lo.root, { focus: focused ? w.tree.focus : null, preedit: focused ? this.preedit : '', ghosts: ghosts.get(app) ?? new Map() }, this.measure);
       const title = this.titleOf(app);
-      if (app === dragging) dragTitle = title;
 
       const dim = app === dragging;
       if (dim) ops.push(['layer', { alpha: 0.4 }]);
       ops.push(['rect', { ...tile, radius: 10, fill: 'surface', stroke: focused ? 'accent' : 'border', lineWidth: focused ? 2 : 1 }]);
       ops.push(['clip', tile]);
-      ops.push(['text', { x: tile.x + 28, y: tile.y + TITLE_H / 2, str: title, size: 12, weight: 600, color: 'muted' }]);
       // つまみ (⠿) : タイトルバーを掴んで動かせることを示す
       for (let r = 0; r < 3; r++)
         for (let c = 0; c < 2; c++) ops.push(['rect', { x: tile.x + 12 + c * 4, y: tile.y + 10 + r * 4, w: 2, h: 2, radius: 1, fill: 'muted' }]);
-      if (lo.overflow.length && settled) {
+      const group = groupOf(shownTree, app);
+      if (group?.tabs) {
+        // タブ: 表に出ているものを強調。タブを掴めばその窓だけを運べる
+        let tx = tile.x + 26;
+        for (const tabApp of group.tabs) {
+          const label = this.titleOf(tabApp);
+          const tw = Math.min(140, this.measure(label, 12, 600) + 20);
+          const r = { x: tx, y: tile.y + 4, w: tw, h: TITLE_H - 8 };
+          const on = tabApp === app;
+          if (on) ops.push(['rect', { ...r, radius: 6, fill: 'bg' }]);
+          ops.push(['text', { x: r.x + 10, y: r.y + r.h / 2, str: label, size: 12, weight: 600, color: on ? 'text' : 'muted' }]);
+          this.tabRects.push({ app: tabApp, rect: r });
+          tx += tw + 4;
+        }
+      } else ops.push(['text', { x: tile.x + 28, y: tile.y + TITLE_H / 2, str: title, size: 12, weight: 600, color: 'muted' }]);
+      if (this.zoomed === app) {
+        const z = 'ズーム中 (ダブルクリック / Esc で戻す)';
+        const zw = this.measure(z, 11, 600) + 16;
+        ops.push(['rect', { x: tile.x + tile.w - zw - 8, y: tile.y + 6, w: zw, h: 18, radius: 9, fill: 'accent' }]);
+        ops.push(['text', { x: tile.x + tile.w - zw, y: tile.y + 15, str: z, size: 11, weight: 600, color: 'accentText' }]);
+      } else if (lo.overflow.length && settled) {
         const long = `はみ出し: 最小 ${lo.minWidth}px > 幅 ${Math.floor(content.w)}px`;
         const fits = this.measure(long, 11, 600) + 12 + 80 < tile.w;
         const msg = fits ? long : `${lo.minWidth}px 必要`;
@@ -474,24 +728,110 @@ export class Shell {
       ops.push(...pt.ops);
       ops.push(['pop']);
       if (dim) ops.push(['pop']);
-      this.titles.set(app, { x: tile.x, y: tile.y, w: tile.w, h: TITLE_H });
-      if (!dim) for (const hit of pt.hits) this.hits.push({ app, hit });
-      if (focused && pt.caret && w.tree.focus) {
+      const hidden = this.zoomed && this.zoomed !== app;
+      if (!hidden) this.titles.set(app, { x: tile.x, y: tile.y, w: tile.w, h: TITLE_H });
+      if (!dim && !hidden) for (const hit of pt.hits) this.hits.push({ app, hit });
+      if (focused && pt.caret && w.tree.focus && !hidden) {
         const f = w.tree.get(w.tree.focus);
         ime = { t: 'ime-enable', node: w.tree.focus, surrounding: f?.value ?? '', cursor: [...(f?.value ?? '')].length, caret: pt.caret };
       }
-      windows.push({ app, title, tile, minWidth: lo.minWidth, overflow: settled ? lo.overflow : [], issues });
+      windows.push({ app, title, tile, minWidth: lo.minWidth, overflow: settled && this.zoomed !== app ? lo.overflow : [], issues });
     }
-    for (const d of dividers) {
-      const c = d.dir === 'row' ? { x: d.rect.x + GAP / 2 - 1, y: d.rect.y + d.rect.h / 2 - 20, w: 2, h: 40 } : { x: d.rect.x + d.rect.w / 2 - 20, y: d.rect.y + GAP / 2 - 1, w: 40, h: 2 };
-      ops.push(['rect', { ...c, radius: 1, fill: 'border' }]);
+    if (!this.zoomed)
+      for (const d of this.dividers) {
+        const c = d.dir === 'row' ? { x: d.rect.x + GAP / 2 - 1, y: d.rect.y + d.rect.h / 2 - 20, w: 2, h: 40 } : { x: d.rect.x + d.rect.w / 2 - 20, y: d.rect.y + GAP / 2 - 1, w: 40, h: 2 };
+        ops.push(['rect', { ...c, radius: 1, fill: 'border' }]);
+      }
+
+    // ドック: 最小化した窓の札。押すと元に戻る
+    this.chips = [];
+    const dock = this.dockRect(this.minimized.length);
+    if (dock) {
+      ops.push(['rect', { ...dock, radius: 10, fill: 'surface', stroke: 'border' }]);
+      let cx = dock.x + 8;
+      for (const app of this.minimized) {
+        const label = this.titleOf(app);
+        const cw = Math.min(160, this.measure(label, 12, 600) + 28);
+        const r = { x: cx, y: dock.y + 6, w: cw, h: dock.h - 12 };
+        ops.push(['rect', { ...r, radius: 8, fill: 'bg', stroke: 'border' }]);
+        ops.push(['text', { x: r.x + 14, y: r.y + r.h / 2, str: label, size: 12, weight: 600, color: 'text' }]);
+        this.chips.push({ app, rect: r });
+        cx += cw + 6;
+      }
+    }
+    // 最小化した直後の窓: 札へ縮みながら消える
+    for (const [app, l] of this.leaving) {
+      const chip = this.chips.find((c) => c.app === app)?.rect ?? dock ?? { x: width / 2, y: height, w: 0, h: 0 };
+      l.rect.target = chip;
+      l.alpha.target = 0;
+      if (!this.animations) {
+        l.rect.snap();
+        l.alpha.snap();
+      }
+      const done = l.rect.step(dt) && l.alpha.step(dt);
+      const r = l.rect.value;
+      const al = Math.max(0, Math.min(1, l.alpha.x));
+      if (al > 0.01) {
+        ops.push(['layer', { alpha: al }]);
+        ops.push(['rect', { ...r, radius: 10, fill: 'surface', stroke: 'border' }]);
+        if (r.w > 60) ops.push(['text', { x: r.x + 12, y: r.y + Math.min(15, r.h / 2), str: this.titleOf(app), size: 12, weight: 600, color: 'muted' }]);
+        ops.push(['pop']);
+      }
+      if (done) this.leaving.delete(app);
+      else animating = true;
+    }
+
+    // agent のレイアウト提案: 実行後の配置を破線で示す (承認するまで何も動かない)
+    for (const p of this.proposals.filter((p) => p.status === 'pending' && p.steps.some(isLayoutStep))) {
+      let st: LayoutState | string = this.state();
+      for (const s of p.steps) if (isLayoutStep(s) && typeof st !== 'string') st = this.simulate(st, s.op);
+      if (typeof st === 'string') continue;
+      const fin = computeRects(st.tiles, this.areaFor(st.minimized.length), GAP).tiles;
+      for (const [app, r] of fin) {
+        const cur = targets.get(app);
+        const rr = st.zoomed === app ? this.areaFor(st.minimized.length) : r;
+        if (cur && Math.abs(cur.x - rr.x) + Math.abs(cur.y - rr.y) + Math.abs(cur.w - rr.w) + Math.abs(cur.h - rr.h) < 2) continue;
+        ops.push(['rect', { ...rr, radius: 10, stroke: 'ghost', dash: true, lineWidth: 2 }]);
+        const grp = groupOf(st.tiles, app);
+        const names = (grp?.tabs ?? [app]).map((a) => this.titleOf(a)).join(' + ');
+        const label = `${p.id}: ${names}${grp?.tabs ? ' (タブ)' : ''} → ここ`;
+        const lw = this.measure(label, 12, 600) + 20;
+        ops.push(['rect', { x: rr.x + rr.w / 2 - lw / 2, y: rr.y + rr.h / 2 - 13, w: lw, h: 26, radius: 13, fill: 'ghost' }]);
+        ops.push(['text', { x: rr.x + rr.w / 2 - lw / 2 + 10, y: rr.y + rr.h / 2, str: label, size: 12, weight: 600, color: 'accentText' }]);
+      }
+      for (const app of st.minimized.filter((a) => !this.minimized.includes(a))) {
+        const cur = targets.get(app);
+        if (!cur) continue;
+        // 「最小化される」は窓の上端 (タイトルバーの下) に出し、中央の配置ラベルと重ねない
+        const label = `${p.id}: ${this.titleOf(app)} は最小化される`;
+        const lw = this.measure(label, 12, 600) + 20;
+        ops.push(['rect', { x: cur.x + 10, y: cur.y + TITLE_H + 6, w: lw, h: 24, radius: 12, fill: 'ghost' }]);
+        ops.push(['text', { x: cur.x + 20, y: cur.y + TITLE_H + 18, str: label, size: 12, weight: 600, color: 'accentText' }]);
+      }
+    }
+
+    // ドラッグ中に現れる「最小化」の受け口
+    {
+      const s1 = this.animations ? this.pill.step(dt) : (this.pill.snap(), true);
+      animating ||= !s1;
+      const al = Math.max(0, Math.min(1, this.pill.x));
+      if (al > 0.01 && !dock) {
+        const r = this.dropDock();
+        const hot = g?.drop?.kind === 'minimize';
+        ops.push(['layer', { alpha: al }]);
+        if (hot && !g!.valid) r.w = Math.max(r.w, this.measure(g!.reason, 12, 600) + 32);
+        ops.push(['rect', { ...r, radius: r.h / 2, fill: hot ? (g!.valid ? 'accent' : 'danger') : 'surface', stroke: hot ? (g!.valid ? 'accent' : 'danger') : 'border', lineWidth: 1.5 }]);
+        const label = hot ? (g!.valid ? '離すと最小化' : g!.reason) : '▾ ここで最小化';
+        ops.push(['text', { x: r.x + r.w / 2 - this.measure(label, 12, 600) / 2, y: r.y + r.h / 2, str: label, size: 12, weight: 600, color: hot ? 'accentText' : 'muted' }]);
+        ops.push(['pop']);
+      }
     }
 
     // ドロップ先のプレビュー (青。最小幅を下回る分割は赤)
     const p = this.preview;
     if (p) {
-      if (!this.drag?.active || !this.drag.drop) p.alpha.target = 0;
-      if (snap && !this.animations) {
+      if (!g || !g.drop) p.alpha.target = 0;
+      if (!this.animations) {
         p.rect.snap();
         p.alpha.snap();
       }
@@ -502,12 +842,12 @@ export class Shell {
       if (alpha > 0.01) {
         const r = p.rect.value;
         const color = p.valid ? 'accent' : 'danger';
-        ops.push(['layer', { alpha: 0.22 * alpha }]);
+        ops.push(['layer', { alpha: (live ? 0.3 : 0.22) * alpha }]);
         ops.push(['rect', { ...r, radius: 10, fill: color }]);
         ops.push(['pop']);
         ops.push(['layer', { alpha }]);
         ops.push(['rect', { ...r, radius: 10, stroke: color, lineWidth: 2 }]);
-        if (p.label && r.w > 60) {
+        if (p.label && r.w > 60 && r.h > 30) {
           const lw = this.measure(p.label, 12, 600) + 20;
           // ラベルは canvas の内側に収める
           const lx = Math.max(this.area.x + 4, Math.min(r.x + r.w / 2 - lw / 2, this.area.x + this.area.w - lw - 4));
@@ -520,8 +860,8 @@ export class Shell {
     }
 
     // ポインタに付いてくる窓の札
-    if (this.drag?.active) {
-      const g = this.drag;
+    if (g) {
+      dragTitle ||= this.titleOf(g.app);
       const w = Math.min(220, this.measure(dragTitle, 12, 600) + 24);
       // 札は canvas の内側に収める (右端・下端ではポインタの左上に回す)
       const bx = g.x + 10 + w > width - 4 ? g.x - 10 - w : g.x + 10;
@@ -535,8 +875,9 @@ export class Shell {
     let cursor: Frame['cursor'] = 'default';
     const hv = this.hover;
     const div = this.dividerDrag ?? this.dividers.find((d) => inside(grow(d.rect, 3), hv.x, hv.y));
-    if (this.drag?.active) cursor = this.drag.drop && !this.drag.valid ? 'not-allowed' : 'grabbing';
-    else if (div) cursor = div.dir === 'row' ? 'col-resize' : 'row-resize';
+    if (g) cursor = g.drop && !g.valid ? 'not-allowed' : 'grabbing';
+    else if (div && !this.zoomed) cursor = div.dir === 'row' ? 'col-resize' : 'row-resize';
+    else if (this.chips.some((c) => inside(c.rect, hv.x, hv.y))) cursor = 'pointer';
     else if ([...this.titles.values()].some((r) => inside(r, hv.x, hv.y))) cursor = 'grab';
     else if (this.hits.some((h) => inside(h.hit.rect, hv.x, hv.y))) cursor = 'pointer';
 
@@ -544,13 +885,40 @@ export class Shell {
   }
 }
 
-function grow(r: Rect, d: number): Rect {
-  return { x: r.x - d, y: r.y - d, w: r.w + 2 * d, h: r.h + 2 * d };
+const DOCK_H = 40;
+const MIN_CONTENT_H = 80;
+
+function describeOp(op: LayoutOp): string {
+  switch (op.type) {
+    case 'move':
+      return `move ${op.app}: ${describeDrop(op.drop)}`;
+    case 'zoom':
+      return op.app ? `zoom ${op.app}` : 'unzoom';
+    case 'minimize':
+      return `minimize ${op.app}`;
+    case 'restore':
+      return `restore ${op.app}`;
+    case 'equalize':
+      return 'equalize';
+  }
 }
 
-/** プレビューが現れるとき、ポインタの位置の小さな矩形から広げる */
-function shrinkFrom(_r: Rect, x: number, y: number): Rect {
-  return { x: x - 20, y: y - 20, w: 40, h: 40 };
+function nodeAtPath(t: TileNode, path: number[]): TileNode | null {
+  let n: TileNode = t;
+  for (const h of path) {
+    if (n.kind !== 'split') return null;
+    n = h === 0 ? n.a : n.b;
+  }
+  return n;
+}
+
+function mapGroup(t: TileNode, app: AppId, f: (l: Extract<TileNode, { kind: 'leaf' }>) => TileNode): TileNode {
+  if (t.kind === 'leaf') return t.app === app ? f(t) : t;
+  return { ...t, a: mapGroup(t.a, app, f), b: mapGroup(t.b, app, f) };
+}
+
+function grow(r: Rect, d: number): Rect {
+  return { x: r.x - d, y: r.y - d, w: r.w + 2 * d, h: r.h + 2 * d };
 }
 
 function inside(r: Rect, x: number, y: number) {

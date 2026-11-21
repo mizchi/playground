@@ -124,6 +124,113 @@ async function step(name, fn) {
     await page.setViewportSize({ width: 1680, height: 900 });
   });
 
+  // ---- ここからは各パターンを初期配置から試す ----
+  const reset = async () => {
+    await page.evaluate(() => {
+      const s = window.shell;
+      s.tiles = { kind: 'split', dir: 'row', ratio: 0.5, a: { kind: 'leaf', app: 'todo' }, b: { kind: 'split', dir: 'column', ratio: 0.5, a: { kind: 'leaf', app: 'settings' }, b: { kind: 'leaf', app: 'notes' } } };
+      s.minimized = [];
+      s.zoomed = null;
+      s.previewMode = 'overlay';
+      s.onChange();
+    });
+    await page.evaluate(() => (document.getElementById('live').checked = false));
+    await settle();
+  };
+  const all = () => page.evaluate(() => window.shell.getLayout());
+
+  await step('タブ: Todo を Notes のタイトルバーへ → タブになり、タブを押すと切り替わる', async () => {
+    await reset();
+    const n = await tile('notes');
+    const g = await drag('todo', n.x + n.w / 2, n.y + 12, { shot: 'dnd-5-preview-tab.png' });
+    assert.deepEqual(g.drop, { kind: 'tab', target: 'notes' });
+    await settle();
+    assert.deepEqual(await leaves(), { column: ['settings', 'todo'] });
+    const c = await canvasBox();
+    const tabPos = await page.evaluate(() => {
+      const r = document.getElementById('screen').getBoundingClientRect();
+      const op = window.shell.frame(r.width, r.height, performance.now()).ops.find((o) => o[0] === 'text' && o[1].str === 'Notes');
+      return { x: op[1].x, y: op[1].y };
+    });
+    await page.mouse.click(c.left + tabPos.x + 5, c.top + tabPos.y);
+    await settle();
+    assert.deepEqual(await leaves(), { column: ['settings', 'notes'] });
+    await page.screenshot({ path: path.join(shotsDir, 'dnd-6-tabs.png') });
+  });
+
+  await step('差し込み: Notes を左右の境界へ → 両側が場所を空け、3 列になる', async () => {
+    await reset();
+    const t = await tile('todo');
+    const g = await drag('notes', t.x + t.w + 4, t.y + t.h / 2, { shot: 'dnd-7-insert.png' });
+    assert.deepEqual(g.drop, { kind: 'insert', path: [] });
+    assert.equal(g.valid, true, g.reason);
+    await settle();
+    assert.deepEqual(await leaves(), { row: ['todo', { row: ['notes', 'settings'] }] });
+  });
+
+  await step('最小化: Settings を下の受け口へ → ドックに入り、札を押すと戻る', async () => {
+    await reset();
+    const c = await canvasBox();
+    const g = await drag('settings', c.left + c.width / 2, c.top + c.height - 66, { shot: 'dnd-8-minimize.png' });
+    assert.deepEqual(g.drop, { kind: 'minimize' });
+    await settle();
+    assert.deepEqual((await all()).minimized, ['settings']);
+    await page.screenshot({ path: path.join(shotsDir, 'dnd-9-dock.png') });
+    await page.mouse.click(c.left + 40, c.top + c.height - 28);
+    await settle();
+    assert.deepEqual((await all()).minimized, []);
+  });
+
+  await step('ズーム: タイトルバーのダブルクリックで全体に広がり、Esc で戻る', async () => {
+    await reset();
+    const t = await tile('todo');
+    await page.mouse.dblclick(t.x + t.w / 2, t.y + 12);
+    await settle();
+    assert.equal((await all()).zoomed, 'todo');
+    await page.screenshot({ path: path.join(shotsDir, 'dnd-10-zoom.png') });
+    await page.keyboard.press('Escape');
+    await settle();
+    assert.equal((await all()).zoomed, null);
+  });
+
+  await step('ライブプレビュー: 離す前からほかの窓が場所を空ける', async () => {
+    await reset();
+    await page.check('#live');
+    const n = await tile('notes');
+    const before = await tile('settings');
+    const g = await drag('todo', n.x + n.w - 50, n.y + n.h / 2, { release: false, shot: 'dnd-11-live.png' });
+    assert.equal(g.valid, true);
+    const during = await tile('settings');
+    assert.ok(during.w > before.w + 200, `Settings が広がって見える (${before.w} → ${during.w})`);
+    await page.mouse.up();
+    await settle();
+    assert.deepEqual(await leaves(), { column: ['settings', { row: ['notes', 'todo'] }] });
+  });
+
+  await step('agent: レイアウトの提案を破線でプレビューし、承認で実行する', async () => {
+    await reset();
+    await page.click('#sampleLayout');
+    await page.click('#propose');
+    await page.waitForSelector('#proposals button[data-op="approve"]');
+    assert.deepEqual(await leaves(), { row: ['todo', { column: ['settings', 'notes'] }] }, '承認までは変わらない');
+    await page.screenshot({ path: path.join(shotsDir, 'dnd-12-agent-layout.png') });
+    await page.click('#proposals button[data-op="approve"]');
+    await settle();
+    const l = await all();
+    assert.deepEqual(l.minimized, ['settings']);
+    assert.equal(l.tiles.kind, 'leaf');
+    assert.deepEqual(l.tiles.tabs, ['notes', 'todo']);
+  });
+
+  await step('キー操作: Alt+→ で隣と入れ替える', async () => {
+    await reset();
+    const t = await tile('todo');
+    await page.mouse.click(t.x + t.w / 2, t.y + t.h - 30);
+    await page.keyboard.press('Alt+ArrowRight');
+    await settle();
+    assert.deepEqual(await leaves(), { row: ['settings', { column: ['todo', 'notes'] }] });
+  });
+
   await step('ページエラーなし', async () => assert.deepEqual(errors, []));
   const v = page.video();
   await context.close();

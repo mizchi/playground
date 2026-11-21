@@ -7,7 +7,7 @@ import type { ViewTemplate } from './catalog.ts';
 import type { Measure } from './protocol.ts';
 import { layout } from './layout.ts';
 import { LOWER_FONT, lower } from './lower.ts';
-import { Shell } from './shell.ts';
+import { Shell, isLayoutStep } from './shell.ts';
 import type { Step } from './shell.ts';
 
 const KEY = 'ai-native-desktop.templates.v1';
@@ -45,6 +45,7 @@ const backend = createCanvasBackend(canvas, sink, {
   pointerDown: (x, y) => shell.pointerDown(x, y),
   pointerMove: (x, y) => shell.pointerMove(x, y),
   pointerUp: () => shell.pointerUp(),
+  doubleClick: (x, y) => shell.doubleClick(x, y),
   input: (m) => shell.input(m),
   resize: () => schedule(),
 });
@@ -55,6 +56,7 @@ shell.onChange = schedule;
 // ---- agent API: MCP の tool にそのまま写せる形で window に出す ----
 const agent = {
   getTree: (app?: string) => shell.getTree(app),
+  getLayout: () => shell.getLayout(),
   propose: (intent: string, steps: Step[]) => shell.propose(intent, steps),
   proposals: () => shell.proposals,
 };
@@ -79,6 +81,14 @@ const SAMPLE_PROPOSAL = {
     { app: 'todo', target: 'add', action: 'click' },
   ],
 };
+const SAMPLE_LAYOUT = {
+  intent: 'Todo を Notes とタブにまとめ、Settings を最小化して、残りを均等にする',
+  steps: [
+    { kind: 'layout', op: { type: 'move', app: 'todo', drop: { kind: 'tab', target: 'notes' } } },
+    { kind: 'layout', op: { type: 'minimize', app: 'settings' } },
+    { kind: 'layout', op: { type: 'equalize' } },
+  ],
+};
 const SAMPLE_CARD: ViewTemplate = {
   type: 'box',
   axis: 'vertical',
@@ -95,11 +105,17 @@ const SAMPLE_CARD: ViewTemplate = {
 const SAMPLE_BAD: ViewTemplate = { type: 'box', axis: 'vertical', children: [{ type: 'text', text: { bind: 'label' }, size: 16 }] };
 
 panel.innerHTML = `
+  <h2>レイアウト</h2>
+  <div class="row"><label><input type="checkbox" id="live"> ライブプレビュー (ほかの窓が場所を空ける)</label></div>
+  <div class="muted">タイトルバーを掴んで運ぶ: 端で分割 / 中央で入れ替え / タイトルバーでタブ / 境界で差し込み / 外周で全体の端 / 下の受け口で最小化。
+  ダブルクリック: タイトルバーでズーム、境界で均等。Alt+方向キーで隣と入れ替え、Alt+Enter ズーム、Alt+M 最小化、Alt+E 均等。</div>
+
   <h2>Agent の提案</h2>
   <div class="row"><label><input type="checkbox" id="auto"> sensitive でない提案は自動承認</label></div>
   <div id="proposals"></div>
   <textarea class="json" id="proposalJson" spellcheck="false"></textarea>
-  <div class="row"><button class="primary" id="propose">提案する (agent として)</button><span id="proposeErr" class="err"></span></div>
+  <div class="row"><button class="primary" id="propose">提案する (agent として)</button><button id="sampleAction">例: 操作</button><button id="sampleLayout">例: レイアウト</button></div>
+  <div id="proposeErr" class="err"></div>
 
   <h2>View Template (LLM の出力の代わり)</h2>
   <div class="row"><select id="sigSel"></select></div>
@@ -131,6 +147,12 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 $<HTMLTextAreaElement>('proposalJson').value = JSON.stringify(SAMPLE_PROPOSAL, null, 2);
 $<HTMLTextAreaElement>('tplJson').value = JSON.stringify(SAMPLE_CARD, null, 2);
 
+$<HTMLInputElement>('live').addEventListener('change', (e) => {
+  shell.previewMode = (e.target as HTMLInputElement).checked ? 'live' : 'overlay';
+  backend.focusInput();
+});
+$('sampleAction').addEventListener('click', () => ($<HTMLTextAreaElement>('proposalJson').value = JSON.stringify(SAMPLE_PROPOSAL, null, 2)));
+$('sampleLayout').addEventListener('click', () => ($<HTMLTextAreaElement>('proposalJson').value = JSON.stringify(SAMPLE_LAYOUT, null, 2)));
 $<HTMLInputElement>('auto').addEventListener('change', (e) => {
   shell.policy.autoApproveSafe = (e.target as HTMLInputElement).checked;
 });
@@ -197,7 +219,13 @@ function renderPanel(frame: ReturnType<Shell['frame']>) {
       .map(
         (p) => `<div class="card ${p.sensitive ? 'sensitive' : ''}">
           <div><b>${p.id}</b> ${escapeHtml(p.intent)} <span class="tag">${p.status}</span>${p.sensitive ? ' <span class="tag">sensitive</span>' : ''}</div>
-          <ol>${p.steps.map((s) => `<li>${s.app}/${s.target} ${s.action}${s.data !== undefined ? ` "${escapeHtml(s.data)}"` : ''}</li>`).join('')}</ol>
+          <ol>${p.steps
+            .map((s) =>
+              isLayoutStep(s)
+                ? `<li>layout: ${escapeHtml(JSON.stringify(s.op))}</li>`
+                : `<li>${s.app}/${s.target} ${s.action}${s.data !== undefined ? ` "${escapeHtml(s.data)}"` : ''}</li>`,
+            )
+            .join('')}</ol>
           ${p.status === 'pending' ? `<div class="row"><button class="primary" data-op="approve" data-id="${p.id}">承認して実行</button><button data-op="reject" data-id="${p.id}">却下</button></div>` : ''}
         </div>`,
       )
