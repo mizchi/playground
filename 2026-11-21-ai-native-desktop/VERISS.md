@@ -7,7 +7,7 @@
 - **タイル型 WM は、窓をどんな幅にもする**: 「いくつかの幅で試した」では足りない。「この幅の範囲なら必ず崩れない」が欲しい
 - **LLM が view を作る**: 生成物を人がレビューせずにキャッシュへ入れるには、機械的な保証が要る
 
-以下はまだ設計で、実装していない。試作 (`proto-canvas/`) は、ここで静的に防ぎたい「はみ出し」を実行時に検出して表示している (タイルの境界を狭めると赤いバッジが出る)。
+V0 (lowering と 3 者照合) と V1 (既定の view の検証をテストに入れる) まで実装した。結果は下の「結果」にある。V2 以降はまだ設計。
 
 ## パイプラインの中の位置
 
@@ -54,17 +54,41 @@ View Tree には selector も cascade もない。ここが重要で、veriss �
 
 ## veriss をどこで動かすか
 
-- veriss は JS (Node 24 以上、Z3 は wasm)。npm には出ていないので、`github:mizchi/veriss#<commit>&path:packages/veriss` で git 依存にする
+- veriss は JS (Node 24 以上、Z3 は wasm)。npm には出ていないので、`github:mizchi/veriss#<commit>&path:packages/veriss` で git 依存にしている (`proto-canvas/package.json`)
 - ブラウザの試作: Web Worker で動かす (isle の playground が同じ構成)
 - ネイティブ (Odin / mac): 別プロセスにして JSON Lines で呼ぶ。検証はキャッシュに入れるときだけで、描画の経路には乗らない。検証中は既定レンダラで表示し、プレビューに「検証中」と出す
 - 証明の記録: `{status, viewport の範囲, 前提, template のハッシュ, font のハッシュ, veriss の commit}`。どれかが変わったら無効にする
+
+## 結果 (V0 / V1)
+
+- `proto-canvas/src/lower.ts`: View Tree → HTML + CSS + 文字の契約。1 ノード 1 クラス
+- `proto-canvas/e2e/veriss-diff.cjs`: 3 者照合。試作の窓 (Todo、Settings、カード template を当てた Todo) を lowering し、次の 3 つを幅 160〜700px で 1px ごとに比べる
+  1. veriss の判定
+  2. Chromium で配置した実測 (子が親の content box か viewport からはみ出すか)
+  3. `layout.ts` の最小幅
+- `proto-canvas/test/veriss.test.ts`: 既定の view について、`layout.ts` の最小幅以上の範囲で veriss と Z3 がともに verified、それ未満で violated になり、違反の上端が最小幅と一致することをテストする
+
+| 窓 | veriss の最小幅 | Chromium の最小幅 | layout.ts の最小幅 | 見逃し / 過剰 |
+|---|---|---|---|---|
+| Todo (既定) | 252 | 252 | 252 | なし |
+| Settings (既定) | 172 | 172 | 172 | なし |
+| Todo (カード template) | 252 | 252 | 252 | なし |
+
+px の固有幅を明示した lowering (`pxIntrinsic: true`) では、3 者が 1px 単位で一致した。明示しないと、どの窓も Unknown になる。原因は veriss の既知の制限 2 つで、どちらも Issue に報告した。
+
+1. column の伸長しない item (`align-items: flex-start` など) は、文字の契約で max-content が決まっていても Unknown になる
+2. row の item で `flex-basis: auto` の、中身のない箱 (`min-width` 付き) も Unknown になる
+
+あわせて、`LayoutBoxContract` の型と README に、実行時が受け付ける `maxInlineSize` などが載っていないことも報告した。最小の再現は `proto-canvas/e2e/veriss-repro.mjs` にある。
+
+`layout.ts` は固有幅を決定的に出せるので、迂回の `pxIntrinsic` を使っても意味は変わらない。ただし、crater-layout に置き換えたあとや、LLM が任意の flex を書く場合には、迂回では済まない。
 
 ## 進め方
 
 | 段階 | 内容 |
 |---|---|
-| V0 | lowering (View Tree → box tree + CSS) を純粋な関数として作る。同じ CSS をブラウザの DOM で配置して、試作の `layout.ts` と差分照合する |
-| V1 | Node で veriss を動かし、既定の template を CI で検証する (Node 24 が必要。この環境は 22) |
+| V0 (済) | lowering (View Tree → box tree + CSS) を純粋な関数として作る。同じ CSS をブラウザの DOM で配置して、試作の `layout.ts` と差分照合する |
+| V1 (済) | Node で veriss を動かし、既定の template をテストで検証する (Node 24) |
 | V2 | ブラウザの Worker で、LLM の template をキャッシュに入れる前に検証する。violated の反例を LLM への再生成の指示に使う |
 | V3 | 実行時のレイアウトを crater-layout (wasm) に置き換え、veriss・crater・Chromium の 3 者で照合する |
 | V4 | WM が検証済みの範囲を守る (最小幅、タブ化、幅ごとの template) |

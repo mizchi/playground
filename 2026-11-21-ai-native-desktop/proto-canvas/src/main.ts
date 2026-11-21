@@ -4,6 +4,8 @@ import { createCanvasBackend } from './backend/canvas.ts';
 import type { CacheEntry, Storage } from './cache.ts';
 import type { ViewTemplate } from './catalog.ts';
 import type { Measure } from './protocol.ts';
+import { layout } from './layout.ts';
+import { LOWER_FONT, lower } from './lower.ts';
 import { Shell } from './shell.ts';
 import type { Step } from './shell.ts';
 
@@ -55,7 +57,17 @@ const agent = {
   propose: (intent: string, steps: Step[]) => shell.propose(intent, steps),
   proposals: () => shell.proposals,
 };
-Object.assign(window, { shell, agent });
+// ---- veriss への lowering (e2e/veriss-diff.cjs が使う)。計測は lowering 先の CSS と同じ font で行う ----
+const lowerCtx = document.createElement('canvas').getContext('2d')!;
+const lowerMeasure: Measure = (s, size, weight) => {
+  lowerCtx.font = `${weight} ${size}px ${LOWER_FONT}`;
+  return lowerCtx.measureText(s).width;
+};
+const lowerFor = (app: string, pxIntrinsic = false) => {
+  const { view } = shell.viewOf(app);
+  return { ...lower(view, lowerMeasure, { pxIntrinsic }), minWidth: layout(view, 1000, lowerMeasure).minWidth };
+};
+Object.assign(window, { shell, agent, lowerFor });
 
 // ---- panel ----
 const SAMPLE_PROPOSAL = {

@@ -4,7 +4,7 @@ import { TemplateCache } from './cache.ts';
 import type { Storage } from './cache.ts';
 import { defaultTemplate } from './catalog.ts';
 import { expandTree } from './expand.ts';
-import type { ExpandIssue, TemplateSource } from './expand.ts';
+import type { ExpandIssue, TemplateSource, ViewNode } from './expand.ts';
 import { layout } from './layout.ts';
 import type { Overflow } from './layout.ts';
 import type { ActionName, ActionRequest, Actor, AppId, DrawOp, ImeFromHost, ImeToHost, Measure, NodeId, Rect, SemanticNode, TreeUpdate } from './protocol.ts';
@@ -263,6 +263,11 @@ export class Shell {
   signatures(app: AppId): { node: NodeId; role: string; label?: string; sig: string }[] {
     const t = this.tree(app);
     return t.walk().map((n) => ({ node: n.id, role: n.role, label: n.label, sig: signature(t, n) }));
+  }
+
+  /** 展開済みの View Tree (veriss への lowering や検査用) */
+  viewOf(app: AppId): { view: ViewNode; issues: ExpandIssue[] } {
+    return expandTree(this.tree(app), this.source);
   }
 
   private source: TemplateSource = (node, sig) => {

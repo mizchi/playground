@@ -16,6 +16,7 @@
 | レイアウト | `src/layout.ts` | portable な flex の部分集合の簡易版 (後で crater-layout に置き換え、veriss で証明する) |
 | P4b 描画 | `src/render.ts`, `src/backend/canvas.ts` | display list → Canvas 2D |
 | P5 IME | `src/backend/canvas.ts` | 隠し textarea に OS の IME を任せる。preedit は表示だけで木に入れず、確定文字列を `replaceSelectedText` にする |
+| veriss への lowering | `src/lower.ts` | View Tree → HTML + CSS + 文字の契約 ([VERISS.md](../VERISS.md)) |
 | タイル | `src/shell.ts` `frame` | 2 枚の横分割。境界をドラッグできる。最小幅を下回ると「はみ出し」を出す |
 
 右のパネルでは、次のことができる。
@@ -34,11 +35,15 @@ pnpm dev          # http://127.0.0.1:8123
 pnpm test         # 単体テスト (node --test、型ストリップで .ts をそのまま実行)
 pnpm typecheck
 pnpm build && pnpm e2e   # Chromium で通し確認。--shots で screenshots/ に保存
+pnpm build && pnpm veriss-diff   # veriss・Chromium・layout.ts の 3 者照合 (../VERISS.md)
+pnpm veriss-repro        # veriss に報告した Unknown の最小再現
 ```
+
+Node 24 以上が必要 (`.node-version`)。veriss がそれを要求する。この環境では `/opt/node24/bin` を PATH の先頭に置いて実行した。
 
 ## 結果
 
-- 単体テスト 10 件と E2E 11 件が通る (Node 22、Playwright の Chromium)
+- 単体テスト 13 件 (うち veriss の検証 3 件) と E2E 11 件が通る (Node 24、Playwright の Chromium)
 - E2E の IME は、CDP の `Input.imeSetComposition` で実際の composition イベントを起こして確かめた。preedit は木に入らず、確定した `卵` だけが値になる
 - LLM の template の代わりに「カード」template を適用すると、件数が変わっても (3 件 → 5 件) 同じキャッシュに当たる。pin すると再読み込み後も残る
 - 操作を落とす template は、既定レンダラに戻り、理由がパネルに出る
