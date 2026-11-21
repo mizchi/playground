@@ -43,7 +43,7 @@ export interface LowerOptions {
   /**
    * flex の子の固有幅を px で明示する (column の非 stretch の子は width、row の子は flex-basis)。
    * veriss が「中身で決まる幅」(shrink-to-fit、flex-basis: auto) を、文字の契約 (min = max) があっても
-   * Unknown にするための迂回。layout.ts が固有幅を決定的に出せるので、意味は変わらない。
+   * Unknown にするための迂回 (mizchi/veriss#6, #7)。layout.ts が固有幅を決定的に出せるので、意味は変わらない。
    */
   pxIntrinsic?: boolean;
 }

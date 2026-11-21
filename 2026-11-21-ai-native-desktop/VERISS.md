@@ -76,10 +76,10 @@ View Tree には selector も cascade もない。ここが重要で、veriss �
 
 px の固有幅を明示した lowering (`pxIntrinsic: true`) では、3 者が 1px 単位で一致した。明示しないと、どの窓も Unknown になる。原因は veriss の既知の制限 2 つで、どちらも Issue に報告した。
 
-1. column の伸長しない item (`align-items: flex-start` など) は、文字の契約で max-content が決まっていても Unknown になる
-2. row の item で `flex-basis: auto` の、中身のない箱 (`min-width` 付き) も Unknown になる
+1. column の伸長しない item (`align-items: flex-start` など) は、文字の契約で max-content が決まっていても Unknown になる ([mizchi/veriss#6](https://github.com/mizchi/veriss/issues/6))
+2. row の item で、中身のない箱に `min-width` を付けると `flex-basis: auto` が Unknown になる ([mizchi/veriss#7](https://github.com/mizchi/veriss/issues/7))
 
-あわせて、`LayoutBoxContract` の型と README に、実行時が受け付ける `maxInlineSize` などが載っていないことも報告した。最小の再現は `proto-canvas/e2e/veriss-repro.mjs` にある。
+あわせて、`LayoutBoxContract` の型と README に、実行時が受け付ける `maxInlineSize` などが載っていないことも報告した ([mizchi/veriss#8](https://github.com/mizchi/veriss/issues/8))。最小の再現は `proto-canvas/e2e/veriss-repro.mjs` にある。
 
 `layout.ts` は固有幅を決定的に出せるので、迂回の `pxIntrinsic` を使っても意味は変わらない。ただし、crater-layout に置き換えたあとや、LLM が任意の flex を書く場合には、迂回では済まない。
 

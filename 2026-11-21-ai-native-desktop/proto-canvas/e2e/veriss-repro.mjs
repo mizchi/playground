@@ -16,7 +16,7 @@ const run = (label, html, css, boxes, extra = {}) => {
   for (const d of r.diagnostics) console.log(' ', d.severity, d.code, d.box ?? '', d.range ? `[${d.range.min}, ${d.range.max})` : '', d.message);
 };
 
-// A: column の伸長しない item。文字の契約は min = max (max-content が確定している)
+// A (mizchi/veriss#6): column の伸長しない item。文字の契約は min = max (max-content が確定している)
 run('A column + align-items:flex-start + 文字の契約', '<main class="col"><div class="t">hello</div></main>',
   `.col { display: flex; flex-direction: column; align-items: flex-start; } .t { ${font} }`, { '.t': T(40) });
 run('A 対照: width: 40px を明示', '<main class="col"><div class="t">hello</div></main>',
@@ -24,7 +24,7 @@ run('A 対照: width: 40px を明示', '<main class="col"><div class="t">hello</
 run('A2 align-self: center', '<main class="col"><div class="t">hello</div></main>',
   `.col { display: flex; flex-direction: column; } .t { ${font} align-self: center; }`, { '.t': T(40) });
 
-// B: row の item、flex-basis: auto、子もテキストもない箱 + min-width
+// B (mizchi/veriss#7): row の item、flex-basis: auto、子もテキストもない箱 + min-width
 run('B row + 中身のない item (flex: 1 0 auto; min-width: 160px)', '<main class="row"><div class="f"></div></main>',
   '.row { display: flex; } .f { flex: 1 0 auto; min-width: 160px; height: 32px; }', {});
 run('B 対照: flex: 1 0 160px', '<main class="row"><div class="f"></div></main>',

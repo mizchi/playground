@@ -35,7 +35,7 @@ for (const app of ['todo', 'settings']) {
   });
 }
 
-test('veriss: px の固有幅を明示しないと Unknown (veriss の既知の制限。Issue に報告)', () => {
+test('veriss: px の固有幅を明示しないと Unknown (veriss の既知の制限。mizchi/veriss#6, #7)', () => {
   const shell = new Shell([createTodoApp(), createSettingsApp()], measure, memoryStorage());
   const low = lower(shell.viewOf('todo').view, measure);
   const r = analyzeHTML(low.html, { name: 'todo', css: low.css, boxes: low.boxes, viewport: { min: 300, max: 900, height: HEIGHT } });
