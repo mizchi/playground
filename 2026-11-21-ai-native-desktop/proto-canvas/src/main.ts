@@ -62,6 +62,40 @@ if (fontUrl) {
   backend.setFontFamily('ShellFont');
   lowerFamily = 'ShellFont';
 }
+// ?backend=odin-gpu&font=...: 描画と計測を Odin + wgpu (ブラウザでは WebGPU) に差し替える
+if (new URLSearchParams(location.search).get('backend') === 'odin-gpu') {
+  if (!fontUrl) throw new Error('backend=odin-gpu には font= が要る');
+  const { createOdinGpu } = await import('./backend/odin-gpu.ts');
+  const gpu = await createOdinGpu('gpu.wasm', fontUrl, { offscreen: new URLSearchParams(location.search).has('gpu-offscreen') });
+  measureImpl = gpu.measure;
+  const draw2d = backend.draw;
+  backend.draw = (ops) => gpu.draw(ops, backend.colors(), backend.canvas);
+  /** 検証用: 同じ描画命令を GPU (読み戻し) と Canvas 2D (上の canvas に一時的に描く) で描き、画素を比べる */
+  const compareGpu = async () => {
+    const c = backend.canvas;
+    const { w, h } = backend.size();
+    const ops = shell.frame(w, h, performance.now()).ops;
+    gpu.draw(ops, backend.colors(), c);
+    const g = await gpu.capture();
+    draw2d(ops);
+    const ctx = c.getContext('2d')!;
+    const cpu = ctx.getImageData(0, 0, c.width, c.height);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, c.width, c.height);
+    let n = 0;
+    for (let i = 0; i < cpu.data.length; i += 4)
+      if (Math.abs(cpu.data[i] - g.data[i]) + Math.abs(cpu.data[i + 1] - g.data[i + 1]) + Math.abs(cpu.data[i + 2] - g.data[i + 2]) > 24) n++;
+    return { diff: n / (cpu.data.length / 4), width: g.width, height: g.height, gpuPng: await toPng(g), cpuPng: await toPng(cpu) };
+  };
+  const toPng = (img: ImageData) => {
+    const cv = document.createElement('canvas');
+    cv.width = img.width;
+    cv.height = img.height;
+    cv.getContext('2d')!.putImageData(img, 0, 0);
+    return cv.toDataURL('image/png');
+  };
+  Object.assign(window, { odinMeasure: gpu.measure, gpuInstances: gpu.lastInstances, compareGpu });
+}
 // ?backend=odin&font=...: 描画と計測を Odin (js_wasm32) に差し替える。入力と IME は canvas backend のまま
 if (new URLSearchParams(location.search).get('backend') === 'odin') {
   if (!fontUrl) throw new Error('backend=odin には font= が要る');

@@ -126,6 +126,21 @@ Odin のビルドの許可を得て、wasm 版の backend をブラウザで確�
 
 **結果**: 2026-11-22 許可を得てビルドし、E2E がすべて通った。
 
+## H11. Odin + wgpu を実際の GPU で表示する
+
+**何を**: Odin + wgpu の backend が、実際のブラウザで canvas に正しく表示されるか。また、mac の単体アプリ (wgpu-native、Metal) でも同じコードが動くか。自動テストでは、ヘッドレスの制約のため、オフスクリーンに描いて読み戻した画素だけを確かめた (VALIDATION.md の 4a')。
+
+**手順**
+
+1. mac の Chrome (WebGPU が有効なもの) で `?backend=odin-gpu&font=fonts/ipaexg.ttf` を開く。表示に必要なものは、`pnpm build:odin-gpu && pnpm fonts && pnpm build` で用意する
+2. 窓のドラッグ、スクロール、IME の入力をして、表示の崩れ・ちらつき・文字のにじみを見る
+3. デバイスピクセル比 2 (Retina) で、文字の鮮明さを Canvas 版と比べる
+4. (任意) mac で wgpu-native を使って、ネイティブの単体アプリとして動かす。wgpu-native の配布物は github.com のリリースにあり、この cloud 環境からは取れなかった
+
+**記録**: 表示の不具合、Canvas 版との見た目の差。
+
+**結果**: (未記入)
+
 ## H6. AeroSpace への写像 (mac)
 
 **何を**: sway で確かめた LayoutOp の写し方 (VALIDATION.md の 5a) が、AeroSpace でも成り立つか。

@@ -14,6 +14,7 @@
 | 2 | 意味ツリーによる操作は、スクショ操作より良いか (実際の LLM で比べる) | 見送り |
 | 3 | 承認の UX: 承認疲れ、プレビューの伝わり方、入力の衝突 | 未 |
 | 4a | Odin の backend (js_wasm32、ブラウザ) で、同じ描画命令を描けるか | 済 |
+| 4a' | Odin + wgpu (ブラウザでは WebGPU) の backend | 済 (画面への表示は [human_checks.md](./human_checks.md) の H11) |
 | 4b | アプリを WIT の wasm コンポーネントにしたときの隔離と、境界のコスト | 済 |
 | 4c | 実際のフォントで、証明・shell の計測・描画が同じ幅になるか | 済 |
 | 5b | 既存アプリのツリーの取り込み (Linux の AT-SPI) | 済 (mac の AX API は [human_checks.md](./human_checks.md) の H7) |
@@ -138,6 +139,39 @@ Odin を wasm (`-target:js_wasm32`) でビルドし、ブラウザで、Canvas �
   3. 枠線だけの矩形は、辺の付近だけを処理する
   - デバイスピクセル比 2 では画素が 4 倍になるので、変わった範囲だけを描き直す (dirty rect) か、GPU (WebGPU / wgpu) に移す必要がある
 - **抽象化の確認**: 同じ描画命令 (P4b) と同じ入力の規約のまま、描画の backend を TypeScript の Canvas 2D から Odin の wasm に差し替えられた。GUI 層の抽象が、言語と描画方式をまたいで成り立つ。
+
+## 4a'. Odin + wgpu の backend (GPU)
+
+同じ描画命令を、Odin の `vendor:wgpu` で GPU に描かせた (`proto-canvas/backend-odin-gpu/gpu.odin`、`src/backend/odin-gpu.ts`、`?backend=odin-gpu&font=fonts/ipaexg.ttf`)。`vendor:wgpu` は、js_wasm32 ではブラウザの WebGPU、ネイティブでは wgpu-native (mac は Metal) を使う。同じ Odin のコードが、ブラウザと mac の単体アプリの両方で動く前提になる。
+
+### 構成
+
+- 描画命令をすべて GPU のインスタンス (四角形 1 つ = 96 バイト) にする。1 フレームを、インスタンス描画 1 回 (draw call 1 回) で描く
+- 角丸・枠線・破線・クリップ・透明度は、フラグメントシェーダ (WGSL) で計算する。符号付き距離の式は CPU 版 (raster.odin) と同じ
+- 文字は、stb_truetype で字形を 2048×2048 のアトラスに焼き、最近傍でサンプリングする (CPU 版と同じ画素位置に置く)
+- 70KB の wasm になった。`--export-table` が要る (wgpu の非同期のコールバックのため)
+
+### 確かめたこと (`e2e/odin-gpu.cjs`、すべて通った)
+
+ヘッドレスの Chromium で、`--enable-unsafe-webgpu` を付けて WebGPU を使った。GPU は無いので、ソフトウェア実装 (SwiftShader) で動いている。
+
+- ページエラーなしで、WebGPU に描ける
+- **画素の一致**: GPU から読み戻した画素が、同じ描画命令を Canvas 2D で描いたものと 0.58% しか違わない (閾値 24。`screenshots/backend-odin-gpu.png` / `backend-canvas-same-frame.png`)
+- 文字幅が mizchi/font と一致する (22 個で差 0)
+- クリックで操作できる
+- **CPU の時間**: 1 フレームの CPU 側の時間 (描画命令の変換と、インスタンスの提出) は平均 0.13ms。CPU 版の Odin (ソフトウェア描画) は 9.9ms だった。Todo・Settings・Notes の画面は、インスタンス 162 個を draw call 1 回で描く。GPU 側の時間は、ソフトウェア実装なので測っていない
+
+### 分かったこと
+
+- **Odin の `wgpu.js` は、表面のテクスチャの状態を書き込まない** (`TODO: determine status somehow?`)。状態が 0 のままなので、`.SuccessOptimal` だけを成功と見ると、毎フレーム何も描かずに戻ってしまう。テクスチャが取れていれば成功とみなした。
+- **`wgpu.js` の `BufferMapAsync` は、失敗のあとに成功も通知する** (`.catch().then()`)。コールバック側で、2 回目を無視する必要がある。
+- **ヘッドレスの Chromium で WebGPU の canvas に表示すると、2 つの問題が起きる** (Odin を使わない素の JS の WebGPU でも同じ)
+  1. スクリーンショットに写らない
+  2. 「A valid external Instance reference no longer exists」となり、以降の `mapAsync` も失敗する
+
+  そこで、検証ではオフスクリーンにだけ描き (`gpu-offscreen=1`)、GPU から読み戻して比べた。実際のブラウザで canvas に表示されるかは、人の確認 (human_checks.md の H11)。
+- **表面の形式**: この環境の推奨は `rgba8unorm` だった。BGRA8 で設定すると、コピーが 1 回増えるという警告が出る。推奨の形式を問い合わせて使うべき。
+- **CPU から GPU への移行で、描画の負担は CPU から離れる**: CPU 版では、画面の大きさに比例して CPU の時間が増える (デバイスピクセル比 2 では約 4 倍)。GPU 版の CPU 側の時間は、画素数ではなく描画命令の数で決まる。
 
 以下は、最初に考えていた構成 (参考):
 

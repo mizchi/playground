@@ -110,7 +110,8 @@ async function step(name, fn) {
         g.drawImage(ib, 0, 0);
         const db = g.getImageData(0, 0, c.width, c.height).data;
         let n = 0;
-        for (let i = 0; i < da.length; i += 4) if (Math.abs(da[i] - db[i]) + Math.abs(da[i + 1] - db[i + 1]) + Math.abs(da[i + 2] - db[i + 2]) > 96) n++;
+        // 白い面と背景 (#eef0f4) の差 (43) も拾えるよう、閾値は 24 にする
+        for (let i = 0; i < da.length; i += 4) if (Math.abs(da[i] - db[i]) + Math.abs(da[i + 1] - db[i + 1]) + Math.abs(da[i + 2] - db[i + 2]) > 24) n++;
         return n / (da.length / 4);
       },
       [`data:image/png;base64,${shots.canvas.toString('base64')}`, `data:image/png;base64,${shots.odin.toString('base64')}`],
