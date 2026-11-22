@@ -21,7 +21,8 @@
     "build:component": "cd component/todo-rs && cargo build --release --target wasm32-wasip2 && cp target/wasm32-wasip2/release/todo_rs.wasm ../todo.wasm",
     "gen:component": "jco transpile component/todo.wasm -o component/gen --name todo --instantiation sync --quiet",
     "pretest": "pnpm -s gen:component",
-    "fonts": "mkdir -p www/fonts && cp /usr/share/fonts/opentype/ipaexfont-gothic/ipaexg.ttf www/fonts/"
+    "fonts": "mkdir -p www/fonts && cp /usr/share/fonts/opentype/ipaexfont-gothic/ipaexg.ttf www/fonts/",
+    "build:odin": "odin build backend-odin -target:js_wasm32 -no-entry-point -o:speed -out:www/raster.wasm && cp \"$(odin root)/core/sys/wasm/js/odin.js\" www/odin.js"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "^1.42.0",

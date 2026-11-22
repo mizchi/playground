@@ -8,3 +8,5 @@ font-diff.json
 atspi-bridge.json
 www/chunks/
 www/fonts/
+www/raster.wasm
+www/odin.js

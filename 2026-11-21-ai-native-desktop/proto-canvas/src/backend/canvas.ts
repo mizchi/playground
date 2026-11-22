@@ -13,6 +13,9 @@ export interface CanvasBackend {
   setCursor(c: string): void;
   /** 描画に使うフォント (shell の計測と同じフォントにする) */
   setFontFamily(f: string): void;
+  /** 色トークンの実際の色 (別の描画 backend に渡す) */
+  colors(): Record<ColorToken, string>;
+  canvas: HTMLCanvasElement;
 }
 
 export interface BackendEvents {
@@ -144,6 +147,8 @@ export function createCanvasBackend(canvas: HTMLCanvasElement, sink: HTMLTextAre
       return { w: r.width, h: r.height };
     },
     focusInput: () => sink.focus({ preventScroll: true }),
+    colors: () => colors,
+    canvas,
     setFontFamily: (f) => {
       family = f;
       widths.clear();

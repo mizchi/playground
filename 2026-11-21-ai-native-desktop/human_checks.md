@@ -112,16 +112,17 @@ pnpm dev          # http://127.0.0.1:8123 をブラウザで開く
 
 **結果**: (未記入)
 
-## H5. Odin + SDL3 の backend (mac)
+## H5. Odin backend のビルドの許可
 
-**何を**: 同じ描画命令と入力の規約で、mac の単体アプリとして動くか (VALIDATION.md の 4a)。
+**何を**: Odin を wasm (js_wasm32) でビルドし、ブラウザで同じ描画命令を描けるか (VALIDATION.md の 4a)。コードと E2E は下書き済み。
 
-**必要なこと** (次のどちらか)
+**必要なこと**: この cloud 環境で、Odin のコンパイラをソースからビルドすることを許可する。対象は `/home/user/tools/odin` に clone 済みの Odin の公式リポジトリで、ビルドスクリプトの実行が権限の判定で止められている。
 
-- この cloud 環境で、Odin をソースからビルドする許可を出す。github.com のリリースは、プロキシで取れなかった
-- mac で Odin と SDL3 を用意し、mac の接続を許可する
+- 方法の例 1: チャットで「`/home/user/tools/odin` で `./build_odin.sh release` を実行してよい」と明示する
+- 方法の例 2: アプリの権限モードを切り替える
+- 方法の例 3: 自分の mac で Odin をビルドし、`pnpm build:odin && pnpm build && node e2e/odin.cjs` を実行する
 
-**記録**: どちらにするか。
+**記録**: どの方法にするか。
 
 **結果**: (未記入)
 

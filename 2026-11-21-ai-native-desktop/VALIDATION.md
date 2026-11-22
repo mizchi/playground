@@ -13,7 +13,7 @@
 | 5a | `LayoutOp` が実在のタイル型 WM (sway) に写せるか | 済 |
 | 2 | 意味ツリーによる操作は、スクショ操作より良いか (実際の LLM で比べる) | 見送り |
 | 3 | 承認の UX: 承認疲れ、プレビューの伝わり方、入力の衝突 | 未 |
-| 4a | Odin + SDL3 の backend で、同じ描画命令を描けるか | 要判断 (Odin のビルドに許可が要る) |
+| 4a | Odin の backend (js_wasm32、ブラウザ) で、同じ描画命令を描けるか | 下書き済み。Odin のコンパイラのビルドに許可が要る |
 | 4b | アプリを WIT の wasm コンポーネントにしたときの隔離と、境界のコスト | 済 |
 | 4c | 実際のフォントで、証明・shell の計測・描画が同じ幅になるか | 済 |
 | 5b | 既存アプリのツリーの取り込み (Linux の AT-SPI) | 済 (mac の AX API は [human_checks.md](./human_checks.md) の H7) |
@@ -109,7 +109,32 @@ AeroSpace (macOS) も i3 に近いコマンドを持つので、同じ方針で�
 
 これで VERISS.md の「P4b の `measure` を shell 側に移す」が、実際のアプリで成り立った。証明に使った計測値と、描画するときの計測値が同じになる。
 
-## 4a. Odin の backend (要判断)
+## 4a. Odin の backend (js_wasm32 でブラウザに。下書き済み、ビルド待ち)
+
+方針を変え、Odin を wasm (`-target:js_wasm32`) でビルドしてブラウザで確かめる。
+
+下書きとして用意したもの (どれも、まだコンパイルしていない):
+
+- `proto-canvas/backend-odin/raster.odin`: ソフトウェアの描画
+  - 角丸矩形 (符号付き距離によるアンチエイリアス)、枠線、破線、クリップ、透明度の層
+  - stb_truetype による文字の描画と計測。stb_truetype の wasm 版は、Odin の vendor にビルド済みのものがある
+  - 描画命令は JSON ではなく、命令ごとの関数呼び出しで受け取る
+- `proto-canvas/src/backend/odin.ts`: 描画命令を Odin の関数呼び出しに変え、Odin のフレームバッファを Canvas に写す。入力と IME は Canvas backend のものを使う。`?backend=odin&font=fonts/ipaexg.ttf` で切り替える
+- `proto-canvas/e2e/odin.cjs`: 次の 4 つを確かめる
+  - Odin backend がページエラーなしで描けること
+  - Odin の文字幅 (stb_truetype) が、mizchi/font と 1/64px 以内で一致すること
+  - Odin backend でも、クリックで操作できること
+  - Canvas 版との画素の差が小さいこと
+- `pnpm build:odin`: `odin build backend-odin -target:js_wasm32 -no-entry-point -o:speed -out:www/raster.wasm` を実行し、Odin のランタイム `odin.js` を写す
+
+wasm 用のリンカ (`wasm-ld`、LLVM 18) と、stb_truetype の wasm 版 (`vendor/stb/lib/stb_truetype_wasm.o`) は、この環境にそろっている。足りないのは Odin のコンパイラ本体だけ。
+
+経緯:
+
+- github.com のリリースからは、配布物を取れなかった (プロキシで 403)
+- git clone したソースでのビルド (`./build_odin.sh release`) は、2 回とも権限の判定で止められた
+
+以下は、最初に考えていた構成 (参考):
 
 予定していた構成:
 

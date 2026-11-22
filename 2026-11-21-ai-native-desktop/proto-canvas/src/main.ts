@@ -62,6 +62,15 @@ if (fontUrl) {
   backend.setFontFamily('ShellFont');
   lowerFamily = 'ShellFont';
 }
+// ?backend=odin&font=...: 描画と計測を Odin (js_wasm32) に差し替える。入力と IME は canvas backend のまま
+if (new URLSearchParams(location.search).get('backend') === 'odin') {
+  if (!fontUrl) throw new Error('backend=odin には font= が要る');
+  const { createOdinRaster } = await import('./backend/odin.ts');
+  const odin = await createOdinRaster('raster.wasm', fontUrl);
+  measureImpl = odin.measure;
+  backend.draw = (ops) => odin.draw(ops, backend.colors(), backend.canvas);
+  Object.assign(window, { odinMeasure: odin.measure });
+}
 // ?todos=1000&extra=7 で件数と窓の数を増やせる (性能の計測用)
 const params = new URLSearchParams(location.search);
 const extra = Array.from({ length: Number(params.get('extra') ?? 0) }, (_, i) => createTodoApp({ id: `todo${i + 2}`, items: 20 }));
