@@ -1,6 +1,5 @@
 // PAL の Odin backend (js_wasm32)。shell の描画命令 (P4b) を、命令ごとの関数呼び出しで受け取り、ソフトウェアで描く。
 // 文字は stb_truetype で、shell と同じフォントファイルを使う。計測 (measure) も同じ規則で返す。
-// 状態: 下書き。この環境では Odin のコンパイラのビルドが許可されておらず、まだコンパイルしていない。
 package raster
 
 import "base:runtime"
@@ -31,6 +30,11 @@ glyphs: map[Glyph_Key]Glyph
 scratch: []u8
 
 ctx: runtime.Context
+
+// 空の main を置いてエントリポイント付きでビルドする。
+// _start がランタイムの @(init) を実行し、stb_truetype が使う libc-shim の malloc が初期化される
+// (-no-entry-point にすると @(init) が走らず、malloc が失敗した)
+main :: proc() {}
 
 @(export)
 init :: proc "c" () {
@@ -116,11 +120,42 @@ rect :: proc "c" (x, y, w, h, radius: f32, fill: Color, stroke: Color, line_widt
 	r := min(radius, min(hx, hy))
 	fa := (fill >> 24) != 0
 	sa := (stroke >> 24) != 0
+	// 不透明で全面を覆う画素は、合成せずに直接書ける
+	opaque := (fill >> 24) == 0xff && alpha >= 1
+	// 角から離れた内側 (この範囲なら距離を計算しなくても被覆率 1): 左右は r、上下は r の内側で、0.5 画素の余裕を取る
+	ix0, ix1 := x + r + 0.5, x + w - r - 0.5
+	iy0, iy1 := y + r + 0.5, y + h - r - 0.5
+	ex0, ex1 := x + 0.5, x + w - 0.5
+	ey0, ey1 := y + 0.5, y + h - 0.5
+	band := line_width / 2 + 1
 	for py in y0 ..< y1 {
-		for px in x0 ..< x1 {
-			fx, fy := f32(px) + 0.5, f32(py) + 0.5
+		fy := f32(py) + 0.5
+		row := int(py * W)
+		px := x0
+		for px < x1 {
+			fx := f32(px) + 0.5
+			// 内側の確実な領域: 塗りは一気に書き、枠線だけなら辺の付近まで飛ばす
+			inner := ((fx >= ix0 && fx <= ix1) && (fy >= ey0 && fy <= ey1)) || ((fy >= iy0 && fy <= iy1) && (fx >= ex0 && fx <= ex1))
+			if inner {
+				deep := fx > ex0 + band && fx < ex1 - band && fy > ey0 + band && fy < ey1 - band
+				if !sa || deep {
+					if fa {
+						if opaque do fb[row + int(px)] = fill
+						else do blend(row + int(px), fill, alpha)
+					} else if deep {
+						// 枠線だけ: 右の辺の付近まで飛ばす
+						next := i32(math.floor(ex1 - band))
+						if next > px {
+							px = next
+							continue
+						}
+					}
+					px += 1
+					continue
+				}
+			}
 			d, qx, qy := sd_round_rect(fx, fy, cx, cy, hx, hy, r)
-			i := int(py * W + px)
+			i := row + int(px)
 			if fa {
 				cov := clamp(0.5 - d, 0, 1)
 				if cov > 0 do blend(i, fill, cov * alpha)
@@ -134,6 +169,7 @@ rect :: proc "c" (x, y, w, h, radius: f32, fill: Color, stroke: Color, line_widt
 				}
 				if cov > 0 do blend(i, stroke, cov * alpha)
 			}
+			px += 1
 		}
 	}
 }
@@ -152,8 +188,9 @@ layer :: proc "c" (alpha: f32) {
 	append(&stack, Kind.Layer)
 }
 
+// 組み込みの pop と名前がぶつからないよう pop_state にする
 @(export)
-pop :: proc "c" () {
+pop_state :: proc "c" () {
 	context = ctx
 	if len(stack) == 0 do return
 	switch pop(&stack) {

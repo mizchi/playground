@@ -22,7 +22,7 @@
     "gen:component": "jco transpile component/todo.wasm -o component/gen --name todo --instantiation sync --quiet",
     "pretest": "pnpm -s gen:component",
     "fonts": "mkdir -p www/fonts && cp /usr/share/fonts/opentype/ipaexfont-gothic/ipaexg.ttf www/fonts/",
-    "build:odin": "odin build backend-odin -target:js_wasm32 -no-entry-point -o:speed -out:www/raster.wasm && cp \"$(odin root)/core/sys/wasm/js/odin.js\" www/odin.js"
+    "build:odin": "odin build backend-odin -target:js_wasm32 -o:speed -out:www/raster.wasm && cp \"$(odin root)/core/sys/wasm/js/odin.js\" www/odin.js"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "^1.42.0",

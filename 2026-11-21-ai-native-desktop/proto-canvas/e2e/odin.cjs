@@ -1,6 +1,5 @@
 // Odin backend (js_wasm32) の確認: 同じ描画命令を Odin が描けるか、Odin の文字幅が mizchi/font と一致するか。
 // 使い方: pnpm fonts && pnpm build:odin && pnpm build && node e2e/odin.cjs
-// 状態: 下書き。Odin のコンパイラが使えるようになったら動かす。
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -61,6 +60,28 @@ async function step(name, fn) {
         }
         console.log(`     ${list.length} 個、最大差 ${max.toFixed(4)}px`);
         assert.ok(max <= 1 / 64, worst);
+      });
+      await step('アニメーション中の 1 フレームの描画時間 (Odin のソフトウェア描画 + Canvas への転送)', async () => {
+        const ms = await page.evaluate(async () => {
+          const s = window.shell;
+          s.tiles = { ...s.tiles, ratio: 0.25 };
+          s.onChange();
+          await new Promise((r) => setTimeout(r, 100));
+          s.applyLayout({ type: 'equalize' }, 'human');
+          const out = [];
+          await new Promise((ok) => {
+            const tick = () => {
+              out.push(window.lastFrame.drawMs);
+              if (out.length < 30) requestAnimationFrame(tick);
+              else ok();
+            };
+            requestAnimationFrame(tick);
+          });
+          out.sort((a, b) => a - b);
+          return { mean: out.reduce((a, b) => a + b, 0) / out.length, p95: out[Math.floor(out.length * 0.95)] };
+        });
+        console.log(`     描画 平均 ${ms.mean.toFixed(1)}ms / p95 ${ms.p95.toFixed(1)}ms (1300x900、デバイスピクセル比 1)`);
+        assert.ok(ms.p95 < 50, '50ms 未満');
       });
       await step('Odin backend でもクリックで操作できる (入力は canvas backend のまま)', async () => {
         const op = await page.evaluate(() => {

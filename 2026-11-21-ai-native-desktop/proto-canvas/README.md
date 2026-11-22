@@ -15,6 +15,7 @@
 | 展開 | `src/expand.ts` | 決定的に展開する。操作できるノードの抜け・重複、role との不一致があれば、その template を捨てて既定レンダラに戻す |
 | レイアウト | `src/layout.ts` | portable な flex の部分集合の簡易版 (後で crater-layout に置き換え、veriss で証明する) |
 | P4b 描画 | `src/render.ts`, `src/backend/canvas.ts` | display list → Canvas 2D |
+| P4b 描画 (Odin) | `backend-odin/raster.odin`, `src/backend/odin.ts` | 同じ display list を、Odin (js_wasm32) のソフトウェア描画で描く。文字は stb_truetype |
 | a11y | `src/backend/aria.ts` | 意味ツリーを ARIA 付きの見えない DOM に写し、widget の位置に重ねる。スクリーンリーダーの操作は人の意味的な操作として shell に戻る。AI の提案と拒否は `aria-live` で読み上げる |
 | P5 IME | `src/backend/canvas.ts` | 隠し textarea に OS の IME を任せる。preedit は表示だけで木に入れず、確定文字列を `replaceSelectedText` にする |
 | veriss への lowering | `src/lower.ts` | View Tree → HTML + CSS + 文字の契約 ([VERISS.md](../VERISS.md)) |
@@ -82,6 +83,8 @@ pnpm font-diff           # 実際のフォント (IPAex ゴシック) で、veri
 pnpm fonts && pnpm build && node e2e/font-shell.cjs   # ?font= で shell の計測を mizchi/font にしたアプリで、証明と描画の計測が一致するか
 pnpm perf                # shell の 1 フレームと veriss の検証時間
 pnpm build && pnpm e2e:mcp   # MCP サーバの通し確認 (MCP クライアント → サーバ → ブラウザの shell)
+pnpm build:odin          # Odin の描画 backend を wasm にする (odin を PATH に置く)。?backend=odin&font=fonts/ipaexg.ttf で使う
+pnpm fonts && pnpm build:odin && pnpm build && node e2e/odin.cjs   # Odin backend の確認 (Canvas 版との画素の差、文字幅、操作、描画時間)
 pnpm build:component     # Rust の Todo を WIT のコンポーネントにする (wasm32-wasip2 のターゲットが必要。component/todo.wasm はコミット済み)
 pnpm atspi-bridge        # 既存の GTK アプリを AT-SPI で取り込む (sway / at-spi2-core / python3-pyatspi / gtk-3-examples が必要)
 pnpm build && node e2e/perf-browser.cjs   # Chromium での 1 フレーム

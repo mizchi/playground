@@ -112,19 +112,19 @@ pnpm dev          # http://127.0.0.1:8123 をブラウザで開く
 
 **結果**: (未記入)
 
-## H5. Odin backend のビルドの許可
+## H5. Odin backend (済)
 
-**何を**: Odin を wasm (js_wasm32) でビルドし、ブラウザで同じ描画命令を描けるか (VALIDATION.md の 4a)。コードと E2E は下書き済み。
+Odin のビルドの許可を得て、wasm 版の backend をブラウザで確かめた (VALIDATION.md の 4a)。mac の単体アプリ (SDL3 の窓) での確認は、まだしていない。
 
-**必要なこと**: この cloud 環境で、Odin のコンパイラをソースからビルドすることを許可する。対象は `/home/user/tools/odin` に clone 済みの Odin の公式リポジトリで、ビルドスクリプトの実行が権限の判定で止められている。
+- 手元で試すとき: `/home/user/tools/odin` にビルドした Odin があれば、次を実行する
 
-- 方法の例 1: チャットで「`/home/user/tools/odin` で `./build_odin.sh release` を実行してよい」と明示する
-- 方法の例 2: アプリの権限モードを切り替える
-- 方法の例 3: 自分の mac で Odin をビルドし、`pnpm build:odin && pnpm build && node e2e/odin.cjs` を実行する
+  ```sh
+  PATH=/home/user/tools/odin:$PATH pnpm build:odin && pnpm fonts && pnpm build
+  ```
 
-**記録**: どの方法にするか。
+  そのうえで `?backend=odin&font=fonts/ipaexg.ttf` を付けて開く
 
-**結果**: (未記入)
+**結果**: 2026-11-22 許可を得てビルドし、E2E がすべて通った。
 
 ## H6. AeroSpace への写像 (mac)
 

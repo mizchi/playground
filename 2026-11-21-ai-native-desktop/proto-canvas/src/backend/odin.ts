@@ -1,6 +1,5 @@
 // PAL の Odin backend (js_wasm32) の JS 側: 描画命令を Odin の関数呼び出しに変え、Odin のフレームバッファを Canvas に写す。
 // 入力と IME は canvas backend のものをそのまま使い、描画と計測だけを差し替える。
-// 状態: 下書き。Odin 側 (backend-odin/raster.odin) をまだコンパイルできていない。
 import type { ColorToken, DrawOp, Measure } from '../protocol.ts';
 
 interface RasterExports {
@@ -13,7 +12,7 @@ interface RasterExports {
   rect(x: number, y: number, w: number, h: number, r: number, fill: number, stroke: number, lw: number, dash: number): void;
   clip(x: number, y: number, w: number, h: number): void;
   layer(a: number): void;
-  pop(): void;
+  pop_state(): void;
   load_font(ptr: number, n: number): number;
   measure(ptr: number, n: number, size: number): number;
   text(x: number, y: number, size: number, color: number, underline: number, ptr: number, n: number): void;
@@ -118,11 +117,12 @@ export async function createOdinRaster(wasmUrl: string, fontUrl: string): Promis
             x.layer(op[1].alpha);
             break;
           case 'pop':
-            x.pop();
+            x.pop_state();
             break;
         }
       }
-      const img = new ImageData(new Uint8ClampedArray(x.memory.buffer, fbPtr, fw * fh * 4).slice(), fw, fh);
+      // wasm のメモリを直接参照する (コピーしない)。メモリが伸びると buffer が変わるので、毎回作り直す
+      const img = new ImageData(new Uint8ClampedArray(x.memory.buffer, fbPtr, fw * fh * 4), fw, fh);
       canvas.getContext('2d')!.putImageData(img, 0, 0);
     },
   };

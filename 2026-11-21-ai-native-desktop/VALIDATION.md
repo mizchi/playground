@@ -13,7 +13,7 @@
 | 5a | `LayoutOp` が実在のタイル型 WM (sway) に写せるか | 済 |
 | 2 | 意味ツリーによる操作は、スクショ操作より良いか (実際の LLM で比べる) | 見送り |
 | 3 | 承認の UX: 承認疲れ、プレビューの伝わり方、入力の衝突 | 未 |
-| 4a | Odin の backend (js_wasm32、ブラウザ) で、同じ描画命令を描けるか | 下書き済み。Odin のコンパイラのビルドに許可が要る |
+| 4a | Odin の backend (js_wasm32、ブラウザ) で、同じ描画命令を描けるか | 済 |
 | 4b | アプリを WIT の wasm コンポーネントにしたときの隔離と、境界のコスト | 済 |
 | 4c | 実際のフォントで、証明・shell の計測・描画が同じ幅になるか | 済 |
 | 5b | 既存アプリのツリーの取り込み (Linux の AT-SPI) | 済 (mac の AX API は [human_checks.md](./human_checks.md) の H7) |
@@ -109,30 +109,35 @@ AeroSpace (macOS) も i3 に近いコマンドを持つので、同じ方針で�
 
 これで VERISS.md の「P4b の `measure` を shell 側に移す」が、実際のアプリで成り立った。証明に使った計測値と、描画するときの計測値が同じになる。
 
-## 4a. Odin の backend (js_wasm32 でブラウザに。下書き済み、ビルド待ち)
+## 4a. Odin の backend (js_wasm32 でブラウザに)
 
-方針を変え、Odin を wasm (`-target:js_wasm32`) でビルドしてブラウザで確かめる。
-
-下書きとして用意したもの (どれも、まだコンパイルしていない):
+Odin を wasm (`-target:js_wasm32`) でビルドし、ブラウザで、Canvas 版と同じ描画命令を描かせた。Odin (dev-2026-11) は、clone した公式リポジトリからこの環境でビルドした (利用者の許可を得て実行)。
 
 - `proto-canvas/backend-odin/raster.odin`: ソフトウェアの描画
   - 角丸矩形 (符号付き距離によるアンチエイリアス)、枠線、破線、クリップ、透明度の層
-  - stb_truetype による文字の描画と計測。stb_truetype の wasm 版は、Odin の vendor にビルド済みのものがある
-  - 描画命令は JSON ではなく、命令ごとの関数呼び出しで受け取る
-- `proto-canvas/src/backend/odin.ts`: 描画命令を Odin の関数呼び出しに変え、Odin のフレームバッファを Canvas に写す。入力と IME は Canvas backend のものを使う。`?backend=odin&font=fonts/ipaexg.ttf` で切り替える
-- `proto-canvas/e2e/odin.cjs`: 次の 4 つを確かめる
-  - Odin backend がページエラーなしで描けること
-  - Odin の文字幅 (stb_truetype) が、mizchi/font と 1/64px 以内で一致すること
-  - Odin backend でも、クリックで操作できること
-  - Canvas 版との画素の差が小さいこと
-- `pnpm build:odin`: `odin build backend-odin -target:js_wasm32 -no-entry-point -o:speed -out:www/raster.wasm` を実行し、Odin のランタイム `odin.js` を写す
+  - stb_truetype による文字の描画と計測。stb_truetype の wasm 版は、Odin の vendor にビルド済みのものを使った
+  - 描画命令は、JSON ではなく命令ごとの関数呼び出しで受け取る
+  - 61KB の wasm になった。import は `odin_env` の `write` と `rand_bytes` の 2 つだけ
+- `proto-canvas/src/backend/odin.ts`: 描画命令を Odin の関数呼び出しに変え、Odin のフレームバッファを Canvas に写す (wasm のメモリを直接参照し、コピーしない)。入力と IME は Canvas backend のまま。`?backend=odin&font=fonts/ipaexg.ttf` で切り替える
 
-wasm 用のリンカ (`wasm-ld`、LLVM 18) と、stb_truetype の wasm 版 (`vendor/stb/lib/stb_truetype_wasm.o`) は、この環境にそろっている。足りないのは Odin のコンパイラ本体だけ。
+### 確かめたこと (`e2e/odin.cjs`、すべて通った)
 
-経緯:
+- Odin backend が、ページエラーなしで描ける
+- Odin の文字幅 (stb_truetype の送り幅 + カーニング) が、mizchi/font (veriss の計測) と一致する。描いた 22 個の文字列で差が 0。shell の計測を Odin に任せても、veriss の証明と同じ値になる
+- Odin backend でも、クリックで操作できる
+- Canvas 版との画素の差は 0.05%。見た目の違いは見分けられない (`screenshots/backend-canvas.png` / `backend-odin.png`)
+- アニメーション中の 1 フレームの描画 (Odin のソフトウェア描画 + Canvas への転送) は、平均 9.9ms (1300x900、デバイスピクセル比 1)
 
-- github.com のリリースからは、配布物を取れなかった (プロキシで 403)
-- git clone したソースでのビルド (`./build_odin.sh release`) は、2 回とも権限の判定で止められた
+### 分かったこと
+
+- **`-no-entry-point` にすると stb_truetype が動かない**: libc-shim (stb_truetype が使う malloc) は、`@(init)` 手続きで自分のアロケータを初期化する。`@(init)` はランタイムの起動処理 (`_start`) で走るので、エントリポイントの無いビルドでは初期化されず、malloc が失敗した。空の `main` を置き、JS から `_start` を呼んで解決した。
+- **export した手続き名が組み込みを隠す**: `pop` という名前で export すると、Odin の組み込みの `pop` が使えなくなる (`pop_state` に改名)。
+- **描画の速さ**: 最初は 1 フレーム 31ms だった。次の 3 つで 9.9ms になった。
+  1. 角から離れた内側の画素は、距離を計算しない
+  2. 不透明で全面を覆う画素は、合成せずに直接書く
+  3. 枠線だけの矩形は、辺の付近だけを処理する
+  - デバイスピクセル比 2 では画素が 4 倍になるので、変わった範囲だけを描き直す (dirty rect) か、GPU (WebGPU / wgpu) に移す必要がある
+- **抽象化の確認**: 同じ描画命令 (P4b) と同じ入力の規約のまま、描画の backend を TypeScript の Canvas 2D から Odin の wasm に差し替えられた。GUI 層の抽象が、言語と描画方式をまたいで成り立つ。
 
 以下は、最初に考えていた構成 (参考):
 
