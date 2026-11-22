@@ -16,6 +16,7 @@ const server = http.createServer((req, res) => {
 });
 const video = process.argv.includes('--video');
 let failures = 0;
+let page;
 async function step(name, fn) {
   try {
     await fn();
@@ -23,6 +24,15 @@ async function step(name, fn) {
   } catch (e) {
     failures++;
     console.log(`FAIL ${name}\n     ${e.message.split('\n').join('\n     ')}`);
+    // まれに失敗することがあった (2026-11-22、全スイートを続けて流したとき 1 回)。再現したときに調べられるよう、状態を残す
+    try {
+      fs.mkdirSync(shotsDir, { recursive: true });
+      const safe = name.replace(/[^\p{L}\p{N}]+/gu, '_').slice(0, 40);
+      await page.screenshot({ path: path.join(shotsDir, `FAIL-${safe}.png`) });
+      fs.writeFileSync(path.join(shotsDir, `FAIL-${safe}.json`), JSON.stringify(await page.evaluate(() => ({ layout: window.shell.getLayout(), frame: window.lastFrame && { animating: window.lastFrame.animating, windows: window.lastFrame.windows.map((w) => ({ app: w.app, tile: w.tile })) }, drag: window.shell.windowDrag() })), null, 1));
+    } catch {
+      /* 記録できなくても続ける */
+    }
   }
 }
 
@@ -34,7 +44,7 @@ async function step(name, fn) {
     viewport: { width: 1680, height: 900 },
     ...(video ? { recordVideo: { dir: shotsDir, size: { width: 1680, height: 900 } } } : {}),
   });
-  const page = await context.newPage();
+  page = await context.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
