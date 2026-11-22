@@ -61,7 +61,7 @@ View Tree には selector も cascade もない。ここが重要で、veriss �
 - veriss は JS (Node 24 以上、Z3 は wasm)。npm には出ていないので、`github:mizchi/veriss#<commit>&path:packages/veriss` で git 依存にしている (`proto-canvas/package.json`)
 - ブラウザの試作: Web Worker で動かす (isle の playground が同じ構成)
 - ネイティブ (Odin / mac): 別プロセスにして JSON Lines で呼ぶ。検証はキャッシュに入れるときだけで、描画の経路には乗らない。検証中は既定レンダラで表示し、プレビューに「検証中」と出す
-- 証明の記録: `{status, viewport の範囲, 前提, template のハッシュ, font のハッシュ, veriss の commit}`。どれかが変わったら無効にする
+- 証明の記録: `{status, viewport の範囲, 前提, template のハッシュ, font のハッシュ, veriss の commit, 実行時のレイアウトエンジンの識別子 (layout.ts の版、のちの crater-layout の版)}`。どれかが変わったら無効にする (V3 でエンジンを置き換えると、V2 の記録はすべて無効になる)
 
 ## 結果 (V0 / V1)
 
