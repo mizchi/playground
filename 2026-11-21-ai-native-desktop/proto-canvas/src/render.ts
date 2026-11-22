@@ -25,7 +25,9 @@ export interface Painted {
   caret: Rect | null;
 }
 
-export function paint(root: LaidOut, state: PaintState, measure: (s: string, size: number, weight: number) => number): Painted {
+/** visible を渡すと、その外にある葉 (文字・widget) は描かず、hit test にも入れない (スクロールした窓の画面外) */
+export function paint(root: LaidOut, state: PaintState, measure: (s: string, size: number, weight: number) => number, visible?: Rect): Painted {
+  const off = (r: Rect) => !!visible && (r.y + r.h < visible.y || r.y > visible.y + visible.h || r.x + r.w < visible.x || r.x > visible.x + visible.w);
   const ops: DrawOp[] = [];
   const hits: HitRegion[] = [];
   let caret: Rect | null = null;
@@ -39,6 +41,7 @@ export function paint(root: LaidOut, state: PaintState, measure: (s: string, siz
       l.children.forEach(visit);
       return;
     }
+    if (off(r)) return; // 画面外の葉は描かない
     if (v.kind === 'text') {
       ops.push(['text', { x: r.x, y: r.y + r.h / 2, str: v.str, size: v.size, weight: v.weight, color: v.color }]);
       return;

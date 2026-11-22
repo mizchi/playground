@@ -155,6 +155,12 @@ export class Shell {
   private lastNow = 0;
   private lastSize = '';
   private snapTiles = false;
+  /** 窓ごとのスクロール量 (ばねで滑らかに動かす) と、その上限 */
+  private scrolls = new Map<AppId, Spring>();
+  private scrollMax = new Map<AppId, number>();
+  private tileRects = new Map<AppId, Rect>();
+  /** 次のフレームで、フォーカスした要素を見える位置まで送る */
+  private revealFocus = false;
   private seq = 1;
   private measure: Measure;
 
@@ -287,6 +293,24 @@ export class Shell {
       if (g.active) this.updateDrop();
     }
     this.onChange();
+  }
+
+  /** ホイール: ポインタの下の窓をスクロールする */
+  wheel(x: number, y: number, dy: number): void {
+    for (const [app, r] of this.tileRects) {
+      if (!inside(r, x, y)) continue;
+      const sp = this.scrollOf(app);
+      sp.target = Math.max(0, Math.min(this.scrollMax.get(app) ?? 0, sp.target + dy));
+      if (!this.animations) sp.snap();
+      this.onChange();
+      return;
+    }
+  }
+
+  private scrollOf(app: AppId): Spring {
+    let sp = this.scrolls.get(app);
+    if (!sp) this.scrolls.set(app, (sp = new Spring(0, PREVIEW_SPRING)));
+    return sp;
   }
 
   pointerUp(): void {
@@ -555,6 +579,7 @@ export class Shell {
     const next = order[(cur + dir + order.length) % order.length];
     this.focusApp(next.app);
     this.preedit = '';
+    this.revealFocus = true;
     this.dispatch({ app: next.app, target: next.node.id, action: 'focus', by: 'human' });
   }
 
@@ -715,10 +740,30 @@ export class Shell {
       const i = this.wins.indexOf(w);
       const { view, issues } = expandTree(w.tree, this.source);
       const content = { x: tile.x, y: tile.y + TITLE_H, w: tile.w, h: tile.h - TITLE_H };
-      const lo = layout(view, content.w, this.measure, content);
+      this.tileRects.set(app, tile);
+      // スクロール: 中身が窓より高ければ、ホイールで動かせる
+      const sp = this.scrollOf(app);
+      let lo = layout(view, content.w, this.measure, { x: content.x, y: content.y - sp.x });
+      const max = Math.max(0, lo.height - content.h);
+      this.scrollMax.set(app, max);
+      if (sp.target > max) sp.target = max;
+      if (this.revealFocus && i === this.focusedWin && w.tree.focus) {
+        // フォーカスした要素が画面外なら、見える位置まで送る (AccessKit の scrollIntoView に当たる)
+        const find = (l: typeof lo.root): Rect | null => (l.view.kind === 'widget' && l.view.node.id === w.tree.focus ? l.rect : l.children.map(find).find(Boolean) ?? null);
+        const r = find(lo.root);
+        if (r) {
+          const top = r.y + sp.x - content.y;
+          if (top < sp.target) sp.target = Math.max(0, top - 8);
+          else if (top + r.h > sp.target + content.h) sp.target = Math.min(max, top + r.h - content.h + 8);
+        }
+        this.revealFocus = false;
+      }
+      if (snap || !this.animations) sp.snap();
+      animating ||= !sp.step(dt);
+      if (sp.x !== 0 || max > 0) lo = layout(view, content.w, this.measure, { x: content.x, y: content.y - sp.x });
       if (this.zoomed !== app) this.minWidths.set(app, lo.minWidth);
       const focused = i === this.focusedWin;
-      const pt = paint(lo.root, { focus: focused ? w.tree.focus : null, preedit: focused ? this.preedit : '', ghosts: ghosts.get(app) ?? new Map() }, this.measure);
+      const pt = paint(lo.root, { focus: focused ? w.tree.focus : null, preedit: focused ? this.preedit : '', ghosts: ghosts.get(app) ?? new Map() }, this.measure, content);
       const title = this.titleOf(app);
 
       const dim = app === dragging;
@@ -759,6 +804,14 @@ export class Shell {
       ops.push(['pop']);
       ops.push(['clip', content]);
       ops.push(...pt.ops);
+      if (max > 0) {
+        // スクロールバー (中身に重ねる。幅を取らない overlay 型)
+        const th = Math.max(24, (content.h * content.h) / lo.height);
+        const ty = content.y + ((content.h - th) * sp.x) / max;
+        ops.push(['layer', { alpha: 0.5 }]);
+        ops.push(['rect', { x: content.x + content.w - 7, y: ty + 2, w: 4, h: th - 4, radius: 2, fill: 'muted' }]);
+        ops.push(['pop']);
+      }
       ops.push(['pop']);
       if (dim) ops.push(['pop']);
       const hidden = this.zoomed && this.zoomed !== app;

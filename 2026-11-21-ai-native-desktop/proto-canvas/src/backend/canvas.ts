@@ -18,6 +18,7 @@ export interface BackendEvents {
   pointerMove(x: number, y: number): void;
   pointerUp(): void;
   doubleClick(x: number, y: number): void;
+  wheel(x: number, y: number, dy: number): void;
   input(msg: ImeFromHost): void;
   resize(): void;
 }
@@ -77,6 +78,15 @@ export function createCanvasBackend(canvas: HTMLCanvasElement, sink: HTMLTextAre
     ev.pointerMove(p.x, p.y);
   });
   canvas.addEventListener('pointerup', () => ev.pointerUp());
+  canvas.addEventListener(
+    'wheel',
+    (e) => {
+      const r = canvas.getBoundingClientRect();
+      ev.wheel(e.clientX - r.left, e.clientY - r.top, e.deltaMode === 1 ? e.deltaY * 20 : e.deltaY);
+      e.preventDefault();
+    },
+    { passive: false },
+  );
   canvas.addEventListener('dblclick', (e) => {
     const r = canvas.getBoundingClientRect();
     ev.doubleClick(e.clientX - r.left, e.clientY - r.top);

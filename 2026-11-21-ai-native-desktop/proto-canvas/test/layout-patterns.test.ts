@@ -239,3 +239,28 @@ test('agent: 最小幅を下回るレイアウトの提案は、提案の時点�
   assert.equal(r.ok, false);
   if (!r.ok) assert.match(r.errors[0], /最小幅/);
 });
+
+test('スクロール: 窓に収まらない中身はホイールで動かせ、画面外は描かない。Tab で移動すると見える位置まで送る', () => {
+  const measure = (s: string, size: number) => [...s].length * size * 0.6;
+  const shell = new Shell([createTodoApp({ items: 200 }), createSettingsApp(), createNotesApp()], measure, memoryStorage());
+  shell.animations = false;
+  let f = shell.frame(W, H, 0);
+  const has = (s: string) => f.ops.some((o) => o[0] === 'text' && o[1].str === s);
+  assert.ok(has('タスク 5') && !has('タスク 150'), '最初は上だけ描く');
+  assert.ok(f.ops.length < 400, `画面外を描かない (${f.ops.length} 命令)`);
+  const todo = f.windows.find((w) => w.app === 'todo')!.tile;
+  shell.wheel(todo.x + 50, todo.y + 100, 4000);
+  f = shell.frame(W, H, 16);
+  assert.ok(has('タスク 150') && !has('タスク 5'), 'ホイールで下へ動く');
+  shell.wheel(todo.x + 50, todo.y + 100, -100000);
+  f = shell.frame(W, H, 32);
+  assert.ok(has('タスク 5'), '上端で止まる');
+  // Tab で一番下の入力欄へ: 見える位置まで送る
+  shell.pointerDown(todo.x + 30, todo.y + 80);
+  shell.pointerUp();
+  for (let i = 0; i < 200; i++) shell.input({ t: 'key', key: 'Tab' }); // i1 → i200 → 入力欄
+  f = shell.frame(W, H, 48);
+  assert.equal(shell.tree('todo').focus, 'input');
+  f = shell.frame(W, H, 64);
+  assert.ok(has('新しいタスク'), 'フォーカスした入力欄が見えている');
+});

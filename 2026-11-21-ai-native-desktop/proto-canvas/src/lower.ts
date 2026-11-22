@@ -29,7 +29,9 @@ export interface TextContract {
 export interface Lowered {
   html: string;
   css: string;
-  boxes: Record<string, TextContract>;
+  boxes: Record<string, TextContract | { overflowBlock: 'scroll' }>;
+  /** scroll のとき veriss に渡す scrollbar の寸法 (canvas の scrollbar は中身に重ねるので 0) */
+  scrollbars?: { name: string; inlineSize: number; blockSize: number }[];
 }
 
 /** layout.ts と同じ規則の固有幅 */
@@ -42,6 +44,8 @@ export interface LowerOptions {
   theme?: Record<ColorToken, string>;
   /** CSS の font-family (計測に使ったフォントと同じにする) */
   fontFamily?: string;
+  /** 窓の中身を縦にスクロールする容器にする (shell の窓と同じ)。中身が窓より高くても、はみ出しではなくなる */
+  scroll?: boolean;
   /**
    * flex の子の固有幅を px で明示する (column の非 stretch の子は width、row の子は flex-basis)。
    * veriss が「中身で決まる幅」(shrink-to-fit、flex-basis: auto) を、文字の契約 (min = max) があっても
@@ -59,7 +63,7 @@ export function lower(view: ViewNode, measure: Measure, opts: LowerOptions = {})
     `html { overflow: hidden; color: ${theme.text}; background: ${theme.surface}; font: 400 14px/20px ${family}; }`,
     'body { display: block; }',
   ];
-  const boxes: Record<string, TextContract> = {};
+  const boxes: Lowered['boxes'] = {};
   const text = (cls: string, str: string, size: number, weight: number) => {
     const w = Math.ceil(measure(str, size, weight));
     boxes[`.${cls}`] = { minInlineSize: w, maxInlineSize: w, intrinsicBlockSize: lineH(size), wrap: 'nowrap' };
@@ -117,6 +121,10 @@ export function lower(view: ViewNode, measure: Measure, opts: LowerOptions = {})
 
   const html = `<main>${visit(view, null, theme.surface)}</main>`;
   // 断片を解析するので html の背景は届かない。ルートに不透明な背景を置く (コントラスト検査のため)
-  rules.push(`main { display: block; background: ${theme.surface}; }`);
+  rules.push(`main { display: block; background: ${theme.surface};${opts.scroll ? ' overflow-y: auto; height: 100%;' : ''} }`);
+  if (opts.scroll) {
+    boxes.main = { overflowBlock: 'scroll' };
+    return { html, css: rules.join('\n'), boxes, scrollbars: [{ name: 'overlay', inlineSize: 0, blockSize: 0 }] };
+  }
   return { html, css: rules.join('\n'), boxes };
 }

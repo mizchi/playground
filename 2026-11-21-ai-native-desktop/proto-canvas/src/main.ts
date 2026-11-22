@@ -46,6 +46,7 @@ const backend = createCanvasBackend(canvas, sink, {
   pointerMove: (x, y) => shell.pointerMove(x, y),
   pointerUp: () => shell.pointerUp(),
   doubleClick: (x, y) => shell.doubleClick(x, y),
+  wheel: (x, y, dy) => shell.wheel(x, y, dy),
   input: (m) => shell.input(m),
   resize: () => schedule(),
 });

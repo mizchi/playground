@@ -42,3 +42,15 @@ test('veriss: px の固有幅を明示しないと Unknown (veriss の既知の�
   assert.equal(r.status, 'unknown');
   assert.ok(r.diagnostics.some((d) => d.code === 'U_LAYOUT_FLEX'));
 });
+
+test('veriss: 窓に収まらない長いリストは、スクロールの容器にすると verified (しないと violated)', () => {
+  const shell = new Shell([createTodoApp({ items: 30 })], measure, memoryStorage());
+  const { view } = shell.viewOf('todo');
+  const min = layout(view, 0, measure).minWidth;
+  const viewport = { min, max: 900, height: HEIGHT };
+  const plain = lower(view, measure, { pxIntrinsic: true });
+  assert.equal(analyzeHTML(plain.html, { name: 'todo', css: plain.css, boxes: plain.boxes, viewport }).status, 'violated', '窓の高さからはみ出す');
+  const sc = lower(view, measure, { pxIntrinsic: true, scroll: true });
+  const r = analyzeHTML(sc.html, { name: 'todo', css: sc.css, boxes: sc.boxes, scrollbars: sc.scrollbars, viewport });
+  assert.equal(r.status, 'verified', JSON.stringify(r.diagnostics.slice(0, 3)));
+});

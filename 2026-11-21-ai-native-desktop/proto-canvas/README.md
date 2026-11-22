@@ -46,6 +46,7 @@
 | Alt+方向キー | 向きの隣の窓と入れ替える (AeroSpace の move) |
 | Alt+M | 最小化 |
 | Escape | ドラッグを取り消す |
+| ホイール | 窓の中身をスクロールする (Tab で移動すると、フォーカスした要素を見える位置まで送る) |
 
 - **プレビュー**: ドロップ先は、青い半透明の矩形と「右に分割」などのラベルで示す。
   - プレビューは、ポインタの位置から広がって現れる。候補が変わると、少し弾むばねで次の候補へ滑る
@@ -72,6 +73,9 @@ pnpm build && pnpm e2e:dnd   # レイアウトの操作 14 項目。--video で 
 pnpm build && pnpm veriss-diff   # veriss・Chromium・layout.ts の 3 者照合 (../VERISS.md)
 pnpm veriss-repro        # veriss に報告した Unknown の最小再現
 pnpm sway-bridge         # LayoutOp を実際の sway に写して比べる (下記)
+pnpm font-diff           # 実際のフォント (IPAex ゴシック) で、veriss の計測・Chromium・layout.ts の幅を比べる
+pnpm perf                # shell の 1 フレームと veriss の検証時間
+pnpm build && node e2e/perf-browser.cjs   # Chromium での 1 フレーム
 ```
 
 ### sway への写像を試す
@@ -92,7 +96,7 @@ Node 24 以上が必要 (`.node-version`)。veriss がそれを要求する。�
 
 ## 結果
 
-- 単体テスト 46 件 (うち veriss の検証 3 件、sway への写像 4 件)、E2E 11 件、レイアウト操作の E2E 14 件が通る (Node 24、Playwright の Chromium)
+- 単体テスト 48 件 (うち veriss の検証 4 件、sway への写像 4 件)、E2E 11 件、レイアウト操作の E2E 14 件が通る (Node 24、Playwright の Chromium)
 - E2E の IME は、CDP の `Input.imeSetComposition` で実際の composition イベントを起こして確かめた。preedit は木に入らず、確定した `卵` だけが値になる
 - LLM の template の代わりに「カード」template を適用すると、件数が変わっても (3 件 → 5 件) 同じキャッシュに当たる。pin すると再読み込み後も残る
 - 操作を落とす template は、既定レンダラに戻り、理由がパネルに出る
