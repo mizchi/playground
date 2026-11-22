@@ -174,6 +174,8 @@ export class Shell {
         : ids.length === 2
           ? { kind: 'split', dir: 'row', ratio: 0.5, a: leaf(ids[0]), b: leaf(ids[1]) }
           : leaf(ids[0]);
+    // 4 つ目以降は、一番大きいペーンを分けて足す (初期の画面の大きさは仮に 1400x800)
+    for (const id of ids.slice(3)) this.tiles = addToLargest(this.tiles, id, { x: 0, y: 0, w: 1400, h: 800 }, GAP);
   }
 
   // ---- P1 ----

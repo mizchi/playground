@@ -1,0 +1,144 @@
+{
+ "html": "<main><div class=\"v0\"><div class=\"v1\">やること</div><div class=\"v2\"><div class=\"v3\" role=\"checkbox\" aria-checked=\"false\" tabindex=\"0\"><div class=\"v3-i\"></div><div class=\"v3-l\">牛乳を買う</div></div><div class=\"v4\" role=\"checkbox\" aria-checked=\"true\" tabindex=\"0\"><div class=\"v4-i\"></div><div class=\"v4-l\">請求書を送る</div></div><div class=\"v5\" role=\"checkbox\" aria-checked=\"false\" tabindex=\"0\"><div class=\"v5-i\"></div><div class=\"v5-l\">PR をレビューする</div></div><div class=\"v6\" role=\"checkbox\" aria-checked=\"false\" tabindex=\"0\"><div class=\"v6-i\"></div><div class=\"v6-l\">タスク 4</div></div><div class=\"v7\" role=\"checkbox\" aria-checked=\"false\" tabindex=\"0\"><div class=\"v7-i\"></div><div class=\"v7-l\">タスク 5</div></div><div class=\"v8\" role=\"checkbox\" aria-checked=\"true\" tabindex=\"0\"><div class=\"v8-i\"></div><div class=\"v8-l\">タスク 6</div></div><div class=\"v9\" role=\"checkbox\" aria-checked=\"false\" tabindex=\"0\"><div class=\"v9-i\"></div><div class=\"v9-l\">タスク 7</div></div><div class=\"v10\" role=\"checkbox\" aria-checked=\"false\" tabindex=\"0\"><div class=\"v10-i\"></div><div class=\"v10-l\">タスク 8</div></div><div class=\"v11\" role=\"checkbox\" aria-checked=\"true\" tabindex=\"0\"><div class=\"v11-i\"></div><div class=\"v11-l\">タスク 9</div></div><div class=\"v12\" role=\"checkbox\" aria-checked=\"false\" tabindex=\"0\"><div class=\"v12-i\"></div><div class=\"v12-l\">タスク 10</div></div><div class=\"v13\" role=\"checkbox\" aria-checked=\"false\" tabindex=\"0\"><div class=\"v13-i\"></div><div class=\"v13-l\">タスク 11</div></div><div class=\"v14\" role=\"checkbox\" aria-checked=\"true\" tabindex=\"0\"><div class=\"v14-i\"></div><div class=\"v14-l\">タスク 12</div></div><div class=\"v15\" role=\"checkbox\" aria-checked=\"false\" tabindex=\"0\"><div class=\"v15-i\"></div><div class=\"v15-l\">タスク 13</div></div><div class=\"v16\" role=\"checkbox\" aria-checked=\"false\" tabindex=\"0\"><div class=\"v16-i\"></div><div class=\"v16-l\">タスク 14</div></div><div class=\"v17\" role=\"checkbox\" aria-checked=\"true\" tabindex=\"0\"><div class=\"v17-i\"></div><div class=\"v17-l\">タスク 15</div></div><div class=\"v18\" role=\"checkbox\" aria-checked=\"false\" tabindex=\"0\"><div class=\"v18-i\"></div><div class=\"v18-l\">タスク 16</div></div><div class=\"v19\" role=\"checkbox\" aria-checked=\"false\" tabindex=\"0\"><div class=\"v19-i\"></div><div class=\"v19-l\">タスク 17</div></div><div class=\"v20\" role=\"checkbox\" aria-checked=\"true\" tabindex=\"0\"><div class=\"v20-i\"></div><div class=\"v20-l\">タスク 18</div></div><div class=\"v21\" role=\"checkbox\" aria-checked=\"false\" tabindex=\"0\"><div class=\"v21-i\"></div><div class=\"v21-l\">タスク 19</div></div><div class=\"v22\" role=\"checkbox\" aria-checked=\"false\" tabindex=\"0\"><div class=\"v22-i\"></div><div class=\"v22-l\">タスク 20</div></div></div><div class=\"v23\"><div class=\"v24\" role=\"textbox\" tabindex=\"0\" aria-label=\"新しいタスク\"></div><div class=\"v25\" role=\"button\" tabindex=\"0\">追加</div></div><div class=\"v26\">残り 14 件</div></div></main>",
+ "css": "* { box-sizing: border-box; margin: 0; padding: 0; }\nhtml { overflow: hidden; color: #1d2230; background: #ffffff; font: 400 14px/20px Arial, Helvetica, sans-serif; }\nbody { display: block; }\n.v0 { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; padding: 14px;  }\n.v1 { font: 700 18px/26px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; flex: none; align-self: flex-start; width: 48px; }\n.v2 { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 0px; flex: none; align-self: stretch; }\n.v3 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 68px; }\n.v3-i { flex: none; width: 18px; height: 18px; background: #c9ced9; }\n.v3-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; }\n.v4 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 77px; }\n.v4-i { flex: none; width: 18px; height: 18px; background: #3557d4; }\n.v4-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #5d6475; }\n.v5 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 110px; }\n.v5-i { flex: none; width: 18px; height: 18px; background: #c9ced9; }\n.v5-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; }\n.v6 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 68px; }\n.v6-i { flex: none; width: 18px; height: 18px; background: #c9ced9; }\n.v6-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; }\n.v7 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 68px; }\n.v7-i { flex: none; width: 18px; height: 18px; background: #c9ced9; }\n.v7-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; }\n.v8 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 68px; }\n.v8-i { flex: none; width: 18px; height: 18px; background: #3557d4; }\n.v8-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #5d6475; }\n.v9 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 68px; }\n.v9-i { flex: none; width: 18px; height: 18px; background: #c9ced9; }\n.v9-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; }\n.v10 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 68px; }\n.v10-i { flex: none; width: 18px; height: 18px; background: #c9ced9; }\n.v10-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; }\n.v11 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 68px; }\n.v11-i { flex: none; width: 18px; height: 18px; background: #3557d4; }\n.v11-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #5d6475; }\n.v12 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 77px; }\n.v12-i { flex: none; width: 18px; height: 18px; background: #c9ced9; }\n.v12-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; }\n.v13 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 77px; }\n.v13-i { flex: none; width: 18px; height: 18px; background: #c9ced9; }\n.v13-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; }\n.v14 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 77px; }\n.v14-i { flex: none; width: 18px; height: 18px; background: #3557d4; }\n.v14-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #5d6475; }\n.v15 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 77px; }\n.v15-i { flex: none; width: 18px; height: 18px; background: #c9ced9; }\n.v15-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; }\n.v16 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 77px; }\n.v16-i { flex: none; width: 18px; height: 18px; background: #c9ced9; }\n.v16-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; }\n.v17 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 77px; }\n.v17-i { flex: none; width: 18px; height: 18px; background: #3557d4; }\n.v17-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #5d6475; }\n.v18 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 77px; }\n.v18-i { flex: none; width: 18px; height: 18px; background: #c9ced9; }\n.v18-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; }\n.v19 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 77px; }\n.v19-i { flex: none; width: 18px; height: 18px; background: #c9ced9; }\n.v19-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; }\n.v20 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 77px; }\n.v20-i { flex: none; width: 18px; height: 18px; background: #3557d4; }\n.v20-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #5d6475; }\n.v21 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 77px; }\n.v21-i { flex: none; width: 18px; height: 18px; background: #c9ced9; }\n.v21-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; }\n.v22 { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; align-self: flex-start; width: 77px; }\n.v22-i { flex: none; width: 18px; height: 18px; background: #c9ced9; }\n.v22-l { flex: none; font: 400 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; color: #1d2230; }\n.v23 { display: flex; flex-direction: row; align-items: center; gap: 8px; padding: 0px; flex: none; align-self: stretch; }\n.v24 { height: 32px; min-width: 160px; background: #ffffff; flex: 1 0 160px; }\n.v25 { font: 600 14px/20px Arial, Helvetica, sans-serif; white-space: nowrap; padding: 6px 14px; background: #3557d4; color: #ffffff; flex: 0 0 47px; }\n.v26 { font: 400 13px/19px Arial, Helvetica, sans-serif; white-space: nowrap; color: #5d6475; flex: none; align-self: flex-start; width: 55px; }\nmain { display: block; background: #ffffff; }",
+ "boxes": {
+  ".v1": {
+   "minInlineSize": 48,
+   "maxInlineSize": 48,
+   "intrinsicBlockSize": 26,
+   "wrap": "nowrap"
+  },
+  ".v3-l": {
+   "minInlineSize": 42,
+   "maxInlineSize": 42,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v4-l": {
+   "minInlineSize": 51,
+   "maxInlineSize": 51,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v5-l": {
+   "minInlineSize": 84,
+   "maxInlineSize": 84,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v6-l": {
+   "minInlineSize": 42,
+   "maxInlineSize": 42,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v7-l": {
+   "minInlineSize": 42,
+   "maxInlineSize": 42,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v8-l": {
+   "minInlineSize": 42,
+   "maxInlineSize": 42,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v9-l": {
+   "minInlineSize": 42,
+   "maxInlineSize": 42,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v10-l": {
+   "minInlineSize": 42,
+   "maxInlineSize": 42,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v11-l": {
+   "minInlineSize": 42,
+   "maxInlineSize": 42,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v12-l": {
+   "minInlineSize": 51,
+   "maxInlineSize": 51,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v13-l": {
+   "minInlineSize": 51,
+   "maxInlineSize": 51,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v14-l": {
+   "minInlineSize": 51,
+   "maxInlineSize": 51,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v15-l": {
+   "minInlineSize": 51,
+   "maxInlineSize": 51,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v16-l": {
+   "minInlineSize": 51,
+   "maxInlineSize": 51,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v17-l": {
+   "minInlineSize": 51,
+   "maxInlineSize": 51,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v18-l": {
+   "minInlineSize": 51,
+   "maxInlineSize": 51,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v19-l": {
+   "minInlineSize": 51,
+   "maxInlineSize": 51,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v20-l": {
+   "minInlineSize": 51,
+   "maxInlineSize": 51,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v21-l": {
+   "minInlineSize": 51,
+   "maxInlineSize": 51,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v22-l": {
+   "minInlineSize": 51,
+   "maxInlineSize": 51,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v25": {
+   "minInlineSize": 19,
+   "maxInlineSize": 19,
+   "intrinsicBlockSize": 20,
+   "wrap": "nowrap"
+  },
+  ".v26": {
+   "minInlineSize": 55,
+   "maxInlineSize": 55,
+   "intrinsicBlockSize": 19,
+   "wrap": "nowrap"
+  }
+ }
+}

@@ -7,14 +7,17 @@ interface Item {
   done: boolean;
 }
 
-export function createTodoApp(): App {
+/** id と件数は性能の計測用 (既定は 'todo' と 3 件) */
+export function createTodoApp(opts: { id?: string; items?: number } = {}): App {
+  const appId = opts.id ?? 'todo';
   let emit: (u: TreeUpdate) => void = () => {};
   let items: Item[] = [
     { id: 'i1', text: '牛乳を買う', done: false },
     { id: 'i2', text: '請求書を送る', done: true },
     { id: 'i3', text: 'PR をレビューする', done: false },
   ];
-  let seq = 4;
+  for (let i = items.length + 1; i <= (opts.items ?? 3); i++) items.push({ id: `i${i}`, text: `タスク ${i}`, done: i % 3 === 0 });
+  let seq = items.length + 1;
   let draft = '';
   let focus: NodeId | null = null;
   let sent = new Set<NodeId>();
@@ -22,7 +25,7 @@ export function createTodoApp(): App {
   const publish = (root?: string) => {
     const left = items.filter((i) => !i.done).length;
     const nodes: SemanticNode[] = [
-      { id: 'root', role: 'x-window', label: 'Todo', children: ['title', 'list', 'entry', 'status'] },
+      { id: 'root', role: 'x-window', label: appId === 'todo' ? 'Todo' : appId, children: ['title', 'list', 'entry', 'status'] },
       { id: 'title', role: 'heading', label: 'やること' },
       { id: 'list', role: 'list', label: 'タスク', children: items.map((i) => i.id) },
       ...items.map((i): SemanticNode => ({ id: i.id, role: 'checkbox', label: i.text, checked: i.done, actions: ['click', 'focus'] })),
@@ -34,11 +37,11 @@ export function createTodoApp(): App {
     const ids = new Set(nodes.map((n) => n.id));
     const remove = [...sent].filter((id) => !ids.has(id));
     sent = ids;
-    emit({ t: 'tree-update', app: 'todo', root, focus, nodes, remove });
+    emit({ t: 'tree-update', app: appId, root, focus, nodes, remove });
   };
 
   return {
-    id: 'todo',
+    id: appId,
     start(e) {
       emit = e;
       publish('root');

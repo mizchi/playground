@@ -40,6 +40,8 @@ const lineH = (size: number) => Math.ceil(size * 1.4);
 
 export interface LowerOptions {
   theme?: Record<ColorToken, string>;
+  /** CSS の font-family (計測に使ったフォントと同じにする) */
+  fontFamily?: string;
   /**
    * flex の子の固有幅を px で明示する (column の非 stretch の子は width、row の子は flex-basis)。
    * veriss が「中身で決まる幅」(shrink-to-fit、flex-basis: auto) を、文字の契約 (min = max) があっても
@@ -50,17 +52,18 @@ export interface LowerOptions {
 
 export function lower(view: ViewNode, measure: Measure, opts: LowerOptions = {}): Lowered {
   const theme = opts.theme ?? THEME_LIGHT;
+  const family = opts.fontFamily ?? LOWER_FONT;
   let n = 0;
   const rules: string[] = [
     '* { box-sizing: border-box; margin: 0; padding: 0; }',
-    `html { overflow: hidden; color: ${theme.text}; background: ${theme.surface}; font: 400 14px/20px ${LOWER_FONT}; }`,
+    `html { overflow: hidden; color: ${theme.text}; background: ${theme.surface}; font: 400 14px/20px ${family}; }`,
     'body { display: block; }',
   ];
   const boxes: Record<string, TextContract> = {};
   const text = (cls: string, str: string, size: number, weight: number) => {
     const w = Math.ceil(measure(str, size, weight));
     boxes[`.${cls}`] = { minInlineSize: w, maxInlineSize: w, intrinsicBlockSize: lineH(size), wrap: 'nowrap' };
-    return `font: ${weight} ${size}px/${lineH(size)}px ${LOWER_FONT}; white-space: nowrap;`;
+    return `font: ${weight} ${size}px/${lineH(size)}px ${family}; white-space: nowrap;`;
   };
 
   /** parent: 親の向き。layout.ts の stretch / grow の規則を CSS の align-self / flex に写す */

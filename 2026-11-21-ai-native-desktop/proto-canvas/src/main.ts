@@ -50,7 +50,10 @@ const backend = createCanvasBackend(canvas, sink, {
   resize: () => schedule(),
 });
 measureImpl = backend.measure;
-shell = new Shell([createTodoApp(), createSettingsApp(), createNotesApp()], (s, z, w) => measureImpl(s, z, w), storage);
+// ?todos=1000&extra=7 で件数と窓の数を増やせる (性能の計測用)
+const params = new URLSearchParams(location.search);
+const extra = Array.from({ length: Number(params.get('extra') ?? 0) }, (_, i) => createTodoApp({ id: `todo${i + 2}`, items: 20 }));
+shell = new Shell([createTodoApp({ items: Number(params.get('todos') ?? 3) }), createSettingsApp(), createNotesApp(), ...extra], (s, z, w) => measureImpl(s, z, w), storage);
 shell.onChange = schedule;
 
 // ---- agent API: MCP の tool にそのまま写せる形で window に出す ----
@@ -254,9 +257,12 @@ function renderPanel(frame: ReturnType<Shell['frame']>) {
 function render() {
   dirty = false;
   const { w, h } = backend.size();
-  const frame = shell.frame(w, h, performance.now());
-  Object.assign(window, { lastFrame: { windows: frame.windows, animating: frame.animating, cursor: frame.cursor } });
+  const t0 = performance.now();
+  const frame = shell.frame(w, h, t0);
+  const t1 = performance.now();
   backend.draw(frame.ops);
+  const t2 = performance.now();
+  Object.assign(window, { lastFrame: { windows: frame.windows, animating: frame.animating, cursor: frame.cursor, shellMs: t1 - t0, drawMs: t2 - t1, ops: frame.ops.length } });
   backend.ime(frame.ime);
   backend.setCursor(frame.cursor);
   // パネルの DOM はアニメーション中は更新しない (重い)。止まったら更新する
