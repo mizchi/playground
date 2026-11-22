@@ -10,8 +10,9 @@ const root = path.join(__dirname, '..', 'www');
 const shotsDir = path.join(__dirname, '..', 'screenshots');
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.map': 'application/json' };
 const server = http.createServer((req, res) => {
-  const file = path.join(root, req.url === '/' ? 'index.html' : req.url.split('?')[0]);
-  if (!file.startsWith(root) || !fs.existsSync(file)) return res.writeHead(404).end();
+  const p = req.url.split('?')[0];
+  const file = path.join(root, p === '/' ? 'index.html' : p);
+  if (!file.startsWith(root) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) return res.writeHead(404).end();
   res.writeHead(200, { 'content-type': types[path.extname(file)] ?? 'application/octet-stream' }).end(fs.readFileSync(file));
 });
 
@@ -157,6 +158,36 @@ async function step(name, fn) {
     await page.mouse.up();
     assert.match(await page.textContent('#wins'), /はみ出し/);
     await shot('05-overflow');
+  });
+
+  await step('アプリが決めた id に HTML を入れても、承認のパネルには文字として出る (HTML として解釈しない)', async () => {
+    const evil = '<img src=x onerror="window.__xss=1">';
+    // 前の手順でタイルを狭めているので、新しい画面で始める
+    await page.goto(`${url}?session=off`);
+    await page.waitForFunction(() => window.platform);
+    const res = await page.evaluate((evil) => {
+      window.platform.registry.install({
+        id: 'evil', title: 'Evil', description: 'x', kind: 'js', capabilities: [], multiInstance: false,
+        create: (id) => ({
+          id,
+          start(emit) {
+            emit({ t: 'tree-update', app: id, root: 'root', focus: null, nodes: [
+              { id: 'root', role: 'x-window', label: 'Evil', children: [evil] },
+              { id: evil, role: 'button', label: '押す', actions: ['click', 'focus'] },
+            ] });
+          },
+          onAction() {},
+        }),
+      });
+      const launched = window.platform.launch('evil');
+      const r = window.agent.propose('押す', [{ app: 'evil', target: evil, action: 'click' }]);
+      return { launched, r: r.ok ? r.proposal.status : r.errors };
+    }, evil);
+    assert.deepEqual(res, { launched: '', r: 'pending' });
+    await page.waitForFunction(() => document.querySelector('#proposals').textContent.includes('onerror'));
+    assert.equal(await page.locator('#proposals img, #sigSel img').count(), 0);
+    assert.equal(await page.evaluate(() => window.__xss), undefined);
+    await page.evaluate(() => window.platform.close('evil'));
   });
 
   await step('最後までページエラーなし', async () => assert.deepEqual(errors, []));

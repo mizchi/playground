@@ -342,7 +342,7 @@ const fillSigs = () => {
   sigSel.innerHTML = openApps()
     .flatMap((app) => shell.signatures(app).map((s) => ({ app, ...s })))
     .filter((s) => s.role !== 'paragraph' && s.role !== 'heading')
-    .map((s) => `<option value="${escapeHtml(s.sig)}">${s.app}/${s.node} (${s.role}${s.label ? ` "${escapeHtml(s.label)}"` : ''})</option>`)
+    .map((s) => `<option value="${escapeHtml(s.sig)}">${escapeHtml(`${s.app}/${s.node}`)} (${s.role}${s.label ? ` "${escapeHtml(s.label)}"` : ''})</option>`)
     .join('');
   if ([...sigSel.options].some((o) => o.value === prev)) sigSel.value = prev;
   else sigSel.value = shell.signatures('todo').find((s) => s.node === 'list')?.sig ?? sigSel.options[0]?.value ?? '';
@@ -430,7 +430,7 @@ function renderPanel(frame: ReturnType<Shell['frame']>) {
     .map((w) => `<div class="card"><b>${escapeHtml(w.title)}</b> <span class="muted">${w.id} (${platform.registry.appOf(w.id) ?? '?'})</span>${wins.length > 1 ? ` <button data-close-win="${w.id}">閉じる</button>` : ''}</div>`)
     .join('');
   const treeSel = $<HTMLSelectElement>('treeApp');
-  const opts = wins.map((w) => `<option>${w.id}</option>`).join('');
+  const opts = wins.map((w) => `<option>${escapeHtml(w.id)}</option>`).join('');
   if (treeSel.dataset.opts !== opts) {
     const prev = treeSel.value;
     treeSel.innerHTML = opts;
@@ -448,7 +448,8 @@ function renderPanel(frame: ReturnType<Shell['frame']>) {
             .map((s) =>
               isLayoutStep(s)
                 ? `<li>layout: ${escapeHtml(JSON.stringify(s.op))}</li>`
-                : `<li>${s.app}/${s.target} ${s.action}${s.data !== undefined ? ` "${escapeHtml(s.data)}"` : ''}</li>`,
+                : // app・target はアプリが決めた id (信用しない)。承認の面にアプリの HTML を混ぜない
+                  `<li>${escapeHtml(`${s.app}/${s.target} ${s.action}`)}${s.data !== undefined ? ` "${escapeHtml(s.data)}"` : ''}</li>`,
             )
             .join('')}</ol>
           ${p.status === 'pending' ? `<div class="row"><button class="primary" data-op="approve" data-id="${p.id}">承認して実行</button><button data-op="reject" data-id="${p.id}">却下</button></div>` : ''}
