@@ -5,8 +5,9 @@ import { createSettingsApp } from '../src/apps/settings.ts';
 import { createTodoApp } from '../src/apps/todo.ts';
 import { TemplateCache, memoryStorage } from '../src/cache.ts';
 import type { Storage } from '../src/cache.ts';
-import { validateTemplate } from '../src/catalog.ts';
-import { expandTree } from '../src/expand.ts';
+import { defaultTemplate, validateTemplate } from '../src/catalog.ts';
+import { collapseSpace, expandTree } from '../src/expand.ts';
+import { lower } from '../src/lower.ts';
 import { layout } from '../src/layout.ts';
 import { Shell } from '../src/shell.ts';
 import type { Step } from '../src/shell.ts';
@@ -76,4 +77,28 @@ test('隣の窓にはみ出した部品は、はみ出した所では押せな�
   const rects = [...shell.accessibility().rects.values()];
   const wins = shell.frame(1000, 600).windows.map((w) => w.tile);
   for (const r of rects) assert.ok(wins.some((t) => r.x >= t.x - 0.01 && r.x + r.w <= t.x + t.w + 0.01), `窓の外の当たり判定 ${JSON.stringify(r)}`);
+});
+
+test('文字列の空白は HTML と同じ規則で潰す (計測・描画・lowering で同じ文字列)', () => {
+  assert.equal(collapseSpace('  A  \t B\n'), 'A B');
+  assert.equal(collapseSpace('全角\u3000空白\u00a0NBSP'), '全角\u3000空白\u00a0NBSP');
+  const tree = new SemanticTree();
+  tree.apply({ t: 'tree-update', app: 'a', root: 'r', focus: null, nodes: [
+    { id: 'r', role: 'group', children: ['h', 'b', 'i'] },
+    { id: 'h', role: 'heading', label: 'A  B' },
+    { id: 'b', role: 'button', label: ' 押す   ボタン ', actions: ['click'] },
+    { id: 'i', role: 'textbox', label: 'x', value: 'a  b', actions: ['setValue'] },
+  ] });
+  const { view } = expandTree(tree, (n) => ({ template: defaultTemplate(n), from: 'default' }));
+  const leaves: string[] = [];
+  const walk = (v: typeof view) => {
+    if (v.kind === 'text') leaves.push(v.str);
+    else if (v.kind === 'widget') leaves.push(`${v.node.label}|${v.node.value ?? ''}`);
+    else v.children.forEach(walk);
+  };
+  walk(view);
+  assert.deepEqual(leaves, ['A B', '押す ボタン|', 'x|a  b'], '入力欄の value は潰さない');
+  // lowering の HTML と文字の契約も同じ文字列
+  const low = lower(view, measure);
+  assert.ok(low.html.includes('>A B<') && low.html.includes('>押す ボタン<'));
 });

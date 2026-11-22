@@ -67,11 +67,12 @@ export function expandTree(tree: SemanticTree, source: TemplateSource): { view: 
           str = t.text.format ? t.text.format.replace('{}', () => raw) : raw;
         }
         // 固定の文字を含む文は強調できない (muted、太字なし)
-        return [{ kind: 'text', str, size: t.size ?? 14, weight: untrusted ? Math.min(t.weight ?? 400, 400) : (t.weight ?? 400), color: untrusted ? 'muted' : (t.color ?? 'text') }];
+        return [{ kind: 'text', str: collapseSpace(str), size: t.size ?? 14, weight: untrusted ? Math.min(t.weight ?? 400, 400) : (t.weight ?? 400), color: untrusted ? 'muted' : (t.color ?? 'text') }];
       }
       case 'widget':
         if (!WIDGET_ROLES[t.kind].includes(ctx.role)) throw new TemplateError(`widget ${t.kind} は role ${ctx.role} に結びつけられない`);
-        return [{ kind: 'widget', widget: t.kind, node: ctx }];
+        // ラベルも同じく空白を潰す (計測・描画・lowering で同じ文字列にする)。入力欄の value は潰さない
+        return [{ kind: 'widget', widget: t.kind, node: ctx.label === undefined ? ctx : { ...ctx, label: collapseSpace(ctx.label) } }];
       case 'children':
         return tree.children(ctx).flatMap(expandNode);
       case 'each':
@@ -111,4 +112,13 @@ export function expandTree(tree: SemanticTree, source: TemplateSource): { view: 
   const view: ViewNode = nodes.length === 1 ? nodes[0] : { kind: 'box', style: { axis: 'vertical' }, children: nodes };
   const unique = [...new Map(issues.map((i) => [`${i.node}\n${i.reason}`, i])).values()];
   return { view, issues: unique };
+}
+
+/**
+ * 1 行の文字列の空白を、HTML の white-space: nowrap と同じ規則で潰す (ASCII の空白の連続を 1 つに、前後は落とす)。
+ * Canvas の計測・描画と、veriss へ lowering した HTML が同じ文字列を扱うようにする。
+ * U+3000 (全角空白) と NBSP は CSS でも潰れないので残す
+ */
+export function collapseSpace(s: string): string {
+  return s.replace(/[ \t\n\r\f]+/g, ' ').trim();
 }
