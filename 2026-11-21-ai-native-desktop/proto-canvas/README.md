@@ -15,8 +15,8 @@
 | 展開 | `src/expand.ts` | 決定的に展開する。操作できるノードの抜け・重複、role との不一致があれば、その template を捨てて既定レンダラに戻す |
 | レイアウト | `src/layout.ts` | portable な flex の部分集合の簡易版 (後で crater-layout に置き換え、veriss で証明する) |
 | P4b 描画 | `src/render.ts`, `src/backend/canvas.ts` | display list → Canvas 2D |
-| P4b 描画 (Odin + wgpu) | `backend-odin-gpu/gpu.odin`, `src/backend/odin-gpu.ts` | 同じ display list を GPU のインスタンス描画 (draw call 1 回) で描く。ブラウザでは WebGPU、ネイティブでは wgpu-native |
-| P4b 描画 (Odin) | `backend-odin/raster.odin`, `src/backend/odin.ts` | 同じ display list を、Odin (js_wasm32) のソフトウェア描画で描く。文字は stb_truetype |
+| P4b 描画 (Odin + wgpu、**Odin の主な backend**) | `backend-odin-gpu/gpu.odin`, `src/backend/odin-gpu.ts` | 同じ display list を GPU のインスタンス描画 (draw call 1 回) で描く。ブラウザでは WebGPU、ネイティブでは wgpu-native ([../DECISIONS.md](../DECISIONS.md)) |
+| P4b 描画 (Odin、ソフトウェア) | `backend-odin/raster.odin`, `src/backend/odin.ts` | 同じ display list を、Odin (js_wasm32) のソフトウェア描画で描く。文字は stb_truetype。GPU 版の比較の基準と、GPU が使えないときの代わり |
 | a11y | `src/backend/aria.ts` | 意味ツリーを ARIA 付きの見えない DOM に写し、widget の位置に重ねる。スクリーンリーダーの操作は人の意味的な操作として shell に戻る。AI の提案と拒否は `aria-live` で読み上げる |
 | P5 IME | `src/backend/canvas.ts` | 隠し textarea に OS の IME を任せる。preedit は表示だけで木に入れず、確定文字列を `replaceSelectedText` にする |
 | veriss への lowering | `src/lower.ts` | View Tree → HTML + CSS + 文字の契約 ([VERISS.md](../VERISS.md)) |

@@ -142,6 +142,8 @@ Odin を wasm (`-target:js_wasm32`) でビルドし、ブラウザで、Canvas �
 
 ## 4a'. Odin + wgpu の backend (GPU)
 
+この結果を受けて、Odin の描画 backend は wgpu を主に使うことにした ([DECISIONS.md](./DECISIONS.md))。
+
 同じ描画命令を、Odin の `vendor:wgpu` で GPU に描かせた (`proto-canvas/backend-odin-gpu/gpu.odin`、`src/backend/odin-gpu.ts`、`?backend=odin-gpu&font=fonts/ipaexg.ttf`)。`vendor:wgpu` は、js_wasm32 ではブラウザの WebGPU、ネイティブでは wgpu-native (mac は Metal) を使う。同じ Odin のコードが、ブラウザと mac の単体アプリの両方で動く前提になる。
 
 ### 構成
