@@ -82,6 +82,9 @@ test('隣の窓にはみ出した部品は、はみ出した所では押せな�
 test('文字列の空白は HTML と同じ規則で潰す (計測・描画・lowering で同じ文字列)', () => {
   assert.equal(collapseSpace('  A  \t B\n'), 'A B');
   assert.equal(collapseSpace('全角\u3000空白\u00a0NBSP'), '全角\u3000空白\u00a0NBSP');
+  // 端の NBSP と U+3000 も残す (CSS は落とさない)
+  assert.equal(collapseSpace('\u3000A\u00a0'), '\u3000A\u00a0');
+  assert.equal(collapseSpace(' \u00a0 A \u3000 '), '\u00a0 A \u3000');
   const tree = new SemanticTree();
   tree.apply({ t: 'tree-update', app: 'a', root: 'r', focus: null, nodes: [
     { id: 'r', role: 'group', children: ['h', 'b', 'i'] },

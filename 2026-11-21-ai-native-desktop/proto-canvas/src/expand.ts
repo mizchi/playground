@@ -120,5 +120,6 @@ export function expandTree(tree: SemanticTree, source: TemplateSource): { view: 
  * U+3000 (全角空白) と NBSP は CSS でも潰れないので残す
  */
 export function collapseSpace(s: string): string {
-  return s.replace(/[ \t\n\r\f]+/g, ' ').trim();
+  // String.prototype.trim は NBSP と U+3000 も落とすので使わない (CSS は落とさない)
+  return s.replace(/[ \t\n\r\f]+/g, ' ').replace(/^ | $/g, '');
 }
