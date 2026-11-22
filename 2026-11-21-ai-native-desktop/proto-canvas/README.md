@@ -15,6 +15,7 @@
 | 展開 | `src/expand.ts` | 決定的に展開する。操作できるノードの抜け・重複、role との不一致があれば、その template を捨てて既定レンダラに戻す |
 | レイアウト | `src/layout.ts` | portable な flex の部分集合の簡易版 (後で crater-layout に置き換え、veriss で証明する) |
 | P4b 描画 | `src/render.ts`, `src/backend/canvas.ts` | display list → Canvas 2D |
+| a11y | `src/backend/aria.ts` | 意味ツリーを ARIA 付きの見えない DOM に写し、widget の位置に重ねる。スクリーンリーダーの操作は人の意味的な操作として shell に戻る。AI の提案と拒否は `aria-live` で読み上げる |
 | P5 IME | `src/backend/canvas.ts` | 隠し textarea に OS の IME を任せる。preedit は表示だけで木に入れず、確定文字列を `replaceSelectedText` にする |
 | veriss への lowering | `src/lower.ts` | View Tree → HTML + CSS + 文字の契約 ([VERISS.md](../VERISS.md)) |
 | タイル | `src/tiling.ts`, `src/anim.ts`, `src/shell.ts` | 分割ツリー。窓のタイトルバーを掴んで運ぶと分割・入れ替えができる (下記)。境界はドラッグで動かせる。最小幅を下回ると「はみ出し」を出す |
@@ -69,6 +70,7 @@ pnpm dev          # http://127.0.0.1:8123
 pnpm test         # 単体テスト (node --test、型ストリップで .ts をそのまま実行)
 pnpm typecheck
 pnpm build && pnpm e2e   # Chromium で通し確認。--shots で screenshots/ に保存
+pnpm build && pnpm e2e:a11y  # スクリーンリーダー向けのミラー DOM (アクセシビリティツリー、操作、読み上げ、axe-core)
 pnpm build && pnpm e2e:dnd   # レイアウトの操作 14 項目。--video で screenshots/dnd.webm と dnd.gif を保存
 pnpm build && pnpm veriss-diff   # veriss・Chromium・layout.ts の 3 者照合 (../VERISS.md)
 pnpm veriss-repro        # veriss に報告した Unknown の最小再現

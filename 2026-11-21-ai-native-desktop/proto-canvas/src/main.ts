@@ -1,6 +1,7 @@
 import { createSettingsApp } from './apps/settings.ts';
 import { createNotesApp } from './apps/notes.ts';
 import { createTodoApp } from './apps/todo.ts';
+import { createAriaMirror } from './backend/aria.ts';
 import { createCanvasBackend } from './backend/canvas.ts';
 import type { CacheEntry, Storage } from './cache.ts';
 import type { ViewTemplate } from './catalog.ts';
@@ -56,6 +57,26 @@ const params = new URLSearchParams(location.search);
 const extra = Array.from({ length: Number(params.get('extra') ?? 0) }, (_, i) => createTodoApp({ id: `todo${i + 2}`, items: 20 }));
 shell = new Shell([createTodoApp({ items: Number(params.get('todos') ?? 3) }), createSettingsApp(), createNotesApp(), ...extra], (s, z, w) => measureImpl(s, z, w), storage);
 shell.onChange = schedule;
+
+// スクリーンリーダー向けのミラー DOM (意味ツリーから作る)
+const aria = createAriaMirror(
+  document.getElementById('a11y')!,
+  (app, node) => {
+    shell.activate(app, node);
+    backend.focusInput();
+  },
+  (app) => shell.restoreApp(app, 'human'),
+);
+let seenProposals = 0;
+let seenAudit = 0;
+/** AI の提案と、拒否された操作を読み上げる (承認の判断を音声でもできるように) */
+function announce() {
+  for (const p of shell.proposals.slice(seenProposals)) aria.announce(`AI の提案 ${p.id}: ${p.intent}。${p.sensitive ? '承認が必要です。' : ''}`);
+  seenProposals = shell.proposals.length;
+  const denied = shell.audit.slice(seenAudit).filter((a) => a.result === 'denied');
+  if (denied.length) aria.announce(`拒否: ${denied.at(-1)!.reason ?? ''}`);
+  seenAudit = shell.audit.length;
+}
 
 // ---- agent API: MCP の tool にそのまま写せる形で window に出す ----
 const agent = {
@@ -267,7 +288,11 @@ function render() {
   backend.ime(frame.ime);
   backend.setCursor(frame.cursor);
   // パネルの DOM はアニメーション中は更新しない (重い)。止まったら更新する
-  if (!frame.animating && !shell.windowDrag()?.active) renderPanel(frame);
+  if (!frame.animating && !shell.windowDrag()?.active) {
+    renderPanel(frame);
+    aria.update(shell.accessibility());
+    announce();
+  }
   if (frame.animating) {
     dirty = true;
     requestAnimationFrame(render);

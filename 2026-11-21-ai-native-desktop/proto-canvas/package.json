@@ -13,13 +13,15 @@
     "e2e:dnd": "node e2e/dnd.cjs",
     "sway-bridge": "node e2e/sway-bridge.ts",
     "font-diff": "node e2e/font-diff.ts",
-    "perf": "node e2e/perf.ts"
+    "perf": "node e2e/perf.ts",
+    "e2e:a11y": "node e2e/a11y.cjs"
   },
   "devDependencies": {
-    "esbuild": "^0.28.2",
-    "typescript": "^5.9.3",
+    "@mizchi/veriss": "github:mizchi/veriss#ee4cb5a559856f475e379335e3200b353c465242&path:packages/veriss",
     "@types/node": "^24.0.0",
-    "@mizchi/veriss": "github:mizchi/veriss#ee4cb5a559856f475e379335e3200b353c465242&path:packages/veriss"
+    "axe-core": "^4.14.1",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3"
   },
   "engines": {
     "node": ">=24"

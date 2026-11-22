@@ -49,6 +49,11 @@
         position: absolute; width: 1px; height: 18px; padding: 0; border: 0; outline: 0;
         opacity: 0; resize: none; overflow: hidden; caret-color: transparent; left: 0; top: 0;
       }
+      /* スクリーンリーダー向けのミラー DOM: 見えないが、アクセシビリティツリーには出る。位置は widget に重ねる */
+      #a11y { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+      #a11y [style] { position: absolute; }
+      #a11y * { color: transparent; background: transparent; border: 0; margin: 0; padding: 0; font-size: 1px; outline: none; }
+      #a11y .live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
       aside {
         background: var(--panel);
         border-left: 1px solid var(--c-border);
@@ -86,6 +91,7 @@
     <div id="stage">
       <canvas id="screen" aria-hidden="true"></canvas>
       <textarea id="sink" aria-label="入力" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+      <div id="a11y"></div>
     </div>
     <aside id="panel"></aside>
     <script type="module" src="./main.js"></script>

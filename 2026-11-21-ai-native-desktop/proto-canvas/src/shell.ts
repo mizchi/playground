@@ -595,6 +595,34 @@ export class Shell {
       }));
   }
 
+  /** スクリーンリーダー向けのミラー DOM の材料: 表示中の窓のツリー、widget の位置、ドック、フォーカス */
+  accessibility(): {
+    windows: { app: AppId; title: string; root: NodeId | null; nodes: SemanticNode[]; focused: boolean; rect: Rect | null }[];
+    rects: Map<string, Rect>;
+    minimized: { app: AppId; title: string; rect: Rect | null }[];
+  } {
+    const shown = this.zoomed ? [this.zoomed] : leaves(this.tiles);
+    const focusedApp = this.wins[this.focusedWin]?.app.id;
+    return {
+      windows: shown.map((app) => {
+        const t = this.tree(app);
+        return { app, title: this.titleOf(app), root: t.root, nodes: t.walk().map((n) => structuredClone(n)), focused: app === focusedApp, rect: this.tileRects.get(app) ?? null };
+      }),
+      rects: new Map(this.hits.map((h) => [`${h.app}/${h.hit.node}`, h.hit.rect])),
+      minimized: this.minimized.map((app) => ({ app, title: this.titleOf(app), rect: this.chips.find((c) => c.app === app)?.rect ?? null })),
+    };
+  }
+
+  /** スクリーンリーダーの操作 (ミラー DOM の click) を、人の意味的な操作にする */
+  activate(app: AppId, node: NodeId): void {
+    const n = this.tree(app).get(node);
+    if (!n) return;
+    this.focusApp(app);
+    this.preedit = '';
+    if (n.actions?.includes('focus')) this.dispatch({ app, target: node, action: 'focus', by: 'human' });
+    if (n.role !== 'textbox' && n.actions?.includes('click')) this.dispatch({ app, target: node, action: 'click', by: 'human' });
+  }
+
   /** agent から見えるレイアウト (木・ドック・ズーム) */
   getLayout(): LayoutState {
     return structuredClone(this.state());
