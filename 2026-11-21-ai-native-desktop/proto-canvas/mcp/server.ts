@@ -49,6 +49,12 @@ const server = new McpServer({ name: 'ai-native-desktop', version: '0.1.0' });
 server.registerTool('list_apps', { description: '表示中・ドックにある窓の一覧' }, () => wrap(() => call('listApps')));
 
 server.registerTool(
+  'list_installed',
+  { description: 'インストール済みのアプリ (起動できるもの)。新しい窓は propose の {kind:"layout", op:{type:"launch", app}} で人に提案する' },
+  () => wrap(() => call('listInstalled')),
+);
+
+server.registerTool(
   'get_tree',
   {
     description: '窓の意味ツリー (WAI-ARIA の role、label、状態、公開している action)。sensitive なノードの value は伏せてある',
@@ -65,7 +71,8 @@ server.registerTool(
     description:
       '操作の提案を出す。人がプレビューを見て承認するまで何も実行されない。承認の前に状況が変わると実行されない (stale)。' +
       ' steps は {app, target, action, data?} (action は get_tree の actions にあるもの。focus は使えない) か、' +
-      ' {kind: "layout", op: {type: "move"|"zoom"|"minimize"|"restore"|"equalize", ...}}',
+      ' {kind: "layout", op: {type: "move"|"zoom"|"minimize"|"restore"|"equalize"|"launch"|"close", ...}}。' +
+      ' launch は {type:"launch", app: list_installed の id}、close は {type:"close", app: 窓の id} (close は常に人の承認が要る)',
     inputSchema: {
       intent: z.string().describe('人に見せる意図の説明'),
       steps: z.array(z.record(z.string(), z.unknown())).describe('手順'),

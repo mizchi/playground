@@ -1,0 +1,72 @@
+// プラットフォームの型: アプリの宣言 (manifest)、能力 (capability)、システムのサービス。
+import type { App } from '../apps/app.ts';
+
+/**
+ * アプリが使える能力。manifest で宣言し、人が許可したものだけが使える。
+ * - storage: アプリ自身の保存領域 (同じアプリの窓で共有)
+ * - clipboard.read / clipboard.write: クリップボード
+ * - notifications: 通知
+ * - apps.launch: ほかのアプリを起動する
+ * - terminal.pty: ホストの本物のシェル (擬似端末) につなぐ。ホストが pty の橋を用意しているときだけ使える
+ */
+export type Capability = 'storage' | 'clipboard.read' | 'clipboard.write' | 'notifications' | 'apps.launch' | 'terminal.pty';
+
+/** 能力の状態。ask は「初めて使うときに人に尋ねる」 */
+export type GrantState = 'granted' | 'denied' | 'ask';
+
+export type ServiceResult<T> = { ok: true; value: T } | { ok: false; reason: 'denied' | 'pending' | 'undeclared' | 'unavailable' };
+
+/** 擬似端末への接続 (ホストのシェル) */
+export interface PtyHandle {
+  write(data: string): void;
+  close(): void;
+}
+/** ホストが用意する擬似端末の口 (無ければ terminal.pty は unavailable) */
+export type PtyConnector = (cols: number, rows: number, onData: (data: string) => void, onExit: (why: string) => void) => PtyHandle;
+
+/** アプリに渡すシステムのサービス。どの呼び出しも能力を確かめ、監査ログに残る */
+export interface AppServices {
+  clipboard: { read(): ServiceResult<string>; write(text: string): ServiceResult<void> };
+  notify(title: string, body?: string): ServiceResult<void>;
+  storage: { get(key: string): ServiceResult<string | undefined>; set(key: string, value: string): ServiceResult<void> };
+  apps: { list(): ServiceResult<{ id: string; title: string; description: string }[]>; launch(id: string): ServiceResult<void> };
+  /** ホストのシェルを開く。出力は onData に届く */
+  pty: { available(): boolean; open(cols: number, rows: number, onData: (data: string) => void, onExit: (why: string) => void): ServiceResult<PtyHandle> };
+  /** 人が許可の要求に答えたとき (ask のあと) */
+  onGrant(cb: (cap: Capability, granted: boolean) => void): void;
+}
+
+export interface AppManifest {
+  /** アプリの id。最初の窓の id にもなる (2 枚目以降は id-2, id-3 ...) */
+  id: string;
+  title: string;
+  description: string;
+  /** どう動くか: js (TypeScript のアプリ) / component (WIT の wasm コンポーネント) / legacy (AT-SPI の既存アプリ) */
+  kind: 'js' | 'component' | 'legacy';
+  /** 使いたい能力。宣言していない能力は、尋ねることもできない */
+  capabilities: Capability[];
+  /** 同じアプリを複数の窓で開けるか */
+  multiInstance: boolean;
+  /** システムのアプリ (ランチャーなど)。ランチャーの一覧に出さない */
+  system?: boolean;
+  /** 窓を作る。services はこの窓に渡す能力付きのサービス */
+  create(windowId: string, services: AppServices): App;
+}
+
+/** 許可の要求 (人が答える) */
+export interface GrantPrompt {
+  id: string;
+  app: string;
+  appTitle: string;
+  capability: Capability;
+  status: 'pending' | 'granted' | 'denied';
+}
+
+export interface Notification {
+  id: number;
+  app: string;
+  window: string;
+  title: string;
+  body?: string;
+  at: number;
+}

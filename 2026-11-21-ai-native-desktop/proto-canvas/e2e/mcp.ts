@@ -57,7 +57,7 @@ await page.waitForFunction(() => (window as unknown as { mcpStatus?: string }).m
 
 await step('tool の一覧: 読む・提案する・待つだけ。承認の tool は無い', async () => {
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['get_layout', 'get_tree', 'list_apps', 'propose', 'wait_proposal']);
+  assert.deepEqual(names, ['get_layout', 'get_tree', 'list_apps', 'list_installed', 'propose', 'wait_proposal']);
 });
 
 await step('get_tree / get_layout / list_apps で画面の状態が読める', async () => {
@@ -106,6 +106,21 @@ await step('レイアウトの提案も同じ流れ (承認で実行)', async ()
   assert.equal((r.value as { status: string }).status, 'done');
   const apps = await call('list_apps');
   assert.deepEqual((apps.value as { minimized: { app: string }[] }).minimized.map((m) => m.app), ['settings']);
+});
+
+await step('list_installed で起動できるアプリを知り、launch の提案で Terminal を開く (承認で実行)', async () => {
+  const installed = (await call('list_installed')).value as { id: string }[];
+  assert.ok(installed.some((a) => a.id === 'terminal'));
+  assert.ok(!installed.some((a) => a.id === 'launcher'), 'システムのアプリは出さない');
+  const p = await call('propose', { intent: 'Terminal を開く', steps: [{ kind: 'layout', op: { type: 'launch', app: 'terminal' } }] });
+  assert.equal(p.isError, false, p.text);
+  await page.click(`#proposals button[data-op="approve"][data-id="${(p.value as { id: string }).id}"]`);
+  const r = await call('wait_proposal', { id: (p.value as { id: string }).id, timeout_s: 5 });
+  assert.equal((r.value as { status: string }).status, 'done');
+  await page.waitForFunction(() => /libghostty-vt/.test((window as any).shell.tree('terminal').get('screen')?.value ?? ''));
+  const tree = await call('get_tree', { app: 'terminal' });
+  assert.ok(tree.text.includes('libghostty-vt'), 'agent は画面の文字を読める');
+  assert.ok(!tree.text.includes('"lines"'), '描画用の格子は渡さない');
 });
 
 await client.close();

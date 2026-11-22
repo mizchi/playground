@@ -12,6 +12,8 @@ export interface BoxStyle {
   border?: ColorToken;
   radius?: number;
   grow?: number;
+  /** horizontal の子を等幅に並べる (CSS の flex: 1 1 0)。表の行どうしで列が揃う */
+  equal?: boolean;
 }
 
 export type ViewTemplate =
@@ -25,7 +27,7 @@ export type ViewTemplate =
   /** each の中だけで使える: 文脈ノード (= 子) を、その子自身の template で描く */
   | { type: 'self' };
 
-export type WidgetKind = 'checkbox' | 'switch' | 'textField' | 'button' | 'radio' | 'stepper' | 'action';
+export type WidgetKind = 'checkbox' | 'switch' | 'textField' | 'button' | 'radio' | 'stepper' | 'terminal' | 'action';
 
 /** widget と結びつけてよい role。widget は node.actions にある action しか起こせない */
 export const WIDGET_ROLES: Record<WidgetKind, Role[]> = {
@@ -35,6 +37,7 @@ export const WIDGET_ROLES: Record<WidgetKind, Role[]> = {
   button: ['button', 'combobox', 'tab'],
   radio: ['radio'],
   stepper: ['slider', 'spinbutton'],
+  terminal: ['log'],
   // 既存アプリの「クリックできる画像やセル」など、役割と操作が食い違うもの。既定レンダラだけが使う (LLM の template では使えない)
   action: ['img', 'cell', 'paragraph', 'heading', 'listitem', 'row', 'group', 'columnheader', 'progressbar', 'tablist', 'table', 'list', 'separator', 'x-window'],
 };
@@ -73,7 +76,8 @@ export function validateTemplate(t: unknown): string[] {
     };
     switch (o.type) {
       case 'box':
-        allow(['type', 'children', 'axis', 'gap', 'padding', 'background', 'border', 'radius', 'grow']);
+        allow(['type', 'children', 'axis', 'gap', 'padding', 'background', 'border', 'radius', 'grow', 'equal']);
+        if (o.equal !== undefined && typeof o.equal !== 'boolean') errors.push(`${path}.equal: boolean`);
         if (o.axis !== undefined && o.axis !== 'vertical' && o.axis !== 'horizontal') errors.push(`${path}.axis: vertical | horizontal`);
         num(o.gap, 'gap', path);
         num(o.padding, 'padding', path);
@@ -171,7 +175,8 @@ function baseTemplate(node: SemanticNode): ViewTemplate {
     case 'table':
       return { type: 'box', axis: 'vertical', gap: 2, children: [{ type: 'children' }] };
     case 'row':
-      return { type: 'box', axis: 'horizontal', gap: 12, children: [{ type: 'children' }] };
+      // セルを等幅にして、行どうしで列を揃える
+      return { type: 'box', axis: 'horizontal', gap: 4, equal: true, children: [{ type: 'children' }] };
     case 'cell':
       return { type: 'text', text: { bind: 'label' }, size: 13, color: 'text' };
     case 'columnheader':
@@ -180,5 +185,7 @@ function baseTemplate(node: SemanticNode): ViewTemplate {
       return { type: 'box', border: 'border', children: [] };
     case 'img':
       return { type: 'text', text: { bind: 'label' }, size: 12, color: 'muted' };
+    case 'log':
+      return { type: 'widget', kind: 'terminal' };
   }
 }

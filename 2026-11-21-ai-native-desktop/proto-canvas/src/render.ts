@@ -46,7 +46,9 @@ export function paint(root: LaidOut, state: PaintState, measure: (s: string, siz
     }
     if (off(r)) return; // 画面外の葉は描かない
     if (v.kind === 'text') {
-      ops.push(['text', { x: r.x, y: r.y + r.h / 2, str: v.str, size: v.size, weight: v.weight, color: v.color }]);
+      // 等幅の行で広げられた文字は中央に置く (それ以外は r.w が固有幅なので左寄せと同じ)
+      const tw = measure(v.str, v.size, v.weight);
+      ops.push(['text', { x: r.x + Math.max(0, (r.w - tw) / 2), y: r.y + r.h / 2, str: v.str, size: v.size, weight: v.weight, color: v.color }]);
       return;
     }
     const n = v.node;
@@ -116,14 +118,45 @@ export function paint(root: LaidOut, state: PaintState, measure: (s: string, siz
         ops.push(['pop']);
         break;
       }
+      case 'terminal': {
+        const s = n.screen;
+        ops.push(['rect', { ...r, radius: 6, rgb: s?.bg ?? '#000000', fill: 'surface' }]);
+        if (!s) break;
+        const x0 = r.x + M.termPad;
+        const y0 = r.y + M.termPad;
+        ops.push(['clip', { x: r.x + 2, y: r.y + 2, w: r.w - 4, h: r.h - 4 }]);
+        s.lines.forEach((line, row) => {
+          const y = y0 + row * M.termLine;
+          for (const run of line) {
+            const cells = run.wide ? 2 : [...run.text].length;
+            const x = x0 + run.col * M.termCell;
+            if (x > r.x + r.w) break;
+            if (run.bg) ops.push(['rect', { x, y, w: cells * M.termCell, h: M.termLine, rgb: run.bg, fill: 'surface' }]);
+            // 1 桁ずつ置く (フォントの字幅に頼らず、格子に合わせる)
+            [...run.text].forEach((ch, i) => {
+              if (ch !== ' ')
+                ops.push(['text', { x: x + i * M.termCell, y: y + M.termLine / 2, str: ch, size: M.termSize, weight: run.bold ? 700 : 400, color: 'text', rgb: run.fg ?? s.fg, mono: true }]);
+            });
+          }
+        });
+        if (s.cursor) {
+          ops.push(['layer', { alpha: 0.55 }]);
+          ops.push(['rect', { x: x0 + s.cursor.x * M.termCell, y: y0 + s.cursor.y * M.termLine, w: M.termCell, h: M.termLine, rgb: s.fg, fill: 'text' }]);
+          ops.push(['pop']);
+        }
+        ops.push(['pop']);
+        break;
+      }
       case 'action':
       case 'button': {
-        const w = Math.ceil(measure(label, M.fontSize, 600)) + 2 * M.btnPadX;
+        // 等幅の行で広げられたら、その幅いっぱいに描き、文字は中央 (それ以外は r.w が固有幅)
+        const tw = Math.ceil(measure(label, M.fontSize, 600));
+        const w = Math.max(tw + 2 * M.btnPadX, r.w);
         hitRect = { x: r.x, y: r.y, w, h: r.h };
-        // tab は選ばれていなければ控えめに描く
-        const quiet = (n.role === 'tab' && !n.selected) || v.widget === 'action';
+        // tab は選ばれていなければ控えめに描く。action (クリックできるセルなど) は選ばれていれば強調する
+        const quiet = (n.role === 'tab' && !n.selected) || (v.widget === 'action' && !n.selected);
         ops.push(['rect', { ...hitRect, radius: 6, fill: quiet ? 'surface' : n.sensitive ? 'danger' : 'accent', stroke: quiet ? 'border' : undefined }]);
-        ops.push(['text', { x: r.x + M.btnPadX, y: cy, str: label, size: M.fontSize, weight: 600, color: quiet ? 'text' : 'accentText' }]);
+        ops.push(['text', { x: r.x + (w - tw) / 2, y: cy, str: label, size: M.fontSize, weight: 600, color: quiet ? 'text' : 'accentText' }]);
         break;
       }
     }

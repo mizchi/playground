@@ -23,10 +23,17 @@
 | wasm コンポーネント | `component/`, `src/apps/component-app.ts` | Rust の Todo を WIT のコンポーネントにしたもの。import は `host.emit` だけ (std の WASI はホストが絞る) |
 | 既存アプリ | `legacy/`, `src/legacy/` | GTK のアプリを AT-SPI で読み、意味ツリーに写して同じ権限モデルで操作する |
 | MCP | `mcp/server.ts`, `src/mcp-link.ts` | AI 向けの口。読む・提案する・待つだけで、承認の tool は無い |
+| プラットフォーム | `src/platform/`, `src/apps/manifests.ts`, `src/apps/launcher.ts` | アプリの manifest と registry、能力の確認付きのシステムのサービス (storage / clipboard / 通知 / アプリの起動 / 擬似端末)、許可の要求 (人だけが答える)、セッションの保存と復元 ([../PLATFORM.md](../PLATFORM.md)) |
+| アプリの例: Terminal | `src/apps/terminal/`, `pty/server.ts` | libghostty-vt (ghostty-web の wasm) の端末。画面は意味ツリーの `log`。内蔵シェル、または `?pty=` でホストの bash |
+| アプリの例: Calendar | `src/apps/calendar.ts` | 月の表を ARIA の table で出す。列は等幅の行 (`equal`) で揃える。予定は storage、今日の予定を通知 |
+| テーマ | `src/theme.ts`, `www/index.html` | ライト / ダーク (システムに従う・明示)。lowering はダークを `prefers-color-scheme: dark` の色の宣言として出し、veriss が両方のコントラストを検査する |
 | タイル | `src/tiling.ts`, `src/anim.ts`, `src/shell.ts` | 分割ツリー。窓のタイトルバーを掴んで運ぶと分割・入れ替えができる (下記)。境界はドラッグで動かせる。最小幅を下回ると「はみ出し」を出す |
 
 右のパネルでは、次のことができる。
 
+- テーマを選ぶ (システムに従う / ライト / ダーク)
+- アプリを開く / 窓を閉じる (Alt+L でランチャー。タイトルバーの × でも閉じる)
+- アプリの許可の要求に答える (クリップボードの読み取り・通知・アプリの起動・ホストのシェル)。通知を見る
 - agent として提案する (ゴースト表示 → 承認 / 却下)
 - template を貼って適用・pin・reject する (LLM の出力の代わり)
 - agent から見える意味ツリーと監査ログを見る
@@ -91,6 +98,10 @@ pnpm fonts && pnpm build:odin-gpu && pnpm build && node e2e/odin-gpu.cjs   # Odi
 pnpm build:component     # Rust の Todo を WIT のコンポーネントにする (wasm32-wasip2 のターゲットが必要。component/todo.wasm はコミット済み)
 pnpm atspi-bridge        # 既存の GTK アプリを AT-SPI で取り込む (sway / at-spi2-core / python3-pyatspi / gtk-3-examples が必要)
 pnpm build && node e2e/perf-browser.cjs   # Chromium での 1 フレーム
+pnpm build && pnpm e2e:terminal   # Terminal (libghostty-vt) の通し確認。ランチャー、キーボードと IME、色、許可、agent の提案、セッションの復元、ホストの bash
+pnpm build && pnpm e2e:calendar   # Calendar の通し確認 (列の揃い、予定の追加、再読み込み、表のミラー)
+pnpm build && pnpm e2e:theme      # テーマの切り替え (OS の設定、明示、保存、Canvas の画素)
+pnpm pty                 # ホストの擬似端末の橋。表示された URL を ?pty= に渡すと、Terminal の「ホストのシェルにつなぐ」が使える
 ```
 
 ### AI (MCP クライアント) からつなぐ
@@ -99,7 +110,7 @@ pnpm build && node e2e/perf-browser.cjs   # Chromium での 1 フレーム
 pnpm dev    # http://127.0.0.1:8123/?mcp=ws://127.0.0.1:8130 を開く
 ```
 
-MCP クライアントには、`node mcp/server.ts` を stdio のサーバとして登録する。tool は `list_apps` / `get_tree` / `get_layout` / `propose` / `wait_proposal` の 5 つ。承認の tool は無いので、提案は画面のパネルで人が承認する。
+MCP クライアントには、`node mcp/server.ts` を stdio のサーバとして登録する。tool は `list_apps` / `list_installed` / `get_tree` / `get_layout` / `propose` / `wait_proposal` の 6 つ。窓を開く・閉じるのも `propose` の layout の手順 (`launch` / `close`) で出す。承認の tool は無いので、提案は画面のパネルで人が承認する。
 
 ### sway への写像を試す
 
@@ -119,7 +130,7 @@ Node 24 以上が必要 (`.node-version`)。veriss がそれを要求する。�
 
 ## 結果
 
-- 単体テスト 48 件 (うち veriss の検証 4 件、sway への写像 4 件)、E2E 11 件、レイアウト操作の E2E 14 件が通る (Node 24、Playwright の Chromium)
+- 単体テスト 93 件 (うち veriss の検証 12 件、sway への写像 4 件)、E2E 11 件、レイアウト操作の E2E 14 件、Terminal の E2E 13 件、Calendar の E2E 6 件、テーマの E2E 6 件が通る (Node 24、Playwright の Chromium)
 - E2E の IME は、CDP の `Input.imeSetComposition` で実際の composition イベントを起こして確かめた。preedit は木に入らず、確定した `卵` だけが値になる
 - LLM の template の代わりに「カード」template を適用すると、件数が変わっても (3 件 → 5 件) 同じキャッシュに当たる。pin すると再読み込み後も残る
 - 操作を落とす template は、既定レンダラに戻り、理由がパネルに出る

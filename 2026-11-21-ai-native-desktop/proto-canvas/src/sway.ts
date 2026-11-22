@@ -134,6 +134,10 @@ export function toSwayCommands(op: LayoutOp, st: SwayState): { commands: string[
     case 'restore':
       // scratchpad から出した窓は浮いた状態で出る。タイルに戻すと、フォーカスのある窓の隣に入る
       return { commands: [`[con_id=${id(op.app)}] scratchpad show`, `[con_id=${id(op.app)}] floating disable`] };
+    case 'close':
+      return { commands: [`[con_id=${id(op.app)}] kill`] };
+    case 'launch':
+      return { unsupported: '起動はプラットフォームがアプリを実行して行う (sway では exec でプロセスを起こし、出てきた窓を配置する)' };
     case 'equalize':
       // sway (i3) に「すべてを均等にする」コマンドはない。構造は変えず、大きさだけを送る (sizeCommands は呼び出し側が送る)
       return { commands: [] };

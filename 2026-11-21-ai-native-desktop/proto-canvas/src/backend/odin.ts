@@ -101,13 +101,13 @@ export async function createOdinRaster(wasmUrl: string, fontUrl: string): Promis
         switch (op[0]) {
           case 'rect': {
             const r = op[1];
-            x.rect(r.x * dpr, r.y * dpr, r.w * dpr, r.h * dpr, (r.radius ?? 0) * dpr, c(r.fill), c(r.stroke), (r.lineWidth ?? 1) * dpr, r.dash ? 1 : 0);
+            x.rect(r.x * dpr, r.y * dpr, r.w * dpr, r.h * dpr, (r.radius ?? 0) * dpr, r.rgb ? rgba(r.rgb) : c(r.fill), c(r.stroke), (r.lineWidth ?? 1) * dpr, r.dash ? 1 : 0);
             break;
           }
           case 'text': {
             const t = op[1];
             const [p, n] = str(t.str);
-            x.text(t.x * dpr, t.y * dpr, t.size * dpr, c(t.color), t.underline ? 1 : 0, p, n);
+            x.text(t.x * dpr, t.y * dpr, t.size * dpr, t.rgb ? rgba(t.rgb) : c(t.color), t.underline ? 1 : 0, p, n);
             break;
           }
           case 'clip':

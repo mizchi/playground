@@ -131,7 +131,8 @@ async function step(name, fn) {
     await shot('04-card-template');
     await page.reload();
     await page.waitForFunction(() => window.shell);
-    assert.ok(await textPos('3 件のタスク'), 'pin した template が新しい状態にも当たる');
+    // Todo の項目はアプリの保存領域 (storage 能力) に残るので、再読み込み後も 5 件
+    assert.ok(await textPos('5 件のタスク'), 'pin した template も Todo の項目も再読み込み後に残る');
   });
 
   await step('template: 操作できるノードを落とす template は既定に戻り、理由が出る', async () => {

@@ -12,3 +12,4 @@ www/raster.wasm
 www/odin.js
 www/gpu.wasm
 www/wgpu.js
+www/ghostty-vt.wasm

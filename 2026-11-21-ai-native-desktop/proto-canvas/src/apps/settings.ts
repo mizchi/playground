@@ -1,7 +1,8 @@
 import type { ActionRequest, NodeId, TreeUpdate } from '../protocol.ts';
 import type { App } from './app.ts';
 
-export function createSettingsApp(): App {
+export function createSettingsApp(opts: { id?: string } = {}): App {
+  const appId = opts.id ?? 'settings';
   let emit: (u: TreeUpdate) => void = () => {};
   let compact = false;
   let telemetry = false;
@@ -11,7 +12,7 @@ export function createSettingsApp(): App {
   const publish = (root?: string) =>
     emit({
       t: 'tree-update',
-      app: 'settings',
+      app: appId,
       root,
       focus,
       nodes: [
@@ -25,7 +26,7 @@ export function createSettingsApp(): App {
     });
 
   return {
-    id: 'settings',
+    id: appId,
     start(e) {
       emit = e;
       publish('root');

@@ -1,4 +1,5 @@
 import type { ActionRequest, NodeId, SemanticNode, TreeUpdate } from '../protocol.ts';
+import type { AppServices } from '../platform/types.ts';
 import type { App } from './app.ts';
 
 interface Item {
@@ -8,8 +9,10 @@ interface Item {
 }
 
 /** id と件数は性能の計測用 (既定は 'todo' と 3 件) */
-export function createTodoApp(opts: { id?: string; items?: number } = {}): App {
+/** services を渡すと、項目を保存し (storage)、すべて完了したら通知する (notifications) */
+export function createTodoApp(opts: { id?: string; items?: number; services?: AppServices } = {}): App {
   const appId = opts.id ?? 'todo';
+  const sv = opts.services;
   let emit: (u: TreeUpdate) => void = () => {};
   let items: Item[] = [
     { id: 'i1', text: '牛乳を買う', done: false },
@@ -17,7 +20,12 @@ export function createTodoApp(opts: { id?: string; items?: number } = {}): App {
     { id: 'i3', text: 'PR をレビューする', done: false },
   ];
   for (let i = items.length + 1; i <= (opts.items ?? 3); i++) items.push({ id: `i${i}`, text: `タスク ${i}`, done: i % 3 === 0 });
-  let seq = items.length + 1;
+  if (sv) {
+    const saved = sv.storage.get('items');
+    if (saved.ok && saved.value) items = JSON.parse(saved.value) as Item[];
+  }
+  let seq = items.reduce((m, i) => Math.max(m, Number(i.id.slice(1)) || 0), 0) + 1;
+  const save = () => sv?.storage.set('items', JSON.stringify(items));
   let draft = '';
   let focus: NodeId | null = null;
   let sent = new Set<NodeId>();
@@ -55,8 +63,12 @@ export function createTodoApp(opts: { id?: string; items?: number } = {}): App {
         const text = draft.trim();
         if (text) items = [...items, { id: `i${seq++}`, text, done: false }];
         draft = '';
+        save();
       } else if (req.action === 'click') {
+        const before = items.every((i) => i.done);
         items = items.map((i) => (i.id === req.target ? { ...i, done: !i.done } : i));
+        save();
+        if (!before && items.length && items.every((i) => i.done)) sv?.notify('Todo', 'すべて完了した');
       }
       publish();
     },

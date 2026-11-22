@@ -83,6 +83,9 @@ export function createAriaMirror(container: HTMLElement, activate: (app: AppId, 
         return '<div role="separator"></div>';
       case 'img':
         return `<div role="img" aria-label="${label}" ${at}></div>`;
+      case 'log':
+        // 画面全体を毎回差し替えるので、読み上げは止めておく (読みたいときに辿る)
+        return `<div role="log" aria-live="off" aria-label="${label}" tabindex="-1" ${at}><pre>${esc(n.value ?? '')}</pre></div>`;
     }
   };
 

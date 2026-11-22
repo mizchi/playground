@@ -31,7 +31,20 @@ export type LayoutOp =
   | { type: 'zoom'; app: AppId | null }
   | { type: 'minimize'; app: AppId }
   | { type: 'restore'; app: AppId }
-  | { type: 'equalize' };
+  | { type: 'equalize' }
+  /** インストール済みのアプリを新しい窓で開く (窓の工場が要る) */
+  | { type: 'launch'; app: string }
+  /** 窓を閉じる */
+  | { type: 'close'; app: AppId };
+
+/** 窓を作る工場。shell はインストール済みのアプリを知らないので、プラットフォームが差し込む */
+export interface WindowFactory {
+  /** 次に開く窓の id (提案のプレビューにも使う) */
+  nextId(appId: string): AppId;
+  create(appId: string, windowId: AppId): App;
+  has(appId: string): boolean;
+  title(appId: string): string;
+}
 
 export interface LayoutStep {
   kind: 'layout';
@@ -133,8 +146,15 @@ export class Shell {
   /** false にするとアニメーションせず、すぐに目標の位置へ (テスト用) */
   animations = true;
   onChange: () => void = () => {};
+  /** 窓の工場 (launch に要る) */
+  factory: WindowFactory | null = null;
+  /** 窓を閉じたとき (プラットフォームが後片付けに使う) */
+  onWindowClosed: (id: AppId) => void = () => {};
 
   private wins: Win[] = [];
+  private closeRects = new Map<AppId, Rect>();
+  /** launch の提案のプレビューで使う、まだ無い窓の名前 */
+  private pendingTitles = new Map<AppId, string>();
   private focusedWin = 0;
   private preedit = '';
   private hits: { app: AppId; hit: HitRegion }[] = [];
@@ -234,6 +254,12 @@ export class Shell {
     const chip = this.chips.find((c) => inside(c.rect, x, y));
     if (chip) {
       this.restoreApp(chip.app, 'human');
+      return;
+    }
+    // 閉じるボタン (×)
+    for (const [app, r] of this.closeRects) {
+      if (!inside(r, x, y)) continue;
+      this.applyLayout({ type: 'close', app }, 'human');
       return;
     }
     const div = this.zoomed ? undefined : this.dividers.find((d) => inside(grow(d.rect, 3), x, y));
@@ -409,8 +435,38 @@ export class Shell {
   }
 
   private titleOf(app: AppId): string {
-    const t = this.win(app).tree;
+    const w = this.wins.find((x) => x.app.id === app);
+    if (!w) return this.pendingTitles.get(app) ?? app;
+    const t = w.tree;
     return (t.root && t.get(t.root)?.label) || app;
+  }
+
+  // ---- 窓の追加と削除 (プラットフォームのアプリの起動と終了) ----
+  /** 開いている窓 (表示中・タブの中・ドックの中のすべて) */
+  windows(): { id: AppId; title: string }[] {
+    return this.wins.map((w) => ({ id: w.app.id, title: this.titleOf(w.app.id) }));
+  }
+
+  private addWindow(app: App, from?: Rect) {
+    if (this.wins.some((w) => w.app.id === app.id)) throw new Error(`窓 ${app.id} はすでにある`);
+    const w: Win = { app, tree: new SemanticTree() };
+    this.wins.push(w);
+    app.start((u) => this.receive(w, u));
+    if (from) this.anims.set(app.id, new AnimatedRect(from, TILE_SPRING));
+  }
+
+  private removeWindow(id: AppId) {
+    const focused = this.wins[this.focusedWin]?.app.id;
+    const i = this.wins.findIndex((w) => w.app.id === id);
+    if (i < 0) return;
+    const [w] = this.wins.splice(i, 1);
+    w.app.stop?.();
+    this.onWindowClosed(id);
+    const cur = this.anims.get(id)?.value;
+    // 閉じた窓は、その場で縮みながら消える
+    if (cur) this.leaving.set(id, { rect: new AnimatedRect(cur, TILE_SPRING), alpha: new Spring(1, TILE_SPRING) });
+    for (const m of [this.anims, this.minWidths, this.scrolls, this.scrollMax, this.tileRects, this.titles, this.closeRects]) m.delete(id);
+    this.focusedWin = Math.max(0, this.wins.findIndex((x) => x.app.id === (focused === id ? leaves(this.tiles)[0] : focused)));
   }
 
   private focusApp(app: AppId) {
@@ -459,6 +515,21 @@ export class Shell {
       }
       case 'equalize':
         return { ...st, tiles: equalize(st.tiles) };
+      case 'launch': {
+        if (!this.factory) return 'アプリを起動できない (窓の工場が無い)';
+        if (!this.factory.has(op.app)) return `アプリ ${op.app} を開けない (インストールされていないか、1 つの窓だけのアプリですでに開いている)`;
+        const id = this.factory.nextId(op.app);
+        this.pendingTitles.set(id, this.factory.title(op.app));
+        const next = addToLargest(st.tiles, id, this.areaFor(st.minimized.length), GAP);
+        const why = this.invalidReason(next, st.minimized.length);
+        return why || { ...st, tiles: next };
+      }
+      case 'close': {
+        if (!visible(op.app) && !st.minimized.includes(op.app)) return `${op.app} は開いていない`;
+        const next = removeApp(st.tiles, op.app) ?? (st.minimized.includes(op.app) ? st.tiles : null);
+        if (!next || (allApps(next).length === 0 && !st.minimized.some((a) => a !== op.app))) return '最後の窓は閉じられない';
+        return { tiles: next, minimized: st.minimized.filter((a) => a !== op.app), zoomed: st.zoomed === op.app ? null : st.zoomed };
+      }
     }
   }
 
@@ -482,6 +553,30 @@ export class Shell {
       const cur = this.anims.get(op.app)?.value;
       if (cur) this.leaving.set(op.app, { rect: new AnimatedRect(cur, TILE_SPRING), alpha: new Spring(1, TILE_SPRING) });
       this.anims.delete(op.app);
+    }
+    // 起動: 窓を作り、画面の中央から広がる
+    if (op.type === 'launch') {
+      const id = this.factory!.nextId(op.app);
+      const fin = computeRects(r.tiles, this.areaFor(r.minimized.length), GAP).tiles.get(id);
+      const from = fin ? { x: fin.x + fin.w / 2 - 20, y: fin.y + fin.h / 2 - 20, w: 40, h: 40 } : undefined;
+      this.addWindow(this.factory!.create(op.app, id), from);
+      this.pendingTitles.delete(id);
+      this.tiles = r.tiles;
+      this.minimized = r.minimized;
+      this.zoomed = r.zoomed;
+      this.focusApp(id);
+      this.logLayout(by, `launch ${op.app} → ${id}`, id, 'ok', undefined, proposal);
+      this.onChange();
+      return '';
+    }
+    if (op.type === 'close') {
+      this.tiles = r.tiles;
+      this.minimized = r.minimized;
+      this.zoomed = r.zoomed;
+      this.removeWindow(op.app);
+      this.logLayout(by, what, op.app, 'ok', undefined, proposal);
+      this.onChange();
+      return '';
     }
     // 元に戻す: ドックの札の位置から広がる
     if (op.type === 'restore') {
@@ -532,7 +627,18 @@ export class Shell {
       case 'Space':
       case 'Enter':
         if (focus && focus.role !== 'textbox') this.dispatch({ app, target: focus.id, action: 'click', by: 'human' });
+        // 入力欄が click (送信) を公開していれば、Enter で送信する (ターミナルのコマンド行など)
+        else if (msg.key === 'Enter' && focus?.role === 'textbox' && focus.actions?.includes('click') && !this.preedit)
+          this.dispatch({ app, target: focus.id, action: 'click', by: 'human' });
         break;
+      case 'Launcher': {
+        // ランチャー (システムのアプリ) を開く。開いていればそこへフォーカスする
+        const open = this.wins.find((x) => x.app.id === 'launcher');
+        if (open) this.focusApp('launcher');
+        else this.applyLayout({ type: 'launch', app: 'launcher' }, 'human');
+        this.onChange();
+        break;
+      }
       case 'Backspace':
         if (focus?.role === 'textbox' && !this.preedit)
           this.dispatch({ app, target: focus.id, action: 'setValue', data: [...(focus.value ?? '')].slice(0, -1).join(''), by: 'human' });
@@ -592,7 +698,8 @@ export class Shell {
       .map((w) => ({
         app: w.app.id,
         root: w.tree.root,
-        nodes: w.tree.walk().map((n) => (n.sensitive && n.value !== undefined ? { ...n, value: '[redacted]' } : structuredClone(n))),
+        // ターミナルの描画用の格子は渡さない (文字は value にある)
+        nodes: w.tree.walk().map(({ screen: _screen, ...n }) => (n.sensitive && n.value !== undefined ? { ...n, value: '[redacted]' } : structuredClone(n))),
       }));
   }
 
@@ -635,6 +742,8 @@ export class Shell {
     let st = this.state();
     steps.forEach((s, i) => {
       if (isLayoutStep(s)) {
+        // 窓を閉じると作業中の状態を失いうるので、自動承認しない
+        if (s.op.type === 'close') sensitive = true;
         const r = this.simulate(st, s.op);
         if (typeof r === 'string') return errors.push(`steps[${i}]: ${r}`);
         st = r;
@@ -726,6 +835,7 @@ export class Shell {
     const ops: DrawOp[] = [['rect', { x: 0, y: 0, w: width, h: height, fill: 'bg' }]];
     this.hits = [];
     this.titles.clear();
+    this.closeRects.clear();
     this.tabRects = [];
     const windows: WindowInfo[] = [];
     let ime: ImeToHost = { t: 'ime-disable' };
@@ -817,18 +927,27 @@ export class Shell {
           tx += tw + 4;
         }
       } else ops.push(['text', { x: tile.x + 28, y: tile.y + TITLE_H / 2, str: title, size: 12, weight: 600, color: 'muted' }]);
+      // 閉じるボタン (×): 最後の 1 枚には出さない
+      const closable = this.wins.length > 1;
+      const cr = { x: tile.x + tile.w - 28, y: tile.y + 4, w: 22, h: 22 };
+      if (closable) {
+        const hot = inside(cr, this.hover.x, this.hover.y);
+        if (hot) ops.push(['rect', { ...cr, radius: 6, fill: 'bg' }]);
+        ops.push(['text', { x: cr.x + 6, y: cr.y + 11, str: '×', size: 15, weight: 600, color: hot ? 'text' : 'muted' }]);
+      }
+      const right = tile.x + tile.w - (closable ? 32 : 8);
       if (this.zoomed === app) {
         const z = 'ズーム中 (ダブルクリック / Esc で戻す)';
         const zw = this.measure(z, 11, 600) + 16;
-        ops.push(['rect', { x: tile.x + tile.w - zw - 8, y: tile.y + 6, w: zw, h: 18, radius: 9, fill: 'accent' }]);
-        ops.push(['text', { x: tile.x + tile.w - zw, y: tile.y + 15, str: z, size: 11, weight: 600, color: 'accentText' }]);
+        ops.push(['rect', { x: right - zw, y: tile.y + 6, w: zw, h: 18, radius: 9, fill: 'accent' }]);
+        ops.push(['text', { x: right - zw + 8, y: tile.y + 15, str: z, size: 11, weight: 600, color: 'accentText' }]);
       } else if (lo.overflow.length && settled) {
         const long = `はみ出し: 最小 ${lo.minWidth}px > 幅 ${Math.floor(content.w)}px`;
-        const fits = this.measure(long, 11, 600) + 12 + 80 < tile.w;
+        const fits = this.measure(long, 11, 600) + 12 + 110 < tile.w;
         const msg = fits ? long : `${lo.minWidth}px 必要`;
         const mw = this.measure(msg, 11, 600) + 12;
-        ops.push(['rect', { x: tile.x + tile.w - mw - 8, y: tile.y + 6, w: mw, h: 18, radius: 9, fill: 'danger' }]);
-        ops.push(['text', { x: tile.x + tile.w - mw - 2, y: tile.y + 15, str: msg, size: 11, weight: 600, color: 'accentText' }]);
+        ops.push(['rect', { x: right - mw, y: tile.y + 6, w: mw, h: 18, radius: 9, fill: 'danger' }]);
+        ops.push(['text', { x: right - mw + 6, y: tile.y + 15, str: msg, size: 11, weight: 600, color: 'accentText' }]);
       }
       ops.push(['pop']);
       ops.push(['clip', content]);
@@ -844,7 +963,8 @@ export class Shell {
       ops.push(['pop']);
       if (dim) ops.push(['pop']);
       const hidden = this.zoomed && this.zoomed !== app;
-      if (!hidden) this.titles.set(app, { x: tile.x, y: tile.y, w: tile.w, h: TITLE_H });
+      if (!hidden) this.titles.set(app, { x: tile.x, y: tile.y, w: tile.w - (closable ? 32 : 0), h: TITLE_H });
+      if (!hidden && closable && !dim) this.closeRects.set(app, cr);
       if (!dim && !hidden) for (const hit of pt.hits) this.hits.push({ app, hit });
       if (focused && pt.caret && w.tree.focus && !hidden) {
         const f = w.tree.get(w.tree.focus);
@@ -909,7 +1029,8 @@ export class Shell {
         ops.push(['rect', { ...rr, radius: 10, stroke: 'ghost', dash: true, lineWidth: 2 }]);
         const grp = groupOf(st.tiles, app);
         const names = (grp?.tabs ?? [app]).map((a) => this.titleOf(a)).join(' + ');
-        const label = `${p.id}: ${names}${grp?.tabs ? ' (タブ)' : ''} → ここ`;
+        const isNew = !this.wins.some((w) => w.app.id === app);
+        const label = isNew ? `${p.id}: 新しい窓 ${this.titleOf(app)}` : `${p.id}: ${names}${grp?.tabs ? ' (タブ)' : ''} → ここ`;
         const lw = this.measure(label, 12, 600) + 20;
         ops.push(['rect', { x: rr.x + rr.w / 2 - lw / 2, y: rr.y + rr.h / 2 - 13, w: lw, h: 26, radius: 13, fill: 'ghost' }]);
         ops.push(['text', { x: rr.x + rr.w / 2 - lw / 2 + 10, y: rr.y + rr.h / 2, str: label, size: 12, weight: 600, color: 'accentText' }]);
@@ -1015,6 +1136,10 @@ function describeOp(op: LayoutOp): string {
       return `restore ${op.app}`;
     case 'equalize':
       return 'equalize';
+    case 'launch':
+      return `launch ${op.app}`;
+    case 'close':
+      return `close ${op.app}`;
   }
 }
 

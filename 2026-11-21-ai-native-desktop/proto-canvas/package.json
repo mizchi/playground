@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "esbuild src/main.ts --bundle --format=esm --splitting --chunk-names=chunks/[name]-[hash] --sourcemap --outdir=www --servedir=www --serve=127.0.0.1:8123",
-    "build": "esbuild src/main.ts --bundle --format=esm --splitting --chunk-names=chunks/[name]-[hash] --sourcemap --outdir=www",
+    "dev": "cp node_modules/ghostty-web/ghostty-vt.wasm www/ && esbuild src/main.ts --bundle --format=esm --splitting --chunk-names=chunks/[name]-[hash] --sourcemap --outdir=www --servedir=www --serve=127.0.0.1:8123",
+    "build": "cp node_modules/ghostty-web/ghostty-vt.wasm www/ && esbuild src/main.ts --bundle --format=esm --splitting --chunk-names=chunks/[name]-[hash] --sourcemap --outdir=www",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
     "e2e": "node e2e/smoke.cjs",
@@ -23,7 +23,11 @@
     "pretest": "pnpm -s gen:component",
     "fonts": "mkdir -p www/fonts && cp /usr/share/fonts/opentype/ipaexfont-gothic/ipaexg.ttf www/fonts/",
     "build:odin": "odin build backend-odin -target:js_wasm32 -o:speed -out:www/raster.wasm && cp \"$(odin root)/core/sys/wasm/js/odin.js\" www/odin.js",
-    "build:odin-gpu": "odin build backend-odin-gpu -target:js_wasm32 -o:speed -extra-linker-flags:\"--export-table\" -out:www/gpu.wasm && cp \"$(odin root)/core/sys/wasm/js/odin.js\" www/odin.js && cp \"$(odin root)/vendor/wgpu/wgpu.js\" www/wgpu.js"
+    "build:odin-gpu": "odin build backend-odin-gpu -target:js_wasm32 -o:speed -extra-linker-flags:\"--export-table\" -out:www/gpu.wasm && cp \"$(odin root)/core/sys/wasm/js/odin.js\" www/odin.js && cp \"$(odin root)/vendor/wgpu/wgpu.js\" www/wgpu.js",
+    "pty": "node pty/server.ts",
+    "e2e:terminal": "node e2e/terminal.cjs",
+    "e2e:calendar": "node e2e/calendar.cjs",
+    "e2e:theme": "node e2e/theme.cjs"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "^1.42.0",
@@ -34,6 +38,7 @@
     "@types/ws": "^8.18.2",
     "axe-core": "^4.14.1",
     "esbuild": "^0.28.2",
+    "ghostty-web": "0.4.0",
     "typescript": "^5.9.3",
     "ws": "^8.23.0",
     "zod": "^3.25.76"

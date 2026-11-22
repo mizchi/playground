@@ -18,8 +18,10 @@
         --panel: #f8f9fb;
         color-scheme: light dark;
       }
+      /* ダーク: OS の設定に従う (data-theme="light" で明示したときを除く)。値は src/theme.ts と同じ (test/theme.test.ts が確かめる) */
       @media (prefers-color-scheme: dark) {
-        :root {
+        :root:not([data-theme="light"]) {
+          color-scheme: dark;
           --c-bg: #15171d;
           --c-surface: #1f222b;
           --c-text: #e6e8ef;
@@ -32,6 +34,21 @@
           --panel: #1a1c23;
         }
       }
+      /* 明示したダーク (パネルのテーマの切り替え) */
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+        --c-bg: #15171d;
+        --c-surface: #1f222b;
+        --c-text: #e6e8ef;
+        --c-muted: #9aa1b2;
+        --c-accent: #7d97ff;
+        --c-accentText: #10131a;
+        --c-border: #3a3f4d;
+        --c-danger: #ff7a70;
+        --c-ghost: #e48ad0;
+        --panel: #1a1c23;
+      }
+      :root[data-theme="light"] { color-scheme: light; }
       * { box-sizing: border-box; }
       body {
         margin: 0;

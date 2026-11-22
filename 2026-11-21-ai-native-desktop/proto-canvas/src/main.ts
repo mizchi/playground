@@ -1,5 +1,6 @@
-import { createSettingsApp } from './apps/settings.ts';
-import { createNotesApp } from './apps/notes.ts';
+import { builtinManifests, todoManifest } from './apps/manifests.ts';
+import { terminalManifest } from './apps/terminal/terminal.ts';
+import { wsPtyConnector } from './apps/terminal/pty-link.ts';
 import { createTodoApp } from './apps/todo.ts';
 import { createAriaMirror } from './backend/aria.ts';
 import { createCanvasBackend } from './backend/canvas.ts';
@@ -9,8 +10,12 @@ import type { Measure } from './protocol.ts';
 import { layout } from './layout.ts';
 import { LOWER_FONT, lower } from './lower.ts';
 import { connectMcp } from './mcp-link.ts';
-import { Shell, isLayoutStep } from './shell.ts';
-import type { Step } from './shell.ts';
+import { createPlatform } from './platform/platform.ts';
+import { memoryKeyValue } from './platform/services.ts';
+import type { KeyValue } from './platform/services.ts';
+import type { AppManifest } from './platform/types.ts';
+import { isLayoutStep } from './shell.ts';
+import type { Shell, Step } from './shell.ts';
 
 const KEY = 'ai-native-desktop.templates.v1';
 const storage: Storage = {
@@ -105,11 +110,54 @@ if (new URLSearchParams(location.search).get('backend') === 'odin') {
   backend.draw = (ops) => odin.draw(ops, backend.colors(), backend.canvas);
   Object.assign(window, { odinMeasure: odin.measure });
 }
-// ?todos=1000&extra=7 で件数と窓の数を増やせる (性能の計測用)
+// ?todos=1000&extra=7 で件数と窓の数を増やせる (性能の計測用。このときは保存も復元もしない)
 const params = new URLSearchParams(location.search);
-const extra = Array.from({ length: Number(params.get('extra') ?? 0) }, (_, i) => createTodoApp({ id: `todo${i + 2}`, items: 20 }));
-shell = new Shell([createTodoApp({ items: Number(params.get('todos') ?? 3) }), createSettingsApp(), createNotesApp(), ...extra], (s, z, w) => measureImpl(s, z, w), storage);
-shell.onChange = schedule;
+const perf = params.has('todos') || params.has('extra');
+const perfTodo: AppManifest = { ...todoManifest, create: (id) => createTodoApp({ id, items: id === 'todo' ? Number(params.get('todos') ?? 3) : 20 }) };
+/** 能力の許可・アプリの保存領域・セッションは localStorage に置く */
+const KV_PREFIX = 'ai-native-desktop.kv.';
+const localKeyValue: KeyValue = {
+  get: (k) => {
+    try {
+      return localStorage.getItem(KV_PREFIX + k) ?? undefined;
+    } catch {
+      return undefined;
+    }
+  },
+  set: (k, v) => {
+    try {
+      localStorage.setItem(KV_PREFIX + k, v);
+    } catch {
+      /* 保存できなくても動く */
+    }
+  },
+};
+// Terminal: libghostty-vt (ghostty-web の ghostty-vt.wasm) は最初の窓を開くときに読み込む
+const terminal = terminalManifest(async () => {
+  const { loadVtFactory } = await import('./apps/terminal/vt.ts');
+  const res = await fetch('ghostty-vt.wasm');
+  if (!res.ok) throw new Error(`ghostty-vt.wasm: ${res.status}`);
+  return loadVtFactory(await res.arrayBuffer());
+});
+const platform = createPlatform({
+  apps: [...(perf ? builtinManifests.map((m) => (m.id === 'todo' ? perfTodo : m)) : builtinManifests), terminal],
+  initial: ['todo', 'settings', 'notes', ...Array.from({ length: Number(params.get('extra') ?? 0) }, () => 'todo')],
+  measure: (s, z, w) => measureImpl(s, z, w),
+  templates: storage,
+  kv: perf ? memoryKeyValue() : localKeyValue,
+  // ?session=off で前回の窓を復元しない
+  restoreSession: !perf && params.get('session') !== 'off',
+});
+shell = platform.shell;
+// 窓・配置が変わったら、すぐにセッションを保存する (変わっていなければ書かない)
+shell.onChange = () => {
+  schedule();
+  if (!perf) platform.saveSession();
+};
+platform.services.onChange = schedule;
+// ?pty=ws://127.0.0.1:8140/?token=... で、Terminal から本物のシェルにつなげる (pty/server.ts)
+const ptyUrl = params.get('pty');
+if (ptyUrl) platform.services.pty = wsPtyConnector(ptyUrl);
 
 // スクリーンリーダー向けのミラー DOM (意味ツリーから作る)
 const aria = createAriaMirror(
@@ -122,6 +170,8 @@ const aria = createAriaMirror(
 );
 let seenProposals = 0;
 let seenAudit = 0;
+let seenPrompts = 0;
+let seenNotes = 0;
 /** AI の提案と、拒否された操作を読み上げる (承認の判断を音声でもできるように) */
 function announce() {
   for (const p of shell.proposals.slice(seenProposals)) aria.announce(`AI の提案 ${p.id}: ${p.intent}。${p.sensitive ? '承認が必要です。' : ''}`);
@@ -129,7 +179,23 @@ function announce() {
   const denied = shell.audit.slice(seenAudit).filter((a) => a.result === 'denied');
   if (denied.length) aria.announce(`拒否: ${denied.at(-1)!.reason ?? ''}`);
   seenAudit = shell.audit.length;
+  const sv = platform.services;
+  for (const p of sv.prompts.slice(seenPrompts)) aria.announce(`${p.appTitle} が ${CAP_LABEL[p.capability]} の許可を求めています`);
+  seenPrompts = sv.prompts.length;
+  const last = sv.notifications.at(-1);
+  if (last && last.id > seenNotes) {
+    aria.announce(`通知 ${last.title}: ${last.body ?? ''}`);
+    seenNotes = last.id;
+  }
 }
+const CAP_LABEL: Record<string, string> = {
+  storage: '保存領域',
+  'clipboard.read': 'クリップボードの読み取り',
+  'clipboard.write': 'クリップボードへの書き込み',
+  notifications: '通知',
+  'apps.launch': 'アプリの起動',
+  'terminal.pty': 'ホストのシェル (擬似端末)',
+};
 
 // ---- agent API: MCP の tool にそのまま写せる形で window に出す ----
 const agent = {
@@ -149,11 +215,14 @@ const lowerFor = (app: string, pxIntrinsic = false) => {
   const { view } = shell.viewOf(app);
   return { ...lower(view, lowerMeasure, { pxIntrinsic, fontFamily: lowerFamily }), minWidth: layout(view, 1000, lowerMeasure).minWidth };
 };
-Object.assign(window, { shell, agent, lowerFor, shellMeasure: (s: string, z: number, w: number) => measureImpl(s, z, w) });
+Object.assign(window, { shell, platform, agent, lowerFor, shellMeasure: (s: string, z: number, w: number) => measureImpl(s, z, w) });
 
 // ?mcp=ws://127.0.0.1:8130 で、AI 向けの MCP サーバ (mcp/server.ts) とつなぐ
 const mcpUrl = params.get('mcp');
-if (mcpUrl) connectMcp(mcpUrl, shell, (s) => Object.assign(window, { mcpStatus: s }));
+if (mcpUrl)
+  connectMcp(mcpUrl, shell, (s) => Object.assign(window, { mcpStatus: s }), () =>
+    platform.registry.list().map((m) => ({ id: m.id, title: m.title, description: m.description, multiInstance: m.multiInstance, capabilities: m.capabilities })),
+  );
 
 // ---- panel ----
 const SAMPLE_PROPOSAL = {
@@ -188,6 +257,15 @@ const SAMPLE_CARD: ViewTemplate = {
 const SAMPLE_BAD: ViewTemplate = { type: 'box', axis: 'vertical', children: [{ type: 'text', text: { bind: 'label' }, size: 16 }] };
 
 panel.innerHTML = `
+  <div class="row"><label>テーマ <select id="theme"><option value="system">システムに従う</option><option value="light">ライト</option><option value="dark">ダーク</option></select></label></div>
+  <div id="prompts"></div>
+  <div id="notices"></div>
+
+  <h2>アプリ</h2>
+  <div class="row" id="installed"></div>
+  <div class="muted">Alt+L でランチャー (それ自体も意味ツリーを出すアプリ)。窓はタイトルバーの × で閉じる。</div>
+  <div id="openWins"></div>
+
   <h2>レイアウト</h2>
   <div class="row"><label><input type="checkbox" id="live"> ライブプレビュー (ほかの窓が場所を空ける)</label></div>
   <div class="muted">タイトルバーを掴んで運ぶ: 端で分割 / 中央で入れ替え / タイトルバーでタブ / 境界で差し込み / 外周で全体の端 / 下の受け口で最小化。
@@ -220,7 +298,7 @@ panel.innerHTML = `
   <div id="wins"></div>
 
   <h2>Semantic Tree (agent から見える形)</h2>
-  <div class="row"><select id="treeApp"><option>todo</option><option>settings</option><option>notes</option></select></div>
+  <div class="row"><select id="treeApp"></select></div>
   <pre id="tree"></pre>
 
   <h2>監査ログ</h2>
@@ -261,13 +339,13 @@ $('proposals').addEventListener('click', (e) => {
 const sigSel = $<HTMLSelectElement>('sigSel');
 const fillSigs = () => {
   const prev = sigSel.value;
-  sigSel.innerHTML = ['todo', 'settings', 'notes']
+  sigSel.innerHTML = openApps()
     .flatMap((app) => shell.signatures(app).map((s) => ({ app, ...s })))
     .filter((s) => s.role !== 'paragraph' && s.role !== 'heading')
     .map((s) => `<option value="${escapeHtml(s.sig)}">${s.app}/${s.node} (${s.role}${s.label ? ` "${escapeHtml(s.label)}"` : ''})</option>`)
     .join('');
   if ([...sigSel.options].some((o) => o.value === prev)) sigSel.value = prev;
-  else sigSel.value = shell.signatures('todo').find((s) => s.node === 'list')!.sig;
+  else sigSel.value = shell.signatures('todo').find((s) => s.node === 'list')?.sig ?? sigSel.options[0]?.value ?? '';
 };
 $('sampleCard').addEventListener('click', () => {
   $<HTMLTextAreaElement>('tplJson').value = JSON.stringify(SAMPLE_CARD, null, 2);
@@ -289,12 +367,69 @@ $('pinTpl').addEventListener('click', () => (shell.cache.setState(sigSel.value, 
 $('rejectTpl').addEventListener('click', () => (shell.cache.setState(sigSel.value, 'rejected'), schedule()));
 $('clearTpl').addEventListener('click', () => (shell.cache.remove(sigSel.value), schedule()));
 $('treeApp').addEventListener('change', () => schedule());
+// 許可の要求・通知・アプリの起動と終了は、アプリから描けない場所 (ホストの UI) に出す
+panel.addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest('button');
+  if (!b) return;
+  const d = b.dataset;
+  if (d.grant) platform.services.answer(d.grant, d.allow === '1', 'human');
+  else if (d.dismiss) platform.services.dismiss(Number(d.dismiss));
+  else if (d.launch) platform.launch(d.launch);
+  else if (d.closeWin) platform.close(d.closeWin);
+  else return;
+  schedule();
+  backend.focusInput();
+});
+const openApps = () => shell.windows().map((w) => w.id);
+// テーマ: システムに従う / ライト / ダーク。<html data-theme> を切り替え、Canvas の backend は CSS 変数を読み直す
+const THEME_KEY = 'platform.theme';
+const applyTheme = (t: string) => {
+  if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+};
+const themeSel = $<HTMLSelectElement>('theme');
+themeSel.value = (perf ? null : localKeyValue.get(THEME_KEY)) ?? 'system';
+applyTheme(themeSel.value);
+themeSel.addEventListener('change', () => {
+  applyTheme(themeSel.value);
+  if (!perf) localKeyValue.set(THEME_KEY, themeSel.value);
+  schedule();
+  backend.focusInput();
+});
 
 function escapeHtml(s: string) {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 }
 
 function renderPanel(frame: ReturnType<Shell['frame']>) {
+  const sv = platform.services;
+  $('prompts').innerHTML = sv.prompts
+    .filter((p) => p.status === 'pending')
+    .map(
+      (p) => `<div class="card sensitive" role="alertdialog" aria-label="許可の要求"><div><b>${escapeHtml(p.appTitle)}</b> が <b>${CAP_LABEL[p.capability]}</b> の許可を求めている</div>
+        <div class="row"><button class="primary" data-grant="${p.id}" data-allow="1">許可</button><button data-grant="${p.id}" data-allow="0">拒否</button></div></div>`,
+    )
+    .join('');
+  $('notices').innerHTML = sv.notifications
+    .slice(-3)
+    .reverse()
+    .map((n) => `<div class="card"><span class="tag">通知</span> <b>${escapeHtml(n.title)}</b> ${escapeHtml(n.body ?? '')} <span class="muted">(${escapeHtml(n.window)})</span> <button data-dismiss="${n.id}">閉じる</button></div>`)
+    .join('');
+  const installed = platform.registry.list();
+  const html = installed.map((m) => `<button data-launch="${m.id}" title="${escapeHtml(m.description)}" ${platform.registry.has(m.id) ? '' : 'disabled'}>${escapeHtml(m.title)} を開く</button>`).join('');
+  if ($('installed').innerHTML !== html) $('installed').innerHTML = html;
+  const wins = shell.windows();
+  $('openWins').innerHTML = wins
+    .map((w) => `<div class="card"><b>${escapeHtml(w.title)}</b> <span class="muted">${w.id} (${platform.registry.appOf(w.id) ?? '?'})</span>${wins.length > 1 ? ` <button data-close-win="${w.id}">閉じる</button>` : ''}</div>`)
+    .join('');
+  const treeSel = $<HTMLSelectElement>('treeApp');
+  const opts = wins.map((w) => `<option>${w.id}</option>`).join('');
+  if (treeSel.dataset.opts !== opts) {
+    const prev = treeSel.value;
+    treeSel.innerHTML = opts;
+    treeSel.dataset.opts = opts;
+    treeSel.value = wins.some((w) => w.id === prev) ? prev : wins[0].id;
+  }
   $('proposals').innerHTML =
     shell.proposals
       .slice(-4)

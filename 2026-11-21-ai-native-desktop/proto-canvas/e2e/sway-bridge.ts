@@ -35,6 +35,10 @@ function simulate(m: Model, op: LayoutOp, area: SwayState['area']): Model | stri
       return { ...m, tiles: addToLargest(m.tiles, op.app, area, 0), minimized: m.minimized.filter((a) => a !== op.app) };
     case 'equalize':
       return { ...m, tiles: m.tiles && equalize(m.tiles) };
+    case 'close':
+      return { ...m, tiles: m.tiles && removeApp(m.tiles, op.app), minimized: m.minimized.filter((a) => a !== op.app) };
+    case 'launch':
+      return 'モデルでは扱わない (プラットフォームの操作)';
   }
 }
 

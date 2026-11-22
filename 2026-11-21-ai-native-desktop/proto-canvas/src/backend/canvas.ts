@@ -40,6 +40,11 @@ export function createCanvasBackend(canvas: HTMLCanvasElement, sink: HTMLTextAre
     const s = getComputedStyle(document.documentElement);
     return Object.fromEntries(TOKENS.map((t) => [t, s.getPropertyValue(`--c-${t}`).trim() || '#f0f'])) as Record<ColorToken, string>;
   }
+  // テーマを明示的に切り替えたとき (<html data-theme>) も読み直す
+  new MutationObserver(() => {
+    colors = readColors();
+    ev.resize();
+  }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
     colors = readColors();
     ev.resize();
@@ -125,6 +130,7 @@ export function createCanvasBackend(canvas: HTMLCanvasElement, sink: HTMLTextAre
         Enter: 'Zoom',
         KeyM: 'Minimize',
         KeyE: 'Equalize',
+        KeyL: 'Launcher',
       };
       const k = map[e.code];
       if (k) {
@@ -174,8 +180,8 @@ export function createCanvasBackend(canvas: HTMLCanvasElement, sink: HTMLTextAre
             const r = op[1];
             ctx.beginPath();
             ctx.roundRect(r.x, r.y, r.w, r.h, r.radius ?? 0);
-            if (r.fill) {
-              ctx.fillStyle = colors[r.fill];
+            if (r.fill || r.rgb) {
+              ctx.fillStyle = r.rgb ?? colors[r.fill!];
               ctx.fill();
             }
             if (r.stroke) {
@@ -189,8 +195,8 @@ export function createCanvasBackend(canvas: HTMLCanvasElement, sink: HTMLTextAre
           }
           case 'text': {
             const t = op[1];
-            ctx.font = font(t.size, t.weight ?? 400);
-            ctx.fillStyle = colors[t.color];
+            ctx.font = t.mono ? `${t.weight ?? 400} ${t.size}px ui-monospace, "DejaVu Sans Mono", Menlo, monospace` : font(t.size, t.weight ?? 400);
+            ctx.fillStyle = t.rgb ?? colors[t.color];
             ctx.textBaseline = 'middle';
             ctx.fillText(t.str, t.x, t.y);
             if (t.underline) ctx.fillRect(t.x, t.y + t.size * 0.62, measure(t.str, t.size, t.weight ?? 400), 1.5);

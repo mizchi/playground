@@ -2,7 +2,7 @@
 // 承認の口は無い。AI ができるのは、読むことと提案することだけ。
 import type { Shell, Step } from './shell.ts';
 
-export function connectMcp(url: string, shell: Shell, onStatus: (s: string) => void): void {
+export function connectMcp(url: string, shell: Shell, onStatus: (s: string) => void, installed: () => unknown[] = () => []): void {
   let ws: WebSocket;
   const open = () => {
     ws = new WebSocket(url);
@@ -26,6 +26,8 @@ export function connectMcp(url: string, shell: Shell, onStatus: (s: string) => v
         const a = shell.accessibility();
         return { shown: a.windows.map((w) => ({ app: w.app, title: w.title, focused: w.focused })), minimized: a.minimized.map((m) => ({ app: m.app, title: m.title })) };
       }
+      case 'listInstalled':
+        return installed();
       case 'getTree':
         return shell.getTree(p.app as string | undefined);
       case 'getLayout':

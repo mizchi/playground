@@ -326,6 +326,50 @@ GTK3 アプリを AT-SPI で読み、意味ツリー (ARIA の語彙) に写し�
 
 実際の LLM をつなぐには、MCP に対応したクライアント (Claude Code など) にこのサーバを登録すればよい。費用がかかるので、今回はつないでいない。
 
+## 8. GUI プラットフォームとしての構成 ([PLATFORM.md](./PLATFORM.md))
+
+### 8a. アプリの manifest・能力・セッション (`test/platform.test.ts`、すべて通った)
+
+- ランチャー (それ自体も意味ツリーを出すアプリ) のボタンでアプリを開く。システムのアプリは apps.launch を尋ねない
+- 複数の窓を開けるアプリは `id-2`, `id-3`。1 つだけのアプリは二重に開けない。閉じた窓の id は再び使える
+- agent は launch / close を提案でき、close は自動承認されない
+- `ask` の能力は要求を出して pending。**答えられるのは人だけ** (agent の答えは拒否)。答えは保存され、次の起動でも効く
+- 宣言していない能力は、尋ねることもできない (`undeclared`)
+- 保存領域はアプリごとで、同じアプリの窓と次の起動で共有される
+- セッション (窓・分割ツリー・ドック・ズーム) を保存して復元する。知らないアプリや壊れた JSON を含むセッションは捨てる
+
+### 8b. Terminal (libghostty-vt) (`test/terminal.test.ts`, `e2e/terminal.cjs`、すべて通った)
+
+![ターミナル](proto-canvas/docs/terminal.png)
+
+- libghostty-vt (ghostty-web 0.4.0 の wasm) で、色・太字・反転・全角を区間にまとめる。Node でも同じ wasm が動く
+- 画面は意味ツリーの `log`。agent には描画用の格子を渡さず、文字だけを見せる。コマンド行は sensitive (agent の入力は承認が要る。承認後は `whoami` が `agent` と出る)
+- 実ブラウザ: Alt+L のランチャーから開く → キーボードと IME (CDP の実 composition) で入力 → `colors` の色が Canvas の画素として、その色のまま描かれる → ファイルは storage → `paste` は許可の要求をホストの UI に出し、人が許可すると読める → 2 枚目の端末は別の状態 → 再読み込みで窓と配置が戻る
+- ホストの擬似端末 (`pty/server.ts`): token の無い接続は断る。terminal.pty を人が許可すると本物の bash が動く (`echo $((6*7))` → 42、`printf` の赤、`stty size` → 18 72)
+
+![ホストの bash](proto-canvas/docs/terminal-host-shell.png)
+
+**見つかった問題**: ghostty-web 0.4.0 の wasm は、別の端末を `free()` したあとのメモリを 0 で埋めずに新しい端末の画面に使う。空の cell に前の端末のポインタの値がごみの文字として出た (`腒腺膢…` のように 0x28 刻み)。作った直後に画面を消去 (ED 2) すると直る。回帰テストあり。
+
+### 8c. Calendar (`test/calendar.test.ts`, `e2e/calendar.cjs`、すべて通った)
+
+- 月の表は ARIA の table / row / columnheader / cell。今日が選ばれた状態で開く
+- 列は行どうしで揃う (等幅の行。実ブラウザでも各週の同じ曜日のセルの x が一致)
+- 日を押して予定を入れ、Enter で追加すると「•」が付く。月を移動しても、再読み込みしても残る
+- 今日の予定があれば、開いたときに通知する (許可のあと)
+- agent は予定を提案で追加できる (自動承認可)。削除は sensitive で承認が要る
+- スクリーンリーダー向けのミラーは表として出る (columnheader 7 個)
+
+### 8d. ダークテーマと veriss のコントラスト検査 (`test/theme.test.ts`, `e2e/theme.cjs`、すべて通った)
+
+- `index.html` の CSS 変数 (ライト・明示したダーク・OS に従うダーク) は `theme.ts` と同じ
+- Todo / Settings / Notes / ランチャー / Terminal の view は、ライトとダークの両方で veriss が verified (配置・a11y・コントラスト)
+- Calendar の表は integrity で verified (8 秒)。a11y と縦方向の検査を同時にすると 5 分で終わらなかったので、コントラストは色の組の見本で検査した
+- 全アプリと shell の UI が使う色の組を並べた見本は、ライトとダークで WCAG AA を満たす (veriss)
+- ダークだけ崩した配色は、ダークの `E_A11Y_CONTRAST` として見つかる。ライトだけ崩しても見つかる
+- 見本のページ自体を最初に作ったとき、veriss が「スクロールする領域にフォーカスできない」(`E_A11Y_SCROLL_FOCUS`) を見つけた。見本でも規則が効いている
+- 実ブラウザ: OS の設定 (prefers-color-scheme) に従い、パネルでライト / ダークを明示でき、再読み込みしても残る。Canvas の画素が theme.ts の値で描かれる
+
 ## 既知の不安定なテスト
 
 - `e2e/dnd.cjs` (ドラッグ&ドロップ): 全スイートを続けて流したときに 1 回だけ、2 件が失敗した (2026-11-22)。そのあと単独で 3 回、smoke と交互に 6 回流して再現しなかった。失敗の詳細は残せていない。
