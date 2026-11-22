@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "esbuild src/main.ts --bundle --format=esm --sourcemap --outdir=www --servedir=www --serve=127.0.0.1:8123",
-    "build": "esbuild src/main.ts --bundle --format=esm --sourcemap --outdir=www",
+    "dev": "esbuild src/main.ts --bundle --format=esm --splitting --chunk-names=chunks/[name]-[hash] --sourcemap --outdir=www --servedir=www --serve=127.0.0.1:8123",
+    "build": "esbuild src/main.ts --bundle --format=esm --splitting --chunk-names=chunks/[name]-[hash] --sourcemap --outdir=www",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
     "e2e": "node e2e/smoke.cjs",
@@ -20,7 +20,8 @@
     "e2e:mcp": "node e2e/mcp.ts",
     "build:component": "cd component/todo-rs && cargo build --release --target wasm32-wasip2 && cp target/wasm32-wasip2/release/todo_rs.wasm ../todo.wasm",
     "gen:component": "jco transpile component/todo.wasm -o component/gen --name todo --instantiation sync --quiet",
-    "pretest": "pnpm -s gen:component"
+    "pretest": "pnpm -s gen:component",
+    "fonts": "mkdir -p www/fonts && cp /usr/share/fonts/opentype/ipaexfont-gothic/ipaexg.ttf www/fonts/"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "^1.42.0",

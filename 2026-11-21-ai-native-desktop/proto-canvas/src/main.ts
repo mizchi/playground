@@ -53,6 +53,15 @@ const backend = createCanvasBackend(canvas, sink, {
   resize: () => schedule(),
 });
 measureImpl = backend.measure;
+// ?font=fonts/ipaexg.ttf: shell の計測を veriss と同じ mizchi/font にし、Canvas も同じフォントで描く (証明と描画の計測を一致させる)
+const fontUrl = new URLSearchParams(location.search).get('font');
+let lowerFamily = LOWER_FONT;
+if (fontUrl) {
+  const { loadFontMeasure } = await import('./backend/font-metrics.ts');
+  measureImpl = await loadFontMeasure(fontUrl, 'ShellFont');
+  backend.setFontFamily('ShellFont');
+  lowerFamily = 'ShellFont';
+}
 // ?todos=1000&extra=7 で件数と窓の数を増やせる (性能の計測用)
 const params = new URLSearchParams(location.search);
 const extra = Array.from({ length: Number(params.get('extra') ?? 0) }, (_, i) => createTodoApp({ id: `todo${i + 2}`, items: 20 }));
@@ -89,14 +98,15 @@ const agent = {
 // ---- veriss への lowering (e2e/veriss-diff.cjs が使う)。計測は lowering 先の CSS と同じ font で行う ----
 const lowerCtx = document.createElement('canvas').getContext('2d')!;
 const lowerMeasure: Measure = (s, size, weight) => {
+  if (fontUrl) return measureImpl(s, size, weight);
   lowerCtx.font = `${weight} ${size}px ${LOWER_FONT}`;
   return lowerCtx.measureText(s).width;
 };
 const lowerFor = (app: string, pxIntrinsic = false) => {
   const { view } = shell.viewOf(app);
-  return { ...lower(view, lowerMeasure, { pxIntrinsic }), minWidth: layout(view, 1000, lowerMeasure).minWidth };
+  return { ...lower(view, lowerMeasure, { pxIntrinsic, fontFamily: lowerFamily }), minWidth: layout(view, 1000, lowerMeasure).minWidth };
 };
-Object.assign(window, { shell, agent, lowerFor });
+Object.assign(window, { shell, agent, lowerFor, shellMeasure: (s: string, z: number, w: number) => measureImpl(s, z, w) });
 
 // ?mcp=ws://127.0.0.1:8130 で、AI 向けの MCP サーバ (mcp/server.ts) とつなぐ
 const mcpUrl = params.get('mcp');

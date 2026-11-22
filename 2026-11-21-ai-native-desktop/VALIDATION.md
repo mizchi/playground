@@ -93,7 +93,21 @@ AeroSpace (macOS) も i3 に近いコマンドを持つので、同じ方針で�
   - mizchi/font と DOM: 最大 0.0146px。どれも 1/64px 以内
 - **窓の最小幅**: 試作のレイアウト (mizchi/font で計測) / veriss / Chromium の DOM で、3 者が一致した (Todo 252px、Settings 170px、Notes 252px)
 
-これで、「証明 (veriss)」と「shell の計測」と「描画 (Chromium)」が、実際のフォントで同じ幅になることを確かめられた。shell の計測を mizchi/font に移す (VERISS.md の方針) ための前提が成り立つ。
+これで、「証明 (veriss)」と「shell の計測」と「描画 (Chromium)」が、実際のフォントで同じ幅になることを確かめられた。
+
+### 実際のアプリで、shell の計測を mizchi/font に移した
+
+`?font=fonts/ipaexg.ttf` を付けて開くと、次の 2 つが同じフォントを使う (`proto-canvas/src/backend/font-metrics.ts`)。
+
+- shell の文字幅の計測: veriss と同じ mizchi/font (MoonBit の出力をブラウザ向けにバンドルしたもの。2.7MB で、指定したときだけ動的に読み込む)
+- Canvas の描画: 同じフォントファイルを FontFace で読む
+
+確かめたこと (`e2e/font-shell.cjs`、すべて通った):
+
+- 描いた 22 個の文字列で、shell の計測と Canvas の `measureText` の差が 0
+- 各窓の最小幅で、実際のアプリのレイアウトと veriss の証明が一致する (Todo 252px、Settings 170px、Notes 252px)
+
+これで VERISS.md の「P4b の `measure` を shell 側に移す」が、実際のアプリで成り立った。証明に使った計測値と、描画するときの計測値が同じになる。
 
 ## 4a. Odin の backend (要判断)
 

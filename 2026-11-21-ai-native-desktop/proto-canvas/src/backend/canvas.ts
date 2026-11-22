@@ -11,6 +11,8 @@ export interface CanvasBackend {
   size(): { w: number; h: number };
   focusInput(): void;
   setCursor(c: string): void;
+  /** 描画に使うフォント (shell の計測と同じフォントにする) */
+  setFontFamily(f: string): void;
 }
 
 export interface BackendEvents {
@@ -40,7 +42,8 @@ export function createCanvasBackend(canvas: HTMLCanvasElement, sink: HTMLTextAre
     ev.resize();
   });
 
-  const font = (size: number, weight: number) => `${weight} ${size}px ${FONT_FAMILY}`;
+  let family = FONT_FAMILY;
+  const font = (size: number, weight: number) => `${weight} ${size}px ${family}`;
   const measure: Measure = (str, size, weight) => {
     const key = `${weight}/${size}/${str}`;
     let w = widths.get(key);
@@ -141,6 +144,10 @@ export function createCanvasBackend(canvas: HTMLCanvasElement, sink: HTMLTextAre
       return { w: r.width, h: r.height };
     },
     focusInput: () => sink.focus({ preventScroll: true }),
+    setFontFamily: (f) => {
+      family = f;
+      widths.clear();
+    },
     setCursor: (c) => {
       if (canvas.style.cursor !== c) canvas.style.cursor = c;
     },

@@ -79,6 +79,7 @@ pnpm build && pnpm veriss-diff   # veriss・Chromium・layout.ts の 3 者照合
 pnpm veriss-repro        # veriss に報告した Unknown の最小再現
 pnpm sway-bridge         # LayoutOp を実際の sway に写して比べる (下記)
 pnpm font-diff           # 実際のフォント (IPAex ゴシック) で、veriss の計測・Chromium・layout.ts の幅を比べる
+pnpm fonts && pnpm build && node e2e/font-shell.cjs   # ?font= で shell の計測を mizchi/font にしたアプリで、証明と描画の計測が一致するか
 pnpm perf                # shell の 1 フレームと veriss の検証時間
 pnpm build && pnpm e2e:mcp   # MCP サーバの通し確認 (MCP クライアント → サーバ → ブラウザの shell)
 pnpm build:component     # Rust の Todo を WIT のコンポーネントにする (wasm32-wasip2 のターゲットが必要。component/todo.wasm はコミット済み)
