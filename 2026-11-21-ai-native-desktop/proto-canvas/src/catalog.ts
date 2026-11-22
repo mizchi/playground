@@ -25,14 +25,18 @@ export type ViewTemplate =
   /** each の中だけで使える: 文脈ノード (= 子) を、その子自身の template で描く */
   | { type: 'self' };
 
-export type WidgetKind = 'checkbox' | 'switch' | 'textField' | 'button';
+export type WidgetKind = 'checkbox' | 'switch' | 'textField' | 'button' | 'radio' | 'stepper' | 'action';
 
 /** widget と結びつけてよい role。widget は node.actions にある action しか起こせない */
 export const WIDGET_ROLES: Record<WidgetKind, Role[]> = {
   checkbox: ['checkbox'],
   switch: ['switch', 'checkbox'],
   textField: ['textbox'],
-  button: ['button'],
+  button: ['button', 'combobox', 'tab'],
+  radio: ['radio'],
+  stepper: ['slider', 'spinbutton'],
+  // 既存アプリの「クリックできる画像やセル」など、役割と操作が食い違うもの。既定レンダラだけが使う (LLM の template では使えない)
+  action: ['img', 'cell', 'paragraph', 'heading', 'listitem', 'row', 'group', 'columnheader', 'progressbar', 'tablist', 'table', 'list', 'separator', 'x-window'],
 };
 
 export const COLOR_TOKENS: ColorToken[] = ['bg', 'surface', 'text', 'muted', 'accent', 'accentText', 'border', 'danger', 'ghost'];
@@ -99,7 +103,8 @@ export function validateTemplate(t: unknown): string[] {
         break;
       case 'widget':
         allow(['type', 'kind']);
-        if (typeof o.kind !== 'string' || !Object.hasOwn(WIDGET_ROLES, o.kind)) errors.push(`${path}.kind: ${Object.keys(WIDGET_ROLES).join(' | ')}`);
+        if (o.kind === 'action') errors.push(`${path}.kind: action は既定レンダラ専用`);
+        else if (typeof o.kind !== 'string' || !Object.hasOwn(WIDGET_ROLES, o.kind)) errors.push(`${path}.kind: ${Object.keys(WIDGET_ROLES).join(' | ')}`);
         break;
       case 'children':
         allow(['type']);
@@ -123,6 +128,15 @@ export function validateTemplate(t: unknown): string[] {
 
 /** 既定レンダラ: role ごとの決定的な template。どれもカバレッジを満たす */
 export function defaultTemplate(node: SemanticNode): ViewTemplate {
+  let t = baseTemplate(node);
+  // 操作できるのに部品で描かない役割 (クリックできる画像など): 控えめなボタン型の部品で描く
+  if (t.type !== 'widget' && node.actions?.includes('click') && !node.disabled) t = { type: 'widget', kind: 'action' };
+  // 部品が子を持つ場合 (既存アプリのコンボボックスの中の入力欄など): 部品の隣に子を描く。子の操作を落とさない
+  if (t.type === 'widget' && node.children?.length) return { type: 'box', axis: 'horizontal', gap: 8, children: [t, { type: 'children' }] };
+  return t;
+}
+
+function baseTemplate(node: SemanticNode): ViewTemplate {
   switch (node.role) {
     case 'x-window':
       return { type: 'box', axis: 'vertical', gap: 10, padding: 14, children: [{ type: 'children' }] };
@@ -142,6 +156,29 @@ export function defaultTemplate(node: SemanticNode): ViewTemplate {
     case 'textbox':
       return { type: 'widget', kind: 'textField' };
     case 'button':
+    case 'combobox':
+    case 'tab':
       return { type: 'widget', kind: 'button' };
+    case 'radio':
+      return { type: 'widget', kind: 'radio' };
+    case 'slider':
+    case 'spinbutton':
+      return { type: 'widget', kind: 'stepper' };
+    case 'progressbar':
+      return { type: 'box', axis: 'horizontal', gap: 8, children: [{ type: 'text', text: { bind: 'label' }, color: 'text' }, { type: 'text', text: { bind: 'value' }, color: 'muted' }] };
+    case 'tablist':
+      return { type: 'box', axis: 'horizontal', gap: 4, children: [{ type: 'children' }] };
+    case 'table':
+      return { type: 'box', axis: 'vertical', gap: 2, children: [{ type: 'children' }] };
+    case 'row':
+      return { type: 'box', axis: 'horizontal', gap: 12, children: [{ type: 'children' }] };
+    case 'cell':
+      return { type: 'text', text: { bind: 'label' }, size: 13, color: 'text' };
+    case 'columnheader':
+      return { type: 'text', text: { bind: 'label' }, size: 13, weight: 700, color: 'text' };
+    case 'separator':
+      return { type: 'box', border: 'border', children: [] };
+    case 'img':
+      return { type: 'text', text: { bind: 'label' }, size: 12, color: 'muted' };
   }
 }

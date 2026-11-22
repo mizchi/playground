@@ -1,7 +1,7 @@
 // View Tree -> veriss の入力 (HTML + CSS + 文字の契約)。layout.ts と同じ意味になるように CSS の flex に写す。
 // View Tree には selector も cascade もないので、1 ノード 1 クラスにする (veriss の ADR-0014/0015 の S1・S2 が起きない)。
 import type { ViewNode } from './expand.ts';
-import { M, layout } from './layout.ts';
+import { M, layout, stepperValue } from './layout.ts';
 import type { ColorToken, Measure } from './protocol.ts';
 
 /** www/index.html の light テーマと同じ値 (コントラスト検査用) */
@@ -99,8 +99,9 @@ export function lower(view: ViewNode, measure: Measure, opts: LowerOptions = {})
     const label = node.label ?? '';
     switch (v.widget) {
       case 'checkbox':
+      case 'radio':
       case 'switch': {
-        const [w, h] = v.widget === 'checkbox' ? [M.check, M.check] : [M.switchW, M.switchH];
+        const [w, h] = v.widget === 'switch' ? [M.switchW, M.switchH] : [M.check, M.check];
         rules.push(`.${cls} { display: flex; align-items: center; gap: ${M.labelGap}px; height: ${M.rowH}px; ${item} }`);
         rules.push(`.${cls}-i { flex: none; width: ${w}px; height: ${h}px; background: ${node.checked ? theme.accent : theme.border}; }`);
         rules.push(`.${cls}-l { flex: none; ${text(`${cls}-l`, label, M.fontSize, 400)} color: ${node.checked && v.widget === 'checkbox' ? theme.muted : theme.text}; }`);
@@ -109,12 +110,22 @@ export function lower(view: ViewNode, measure: Measure, opts: LowerOptions = {})
       case 'textField':
         rules.push(`.${cls} { height: ${M.fieldH}px; min-width: ${M.fieldMinW}px; background: ${theme.surface}; ${item} }`);
         return `<div class="${cls}" role="textbox" tabindex="0" aria-label="${esc(label)}"></div>`;
+      case 'action':
       case 'button': {
         const pad = (M.btnH - lineH(M.fontSize)) / 2;
         rules.push(
           `.${cls} { ${text(cls, label, M.fontSize, 600)} padding: ${pad}px ${M.btnPadX}px; background: ${node.sensitive ? theme.danger : theme.accent}; color: ${theme.accentText}; ${item} }`,
         );
-        return `<div class="${cls}" role="button" tabindex="0">${esc(label)}</div>`;
+        return `<div class="${cls}" role="${v.widget === 'action' || node.role === 'button' ? 'button' : node.role}" tabindex="0">${esc(label)}</div>`;
+      }
+      case 'stepper': {
+        // ラベル [−] 値 [+] (layout.ts と同じ並び)
+        const val = stepperValue(node);
+        rules.push(`.${cls} { display: flex; align-items: center; gap: ${M.labelGap}px; height: ${M.rowH}px; ${item} }`);
+        rules.push(`.${cls}-l { flex: none; ${text(`${cls}-l`, label, M.fontSize, 400)} color: ${theme.text}; }`);
+        rules.push(`.${cls}-b { flex: none; width: ${M.stepBtn}px; height: ${M.stepBtn}px; background: ${theme.border}; }`);
+        rules.push(`.${cls}-v { flex: none; ${text(`${cls}-v`, val, M.fontSize, 600)} color: ${theme.text}; }`);
+        return `<div class="${cls}" role="${node.role}" aria-label="${esc(label)}" aria-valuenow="${node.valueNow ?? 0}" tabindex="0"><div class="${cls}-l">${esc(label)}</div><div class="${cls}-b" role="button" aria-label="減らす"></div><div class="${cls}-v">${esc(val)}</div><div class="${cls}-b" role="button" aria-label="増やす"></div></div>`;
       }
     }
   };

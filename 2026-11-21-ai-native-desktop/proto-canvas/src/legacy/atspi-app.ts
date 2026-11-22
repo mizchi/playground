@@ -45,6 +45,13 @@ export function createAtspiApp(id: string, atspiName: string): App & { refresh()
       else if (req.action === 'click') {
         const act = PRESS_ACTIONS.find((a) => rawAt(p).actions.includes(a));
         if (act) bridge('action', atspiName, p, act);
+      } else if (req.action === 'increment' || req.action === 'decrement') {
+        const v = rawAt(p).value;
+        if (v) {
+          const step = v.step > 0 ? v.step : (v.max - v.min) / 20 || 1;
+          const next = Math.min(v.max, Math.max(v.min, v.current + (req.action === 'increment' ? step : -step)));
+          bridge('set-value', atspiName, p, String(next));
+        }
       } else if (req.action === 'setValue') bridge('set-text', atspiName, p, req.data ?? '');
       else if (req.action === 'replaceSelectedText') bridge('set-text', atspiName, p, (rawAt(p).text ?? '') + (req.data ?? ''));
       sleep(150); // 既存アプリが自分のイベントループで処理するのを待つ

@@ -11,6 +11,7 @@ export interface AtspiNode {
   actions: string[];
   text: string | null;
   editable: boolean;
+  value?: { current: number; min: number; max: number; step: number } | null;
   children: AtspiNode[];
 }
 
@@ -40,6 +41,28 @@ const ROLE_MAP: Record<string, Role | 'flatten'> = {
   list: 'list',
   'list box': 'list',
   'list item': 'listitem',
+  'radio button': 'radio',
+  'radio menu item': 'radio',
+  'combo box': 'combobox',
+  slider: 'slider',
+  'spin button': 'spinbutton',
+  'progress bar': 'progressbar',
+  'level bar': 'progressbar',
+  'page tab list': 'tablist',
+  'page tab': 'tab',
+  table: 'table',
+  'tree table': 'table',
+  tree: 'table',
+  'table row': 'row',
+  'table cell': 'cell',
+  'table column header': 'columnheader',
+  'column header': 'columnheader',
+  separator: 'separator',
+  icon: 'img',
+  image: 'img',
+  animation: 'img',
+  // スクロールバーは写さない (shell が自分でスクロールする)
+  'scroll bar': 'flatten',
 };
 
 /** AT-SPI の action のうち、「押す」に当たるもの (優先順) */
@@ -73,22 +96,48 @@ export function mapAtspi(app: AtspiNode, opts: { includeHidden?: boolean } = {})
       role = n.children.length ? (label ? 'group' : 'flatten') : label ? 'paragraph' : 'flatten';
     }
     if (role === 'flatten' && label && n.children.length && n.role !== 'application' && n.role !== 'filler') role = 'group';
-    const kids = n.children.flatMap(convert);
+    let kids = n.children.flatMap(convert);
     if (role === 'flatten') return kids;
+    if (role === 'table') kids = groupRows(n, kids);
     const id = idOf(n.path);
     paths[id] = n.path;
     const actions: ActionName[] = [];
     const sensitive = n.states.includes('sensitive') || n.states.includes('enabled');
     if (role === 'textbox' && n.editable) actions.push('focus', 'setValue', 'replaceSelectedText');
+    else if ((role === 'slider' || role === 'spinbutton') && n.value && sensitive) actions.push('increment', 'decrement', 'focus');
     else if (n.actions.some((a) => PRESS_ACTIONS.includes(a))) actions.push('click', 'focus');
     const node: SemanticNode = { id, role, label: role === 'textbox' ? n.name || label : label };
     if (role === 'textbox') node.value = n.text ?? '';
-    if (role === 'checkbox' || role === 'switch') node.checked = n.states.includes('checked') || n.states.includes('pressed');
+    if (role === 'checkbox' || role === 'switch' || role === 'radio') node.checked = n.states.includes('checked') || n.states.includes('pressed');
+    if (role === 'tab') node.selected = n.states.includes('selected');
+    if (n.value && (role === 'slider' || role === 'spinbutton' || role === 'progressbar')) {
+      node.valueNow = n.value.current;
+      node.valueMin = n.value.min;
+      node.valueMax = n.value.max;
+      if (role === 'progressbar') node.value = n.value.max > n.value.min ? `${Math.round(((n.value.current - n.value.min) / (n.value.max - n.value.min)) * 100)}%` : String(n.value.current);
+    }
     if (!sensitive && role !== 'x-window' && role !== 'paragraph' && role !== 'heading') node.disabled = true;
     if (actions.length) node.actions = actions;
     if (kids.length) node.children = kids;
     nodes.push(node);
     return [id];
+  };
+  /** GTK の表は行の節点を持たず、列見出しとセルが並ぶだけ。列見出しの数ごとにセルを行にまとめる */
+  const groupRows = (n: AtspiNode, kids: string[]): string[] => {
+    const byId = new Map(nodes.map((x) => [x.id, x] as const));
+    const headers = kids.filter((k) => byId.get(k)?.role === 'columnheader');
+    const cells = kids.filter((k) => byId.get(k)?.role === 'cell');
+    if (!headers.length || !cells.length) return kids;
+    const rows: string[] = [];
+    const head = `${idOf(n.path)}-h`;
+    nodes.push({ id: head, role: 'row', children: headers });
+    rows.push(head);
+    for (let i = 0; i < cells.length; i += headers.length) {
+      const id = `${idOf(n.path)}-r${i / headers.length}`;
+      nodes.push({ id, role: 'row', children: cells.slice(i, i + headers.length) });
+      rows.push(id);
+    }
+    return [...kids.filter((k) => !headers.includes(k) && !cells.includes(k)), ...rows];
   };
   const top = convert(app);
   // 窓が 1 つならそれを根に、複数なら最初の窓 (この試作は 1 アプリ 1 窓)

@@ -2,12 +2,15 @@
 import type { WidgetKind } from './catalog.ts';
 import { M } from './layout.ts';
 import type { LaidOut } from './layout.ts';
-import type { DrawOp, NodeId, Rect } from './protocol.ts';
+import type { ActionName, DrawOp, NodeId, Rect } from './protocol.ts';
+import { stepperValue } from './layout.ts';
 
 export interface HitRegion {
   rect: Rect;
   node: NodeId;
   widget: WidgetKind;
+  /** 押したときの action (ステッパーの [−] [+] など)。無ければ click */
+  action?: ActionName;
 }
 
 export interface PaintState {
@@ -59,6 +62,32 @@ export function paint(root: LaidOut, state: PaintState, measure: (s: string, siz
         hitRect = { x: r.x, y: r.y, w: Math.min(r.w, M.check + M.labelGap + measure(label, M.fontSize, 400)), h: r.h };
         break;
       }
+      case 'radio': {
+        const box = { x: r.x, y: cy - M.check / 2, w: M.check, h: M.check };
+        ops.push(['rect', { ...box, radius: M.check / 2, fill: 'surface', stroke: n.checked ? 'accent' : 'border', lineWidth: 1.5 }]);
+        if (n.checked) ops.push(['rect', { x: box.x + 5, y: box.y + 5, w: 8, h: 8, radius: 4, fill: 'accent' }]);
+        ops.push(['text', { x: r.x + M.check + M.labelGap, y: cy, str: label, size: M.fontSize, color: 'text' }]);
+        hitRect = { x: r.x, y: r.y, w: Math.min(r.w, M.check + M.labelGap + measure(label, M.fontSize, 400)), h: r.h };
+        break;
+      }
+      case 'stepper': {
+        // ラベル [−] 値 [+] : [−] [+] はそれぞれ decrement / increment
+        ops.push(['text', { x: r.x, y: cy, str: label, size: M.fontSize, color: 'text' }]);
+        const bx = r.x + Math.ceil(measure(label, M.fontSize, 400)) + M.labelGap;
+        const val = stepperValue(n);
+        const minus = { x: bx, y: cy - M.stepBtn / 2, w: M.stepBtn, h: M.stepBtn };
+        const vx = bx + M.stepBtn + M.labelGap;
+        const plus = { x: vx + Math.ceil(measure(val, M.fontSize, 600)) + M.labelGap, y: minus.y, w: M.stepBtn, h: M.stepBtn };
+        for (const [b, s] of [[minus, '−'], [plus, '+']] as const) {
+          ops.push(['rect', { ...b, radius: 6, fill: 'surface', stroke: 'border' }]);
+          ops.push(['text', { x: b.x + 7, y: cy, str: s, size: 14, weight: 700, color: 'text' }]);
+        }
+        ops.push(['text', { x: vx, y: cy, str: val, size: M.fontSize, weight: 600, color: 'text' }]);
+        if (n.actions?.includes('decrement')) hits.push({ rect: minus, node: n.id, widget: 'stepper', action: 'decrement' });
+        if (n.actions?.includes('increment')) hits.push({ rect: plus, node: n.id, widget: 'stepper', action: 'increment' });
+        hitRect = { x: r.x, y: r.y, w: plus.x + plus.w - r.x, h: r.h };
+        break;
+      }
       case 'switch': {
         const track = { x: r.x, y: cy - M.switchH / 2, w: M.switchW, h: M.switchH };
         ops.push(['rect', { ...track, radius: M.switchH / 2, fill: n.checked ? (n.sensitive ? 'danger' : 'accent') : 'border' }]);
@@ -87,11 +116,14 @@ export function paint(root: LaidOut, state: PaintState, measure: (s: string, siz
         ops.push(['pop']);
         break;
       }
+      case 'action':
       case 'button': {
         const w = Math.ceil(measure(label, M.fontSize, 600)) + 2 * M.btnPadX;
         hitRect = { x: r.x, y: r.y, w, h: r.h };
-        ops.push(['rect', { ...hitRect, radius: 6, fill: n.sensitive ? 'danger' : 'accent' }]);
-        ops.push(['text', { x: r.x + M.btnPadX, y: cy, str: label, size: M.fontSize, weight: 600, color: 'accentText' }]);
+        // tab は選ばれていなければ控えめに描く
+        const quiet = (n.role === 'tab' && !n.selected) || v.widget === 'action';
+        ops.push(['rect', { ...hitRect, radius: 6, fill: quiet ? 'surface' : n.sensitive ? 'danger' : 'accent', stroke: quiet ? 'border' : undefined }]);
+        ops.push(['text', { x: r.x + M.btnPadX, y: cy, str: label, size: M.fontSize, weight: 600, color: quiet ? 'text' : 'accentText' }]);
         break;
       }
     }
@@ -103,7 +135,7 @@ export function paint(root: LaidOut, state: PaintState, measure: (s: string, siz
       ops.push(['rect', { x: hitRect.x + hitRect.w - 4, y: hitRect.y - 10, w: 18, h: 18, radius: 9, fill: 'ghost' }]);
       ops.push(['text', { x: hitRect.x + hitRect.w + 1, y: hitRect.y - 1, str: String(step), size: 11, weight: 700, color: 'accentText' }]);
     }
-    hits.push({ rect: hitRect, node: n.id, widget: v.widget });
+    if (v.widget !== 'stepper') hits.push({ rect: hitRect, node: n.id, widget: v.widget });
   };
   visit(root);
   return { ops, hits, caret };

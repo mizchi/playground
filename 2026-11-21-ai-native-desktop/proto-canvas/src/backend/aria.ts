@@ -35,6 +35,9 @@ export function createAriaMirror(container: HTMLElement, activate: (app: AppId, 
     const label = esc(n.label ?? '');
     const at = `data-app="${esc(app)}" data-node="${esc(n.id)}" id="a11y-${esc(app)}-${esc(n.id)}"${pos(rects.get(`${app}/${n.id}`))}`;
     const dis = n.disabled ? ' aria-disabled="true"' : '';
+    // 操作できるのに操作の役割を持たないもの (クリックできる画像など) は、ボタンとして出す
+    if (n.actions?.includes('click') && ['img', 'cell', 'paragraph', 'heading', 'columnheader', 'progressbar'].includes(n.role))
+      return `<div role="button" tabindex="-1" aria-label="${label}" ${at}${dis}>${inner}</div>`;
     switch (n.role) {
       case 'x-window':
         return `<section role="region" aria-label="${label}" data-app="${esc(app)}">${inner}</section>`;
@@ -54,6 +57,32 @@ export function createAriaMirror(container: HTMLElement, activate: (app: AppId, 
         return `<div role="textbox" aria-label="${label}" aria-multiline="${n.multiline ? 'true' : 'false'}" tabindex="-1" ${at}${dis}>${esc(n.value ?? '')}</div>`;
       case 'button':
         return `<div role="button" tabindex="-1" ${at}${dis}>${label}</div>`;
+      case 'radio':
+        return `<div role="radio" aria-checked="${n.checked ? 'true' : 'false'}" tabindex="-1" ${at}${dis}>${label}</div>`;
+      case 'combobox':
+        return `<div role="combobox" aria-expanded="false" aria-label="${label}" tabindex="-1" ${at}${dis}>${esc(n.value ?? '')}</div>`;
+      case 'slider':
+      case 'spinbutton':
+      case 'progressbar': {
+        const v = `aria-valuenow="${n.valueNow ?? 0}"${n.valueMin !== undefined ? ` aria-valuemin="${n.valueMin}"` : ''}${n.valueMax !== undefined ? ` aria-valuemax="${n.valueMax}"` : ''}`;
+        return `<div role="${n.role}" aria-label="${label}" ${v} tabindex="-1" ${at}${dis}></div>`;
+      }
+      case 'tablist':
+        return `<div role="tablist" aria-label="${label}">${inner}</div>`;
+      case 'tab':
+        return `<div role="tab" aria-selected="${n.selected ? 'true' : 'false'}" tabindex="-1" ${at}${dis}>${label}</div>`;
+      case 'table':
+        return `<div role="table" aria-label="${label}">${inner}</div>`;
+      case 'row':
+        return `<div role="row">${inner}</div>`;
+      case 'cell':
+        return `<div role="cell" ${at}>${label}</div>`;
+      case 'columnheader':
+        return `<div role="columnheader" ${at}>${label}</div>`;
+      case 'separator':
+        return '<div role="separator"></div>';
+      case 'img':
+        return `<div role="img" aria-label="${label}" ${at}></div>`;
     }
   };
 

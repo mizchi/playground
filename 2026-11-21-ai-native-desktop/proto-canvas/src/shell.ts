@@ -256,7 +256,8 @@ export class Shell {
     this.focusApp(h.app);
     this.preedit = '';
     this.dispatch({ app: h.app, target: h.hit.node, action: 'focus', by: 'human' });
-    if (h.hit.widget !== 'textField') this.dispatch({ app: h.app, target: h.hit.node, action: 'click', by: 'human' });
+    if (h.hit.action) this.dispatch({ app: h.app, target: h.hit.node, action: h.hit.action, by: 'human' });
+    else if (h.hit.widget !== 'textField') this.dispatch({ app: h.app, target: h.hit.node, action: 'click', by: 'human' });
   }
 
   /** タイトルバーのダブルクリックでズーム、境界のダブルクリックで均等にする */

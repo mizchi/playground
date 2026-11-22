@@ -9,7 +9,10 @@ import { memoryStorage } from '../src/cache.ts';
 import { mapAtspi } from '../src/legacy/atspi.ts';
 import type { AtspiNode } from '../src/legacy/atspi.ts';
 import { createAtspiApp } from '../src/legacy/atspi-app.ts';
+import { defaultTemplate } from '../src/catalog.ts';
+import { expandTree } from '../src/expand.ts';
 import { Shell } from '../src/shell.ts';
+import { SemanticTree } from '../src/tree.ts';
 
 const PY = '/usr/bin/python3.12';
 const here = import.meta.dirname;
@@ -97,7 +100,22 @@ step('提案のあとに人が同じスイッチを操作したら、承認し�
 });
 gtk.kill();
 
-// ---- 実在の GTK アプリでの写像の網羅率 (gtk3-widget-factory) ----
+// ---- 実在の GTK アプリ (gtk3-widget-factory) ----
+step('gtk3-widget-factory: スライダーを increment すると、GTK の値が変わる (人の操作として)', () => {
+  const wf = spawn('gtk3-widget-factory', [], { stdio: 'ignore' });
+  waitApp('gtk3-widget-factory');
+  const app = createAtspiApp('wf', 'gtk3-widget-factory');
+  const sh = new Shell([app], (s, z) => [...s].length * z * 0.6, memoryStorage());
+  sh.frame(1400, 800, 0);
+  const slider = () => sh.tree('wf').walk().find((n) => n.role === 'slider' && n.actions?.includes('increment'))!;
+  const before = slider().valueNow!;
+  const r = sh.dispatch({ app: 'wf', target: slider().id, action: 'increment', by: 'human' });
+  assert.equal(r.result, 'ok');
+  app.refresh();
+  assert.ok(slider().valueNow! > before, `${before} → ${slider().valueNow}`);
+  wf.kill();
+});
+
 step('gtk3-widget-factory: 写せる role の割合', () => {
   const wf = spawn('gtk3-widget-factory', [], { stdio: 'ignore' });
   const dump = waitApp('gtk3-widget-factory');
@@ -111,6 +129,11 @@ step('gtk3-widget-factory: 写せる role の割合', () => {
   const m = mapAtspi(dump);
   const total = Object.values(all).reduce((a, b) => a + b, 0);
   const unknown = Object.values(m.unknownRoles).reduce((a, b) => a + b, 0);
+  // 写した意味ツリーが、試作の描画で描けること (展開の検査を通ること)
+  const t = new SemanticTree();
+  t.apply({ t: 'tree-update', app: 'wf', root: m.root, focus: null, nodes: m.nodes });
+  const { issues } = expandTree(t, (node) => ({ template: defaultTemplate(node), from: 'default' }));
+  assert.deepEqual(issues, []);
   results.widgetFactory = { total, unknown, unknownRoles: m.unknownRoles, roles: all, mappedNodes: m.nodes.length, interactive: m.nodes.filter((n) => n.actions?.length).length };
   console.log(`     表示中の節点 ${total} 個、写せない role ${unknown} 個 (${((unknown / total) * 100).toFixed(1)}%)、意味ツリーの節点 ${m.nodes.length} 個 (操作できる ${m.nodes.filter((n) => n.actions?.length).length} 個)`);
   console.log(`     写せない role: ${JSON.stringify(m.unknownRoles)}`);

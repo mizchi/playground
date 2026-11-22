@@ -15,10 +15,23 @@ export type Role =
   | 'checkbox'
   | 'switch'
   | 'textbox'
-  | 'button';
+  | 'button'
+  | 'radio'
+  | 'combobox'
+  | 'slider'
+  | 'spinbutton'
+  | 'progressbar'
+  | 'tablist'
+  | 'tab'
+  | 'table'
+  | 'row'
+  | 'cell'
+  | 'columnheader'
+  | 'separator'
+  | 'img';
 
 /** AccessKit の Action 名を camelCase で借りたもの。 */
-export type ActionName = 'click' | 'focus' | 'setValue' | 'replaceSelectedText';
+export type ActionName = 'click' | 'focus' | 'setValue' | 'replaceSelectedText' | 'increment' | 'decrement';
 
 export interface SemanticNode {
   id: NodeId;
@@ -27,6 +40,12 @@ export interface SemanticNode {
   label?: string;
   value?: string;
   checked?: boolean | 'mixed';
+  /** tab などで選ばれている */
+  selected?: boolean;
+  /** slider / spinbutton / progressbar の値 (aria-valuenow / min / max) */
+  valueNow?: number;
+  valueMin?: number;
+  valueMax?: number;
   disabled?: boolean;
   multiline?: boolean;
   /** agent からの操作に毎回承認を要する */

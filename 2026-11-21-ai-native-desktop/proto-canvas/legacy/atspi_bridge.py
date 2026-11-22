@@ -4,6 +4,7 @@
   atspi_bridge.py dump <アプリ名>
   atspi_bridge.py action <アプリ名> <道 (0.1.2)> <action 名>
   atspi_bridge.py set-text <アプリ名> <道> <文字列>
+  atspi_bridge.py set-value <アプリ名> <道> <数値>
 
 道は、アプリのルートからの子の番号の列。結果は JSON で標準出力に出す。
 """
@@ -50,7 +51,14 @@ def dump(acc, path="", depth=0):
         editable = True
     except NotImplementedError:
         pass
+    value = None
+    try:
+        v = acc.queryValue()
+        value = {"current": v.currentValue, "min": v.minimumValue, "max": v.maximumValue, "step": v.minimumIncrement}
+    except NotImplementedError:
+        pass
     out = {
+        "value": value,
         "path": path,
         "role": acc.getRoleName(),
         "name": acc.name,
@@ -80,6 +88,10 @@ def main():
         if sys.argv[4] not in names:
             raise SystemExit(json.dumps({"error": f"action {sys.argv[4]} がない", "actions": names}, ensure_ascii=False))
         print(json.dumps({"ok": ai.doAction(names.index(sys.argv[4]))}))
+    elif cmd == "set-value":
+        n = node_at(app, sys.argv[3])
+        n.queryValue().currentValue = float(sys.argv[4])
+        print(json.dumps({"ok": True}))
     elif cmd == "set-text":
         n = node_at(app, sys.argv[3])
         print(json.dumps({"ok": n.queryEditableText().setTextContents(sys.argv[4])}))

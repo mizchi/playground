@@ -13,7 +13,13 @@ export const M = {
   switchH: 20,
   labelGap: 8,
   fontSize: 14,
+  stepBtn: 24,
 } as const;
+
+/** slider / spinbutton の表示値 */
+export function stepperValue(n: { valueNow?: number; value?: string }): string {
+  return n.valueNow !== undefined ? String(Math.round(n.valueNow * 100) / 100) : (n.value ?? '');
+}
 
 export interface LaidOut {
   view: ViewNode;
@@ -51,7 +57,11 @@ export function layout(view: ViewNode, width: number, measure: Measure, origin =
       const label = v.node.label ?? '';
       switch (v.widget) {
         case 'checkbox':
+        case 'radio':
           r = { w: M.check + M.labelGap + Math.ceil(measure(label, M.fontSize, 400)), h: M.rowH };
+          break;
+        case 'stepper':
+          r = { w: Math.ceil(measure(label, M.fontSize, 400)) + M.labelGap + 2 * M.stepBtn + 2 * M.labelGap + Math.ceil(measure(stepperValue(v.node), M.fontSize, 600)), h: M.rowH };
           break;
         case 'switch':
           r = { w: M.switchW + M.labelGap + Math.ceil(measure(label, M.fontSize, 400)), h: M.rowH };
@@ -60,6 +70,7 @@ export function layout(view: ViewNode, width: number, measure: Measure, origin =
           r = { w: M.fieldMinW, h: M.fieldH };
           break;
         case 'button':
+        case 'action':
           r = { w: Math.ceil(measure(label, M.fontSize, 600)) + 2 * M.btnPadX, h: M.btnH };
           break;
       }
