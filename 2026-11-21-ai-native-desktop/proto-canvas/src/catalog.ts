@@ -83,6 +83,8 @@ export function validateTemplate(t: unknown): string[] {
         num(o.padding, 'padding', path);
         num(o.radius, 'radius', path);
         num(o.grow, 'grow', path);
+        // 小数の grow は、合計が 1 未満のとき CSS (余白の一部だけを配る) と layout.ts (全部を配る) で意味が変わる
+        if (typeof o.grow === 'number' && !Number.isInteger(o.grow)) errors.push(`${path}.grow: 整数 (0..4)`);
         color(o.background, `${path}.background`);
         color(o.border, `${path}.border`);
         // 生成 UI は面を強調できない: 危険色・強調色の背景で操作の印象を変えさせない

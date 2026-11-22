@@ -683,7 +683,8 @@ export class Shell {
     if (order.length === 0) return;
     const w = this.wins[this.focusedWin];
     const cur = order.findIndex((o) => o.app === w.app.id && o.node.id === w.tree.focus);
-    const next = order[(cur + dir + order.length) % order.length];
+    // フォーカスが無いときは、Tab で先頭、Shift+Tab で末尾へ
+    const next = cur === -1 ? order[dir === 1 ? 0 : order.length - 1] : order[(cur + dir + order.length) % order.length];
     this.focusApp(next.app);
     this.preedit = '';
     this.revealFocus = true;
@@ -740,6 +741,11 @@ export class Shell {
     const errors: string[] = [];
     let sensitive = false;
     let st = this.state();
+    // 外 (MCP・パネルの JSON) から来るので、形を確かめてから使う
+    if (typeof intent !== 'string') errors.push('intent は文字列');
+    if (!Array.isArray(steps)) return { ok: false, errors: [...errors, 'steps は配列'] };
+    const shapeErrors = steps.map((s, i) => stepShapeError(s, i)).filter((e): e is string => !!e);
+    if (shapeErrors.length) return { ok: false, errors: [...errors, ...shapeErrors] };
     steps.forEach((s, i) => {
       if (isLayoutStep(s)) {
         // 窓を閉じると作業中の状態を失いうるので、自動承認しない
@@ -965,7 +971,12 @@ export class Shell {
       const hidden = this.zoomed && this.zoomed !== app;
       if (!hidden) this.titles.set(app, { x: tile.x, y: tile.y, w: tile.w - (closable ? 32 : 0), h: TITLE_H });
       if (!hidden && closable && !dim) this.closeRects.set(app, cr);
-      if (!dim && !hidden) for (const hit of pt.hits) this.hits.push({ app, hit });
+      // 窓の中身の矩形で切る (隣の窓にはみ出した部分や、タイトルバーの裏に隠れた部分は押せない)
+      if (!dim && !hidden)
+        for (const hit of pt.hits) {
+          const r = intersect(hit.rect, content);
+          if (r) this.hits.push({ app, hit: { ...hit, rect: r } });
+        }
       if (focused && pt.caret && w.tree.focus && !hidden) {
         const f = w.tree.get(w.tree.focus);
         ime = { t: 'ime-enable', node: w.tree.focus, surrounding: f?.value ?? '', cursor: [...(f?.value ?? '')].length, caret: pt.caret };
@@ -1163,4 +1174,28 @@ function grow(r: Rect, d: number): Rect {
 
 function inside(r: Rect, x: number, y: number) {
   return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+}
+
+function intersect(a: Rect, b: Rect): Rect | null {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const w = Math.min(a.x + a.w, b.x + b.w) - x;
+  const h = Math.min(a.y + a.h, b.y + b.h) - y;
+  return w > 0 && h > 0 ? { x, y, w, h } : null;
+}
+
+const LAYOUT_OPS = ['move', 'zoom', 'minimize', 'restore', 'equalize', 'launch', 'close'];
+/** 提案の手順の形 (型) の検査。中身 (ノードがあるか、action を公開しているか) は propose が確かめる */
+function stepShapeError(s: unknown, i: number): string | null {
+  if (typeof s !== 'object' || s === null || Array.isArray(s)) return `steps[${i}]: object が必要`;
+  const o = s as Record<string, unknown>;
+  if (o.kind === 'layout') {
+    const op = o.op as Record<string, unknown> | null;
+    if (typeof op !== 'object' || op === null || !LAYOUT_OPS.includes(op.type as string)) return `steps[${i}].op.type: ${LAYOUT_OPS.join(' | ')}`;
+    if ('app' in op && op.app !== null && typeof op.app !== 'string') return `steps[${i}].op.app: 文字列`;
+    return null;
+  }
+  for (const k of ['app', 'target', 'action'] as const) if (typeof o[k] !== 'string') return `steps[${i}].${k}: 文字列`;
+  if (o.data !== undefined && typeof o.data !== 'string') return `steps[${i}].data: 文字列`;
+  return null;
 }

@@ -52,6 +52,7 @@ README の「宣言的 UI ツリー」を一歩進め、**アクセシビリテ�
   - `pinned`: ユーザーが「これが好み」と承認したもの
   - `rejected`: 再生成させたもの
 - ヒットすれば LLM は呼ばない。④の展開は決定的に行う。
+- **ヒットしても、展開のたびに不変条件を確かめ直す**。`list-of` に畳んだので、件数の違う木に同じ template が当たる。template は子の id を名指しせず、`each` / `children` で今の子をすべてたどる形しか書けない (catalog の語彙)。そのうえで展開時に「操作できるノードが view に 1 回ずつ現れる」(不変条件 2) を毎回検査し、破れたらその template を捨てて既定レンダラに戻す (`expand.ts`)
 
 ---
 
@@ -156,6 +157,7 @@ Wayland の `text-input-v3` を手本にした最小の形。
 ```
 
 - **確定文字列だけを action にする**。preedit は view の一時状態で、tree にも AI にも見せない
+- **未対応: キャレットの前後を消す操作**。`text-input-v3` の `delete_surrounding_text` に当たるものがまだ無い (IME が直前の文字を消して確定し直す場合)。足すときは `{"t":"ime-delete-surrounding","before":n,"after":m}` (文字数は Unicode のコードポイント) とし、同じ確定の組の中では「消す → commit」の順に当てる。P2 では `setValue` (消したあとの値) に写す
 - `caret` を送るのは、変換候補ウィンドウを OS が正しい位置に出すため
 
 ---

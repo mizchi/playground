@@ -100,6 +100,14 @@ async function step(name, fn) {
     assert.equal(await page.getByRole('region', { name: 'Settings' }).count(), 1);
   });
 
+  await step('F6 でデスクトップからパネルへ、もう一度でデスクトップへ戻る (キーボードだけで承認の口に届く)', async () => {
+    await page.focus('#sink');
+    await page.keyboard.press('F6');
+    assert.ok(await page.evaluate(() => document.getElementById('panel').contains(document.activeElement)), 'パネルにフォーカス');
+    await page.keyboard.press('F6');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'sink');
+  });
+
   await step('axe-core の規則に違反しない (見た目は Canvas なので color-contrast は除く)', async () => {
     await page.addScriptTag({ path: axePath });
     const r = await page.evaluate(async () => {

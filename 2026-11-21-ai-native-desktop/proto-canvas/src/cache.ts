@@ -24,12 +24,33 @@ export const memoryStorage = (): Storage => {
   return { load: () => structuredClone(data), save: (e) => (data = structuredClone(e)) };
 };
 
+const STATES: EntryState[] = ['ephemeral', 'pinned', 'rejected'];
+const VERIFICATIONS: CacheEntry['verification'][] = ['unchecked', 'verified', 'violated', 'unknown'];
+function isEntry(e: unknown): e is CacheEntry {
+  if (typeof e !== 'object' || e === null) return false;
+  const o = e as Record<string, unknown>;
+  return (
+    typeof o.sig === 'string' &&
+    typeof o.origin === 'string' &&
+    STATES.includes(o.state as EntryState) &&
+    VERIFICATIONS.includes(o.verification as CacheEntry['verification']) &&
+    validateTemplate(o.template).length === 0
+  );
+}
+
 export class TemplateCache {
   private entries = new Map<string, CacheEntry>();
   private storage: Storage;
   constructor(storage: Storage) {
     this.storage = storage;
-    for (const e of storage.load()) if (validateTemplate(e.template).length === 0) this.entries.set(e.sig, e);
+    // 保存先 (localStorage など) の中身は信用しない: 形の崩れた entry は捨て、正しいものだけ使う
+    let loaded: unknown;
+    try {
+      loaded = storage.load();
+    } catch {
+      loaded = [];
+    }
+    for (const e of Array.isArray(loaded) ? loaded : []) if (isEntry(e)) this.entries.set(e.sig, e);
   }
 
   /** 静的検査を通ったものだけを ephemeral として受け入れる */

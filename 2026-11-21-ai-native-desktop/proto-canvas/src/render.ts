@@ -102,7 +102,9 @@ export function paint(root: LaidOut, state: PaintState, measure: (s: string, siz
         const focused = state.focus === n.id;
         ops.push(['rect', { ...r, radius: 6, fill: 'surface', stroke: focused ? 'accent' : 'border', lineWidth: focused ? 2 : 1 }]);
         const value = n.value ?? '';
-        const tx = r.x + 10;
+        // 入力が欄より長いときは、キャレット (末尾) が見えるように文字を左へ送る
+        const endW = (value ? measure(value, M.fontSize, 400) : 0) + (focused && state.preedit ? measure(state.preedit, M.fontSize, 400) : 0);
+        const tx = r.x + 10 - Math.max(0, endW - (r.w - 22));
         ops.push(['clip', { x: r.x + 2, y: r.y, w: r.w - 4, h: r.h }]);
         if (value === '' && !(focused && state.preedit)) ops.push(['text', { x: tx, y: cy, str: label, size: M.fontSize, color: 'muted' }]);
         else ops.push(['text', { x: tx, y: cy, str: value, size: M.fontSize, color: 'text' }]);

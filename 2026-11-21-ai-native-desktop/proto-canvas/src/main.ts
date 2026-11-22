@@ -263,7 +263,7 @@ panel.innerHTML = `
 
   <h2>アプリ</h2>
   <div class="row" id="installed"></div>
-  <div class="muted">Alt+L でランチャー (それ自体も意味ツリーを出すアプリ)。窓はタイトルバーの × で閉じる。</div>
+  <div class="muted">F6 でデスクトップとこのパネルの間を移る。Alt+L でランチャー (それ自体も意味ツリーを出すアプリ)。窓はタイトルバーの × で閉じる。</div>
   <div id="openWins"></div>
 
   <h2>レイアウト</h2>
@@ -381,6 +381,13 @@ panel.addEventListener('click', (e) => {
   backend.focusInput();
 });
 const openApps = () => shell.windows().map((w) => w.id);
+// F6: デスクトップ (Canvas) とパネルの間でフォーカスを移す。Canvas の中の Tab はアプリの部品を巡るので、パネルへはこれで行く
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'F6') return;
+  e.preventDefault();
+  if (panel.contains(document.activeElement)) backend.focusInput();
+  else panel.querySelector<HTMLElement>('button:not([disabled]), select, input, textarea')?.focus();
+});
 // テーマ: システムに従う / ライト / ダーク。<html data-theme> を切り替え、Canvas の backend は CSS 変数を読み直す
 const THEME_KEY = 'platform.theme';
 const applyTheme = (t: string) => {
@@ -431,9 +438,9 @@ function renderPanel(frame: ReturnType<Shell['frame']>) {
     treeSel.value = wins.some((w) => w.id === prev) ? prev : wins[0].id;
   }
   $('proposals').innerHTML =
-    shell.proposals
-      .slice(-4)
-      .reverse()
+    // 待っている提案はすべて出す (承認・却下の口を失わない)。済んだものは新しい 4 件だけ
+    [...shell.proposals.filter((p) => p.status !== 'pending').slice(-4), ...shell.proposals.filter((p) => p.status === 'pending')]
+      .sort((a, b) => shell.proposals.indexOf(b) - shell.proposals.indexOf(a))
       .map(
         (p) => `<div class="card ${p.sensitive ? 'sensitive' : ''}">
           <div><b>${p.id}</b> ${escapeHtml(p.intent)} <span class="tag">${p.status}</span>${p.sensitive ? ' <span class="tag">sensitive</span>' : ''}</div>

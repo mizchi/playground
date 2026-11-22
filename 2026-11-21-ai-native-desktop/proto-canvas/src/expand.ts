@@ -63,7 +63,8 @@ export function expandTree(tree: SemanticTree, source: TemplateSource): { view: 
         else {
           const raw =
             t.text.bind === 'label' ? (ctx.label ?? '') : t.text.bind === 'value' ? (ctx.value ?? '') : String(ctx.children?.length ?? 0);
-          str = t.text.format ? t.text.format.replace('{}', raw) : raw;
+          // 置換文字列の $& などを解釈させない (値をそのまま入れる)
+          str = t.text.format ? t.text.format.replace('{}', () => raw) : raw;
         }
         // 固定の文字を含む文は強調できない (muted、太字なし)
         return [{ kind: 'text', str, size: t.size ?? 14, weight: untrusted ? Math.min(t.weight ?? 400, 400) : (t.weight ?? 400), color: untrusted ? 'muted' : (t.color ?? 'text') }];

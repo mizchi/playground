@@ -81,7 +81,8 @@ export function lower(view: ViewNode, measure: Measure, opts: LowerOptions = {})
   const text = (cls: string, str: string, size: number, weight: number) => {
     const w = Math.ceil(measure(str, size, weight));
     boxes[`.${cls}`] = { minInlineSize: w, maxInlineSize: w, intrinsicBlockSize: lineH(size), wrap: 'nowrap' };
-    return `font: ${weight} ${size}px/${lineH(size)}px ${family}; white-space: nowrap;`;
+    // 空の文字列でも layout.ts と同じ高さを取る (空の行の箱は高さを持たない)
+    return `font: ${weight} ${size}px/${lineH(size)}px ${family}; white-space: nowrap; min-height: ${lineH(size)}px;`;
   };
 
   /** parent: 親の向き。layout.ts の stretch / grow の規則を CSS の align-self / flex に写す */

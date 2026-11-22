@@ -42,12 +42,16 @@ View Tree には selector も cascade もない。ここが重要で、veriss �
 ## プロトコルへの追加 (必要になるもの)
 
 - **P1 に文字列の長さの契約**: アプリが動的な文字列の上界を宣言する (例: `maxLength`、`charset`)。veriss の S3 (実行時にしか決まらない量) を契約で受けるため。宣言がない文字列は `nowrap` + clip で囲むか、Unknown にする
+  - **実行時の強制**: 証明は宣言した上界の中でだけ成り立つ。shell は tree-update を受けたときに上界を確かめ、超えた値を含む subtree には検証済みの template を当てない (既定レンダラに戻し、その部分は `overflow: clip` で囲む。監査ログに「契約違反」として残す)。値を黙って切り詰めることはしない (アプリが言っていない文を作らない)
+  - キャッシュのキーには上界 (`maxLength`・`charset`) を含める。上界が広がった更新は、狭い上界で検証した template に当たらない
 - **P4b の `measure` を shell 側に移す**: 証明は font の計測値を前提にしている。実行時も**同じ font ファイルと同じ計測** (mizchi/font) を使わないと、証明が実際の画面と食い違う。backend は同じ font で字形を描くだけにする。証明の記録に font のハッシュを含める
 - **実行時のレイアウトエンジンを CSS の flex と同じ意味にする**: 試作の `layout.ts` は簡易版。ADR-0015 の案 1 のとおり crater-layout (Taffy 由来の MoonBit、wasm component あり) に置き換え、veriss・crater・Chromium の 3 者で 1/64px 一致を照合する
 
 ## WM 側: 証明された範囲を守るタイル配置
 
-- veriss の結果は「この幅の範囲で崩れない」なので、窓は**検証済みの最小幅**を持つ。タイルの配置計算は、それより狭い幅を割り当てない
+- veriss の結果は「この幅・高さの範囲で崩れない」なので、窓は**検証した範囲** (`viewport` の幅と高さの min / max) の中でだけ、その template を使う。タイルの配置計算は、最小幅より狭い幅を割り当てない
+  - 高さは窓の中身を縦にスクロールする容器にして検証する (`overflowBlock: 'scroll'`)。こうすると高さの下限は「スクロールできる」ことで満たされる
+  - 範囲の外 (検証した最大より広い・高い窓、最小より低い窓) になったら、その窓では既定レンダラに戻すか、その範囲で検証し直す。範囲の外では証明に頼らない
   - 割り当てられない (窓が多すぎる) ときは、潰すのではなく、タブ化やスタック化に切り替える (i3 の tabbed のように)
 - 幅の区間ごとに別の template を検証してキャッシュする手もある。タイルの幅で template を選べば、container query と同じことになる
 - 試作の実行時バッジ (`252px 必要`) は、この仕組みが入れば出なくなるはず
@@ -89,7 +93,7 @@ px の固有幅を明示した lowering (`pxIntrinsic: true`) では、3 者が 
 |---|---|
 | V0 (済) | lowering (View Tree → box tree + CSS) を純粋な関数として作る。同じ CSS をブラウザの DOM で配置して、試作の `layout.ts` と差分照合する |
 | V1 (済) | Node で veriss を動かし、既定の template をテストで検証する (Node 24) |
-| V2 | ブラウザの Worker で、LLM の template をキャッシュに入れる前に検証する。violated の反例を LLM への再生成の指示に使う |
+| V2 | ブラウザの Worker で、LLM の template をキャッシュに入れる前に検証する。violated の反例を LLM への再生成の指示に使う。**`verified` としてキャッシュに入れるのは、V0 の照合 (`layout.ts` とブラウザの DOM の一致) がその template で通ったときだけ** (実行時のエンジンが CSS の flex と違う意味なら、証明は実際の画面に当たらない)。通らなければ `unknown` のまま |
 | V3 | 実行時のレイアウトを crater-layout (wasm) に置き換え、veriss・crater・Chromium の 3 者で照合する |
 | V4 | WM が検証済みの範囲を守る (最小幅、タブ化、幅ごとの template) |
 

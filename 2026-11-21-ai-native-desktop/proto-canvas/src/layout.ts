@@ -148,6 +148,8 @@ export function layout(view: ViewNode, width: number, measure: Measure, origin =
     return { view: v, rect: { x, y, w, h }, children };
   };
 
+  // 根が箱でない (template が部品 1 つに展開した) ときも、幅が足りなければはみ出しとして報告する
+  if (view.kind !== 'box' && intrinsic(view).w > width) overflow.push({ rect: { x: origin.x, y: origin.y, w: width, h: intrinsic(view).h }, required: intrinsic(view).w, available: width });
   const root = arrange(view, origin.x, origin.y, width);
   return { root, minWidth: intrinsic(view).w, height: intrinsic(view).h, overflow };
 }
