@@ -18,6 +18,9 @@
 | a11y | `src/backend/aria.ts` | 意味ツリーを ARIA 付きの見えない DOM に写し、widget の位置に重ねる。スクリーンリーダーの操作は人の意味的な操作として shell に戻る。AI の提案と拒否は `aria-live` で読み上げる |
 | P5 IME | `src/backend/canvas.ts` | 隠し textarea に OS の IME を任せる。preedit は表示だけで木に入れず、確定文字列を `replaceSelectedText` にする |
 | veriss への lowering | `src/lower.ts` | View Tree → HTML + CSS + 文字の契約 ([VERISS.md](../VERISS.md)) |
+| wasm コンポーネント | `component/`, `src/apps/component-app.ts` | Rust の Todo を WIT のコンポーネントにしたもの。import は `host.emit` だけ (std の WASI はホストが絞る) |
+| 既存アプリ | `legacy/`, `src/legacy/` | GTK のアプリを AT-SPI で読み、意味ツリーに写して同じ権限モデルで操作する |
+| MCP | `mcp/server.ts`, `src/mcp-link.ts` | AI 向けの口。読む・提案する・待つだけで、承認の tool は無い |
 | タイル | `src/tiling.ts`, `src/anim.ts`, `src/shell.ts` | 分割ツリー。窓のタイトルバーを掴んで運ぶと分割・入れ替えができる (下記)。境界はドラッグで動かせる。最小幅を下回ると「はみ出し」を出す |
 
 右のパネルでは、次のことができる。
@@ -78,6 +81,7 @@ pnpm sway-bridge         # LayoutOp を実際の sway に写して比べる (下
 pnpm font-diff           # 実際のフォント (IPAex ゴシック) で、veriss の計測・Chromium・layout.ts の幅を比べる
 pnpm perf                # shell の 1 フレームと veriss の検証時間
 pnpm build && pnpm e2e:mcp   # MCP サーバの通し確認 (MCP クライアント → サーバ → ブラウザの shell)
+pnpm build:component     # Rust の Todo を WIT のコンポーネントにする (wasm32-wasip2 のターゲットが必要。component/todo.wasm はコミット済み)
 pnpm atspi-bridge        # 既存の GTK アプリを AT-SPI で取り込む (sway / at-spi2-core / python3-pyatspi / gtk-3-examples が必要)
 pnpm build && node e2e/perf-browser.cjs   # Chromium での 1 フレーム
 ```

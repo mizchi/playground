@@ -14,7 +14,7 @@
 | 2 | 意味ツリーによる操作は、スクショ操作より良いか (実際の LLM で比べる) | 見送り |
 | 3 | 承認の UX: 承認疲れ、プレビューの伝わり方、入力の衝突 | 未 |
 | 4a | Odin + SDL3 の backend で、同じ描画命令を描けるか | 要判断 (Odin のビルドに許可が要る) |
-| 4b | アプリを WIT の wasm コンポーネントにしたときの隔離と、境界のコスト | 未 |
+| 4b | アプリを WIT の wasm コンポーネントにしたときの隔離と、境界のコスト | 済 |
 | 4c | 実際のフォントで、証明・shell の計測・描画が同じ幅になるか | 済 |
 | 5b | 既存アプリのツリーの取り込み (Linux の AT-SPI) | 済 (mac の AX API は [human_checks.md](./human_checks.md) の H7) |
 | 6a | 性能 (1000 件のリスト、窓 10 枚) | 済 (スクロールが無い穴を塞いだ) |
@@ -108,6 +108,33 @@ github.com のリリースからは配布物を取れなかった (プロキシ�
 
 - この環境で Odin のビルドを許可する
 - mac 側で Odin を用意する
+
+## 4b. WIT のコンポーネントとしてのアプリ
+
+Todo アプリを Rust で書き、WIT のコンポーネントにした (`proto-canvas/component/`)。
+
+- **world** (`component/wit/app.wit`): アプリが import するのは `host.emit` (意味ツリーを出す) だけ。export は `start` と `on-action`。P1 / P2 を型付きにしたもの
+- **ビルド**: wit-bindgen 0.63 + `wasm32-wasip2` で 75KB のコンポーネントになった
+- **ホスト**: jco 1.42 で JS に変換し、試作の `App` として shell に入れた (`src/apps/component-app.ts`)
+
+### 確かめたこと (`test/component.test.ts`、すべて通った)
+
+- コンポーネントのアプリが、意味ツリーを出して shell に入る。試作の描画で描ける
+- 人の操作も agent の提案も、JS のアプリと同じ権限モデルで通る。WIT の enum (`replace-selected-text`) と P2 の action 名 (`replaceSelectedText`) は相互に変換する
+- **能力はホストが決める**: アプリはボタンでファイルを読もうとする
+  - ホストが preopens (開いたディレクトリ) を渡さなければ、「ファイルは読めない」になる
+  - ルートを開いて渡せば、読める
+- **境界のコスト**: 1 操作あたり (on-action → tree-update の emit → 木の更新)、JS のアプリは 20µs、コンポーネントは 67µs だった。アプリは変化があったときだけ emit するので、描画のフレームには影響しない
+
+### 分かったこと
+
+- **WIT の world と、実際の import は一致しない**: world は host だけを import すると宣言している。しかし、Rust の std (`wasm32-wasip2`) が WASI の import を 17 個持ち込む (cli、io、clocks、filesystem)。
+  - 能力は、ホストが渡す実装で決まる。ファイルシステムの import があっても、preopens を渡さなければ触れない
+  - より強く閉じたいなら、次の 2 つの手がある
+    1. 読み込み時に import を一覧し、許可したもの以外を持つコンポーネントを拒む。テストで、一覧を取れることを確かめた
+    2. アプリを `no_std` (WASI を使わない) で作る
+- **jco 1.42 の生成物の食い違い**: 型定義 (`.d.ts`) では版番号付きの名前 (`gui:app/host@0.1.0`)、JS では版番号の無い名前 (`gui:app/host`) で import を読んでいた。両方の名前で渡して回避した。
+- **preview2-shim の既定**: この版は、既定でディレクトリを何も開いていなかった。比較用の「許可」は、ルートを明示的に開いて作った。
 
 ## 6a. 性能
 

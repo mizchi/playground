@@ -17,9 +17,14 @@
     "e2e:a11y": "node e2e/a11y.cjs",
     "atspi-bridge": "legacy/run-env.sh node e2e/atspi-bridge.ts",
     "mcp": "node mcp/server.ts",
-    "e2e:mcp": "node e2e/mcp.ts"
+    "e2e:mcp": "node e2e/mcp.ts",
+    "build:component": "cd component/todo-rs && cargo build --release --target wasm32-wasip2 && cp target/wasm32-wasip2/release/todo_rs.wasm ../todo.wasm",
+    "gen:component": "jco transpile component/todo.wasm -o component/gen --name todo --instantiation sync --quiet",
+    "pretest": "pnpm -s gen:component"
   },
   "devDependencies": {
+    "@bytecodealliance/jco": "^1.42.0",
+    "@bytecodealliance/preview2-shim": "^0.31.1",
     "@mizchi/veriss": "github:mizchi/veriss#ee4cb5a559856f475e379335e3200b353c465242&path:packages/veriss",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@types/node": "^24.0.0",

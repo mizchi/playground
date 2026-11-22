@@ -3,7 +3,7 @@
 AI と人間が同じ GUI 環境を安全に共同操作するための「AI ネイティブなデスクトップ」を考察する実験。
 
 - **目的**: Linux デスクトップの構成要素を理解したうえで、Canvas / wasm / Odin で UI 体験のプロトタイプを作る
-- **状態**: 設計メモ + Canvas の試作 ([`proto-canvas/`](./proto-canvas/README.md))。`wit/shell.wit` は未検証のスケッチ
+- **状態**: 設計メモ + Canvas の試作 ([`proto-canvas/`](./proto-canvas/README.md))。WIT は `proto-canvas/component/wit/app.wit` が最新 (ルートの `wit/shell.wit` は初期のスケッチ)
 - **プロトコル**: a11y ツリーを正とするパイプラインとワイヤ形式は [`PROTOCOL.md`](./PROTOCOL.md)。こちらが最新で、WIT はこれが固まってから追従させる
 - **安全なレイアウト**: mizchi/veriss で、生成された view をタイルの幅の範囲全体で検証する設計は [`VERISS.md`](./VERISS.md)
 - **翻訳** (未実装の設計メモ): [`TRANSLATION.md`](./TRANSLATION.md)
