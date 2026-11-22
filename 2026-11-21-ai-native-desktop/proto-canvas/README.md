@@ -71,13 +71,28 @@ pnpm build && pnpm e2e   # Chromium で通し確認。--shots で screenshots/ �
 pnpm build && pnpm e2e:dnd   # レイアウトの操作 14 項目。--video で screenshots/dnd.webm と dnd.gif を保存
 pnpm build && pnpm veriss-diff   # veriss・Chromium・layout.ts の 3 者照合 (../VERISS.md)
 pnpm veriss-repro        # veriss に報告した Unknown の最小再現
+pnpm sway-bridge         # LayoutOp を実際の sway に写して比べる (下記)
 ```
+
+### sway への写像を試す
+
+```sh
+apt-get install -y --no-install-recommends sway foot fonts-dejavu-core
+mkdir -p /tmp/sway/run && chmod 700 /tmp/sway/run
+printf 'output HEADLESS-1 resolution 1400x800\ndefault_border none\ngaps inner 0\n' > /tmp/sway/config
+XDG_RUNTIME_DIR=/tmp/sway/run WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman sway -c /tmp/sway/config &
+export XDG_RUNTIME_DIR=/tmp/sway/run WAYLAND_DISPLAY=wayland-1 SWAYSOCK=$(ls /tmp/sway/run/sway-ipc.*.sock)
+for a in todo settings notes; do foot --app-id=$a sh -c 'sleep 100000' & done
+pnpm sway-bridge
+```
+
+結果は [VALIDATION.md](../VALIDATION.md) の 5a。
 
 Node 24 以上が必要 (`.node-version`)。veriss がそれを要求する。この環境では `/opt/node24/bin` を PATH の先頭に置いて実行した。
 
 ## 結果
 
-- 単体テスト 37 件 (うち veriss の検証 3 件)、E2E 11 件、レイアウト操作の E2E 14 件が通る (Node 24、Playwright の Chromium)
+- 単体テスト 46 件 (うち veriss の検証 3 件、sway への写像 4 件)、E2E 11 件、レイアウト操作の E2E 14 件が通る (Node 24、Playwright の Chromium)
 - E2E の IME は、CDP の `Input.imeSetComposition` で実際の composition イベントを起こして確かめた。preedit は木に入らず、確定した `卵` だけが値になる
 - LLM の template の代わりに「カード」template を適用すると、件数が変わっても (3 件 → 5 件) 同じキャッシュに当たる。pin すると再読み込み後も残る
 - 操作を落とす template は、既定レンダラに戻り、理由がパネルに出る

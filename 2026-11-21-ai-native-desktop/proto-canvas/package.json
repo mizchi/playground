@@ -10,7 +10,8 @@
     "e2e": "node e2e/smoke.cjs",
     "veriss-diff": "node e2e/veriss-diff.cjs",
     "veriss-repro": "node e2e/veriss-repro.mjs",
-    "e2e:dnd": "node e2e/dnd.cjs"
+    "e2e:dnd": "node e2e/dnd.cjs",
+    "sway-bridge": "node e2e/sway-bridge.ts"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

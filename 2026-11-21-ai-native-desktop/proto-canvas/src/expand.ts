@@ -55,13 +55,18 @@ export function expandTree(tree: SemanticTree, source: TemplateSource): { view: 
       }
       case 'text': {
         let str: string;
+        // 固定の文字列 (template の文字列と format の地の文) はアプリが言っていない文。誤誘導に使わせない
+        const literal = typeof t.text === 'string' ? t.text : (t.text.format ?? '{}').replace('{}', '');
+        const untrusted = literal.trim() !== '';
+        if (untrusted && hasSensitive(ctx)) throw new TemplateError('固定の文字列は sensitive な操作を含む部分では使えない');
         if (typeof t.text === 'string') str = t.text;
         else {
           const raw =
             t.text.bind === 'label' ? (ctx.label ?? '') : t.text.bind === 'value' ? (ctx.value ?? '') : String(ctx.children?.length ?? 0);
           str = t.text.format ? t.text.format.replace('{}', raw) : raw;
         }
-        return [{ kind: 'text', str, size: t.size ?? 14, weight: t.weight ?? 400, color: t.color ?? 'text' }];
+        // 固定の文字を含む文は強調できない (muted、太字なし)
+        return [{ kind: 'text', str, size: t.size ?? 14, weight: untrusted ? Math.min(t.weight ?? 400, 400) : (t.weight ?? 400), color: untrusted ? 'muted' : (t.color ?? 'text') }];
       }
       case 'widget':
         if (!WIDGET_ROLES[t.kind].includes(ctx.role)) throw new TemplateError(`widget ${t.kind} は role ${ctx.role} に結びつけられない`);
@@ -75,6 +80,8 @@ export function expandTree(tree: SemanticTree, source: TemplateSource): { view: 
         return expandNode(ctx);
     }
   };
+
+  const hasSensitive = (n: SemanticNode): boolean => !!n.sensitive || tree.children(n).some(hasSensitive);
 
   /** 部分木の操作できるノードが、ちょうど 1 回ずつ widget になっていること */
   const checkCoverage = (node: SemanticNode, out: ViewNode[]) => {

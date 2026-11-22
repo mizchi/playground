@@ -51,10 +51,19 @@ export interface Proposal {
   id: string;
   intent: string;
   steps: Step[];
-  status: 'pending' | 'approved' | 'rejected' | 'done';
+  /** stale: 提案のあとに前提が変わったので実行しなかった */
+  status: 'pending' | 'approved' | 'rejected' | 'done' | 'stale';
   /** sensitive なノードに触れる (自動承認しない) */
   sensitive: boolean;
+  /** 提案した時点の前提。承認するときに 1 つでも変わっていたら実行しない */
+  preconditions: { app: AppId; target: NodeId; state: NodeState }[];
+  /** レイアウトの手順を含むとき、提案した時点の配置 */
+  layoutBefore?: string;
 }
+
+/** 前提として比べるノードの状態 (操作の意味を左右するもの) */
+type NodeState = Pick<SemanticNode, 'role' | 'label' | 'value' | 'checked' | 'disabled'>;
+const nodeState = (n: SemanticNode): NodeState => ({ role: n.role, label: n.label, value: n.value, checked: n.checked, disabled: n.disabled });
 
 export interface AuditEntry {
   at: number;
@@ -584,7 +593,9 @@ export class Shell {
     });
     if (steps.length === 0) errors.push('steps が空');
     if (errors.length) return { ok: false, errors };
-    const p: Proposal = { id: `p${this.seq++}`, intent, steps: structuredClone(steps), status: 'pending', sensitive };
+    const preconditions = steps.filter((s): s is ActionStep => !isLayoutStep(s)).map((s) => ({ app: s.app, target: s.target, state: nodeState(this.tree(s.app).get(s.target)!) }));
+    const layoutBefore = steps.some(isLayoutStep) ? JSON.stringify(this.state()) : undefined;
+    const p: Proposal = { id: `p${this.seq++}`, intent, steps: structuredClone(steps), status: 'pending', sensitive, preconditions, layoutBefore };
     this.proposals.push(p);
     if (this.policy.autoApproveSafe && !sensitive) this.approve(p.id);
     else this.onChange();
@@ -594,6 +605,14 @@ export class Shell {
   approve(id: string): void {
     const p = this.proposals.find((x) => x.id === id);
     if (!p || p.status !== 'pending') return;
+    // 提案と承認の間に人 (や別のアプリの更新) が状況を変えていたら、提案の意図と結果がずれる。実行せずに古い提案にする
+    const stale = this.staleReason(p);
+    if (stale) {
+      p.status = 'stale';
+      this.audit.push({ at: Date.now(), by: 'agent', app: '*', target: p.id, action: 'layout', result: 'denied', reason: `提案のあとに変わった: ${stale}`, proposal: p.id });
+      this.onChange();
+      return;
+    }
     p.status = 'approved';
     for (const s of p.steps) {
       if (isLayoutStep(s)) this.applyLayout(s.op, 'agent', p.id);
@@ -601,6 +620,18 @@ export class Shell {
     }
     p.status = 'done';
     this.onChange();
+  }
+
+  private staleReason(p: Proposal): string {
+    for (const c of p.preconditions) {
+      const n = this.wins.find((w) => w.app.id === c.app)?.tree.get(c.target);
+      if (!n) return `${c.app}/${c.target} がなくなった`;
+      const now = nodeState(n);
+      for (const k of Object.keys(c.state) as (keyof NodeState)[])
+        if (JSON.stringify(now[k]) !== JSON.stringify(c.state[k])) return `${c.app}/${c.target} の ${k} が ${JSON.stringify(c.state[k])} → ${JSON.stringify(now[k])}`;
+    }
+    if (p.layoutBefore !== undefined && p.layoutBefore !== JSON.stringify(this.state())) return '窓の配置';
+    return '';
   }
 
   reject(id: string): void {

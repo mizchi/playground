@@ -37,6 +37,8 @@ export const WIDGET_ROLES: Record<WidgetKind, Role[]> = {
 
 export const COLOR_TOKENS: ColorToken[] = ['bg', 'surface', 'text', 'muted', 'accent', 'accentText', 'border', 'danger', 'ghost'];
 
+export const NEUTRAL_BACKGROUNDS: ColorToken[] = ['bg', 'surface', 'border'];
+
 const LIMITS = { gap: [0, 48], padding: [0, 48], radius: [0, 24], grow: [0, 4], size: [11, 28], weight: [300, 800] } as const;
 const MAX_TEMPLATE_NODES = 64;
 
@@ -75,6 +77,9 @@ export function validateTemplate(t: unknown): string[] {
         num(o.grow, 'grow', path);
         color(o.background, `${path}.background`);
         color(o.border, `${path}.border`);
+        // 生成 UI は面を強調できない: 危険色・強調色の背景で操作の印象を変えさせない
+        if (o.background !== undefined && !NEUTRAL_BACKGROUNDS.includes(o.background as ColorToken))
+          errors.push(`${path}.background: 背景は ${NEUTRAL_BACKGROUNDS.join(' | ')} のみ (生成 UI は面を強調できない)`);
         if (!Array.isArray(o.children)) errors.push(`${path}.children: 配列が必要`);
         else o.children.forEach((c, i) => visit(c, `${path}.children[${i}]`, inEach));
         break;

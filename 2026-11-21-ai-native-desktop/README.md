@@ -7,6 +7,7 @@ AI と人間が同じ GUI 環境を安全に共同操作するための「AI ネ
 - **プロトコル**: a11y ツリーを正とするパイプラインとワイヤ形式は [`PROTOCOL.md`](./PROTOCOL.md)。こちらが最新で、WIT はこれが固まってから追従させる
 - **安全なレイアウト**: mizchi/veriss で、生成された view をタイルの幅の範囲全体で検証する設計は [`VERISS.md`](./VERISS.md)
 - **翻訳** (未実装の設計メモ): [`TRANSLATION.md`](./TRANSLATION.md)
+- **検証の計画と結果**: [`VALIDATION.md`](./VALIDATION.md)
 - **方針**: GUI 層は抽象化し、ブラウザ Canvas と macOS 単体アプリで先に検証。Linux 実機コンポジタは最後
 
 ---
