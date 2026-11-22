@@ -63,7 +63,9 @@ for (const n of [3, 10, 30, 100]) {
   const min = layout(view, 0, measure).minWidth;
   const low = lower(view, measure, { pxIntrinsic: true });
   const a = performance.now();
-  const r = analyzeHTML(low.html, { name: 'todo', css: low.css, boxes: low.boxes, integrity: true, accessibility: true, viewport: { min, max: 900, height: { min: 300, max: 4000 } } });
+  // accessibility は実行時には受け付けるが、LayoutOptions の型に無い (mizchi/veriss#8)。変数に入れて渡す
+  const opts = { name: 'todo', css: low.css, boxes: low.boxes, integrity: true, accessibility: true, viewport: { min, max: 900, height: { min: 300, max: 4000 } } };
+  const r = analyzeHTML(low.html, opts);
   const b = performance.now();
   const p = await verifyLayoutReport(r);
   const c = performance.now();

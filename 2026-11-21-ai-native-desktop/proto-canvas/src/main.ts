@@ -8,6 +8,7 @@ import type { ViewTemplate } from './catalog.ts';
 import type { Measure } from './protocol.ts';
 import { layout } from './layout.ts';
 import { LOWER_FONT, lower } from './lower.ts';
+import { connectMcp } from './mcp-link.ts';
 import { Shell, isLayoutStep } from './shell.ts';
 import type { Step } from './shell.ts';
 
@@ -96,6 +97,10 @@ const lowerFor = (app: string, pxIntrinsic = false) => {
   return { ...lower(view, lowerMeasure, { pxIntrinsic }), minWidth: layout(view, 1000, lowerMeasure).minWidth };
 };
 Object.assign(window, { shell, agent, lowerFor });
+
+// ?mcp=ws://127.0.0.1:8130 で、AI 向けの MCP サーバ (mcp/server.ts) とつなぐ
+const mcpUrl = params.get('mcp');
+if (mcpUrl) connectMcp(mcpUrl, shell, (s) => Object.assign(window, { mcpStatus: s }));
 
 // ---- panel ----
 const SAMPLE_PROPOSAL = {

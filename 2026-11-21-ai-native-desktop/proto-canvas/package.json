@@ -15,14 +15,20 @@
     "font-diff": "node e2e/font-diff.ts",
     "perf": "node e2e/perf.ts",
     "e2e:a11y": "node e2e/a11y.cjs",
-    "atspi-bridge": "legacy/run-env.sh node e2e/atspi-bridge.ts"
+    "atspi-bridge": "legacy/run-env.sh node e2e/atspi-bridge.ts",
+    "mcp": "node mcp/server.ts",
+    "e2e:mcp": "node e2e/mcp.ts"
   },
   "devDependencies": {
     "@mizchi/veriss": "github:mizchi/veriss#ee4cb5a559856f475e379335e3200b353c465242&path:packages/veriss",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.2",
     "axe-core": "^4.14.1",
     "esbuild": "^0.28.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "ws": "^8.23.0",
+    "zod": "^3.25.76"
   },
   "engines": {
     "node": ">=24"

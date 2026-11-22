@@ -12,5 +12,6 @@
     "types": ["node"],
     "skipLibCheck": true
   },
-  "include": ["src", "test"]
+  "include": ["src", "test", "mcp", "e2e/*.ts"],
+  "exclude": ["e2e/font-diff.ts", "e2e/mcp.ts"]
 }

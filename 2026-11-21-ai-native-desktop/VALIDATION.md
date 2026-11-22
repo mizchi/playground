@@ -16,9 +16,10 @@
 | 4a | Odin + SDL3 の backend で、同じ描画命令を描けるか | 要判断 (Odin のビルドに許可が要る) |
 | 4b | アプリを WIT の wasm コンポーネントにしたときの隔離と、境界のコスト | 未 |
 | 4c | 実際のフォントで、証明・shell の計測・描画が同じ幅になるか | 済 |
-| 5b | 既存アプリのツリー (macOS の AX API / Linux の AT-SPI) の取り込み | 未 |
+| 5b | 既存アプリのツリーの取り込み (Linux の AT-SPI) | 済 (mac の AX API は [human_checks.md](./human_checks.md) の H7) |
 | 6a | 性能 (1000 件のリスト、窓 10 枚) | 済 (スクロールが無い穴を塞いだ) |
-| 6b | 実際のスクリーンリーダー | 未 |
+| 6b | スクリーンリーダー向けの ARIA のミラー DOM | 済 (自動検証まで。実際の VoiceOver は human_checks.md の H4) |
+| 7 | AI 向けの口 (MCP サーバ) | 済 |
 
 ## 1a. 提案から承認までの間に状況が変わる問題
 
@@ -151,6 +152,72 @@ accessibility の検査と縦方向の検査を併用すると、行の数に対
 - accessibility の検査なしでは、ほぼ線形
 - 手書きの単純な HTML では再現せず、試作が lowering した入力で再現した。再現データを付けて Issue にした
 - 当面は、リストの検証を件数の小さい代表で行う。または、accessibility の検査を縦方向の検査と分けて行う
+
+## 5b. 既存の Linux アプリ (AT-SPI) の取り込み
+
+GTK3 アプリを AT-SPI で読み、意味ツリー (ARIA の語彙) に写して試作の shell に入れた。
+
+- 構成
+  - `proto-canvas/legacy/atspi_bridge.py`: pyatspi でツリーを書き出し、操作を実行する
+  - `proto-canvas/src/legacy/atspi.ts`: 書き出したツリーを意味ツリーに写す
+  - `proto-canvas/src/legacy/atspi-app.ts`: 写したツリーを、試作の `App` として shell に入れる
+- 環境: 画面なしの sway の上で、D-Bus のセッションと AT-SPI のバスを立てて動かした (`legacy/run-env.sh`)
+
+### 確かめたこと (`e2e/atspi-bridge.ts`、すべて通った)
+
+- 自分で書いた GTK3 アプリのツリーが、窓・見出し・チェックボックス・入力欄・ボタン・スイッチとして入る。試作の描画で、意味ツリーから描き直せる
+- 人の click が、GTK のチェックボックスを実際に切り替える
+- agent の直接操作は拒否される。提案 (入力して追加) は、承認すると GTK で実行される
+- 提案のあとに人が同じスイッチを操作すると、承認しても実行しない (stale)
+- `gtk3-widget-factory` (GTK 付属の部品の見本) のスライダーを、人の操作 (increment) で実際に動かせる
+- `gtk3-widget-factory` の表示中の 146 節点は、すべて写せる。意味ツリーは 119 節点で、操作できるのは 67 個。展開の検査 (操作の抜けがないこと) も通る
+
+### 分かったこと
+
+- **試作の語彙が足りなかった**: 最初は 55% の節点を写せなかった。原因は AT-SPI ではなく、試作の語彙である。radio、combobox、slider、spinbutton、progressbar、tablist / tab、table / row / cell / columnheader、separator、img と、AccessKit の increment / decrement を足して 0% になった。
+- **展開の検査が穴を 2 つ見つけた**: 実在のアプリで、既定の表示が操作を落としていた。
+  1. コンボボックスの中の入力欄: 部品が子を持つ場合は「部品 + 子」の形で描くようにした
+  2. クリックできる画像: 役割を問わず操作できるノードは、控えめなボタン型の部品 (`action`) で描くようにした。この部品は既定レンダラ専用で、LLM の template では使えない
+- **AT-SPI の節点には安定した id が無い**: 子の番号の道 (`0.0.1.2`) を id にしている。項目の追加や削除で道が変わると、別の節点を指してしまうおそれがある。
+  - stale の検査が、role と label の食い違いとして捕まえる
+  - 本格的に使うなら、role と name による照合を足す必要がある
+- **GTK の表は行の節点を持たない**: 列見出しとセルが平らに並ぶ。列見出しの数ごとにセルを行にまとめて写した。
+
+## 6b. スクリーンリーダー向けの ARIA のミラー DOM
+
+`<canvas>` はスクリーンリーダーから見えない。そこで、意味ツリーから ARIA の role・名前・状態を持つ見えない DOM を作り、各要素を Canvas 上の widget の位置に重ねた (`proto-canvas/src/backend/aria.ts`)。
+
+- スクリーンリーダーの操作 (click) は、人の意味的な操作として shell に戻る
+- AI の提案と、拒否された操作は、`aria-live` で読み上げる
+- 自動検証 (`e2e/a11y.cjs`、すべて通った)
+  - Playwright のアクセシビリティツリー (`ariaSnapshot`) で、役割・名前・状態が出ること
+  - ミラーの要素が widget の位置に重なること
+  - 支援技術からの click が状態を変えること
+  - 入力欄を選ぶと IME の受け口にフォーカスが移ること
+  - 提案が読み上げられること
+  - ドックのボタンで、最小化した窓が戻ること
+  - axe-core の規則に違反しないこと
+- 実際の VoiceOver での確認は、human_checks.md の H4
+
+## 7. AI 向けの口 (MCP サーバ)
+
+`proto-canvas/mcp/server.ts` は MCP サーバ (stdio) で、ブラウザで動く shell と localhost の WebSocket でつながる。
+
+- tool は `list_apps` / `get_tree` / `get_layout` / `propose` / `wait_proposal` の 5 つ
+- 承認の tool はあえて作らない。AI は自分の提案を承認できず、承認は人が画面で行う
+- `wait_proposal` は、done / rejected / stale / pending (時間切れ) を返す
+
+通しの確認 (`e2e/mcp.ts`、すべて通った): 公式 SDK の MCP クライアントからサーバを起動し、次を確かめた。
+
+- 画面がつながる前は、理由付きのエラーを返す
+- tool の一覧に、承認の tool が無い
+- 読み取りの tool で、画面の状態が読める
+- 提案 → 人が画面で承認 (Playwright が代行) → done になり、状態が変わる
+- 人が却下すると rejected になる
+- 公開されていない action や focus の提案は、理由付きで拒否される
+- レイアウトの提案も、同じ流れで実行される
+
+実際の LLM をつなぐには、MCP に対応したクライアント (Claude Code など) にこのサーバを登録すればよい。費用がかかるので、今回はつないでいない。
 
 ## 2. 実際の LLM での比較 (見送り)
 

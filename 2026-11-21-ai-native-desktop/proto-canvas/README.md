@@ -77,8 +77,18 @@ pnpm veriss-repro        # veriss に報告した Unknown の最小再現
 pnpm sway-bridge         # LayoutOp を実際の sway に写して比べる (下記)
 pnpm font-diff           # 実際のフォント (IPAex ゴシック) で、veriss の計測・Chromium・layout.ts の幅を比べる
 pnpm perf                # shell の 1 フレームと veriss の検証時間
+pnpm build && pnpm e2e:mcp   # MCP サーバの通し確認 (MCP クライアント → サーバ → ブラウザの shell)
+pnpm atspi-bridge        # 既存の GTK アプリを AT-SPI で取り込む (sway / at-spi2-core / python3-pyatspi / gtk-3-examples が必要)
 pnpm build && node e2e/perf-browser.cjs   # Chromium での 1 フレーム
 ```
+
+### AI (MCP クライアント) からつなぐ
+
+```sh
+pnpm dev    # http://127.0.0.1:8123/?mcp=ws://127.0.0.1:8130 を開く
+```
+
+MCP クライアントには、`node mcp/server.ts` を stdio のサーバとして登録する。tool は `list_apps` / `get_tree` / `get_layout` / `propose` / `wait_proposal` の 5 つ。承認の tool は無いので、提案は画面のパネルで人が承認する。
 
 ### sway への写像を試す
 
