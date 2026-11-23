@@ -4,7 +4,7 @@
 //   node native/host.ts                          # 窓を開く
 //   node native/host.ts --headless 1280x800      # 窓なし (オフスクリーン)。--control で標準入力から操作・画面の書き出し
 //   オプション: --kv <file> (保存先) / --font <ttf> / --theme light|dark / --pty (ホストの bash) / --mcp ws://127.0.0.1:8130 / --renderer <path>
-//             --package <app.json> (パッケージを入れる。次の起動でも読む)
+//             --package <app.json> (パッケージを入れる。次の起動でも読む) / --a11y (AT-SPI にツリーを出す。Linux のスクリーンリーダー)
 //
 // 役割の分け方
 // - Node: プラットフォーム (アプリ・能力・保存・セッション)、shell (意味ツリー → 描画命令)、文字の計測 (mizchi/font)、人だけが答えるパネル
@@ -278,6 +278,68 @@ function render() {
   }
 }
 
+// ---- スクリーンリーダー (Linux の AT-SPI)。ブラウザの ARIA のミラーの代わり ----
+// native/atspi/server.py (system の Python 3.12 + Gio) に意味ツリーとパネルを渡し、スクリーンリーダーからの操作を人の操作として受ける
+let a11y: ReturnType<typeof spawn> | null = null;
+let a11ySent = '';
+const announced = { proposals: 0, prompts: 0, notes: 0 };
+if (flag('--a11y')) {
+  a11y = spawn(process.env.ATSPI_PYTHON ?? '/usr/bin/python3.12', [here('./atspi/server.py')], { stdio: ['pipe', 'pipe', 'inherit'] });
+  a11y.stdin!.on('error', () => {});
+  a11y.on('exit', (code) => {
+    log(`AT-SPI のサーバが終わった (${code})`);
+    a11y = null;
+  });
+  createInterface({ input: a11y.stdout! }).on('line', (line) => {
+    let m: { t: string; app?: string; node?: string; action?: string; data?: string; message?: string; bus?: string };
+    try {
+      m = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (m.t === 'ready') {
+      log(`AT-SPI: ${m.bus}`);
+      a11ySent = '';
+      reply({ t: 'a11y-ready', bus: m.bus });
+      schedule();
+    } else if (m.t === 'error') log('AT-SPI:', m.message);
+    else if (m.t === 'panel' && m.action) press(m.action);
+    else if (m.t === 'action' && m.app && m.node) {
+      // スクリーンリーダーの操作は、人の意味的な操作 (ブラウザの ARIA のミラーと同じ)
+      if (m.action === 'click') shell.activate(m.app, m.node);
+      else if (m.action === 'focus') shell.dispatch({ app: m.app, target: m.node, action: 'focus', by: 'human' });
+      else if (m.action === 'setValue') shell.dispatch({ app: m.app, target: m.node, action: 'setValue', data: m.data ?? '', by: 'human' });
+      schedule();
+    }
+  });
+}
+function syncA11y() {
+  if (!a11y?.stdin?.writable) return;
+  const a = shell.accessibility();
+  const msg = JSON.stringify({
+    t: 'tree',
+    windows: a.windows.map((w) => ({ ...w, focus: shell.tree(w.app).focus })),
+    rects: Object.fromEntries(a.rects),
+    panel: presented.map((b) => ({ action: b.action, label: b.label, rect: b.rect })),
+  });
+  if (msg !== a11ySent) {
+    a11ySent = msg;
+    a11y.stdin.write(`${msg}\n`);
+  }
+  // 提案・許可の要求・通知を読み上げる (ブラウザの aria-live と同じもの)
+  const say = (text: string) => a11y!.stdin!.write(`${JSON.stringify({ t: 'announce', text })}\n`);
+  const sv = platform.services;
+  for (const p of platform.shell.proposals.slice(announced.proposals)) say(`AI の提案 ${p.id}: ${p.intent}。${p.sensitive ? '承認が必要です。' : ''}`);
+  announced.proposals = platform.shell.proposals.length;
+  for (const p of sv.prompts.slice(announced.prompts)) say(`${p.appTitle} が ${capLabel(p.capability)} の許可を求めています`);
+  announced.prompts = sv.prompts.length;
+  const last = sv.notifications.at(-1);
+  if (last && last.id > announced.notes) {
+    say(`通知 ${last.title}: ${last.body ?? ''}`);
+    announced.notes = last.id;
+  }
+}
+
 // ---- 入力 ----
 let pointerInPanel = false;
 let pendingDouble: { x: number; y: number } | null = null;
@@ -383,6 +445,7 @@ createInterface({ input: renderer.stdout! }).on('line', (line) => {
         presented = sentButtons;
       }
       sentButtons = null;
+      if (!dirty) syncA11y();
       if (!e.skipped) {
         lastInstances = e.n;
         lastMs = e.ms;
@@ -482,3 +545,4 @@ if (control)
   });
 
 process.on('SIGINT', () => send(MSG.quit));
+process.on('exit', () => a11y?.kill());

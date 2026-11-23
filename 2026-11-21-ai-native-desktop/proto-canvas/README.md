@@ -120,9 +120,11 @@ pnpm pty                 # ホストの擬似端末の橋。表示された URL 
 pnpm fonts                                      # Linux。mac は ipaexg.ttf を www/fonts/ に置く (または --font)
 SDL3_LIB=/path/to/sdl3/lib pnpm build:native   # native/bin/renderer (ODIN= で odin の場所を変える)
 pnpm native                                    # 窓を開く。-- --pty でホストの bash、-- --mcp ws://127.0.0.1:8130 で AI とつなぐ
+                                               # -- --package www/packages/todo-rs/app.json でパッケージ、-- --a11y で AT-SPI
 pnpm native -- --headless 1280x800 --control   # 窓なし。標準入力の JSON Lines で操作し、{"t":"capture","path":"x.png"} で書き出す
 pnpm e2e:native          # 窓なしの通し確認 (Vulkan が要る。この環境は lavapipe)
 pnpm e2e:native-window   # Xvfb の X11 の窓で、xdotool のマウス・キーボードを入れる
+pnpm e2e:native-a11y     # AT-SPI (Linux のスクリーンリーダーの口) に意味ツリーを出し、pyatspi から読んで操作する
 ```
 
 ### AI (MCP クライアント) からつなぐ
@@ -153,7 +155,7 @@ Node 24 以上が必要 (`.node-version`)。veriss がそれを要求する。�
 
 ## 結果
 
-- 単体テスト 143 件 (うち veriss の検証 12 件、sway への写像 4 件)、E2E 12 件、レイアウト操作の E2E 14 件、Terminal の E2E 14 件、Calendar の E2E 6 件、テーマの E2E 6 件、パッケージの E2E 9 件、ワークスペースの E2E 4 件、通知の E2E 5 件、ネイティブのホストの E2E 12 件 (窓なし) と 7 件 (X11 の窓) が通る (Node 24、Playwright の Chromium)
+- 単体テスト 143 件 (うち veriss の検証 12 件、sway への写像 4 件)、E2E 12 件、レイアウト操作の E2E 14 件、Terminal の E2E 14 件、Calendar の E2E 6 件、テーマの E2E 6 件、パッケージの E2E 9 件、ワークスペースの E2E 4 件、通知の E2E 5 件、ネイティブのホストの E2E 13 件 (窓なし)、7 件 (X11 の窓)、4 件 (AT-SPI) が通る (Node 24、Playwright の Chromium)
 - E2E の IME は、CDP の `Input.imeSetComposition` で実際の composition イベントを起こして確かめた。preedit は木に入らず、確定した `卵` だけが値になる
 - LLM の template の代わりに「カード」template を適用すると、件数が変わっても (3 件 → 5 件) 同じキャッシュに当たる。pin すると再読み込み後も残る
 - 操作を落とす template は、既定レンダラに戻り、理由がパネルに出る

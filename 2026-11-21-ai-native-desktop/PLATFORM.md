@@ -245,7 +245,10 @@ agent ──直接操作──▶ agent のワークスペース (Shell)       �
 - **擬似端末**: ブラウザでは WebSocket の橋 (`pty/server.ts`) を通すが、ネイティブでは同じ `pty_helper.py` を直接起こす (`--pty` のときだけ。許可はパネルで答える)
 - **MCP**: `--mcp ws://...` で、ブラウザと同じ `connectMcp` を使う (Node 24 の WebSocket)。AI の提案と持ち込みは、ホストのパネルで人が承認する
 - 窓なし (`--headless 1280x800`) では描画プロセスがオフスクリーンに描き、`--control` の標準入力から入力を入れて PNG に書き出せる (テスト・CI 用)
-- まだ無いもの: パッケージ (WIT のコンポーネント) の読み込み (ブラウザの Worker の代わりに worker_threads が要る)、スクリーンリーダー (ブラウザの ARIA のミラーの代わりに、AT-SPI / NSAccessibility へ写す必要がある)、文字の太さ (フォントは 1 つ)
+- **パッケージ**: `--package <app.json>` で入れる (次の起動でも読む)。glue の生成・import の検査・期限付きの実行はブラウザと同じ (`loadPackage` / `workerRunner`)。ブラウザの Worker の代わりに worker_threads で動かす。Worker の中身はブラウザと共通 (`component-worker-core.ts`)
+- **スクリーンリーダー (Linux)**: `--a11y` で、意味ツリーとパネルを AT-SPI (D-Bus) に出す (`native/atspi/server.py`。system の Python 3.12 + Gio)。ブラウザの ARIA のミラーと同じ役で、スクリーンリーダーの click・文字の入力・フォーカスは、人の操作として shell に渡す。フォーカスの移動は `focused` のイベント、AI の提案・許可の要求・通知は `announcement` のイベントで知らせる
+  - 信頼の境界: AT-SPI のバスには、同じユーザのプロセスなら誰でもつなげる (X11 の入力の注入や、保存のファイルを書き換えるのと同じ)。「人だけが答える」は、MCP やエージェントの口しか持たない agent に対しての約束で、手元でコードを動かせる agent はこの境界の外にいる
+- まだ無いもの: mac のスクリーンリーダー (NSAccessibility)、文字の太さ (フォントは 1 つ)
 
 ![ネイティブのホスト (Xvfb の X11 の窓)](proto-canvas/docs/native-window.png)
 
@@ -257,4 +260,4 @@ agent ──直接操作──▶ agent のワークスペース (Shell)       �
 3. ~~**ワークスペース**~~ (済: agent のワークスペースと重ねた層、人が承認する持ち込み。持ち込みはキー単位で、一部だけ選ぶことはまだできない)
 4. ~~**通知を Canvas の上に**~~ (済: shell の最上の層。許可の要求はホストの UI のまま)
 5. ~~**ネイティブのホスト**~~ (済: Node のホスト + Odin の描画プロセス (SDL3 + wgpu-native)。KeyValue はファイル、擬似端末は直接)
-6. **ネイティブでのパッケージとスクリーンリーダー**: WIT のコンポーネントを worker_threads で動かす。意味ツリーを AT-SPI (Linux) / NSAccessibility (mac) に写す
+6. ~~**ネイティブでのパッケージとスクリーンリーダー**~~ (済: worker_threads でコンポーネント、AT-SPI (Linux) に意味ツリー。mac の NSAccessibility はまだ)

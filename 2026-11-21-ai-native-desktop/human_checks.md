@@ -182,7 +182,8 @@ Odin のビルドの許可を得て、wasm 版の backend をブラウザで確�
 3. `cd proto-canvas && pnpm install && SDL3_LIB=<SDL3 の lib> pnpm build:native` で描画プロセスを作り、`pnpm native` で開く
 4. 日本語の IME (mac の日本語入力、Linux の fcitx5 / ibus) で Todo に入力する。候補の窓がキャレットの近くに出るか
 5. Retina / HiDPI で文字の鮮明さを見る。窓の × で閉じると、両方のプロセスが終わるか
-6. `node mcp/server.ts` を MCP クライアントに登録し、`pnpm native -- --mcp ws://127.0.0.1:8130` で AI からの提案をパネルで承認する
+6. (Linux) `pnpm native -- --a11y` で開き、Orca で窓・ボタン・入力欄が読み上げられるか、AI の提案が読み上げられるか、パネルの承認を Orca から押せるかを見る
+7. `node mcp/server.ts` を MCP クライアントに登録し、`pnpm native -- --mcp ws://127.0.0.1:8130` で AI からの提案をパネルで承認する
 
 **記録**: 表示の不具合、IME の候補の位置、閉じたときの振る舞い、体感の速さ。
 

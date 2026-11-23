@@ -21,7 +21,7 @@
 | 6a | 性能 (1000 件のリスト、窓 10 枚) | 済 (スクロールが無い穴を塞いだ) |
 | 6b | スクリーンリーダー向けの ARIA のミラー DOM | 済 (自動検証まで。実際の VoiceOver は human_checks.md の H4) |
 | 7 | AI 向けの口 (MCP サーバ) | 済 |
-| 8i | ネイティブのホスト (Node + Odin の描画プロセス、SDL3 + wgpu-native) | 済 (Linux の X11 まで。mac と実際の IME は [human_checks.md](./human_checks.md) の H14) |
+| 8i | ネイティブのホスト (Node + Odin の描画プロセス、SDL3 + wgpu-native)。パッケージ (worker_threads) と AT-SPI | 済 (Linux の X11 まで。mac・実際の IME・Orca は [human_checks.md](./human_checks.md) の H14) |
 
 ## 1a. 提案から承認までの間に状況が変わる問題
 
@@ -431,8 +431,12 @@ GTK3 アプリを AT-SPI で読み、意味ツリー (ARIA の語彙) に写し�
 - 守り: 読めない `--control` の行には error を返して動き続ける。同じ保存先を 2 つ目のホストでは開かない (lock)。720x400 より狭い窓なしの大きさは断る
 - 単体テスト: キーの対応 (ブラウザと共通)、命令の形、ファイルの KeyValue (壊れたファイルは空から、lock、rename が失敗した値はもう一度書ける)、パネルのボタン・全部の手順・スクロール・折り返し
 
+- パッケージ: Rust の Todo (WIT のコンポーネント) を worker_threads で動かし、チェックの保存が JSON ファイルに残る。応答しないコンポーネント (spin-rs) を押してもホストはすぐ答え、2 秒の期限で止めて「応答しない」と出し、再起動できる。`--package` なしの次の起動でもパッケージを読み、窓を復元する
+- スクリーンリーダー (`e2e/native-a11y.ts`。D-Bus のセッションと AT-SPI のバスを立て、pyatspi から読む): アプリ「AI-native desktop」の下に、窓ごとの frame とパネルの frame が出る。チェックボックス・入力欄・スイッチの役割、checkable / checked / editable の状態、click の action が読める。AT-SPI の click でチェックが付き、EditableText で入力欄に文字が入る。フォーカスが動くと `focused` のイベントが届く。AI の提案は `announcement` で読み上げられ、パネルの「承認」を AT-SPI から押すと実行される
+
 ### 見つけたこと
 
+- **libatspi は、アプリを見つけるとまず `/org/a11y/atspi/cache` の `GetItems` を呼ぶ**。無いと警告を出す (読むのは続く)。空の一覧を返すようにした
 - **SDL3 の X11 の窓の × は、窓のマネージャが送る** (WM_DELETE_WINDOW)。窓のマネージャの無い Xvfb では送られず、`xdotool windowclose` は窓を壊すだけ (描画プロセスは BadWindow で落ちる)。閉じる操作は実機で確かめる ([human_checks.md](./human_checks.md) の H14)
 - **wgpu-native の callback** は `AllowProcessEvents` で頼み、`InstanceProcessEvents` を回して受け取る。ブラウザの `wgpu.js` は callback の mode を見ない
 - **Todo の入力欄は Enter で追加しない** (`click` を持たないので)。ネイティブの e2e で、Enter で増えたと思った項目が入力欄の文字だったことで気付いた。テストは「追加」を押すように直した
