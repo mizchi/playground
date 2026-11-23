@@ -104,8 +104,10 @@ display list (P4b) が backend の境界。`DrawOp` は `rect` / `text` / `clip`
 - 画面は意味ツリーの `log` ノード (ARIA の log) にする。文字は `value`、描画用の色付きの格子は `screen`。描画は shell の `terminal` widget が格子に 1 桁ずつ置く
 - コマンド行は `sensitive`: agent の入力は毎回、人の承認が要る。承認された入力は `whoami` で `agent` と出る (actor がアプリまで届く)
 - 既定は内蔵の小さなシェル (`help` / `echo` / `colors` / `ls` / `cat` / `write` / `copy` / `paste` / `notify` / `open` / `whoami` ...)。ファイルは storage、copy / paste はクリップボード、`open` はアプリの起動で、どれも能力の確認を通る
-- `?pty=ws://127.0.0.1:8140/?token=...` で、ホストの擬似端末の橋 (`pty/server.ts`) につなげる。橋は util-linux の `script(1)` で擬似端末を作るので、ネイティブ拡張は要らない。127.0.0.1 だけで待ち、起動ごとの token と Origin を確かめる
-- 窓の幅は可変だが、端末の大きさは固定 (72×18)。狭い窓では右の桁を切り取る。窓の大きさを端末に伝える (TIOCSWINSZ) には、P2 にサイズの通知を足す必要がある (未実装)
+- `?pty=ws://127.0.0.1:8140/?token=...` で、ホストの擬似端末の橋 (`pty/server.ts`) につなげる。橋は Python の標準ライブラリの `pty` で擬似端末を作るので、ネイティブ拡張は要らない。127.0.0.1 だけで待ち、起動ごとの token と Origin を確かめる
+- 端末の大きさは窓に合わせる。shell が P2' (`onResize(node, cols, rows)`) で格子の大きさを知らせ、アプリは libghostty-vt の端末と、ホストの擬似端末 (TIOCSWINSZ。シェルには SIGWINCH が届く) の両方を変える。擬似端末の橋は Python の標準ライブラリの `pty` を使う (`pty/pty_helper.py`。Node だけでは ioctl を呼べない)
+- agent とスクリーンリーダーに渡す文字 (`value`) は、折り返した行を 1 行につなげる (論理的な行)。描画の格子は行ごと
+- ghostty-web 0.4.0 の `isRowWrapped(y)` は、d.ts の説明 (「次の行へ折り返す」) と違い、「y 行目が前の行の続き」のとき true を返す (実測)。`vt.ts` はこの意味で使う
 
 ### 見つけた問題
 
@@ -139,7 +141,7 @@ ghostty-web 0.4.0 の wasm は、別の端末を `free()` したあとのメモ�
 
 0. **アプリどうしのデータの受け渡し**: 共有の保存領域ではなく、意図 (intent) のような口で、受け取る側が能力として宣言する (例: ターミナルの `cal` がカレンダーの予定を読む)
 1. **アプリの入れ方を増やす**: manifest を JSON にして、wasm コンポーネント (`kind: 'component'`) を URL から入れる。能力は WIT の import と 1 対 1 にする
-2. **窓の大きさの通知**: P2 に `resize` (窓の中で使える幅と高さ) を足し、ターミナルの桁数・行数を窓に合わせる
+2. ~~**窓の大きさの通知**~~ (済: P2' の格子の大きさ)
 3. **ワークスペース**: 人と agent が別のワークスペースで作業し、agent の結果を人のワークスペースに提案として持ち込む
 4. **通知を Canvas の上に**: 今はホストの UI (DOM) だけ。shell の描画にも、アプリが触れない層として出す
 5. **ネイティブのホスト**: `createPlatform` は DOM に依存しないので、Odin + wgpu のネイティブのホストから同じ組み立てを呼ぶ (KeyValue はファイル、擬似端末は直接)
