@@ -14,3 +14,4 @@ www/gpu.wasm
 www/wgpu.js
 www/ghostty-vt.wasm
 www/packages/
+www/vendor/

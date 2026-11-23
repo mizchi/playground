@@ -145,9 +145,10 @@ const loadWasi = async () => (await import('@bytecodealliance/preview2-shim')) a
 async function readPackage(url: string) {
   const { loadPackage } = await import('./platform/packages.ts');
   const { urlPackageSource } = await import('./platform/package-source.ts');
+  const { blobModule, hostPackageTools } = await import('./platform/package-tools.ts');
   const src = urlPackageSource(url);
   if (typeof src === 'string') return { ok: false as const, errors: [src] };
-  return loadPackage(src, await loadWasi());
+  return loadPackage(src, await loadWasi(), hostPackageTools(blobModule));
 }
 const packageUrls: string[] = (() => {
   try {
@@ -304,7 +305,7 @@ panel.innerHTML = `
   <div class="muted">F6 でデスクトップとこのパネルの間を移る。Alt+L でランチャー (それ自体も意味ツリーを出すアプリ)。窓はタイトルバーの × で閉じる。</div>
   <div id="openWins"></div>
   <div class="row"><label>パッケージ <input id="pkgUrl" value="packages/todo-rs/app.json" size="28" spellcheck="false" aria-label="パッケージ (app.json) の URL"></label><button id="pkgInstall">入れる</button></div>
-  <div class="muted">WIT のコンポーネントのアプリ。能力は import として渡す (宣言していない import を求めるものは入らない)。同じ origin のものだけ。</div>
+  <div class="muted">WIT のコンポーネントのアプリ (app.json + .wasm)。glue はホストが .wasm から作り、パッケージの JS は動かさない。能力は import として渡す (宣言していない import を持つものは入らない)。</div>
   <div id="pkgErr" class="err" role="alert"></div>
 
   <h2>レイアウト</h2>

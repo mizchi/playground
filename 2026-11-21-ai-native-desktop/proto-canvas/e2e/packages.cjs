@@ -14,6 +14,13 @@ const server = http.createServer((req, res) => {
   if (!file.startsWith(root) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) return res.writeHead(404).end();
   res.writeHead(200, { 'content-type': types[path.extname(file)] ?? 'application/octet-stream' }).end(fs.readFileSync(file));
 });
+// 別の origin のパッケージの置き場 (CORS を許す)。パッケージの JS は動かさないので、ほかの origin からも入れられる
+const other = http.createServer((req, res) => {
+  const p = req.url.split('?')[0];
+  const file = path.join(root, p);
+  if (!file.startsWith(path.join(root, 'packages')) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) return res.writeHead(404, { 'access-control-allow-origin': '*' }).end();
+  res.writeHead(200, { 'content-type': types[path.extname(file)] ?? 'application/octet-stream', 'access-control-allow-origin': '*' }).end(fs.readFileSync(file));
+});
 let failures = 0;
 async function step(name, fn) {
   try {
@@ -27,6 +34,8 @@ async function step(name, fn) {
 
 (async () => {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  await new Promise((r) => other.listen(0, '127.0.0.1', r));
+  const otherUrl = `http://127.0.0.1:${other.address().port}/packages/todo-rs/app.json`;
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1500, height: 860 } });
   const errors = [];
@@ -41,15 +50,15 @@ async function step(name, fn) {
   };
   const tree = (id) => page.evaluate((id) => window.shell.tree(id).get(id === 'todo-rs' ? 'list' : 'root'), id);
 
-  await step('ほかの origin のパッケージは入れない', async () => {
-    await page.fill('#pkgUrl', 'https://example.com/app.json');
+  await step('http(s) でない URL は断る', async () => {
+    await page.fill('#pkgUrl', 'data:application/json,{}');
     await page.click('#pkgInstall');
     await page.waitForFunction(() => document.getElementById('pkgErr').textContent !== '読み込み中…');
-    assert.match(await page.textContent('#pkgErr'), /同じ origin/);
+    assert.match(await page.textContent('#pkgErr'), /http\(s\) の URL だけ/);
   });
 
-  await step('パネルからパッケージを入れると、ランチャーに出て、開ける', async () => {
-    await page.fill('#pkgUrl', 'packages/todo-rs/app.json');
+  await step('ほかの origin のパッケージを、パネルから入れると、ランチャーに出て、開ける (glue はホストが .wasm から作る)', async () => {
+    await page.fill('#pkgUrl', otherUrl);
     await page.click('#pkgInstall');
     await page.waitForFunction(() => document.getElementById('pkgErr').textContent === '');
     await page.waitForSelector('#installed [data-launch="todo-rs"]');
@@ -61,6 +70,14 @@ async function step(name, fn) {
     await settle();
     assert.ok(await page.evaluate(() => window.shell.windows().some((w) => w.id === 'todo-rs')));
     assert.equal(await page.evaluate(() => window.shell.tree('todo-rs').get('root').label), 'Todo (wasm)');
+  });
+
+  await step('同じ id のパッケージは、別の URL からでも二重には入らない', async () => {
+    await page.fill('#pkgUrl', 'packages/todo-rs/app.json');
+    await page.click('#pkgInstall');
+    await page.waitForFunction(() => document.getElementById('pkgErr').textContent !== '読み込み中…');
+    assert.match(await page.textContent('#pkgErr'), /すでに入っている/);
+    await page.keyboard.press('F6');
   });
 
   await step('コンポーネントのアプリで項目を足すと、能力 storage (import) で保存される', async () => {
@@ -92,6 +109,7 @@ async function step(name, fn) {
   await step('ページエラーなし', async () => assert.deepEqual(errors, []));
   await browser.close();
   server.close();
+  other.close();
   console.log(failures ? `${failures} failed` : 'all passed');
   process.exit(failures ? 1 : 0);
 })();

@@ -69,20 +69,22 @@ WIT にするときは、能力ごとに interface を分け、manifest の宣�
 
 ## アプリのパッケージ (WIT のコンポーネント)
 
-あとから入れるアプリは、`app.json` と WIT のコンポーネント (jco で ES module にしたもの) の組 (`proto-canvas/packages/todo-rs/`)。
+あとから入れるアプリは、`app.json` と WIT のコンポーネント (`.wasm`) の組 (`proto-canvas/packages/todo-rs/`)。**パッケージは JS を持たない**。
 
 ```json
 { "id": "todo-rs", "title": "Todo (Rust)", "kind": "component", "capabilities": ["storage"],
-  "multiInstance": false, "entry": "todo.js", "core": ["todo.core.wasm", "todo.core2.wasm", "todo.core3.wasm"] }
+  "multiInstance": false, "component": "todo.wasm" }
 ```
 
 - **能力 = import**。ホストは、宣言した能力の WIT の interface だけを import として渡す。`storage.get` は `result<option<string>, string>`: 読めないとき (人が拒否している) は err、キーが無いだけなら ok(none)。この 2 つを分けないと、読めなかったアプリが既定の値で保存済みのデータを上書きしてしまう (Rust の Todo は、読めていない窓では書かない)。`storage` を宣言したアプリにだけ `gui:app/storage` (`component/wit/app.wit` の world `gui-app-storage`) を渡し、その呼び出しは JS のアプリと同じサービス (許可・監査ログ) を通る
-- 入れる前に一度インスタンスを作り、**宣言していない import を求めるコンポーネントは入れない**。何が足りないかを言う (「gui:app/storage を import している (能力 storage を宣言していない)」)
+- **glue はホストが作る**: コンポーネントを JS から呼ぶためのコード (glue) は、ホストが jco の `generate` (それ自体が wasm で動く) で `.wasm` から生成し、Blob の URL で読み込む。パッケージの JS がページの中で動くことはない
+- **宣言していない import を持つコンポーネントは入れない**: import の一覧は glue の生成で分かる (コンポーネントの型そのもの)。何が足りないかを言う (「gui:app/storage を import している (能力 storage を宣言していない)」)
 - WASI は渡すが、ファイルは 1 つも開いていない (preopens なし)。Rust の std が WASI を持ち込んでも、ファイルには触れない
 - `app.json` の検査: パッケージの外を指すパス、知らない能力、形の崩れを断る。入っているアプリ (同梱を含む) と同じ id は入れない (なりすまし)。world `gui-app` の `app` (start / on-action) を export していないものも入れない
 - 起動時に読むパッケージの一覧が壊れていても、後から同じ id を返すようになったパッケージがあっても、起動は止めない (読み飛ばして console に残す)
 - 入れるのは人だけ (パネルの「パッケージ」)。agent と MCP には口が無い。入れた URL は保存し、次の起動ではセッションの復元の前に読み込む
-- **未解決の穴**: jco の生成物 (`todo.js`) はページの中で動く JS なので、能力の境界の外にある。ブラウザでは同じ origin のパッケージだけを入れられるようにした。本番では、ホストが `.wasm` から glue を作り、パッケージの JS は動かさない (jco の transpile をホストで動かすか、ネイティブのホストで wasmtime を使う)
+- パッケージの JS を動かさないので、**ほかの origin のパッケージも入れられる** (CORS が要る。fetch は資格情報を送らない)。http(s) 以外の URL は断る
+- 残る前提: glue の生成器 (jco) を信頼している。生成器は 5.7MB の wasm で、最初にパッケージを読むときだけ読み込む。生成した glue は `eval` ではなく ES module として読むので、CSP で `blob:` の script を許す必要がある
 
 ## アプリどうしのデータ
 
@@ -178,7 +180,7 @@ ghostty-web 0.4.0 の wasm は、別の端末を `free()` したあとのメモ�
 ## 広げていく順番
 
 0. ~~**アプリどうしのデータの受け渡し**~~ (済: provides と `data:<topic>`。書き込みや「この予定をカレンダーに追加」のような依頼は、まだ無い)
-1. ~~**アプリの入れ方を増やす**~~ (済: `app.json` + WIT のコンポーネント。能力 = import。残り: パッケージの JS を動かさずに、ホストが glue を作る)
+1. ~~**アプリの入れ方を増やす**~~ (済: `app.json` + WIT のコンポーネント。能力 = import。glue はホストが `.wasm` から作る)
 2. ~~**窓の大きさの通知**~~ (済: P2' の格子の大きさ)
 3. **ワークスペース**: 人と agent が別のワークスペースで作業し、agent の結果を人のワークスペースに提案として持ち込む
 4. **通知を Canvas の上に**: 今はホストの UI (DOM) だけ。shell の描画にも、アプリが触れない層として出す

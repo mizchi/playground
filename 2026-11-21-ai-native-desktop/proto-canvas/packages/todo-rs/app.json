@@ -5,6 +5,5 @@
   "kind": "component",
   "capabilities": ["storage"],
   "multiInstance": false,
-  "entry": "todo.js",
-  "core": ["todo.core.wasm", "todo.core2.wasm", "todo.core3.wasm"]
+  "component": "todo.wasm"
 }
