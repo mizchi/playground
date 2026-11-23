@@ -106,6 +106,34 @@ async function step(name, fn) {
     assert.equal(await page.evaluate(() => window.platform.registry.list().filter((m) => m.id === 'todo-rs').length), 1);
   });
 
+  await step('前回の起動が終わらなかったパッケージは隔離して読み込まず、デスクトップは起動する。?safe では 1 つも読み込まない', async () => {
+    const url = 'packages/todo-rs/app.json';
+    // 読み込みの途中で固まった (見張りが外れていない) 状態を作る
+    await page.evaluate((url) => {
+      localStorage.setItem('ai-native-desktop.kv.platform.packages', JSON.stringify([url]));
+      localStorage.setItem('ai-native-desktop.kv.platform.packages.loading', JSON.stringify([url]));
+    }, url);
+    await page.reload();
+    await page.waitForFunction(() => window.platform);
+    assert.match(await page.textContent('#pkgErr'), /前回の起動が終わらなかったので、パッケージ packages\/todo-rs\/app.json を隔離した/);
+    assert.ok(!(await page.evaluate(() => window.platform.registry.manifest('todo-rs'))));
+    // 隔離は残る (もう一度起動しても読み込まない)
+    await page.reload();
+    await page.waitForFunction(() => window.platform);
+    assert.ok(!(await page.evaluate(() => window.platform.registry.manifest('todo-rs'))));
+    // 人が入れ直すと隔離が解け、次の起動から読み込む
+    await page.fill('#pkgUrl', url);
+    await page.click('#pkgInstall');
+    await page.waitForFunction(() => document.getElementById('pkgErr').textContent === '');
+    await page.reload();
+    await page.waitForFunction(() => window.platform && window.platform.registry.manifest('todo-rs'));
+    // ?safe
+    await page.goto(page.url().split('?')[0] + '?safe');
+    await page.waitForFunction(() => window.platform);
+    assert.ok(!(await page.evaluate(() => window.platform.registry.manifest('todo-rs'))));
+    assert.match(await page.textContent('#pkgErr'), /安全モード/);
+  });
+
   await step('ページエラーなし', async () => assert.deepEqual(errors, []));
   await browser.close();
   server.close();

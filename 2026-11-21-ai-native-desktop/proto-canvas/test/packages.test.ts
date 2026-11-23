@@ -133,3 +133,26 @@ test('入っているアプリ (同梱のアプリを含む) と同じ id のパ
   assert.match(p.install(r.manifest), /すでに入っている/);
   assert.equal(p.registry.manifest('settings')!.kind, 'js');
 });
+
+test('応答を返し終わらないパッケージのサーバでも、期限で失敗する (本文を読む途中も含む)', async () => {
+  const http = await import('node:http');
+  const { urlPackageSource } = await import('../src/platform/package-source.ts');
+  // ヘッダは返すが、本文を終わらせないサーバ
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.write('{"id":');
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/`;
+  try {
+    const src = urlPackageSource('app.json', base, 200);
+    assert.ok(typeof src !== 'string');
+    const t = performance.now();
+    await assert.rejects(src.manifest(), /0.2 秒で読み終わらない/);
+    assert.ok(performance.now() - t < 2000);
+    await assert.rejects(src.bytes('x.wasm'), /読み終わらない/);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});

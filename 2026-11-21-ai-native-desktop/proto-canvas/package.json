@@ -28,7 +28,7 @@
     "e2e:terminal": "node e2e/terminal.cjs",
     "e2e:calendar": "node e2e/calendar.cjs",
     "e2e:theme": "node e2e/theme.cjs",
-    "build:packages": "rm -rf www/packages && mkdir -p www/packages/todo-rs www/vendor && cp packages/todo-rs/app.json www/packages/todo-rs/ && cp component/todo.wasm www/packages/todo-rs/todo.wasm && cp node_modules/@bytecodealliance/jco/node_modules/@bytecodealliance/jco-transpile/vendor/*.wasm www/vendor/ 2>/dev/null || cp $(node -e \"const p=require(\\\"path\\\");console.log(p.dirname(require.resolve(\\\"@bytecodealliance/jco-transpile/component\\\",{paths:[require.resolve(\\\"@bytecodealliance/jco\\\")]})))\")/../vendor/*.wasm www/vendor/",
+    "build:packages": "sh scripts/build-packages.sh",
     "e2e:packages": "node e2e/packages.cjs"
   },
   "devDependencies": {
