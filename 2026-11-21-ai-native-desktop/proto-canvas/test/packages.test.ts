@@ -3,30 +3,30 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
-import { pathToFileURL } from 'node:url';
 import * as shim from '@bytecodealliance/preview2-shim';
 import { builtinManifests } from '../src/apps/manifests.ts';
 import { memoryStorage } from '../src/cache.ts';
 import { loadPackage, parsePackage } from '../src/platform/packages.ts';
+import { hostPackageTools } from '../src/platform/package-tools.ts';
 import type { ComponentModule, PackageSource } from '../src/platform/packages.ts';
 import { createPlatform } from '../src/platform/platform.ts';
 import { memoryKeyValue } from '../src/platform/services.ts';
 import type { KeyValue } from '../src/platform/services.ts';
 
 const root = path.join(import.meta.dirname, '..');
-const gen = path.join(root, 'component', 'gen');
 const wasi = shim as unknown as Record<string, Record<string, unknown>>;
 const measure = (s: string, size: number) => [...s].length * size * 0.6;
 
-/** テストでは、app.json は packages/、生成物は component/gen/ から読む */
+/** テストでは、app.json は packages/、コンポーネントは component/todo.wasm から読む */
 const fsSource = (patch: (m: Record<string, unknown>) => Record<string, unknown> = (m) => m): PackageSource => ({
   manifest: async () => patch(JSON.parse(await readFile(path.join(root, 'packages', 'todo-rs', 'app.json'), 'utf8'))),
-  module: async (p) => (await import(pathToFileURL(path.join(gen, p)).href)) as ComponentModule,
-  bytes: (p) => readFile(path.join(gen, p)),
+  bytes: async (p) => new Uint8Array(await readFile(path.join(root, 'component', p))),
 });
+/** Node: 生成した glue を data: URL で読み込む */
+const tools = hostPackageTools(async (js) => (await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)) as ComponentModule);
 
 const make = async (kv: KeyValue = memoryKeyValue()) => {
-  const r = await loadPackage(fsSource(), wasi);
+  const r = await loadPackage(fsSource(), wasi, tools);
   assert.ok(r.ok, JSON.stringify(!r.ok && r.errors));
   const p = createPlatform({ apps: builtinManifests, initial: ['todo'], measure, templates: memoryStorage(), kv });
   assert.equal(p.install(r.manifest), '');
@@ -34,6 +34,15 @@ const make = async (kv: KeyValue = memoryKeyValue()) => {
   p.shell.frame(1400, 800);
   return p;
 };
+
+test('パッケージは .wasm と app.json だけ: glue はホストが .wasm から作る (パッケージの JS は動かさない)', async () => {
+  const pkgFiles = JSON.parse(await readFile(path.join(root, 'packages', 'todo-rs', 'app.json'), 'utf8'));
+  assert.equal(pkgFiles.component, 'todo.wasm');
+  assert.ok(!('entry' in pkgFiles) && !('core' in pkgFiles));
+  const g = await tools.generate(new Uint8Array(await readFile(path.join(root, 'component', 'todo.wasm'))));
+  assert.ok(g.files.some(([n]) => n === 'app.js'));
+  assert.ok(g.imports.includes('gui:app/storage'), 'import の一覧はコンポーネントから分かる');
+});
 
 test('パッケージを入れると、ランチャーから開ける WIT のコンポーネントのアプリになる', async () => {
   const p = await make();
@@ -90,27 +99,27 @@ test('項目の文字のタブ・改行・バックスラッシュは、保存�
 });
 
 test('world gui-app の app (start / on-action) を export しないコンポーネントは入れない', async () => {
-  const src = fsSource();
-  const r = await loadPackage({ ...src, module: async () => ({ instantiate: () => ({}) }) }, wasi);
+  const r = await loadPackage(fsSource(), wasi, { ...tools, loadModule: async () => ({ instantiate: () => ({}) }) });
   assert.ok(!r.ok);
   assert.deepEqual(r.errors, ['gui:app/app (start と on-action) を export していない']);
 });
 
 test('宣言していない能力の import を求めるコンポーネントは入れない (どの能力が足りないかを言う)', async () => {
-  const r = await loadPackage(fsSource((m) => ({ ...m, capabilities: [] })), wasi);
+  const r = await loadPackage(fsSource((m) => ({ ...m, capabilities: [] })), wasi, tools);
   assert.ok(!r.ok);
   assert.deepEqual(r.errors, ['gui:app/storage を import している (能力 storage を宣言していない)']);
 });
 
 test('app.json の検査: パッケージの外のパス、知らない能力、形の崩れを断る', () => {
-  const base = { id: 'x', title: 'X', description: 'x', kind: 'component', capabilities: [], multiInstance: false, entry: 'x.js', core: ['x.wasm'] };
+  const base = { id: 'x', title: 'X', description: 'x', kind: 'component', capabilities: [], multiInstance: false, component: 'x.wasm' };
   assert.ok(parsePackage(base).ok);
   const bad = (patch: Record<string, unknown>) => {
     const r = parsePackage({ ...base, ...patch });
     return r.ok ? [] : r.errors;
   };
-  assert.match(bad({ entry: '../../etc/passwd' }).join(), /相対パス/);
-  assert.match(bad({ core: ['/abs.wasm'] }).join(), /相対パス/);
+  assert.match(bad({ component: '../../etc/x.wasm' }).join(), /相対パス/);
+  assert.match(bad({ component: '/abs.wasm' }).join(), /相対パス/);
+  assert.match(bad({ component: 'app.js' }).join(), /\.wasm/);
   assert.match(bad({ capabilities: ['root'] }).join(), /capabilities/);
   assert.match(bad({ id: 'Bad Id' }).join(), /id/);
   assert.match(bad({ kind: 'js' }).join(), /kind/);
@@ -118,9 +127,32 @@ test('app.json の検査: パッケージの外のパス、知らない能力、
 });
 
 test('入っているアプリ (同梱のアプリを含む) と同じ id のパッケージは入れない (なりすまし)', async () => {
-  const r = await loadPackage(fsSource((m) => ({ ...m, id: 'settings', title: 'Settings' })), wasi);
+  const r = await loadPackage(fsSource((m) => ({ ...m, id: 'settings', title: 'Settings' })), wasi, tools);
   assert.ok(r.ok);
   const p = createPlatform({ apps: builtinManifests, initial: ['todo'], measure, templates: memoryStorage(), kv: memoryKeyValue() });
   assert.match(p.install(r.manifest), /すでに入っている/);
   assert.equal(p.registry.manifest('settings')!.kind, 'js');
+});
+
+test('応答を返し終わらないパッケージのサーバでも、期限で失敗する (本文を読む途中も含む)', async () => {
+  const http = await import('node:http');
+  const { urlPackageSource } = await import('../src/platform/package-source.ts');
+  // ヘッダは返すが、本文を終わらせないサーバ
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.write('{"id":');
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/`;
+  try {
+    const src = urlPackageSource('app.json', base, 200);
+    assert.ok(typeof src !== 'string');
+    const t = performance.now();
+    await assert.rejects(src.manifest(), /0.2 秒で読み終わらない/);
+    assert.ok(performance.now() - t < 2000);
+    await assert.rejects(src.bytes('x.wasm'), /読み終わらない/);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
 });

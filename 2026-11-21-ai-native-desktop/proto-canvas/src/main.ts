@@ -145,9 +145,10 @@ const loadWasi = async () => (await import('@bytecodealliance/preview2-shim')) a
 async function readPackage(url: string) {
   const { loadPackage } = await import('./platform/packages.ts');
   const { urlPackageSource } = await import('./platform/package-source.ts');
+  const { blobModule, hostPackageTools } = await import('./platform/package-tools.ts');
   const src = urlPackageSource(url);
   if (typeof src === 'string') return { ok: false as const, errors: [src] };
-  return loadPackage(src, await loadWasi());
+  return loadPackage(src, await loadWasi(), hostPackageTools(blobModule));
 }
 const packageUrls: string[] = (() => {
   try {
@@ -161,7 +162,34 @@ const packageUrls: string[] = (() => {
 const packageManifests: AppManifest[] = [];
 // 同梱のアプリと、先に読んだパッケージの id は使わせない (後から同じ id を返すようになったパッケージで、起動が止まらないように)
 const takenIds = new Set([...builtinManifests.map((m) => m.id), terminal.id]);
+// 起動の見張り: コンポーネントは UI スレッドで同期に動くので、止まらないコンポーネントは画面ごと固める (期限では止められない)。
+// 読み込み中のパッケージを記録し、起動が終わったら消す。前回の起動が終わらなかったら、そのパッケージを隔離して読み込まない。
+// (根本の対策は、コンポーネントを Worker で動かして止められるようにすること。PLATFORM.md)
+const STARTUP_KEY = 'platform.packages.loading';
+const QUARANTINE_KEY = 'platform.packages.quarantine';
+const readList = (k: string): string[] => {
+  try {
+    const v: unknown = JSON.parse(localKeyValue.get(k) ?? '[]');
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+};
+const quarantined = new Set([...readList(QUARANTINE_KEY), ...readList(STARTUP_KEY)]);
+if (quarantined.size) localKeyValue.set(QUARANTINE_KEY, JSON.stringify([...quarantined]));
+const packageWarnings: string[] = [];
+// ?safe でパッケージを 1 つも読み込まずに起動する
+const safeMode = params.has('safe');
 for (const url of packageUrls) {
+  if (safeMode) {
+    packageWarnings.push(`安全モード (?safe): パッケージ ${url} を読み込まなかった`);
+    continue;
+  }
+  if (quarantined.has(url)) {
+    packageWarnings.push(`前回の起動が終わらなかったので、パッケージ ${url} を隔離した (読み込まない)`);
+    continue;
+  }
+  localKeyValue.set(STARTUP_KEY, JSON.stringify([url]));
   const r = await readPackage(url);
   if (!r.ok) console.warn(`パッケージ ${url} を読めない: ${r.errors.join(' / ')}`);
   else if (takenIds.has(r.manifest.id)) console.warn(`パッケージ ${url} の id ${r.manifest.id} はすでに使われている。読み込まない`);
@@ -170,6 +198,8 @@ for (const url of packageUrls) {
     packageManifests.push(r.manifest);
   }
 }
+// 窓の復元でもコンポーネントを動かすので、読み込んだパッケージ全体を見張りに入れておく
+localKeyValue.set(STARTUP_KEY, JSON.stringify(packageUrls.filter((u) => !quarantined.has(u) && !safeMode)));
 const platform = createPlatform({
   apps: [...(perf ? builtinManifests.map((m) => (m.id === 'todo' ? perfTodo : m)) : builtinManifests), terminal, ...packageManifests],
   initial: ['todo', 'settings', 'notes', ...Array.from({ length: Number(params.get('extra') ?? 0) }, () => 'todo')],
@@ -304,7 +334,7 @@ panel.innerHTML = `
   <div class="muted">F6 でデスクトップとこのパネルの間を移る。Alt+L でランチャー (それ自体も意味ツリーを出すアプリ)。窓はタイトルバーの × で閉じる。</div>
   <div id="openWins"></div>
   <div class="row"><label>パッケージ <input id="pkgUrl" value="packages/todo-rs/app.json" size="28" spellcheck="false" aria-label="パッケージ (app.json) の URL"></label><button id="pkgInstall">入れる</button></div>
-  <div class="muted">WIT のコンポーネントのアプリ。能力は import として渡す (宣言していない import を求めるものは入らない)。同じ origin のものだけ。</div>
+  <div class="muted">WIT のコンポーネントのアプリ (app.json + .wasm)。glue はホストが .wasm から作り、パッケージの JS は動かさない。能力は import として渡す (宣言していない import を持つものは入らない)。</div>
   <div id="pkgErr" class="err" role="alert"></div>
 
   <h2>レイアウト</h2>
@@ -423,6 +453,7 @@ panel.addEventListener('click', (e) => {
 });
 const openApps = () => shell.windows().map((w) => w.id);
 // パッケージを入れる (人の操作だけ。agent / MCP には口が無い)
+if (packageWarnings.length) $('pkgErr').textContent = packageWarnings.join('\n');
 $('pkgInstall').addEventListener('click', async () => {
   const url = $<HTMLInputElement>('pkgUrl').value.trim();
   $('pkgErr').textContent = '読み込み中…';
@@ -430,6 +461,9 @@ $('pkgInstall').addEventListener('click', async () => {
   const why = r.ok ? platform.install(r.manifest) : r.errors.join('\n');
   $('pkgErr').textContent = why;
   if (!why) {
+    // 人が入れ直したら隔離を解く
+    quarantined.delete(url);
+    localKeyValue.set(QUARANTINE_KEY, JSON.stringify([...quarantined]));
     localKeyValue.set(PACKAGES_KEY, JSON.stringify([...new Set([...packageUrls, url])]));
     packageUrls.push(url);
     aria.announce(`${r.ok ? r.manifest.title : ''} を入れた`);
@@ -556,3 +590,5 @@ function render() {
 }
 render();
 backend.focusInput();
+// 最初のフレームまで来たので、起動の見張りを外す (窓の復元でパッケージの窓も作り終えている)
+localKeyValue.set(STARTUP_KEY, '[]');

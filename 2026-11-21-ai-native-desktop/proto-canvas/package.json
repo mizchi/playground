@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm -s build:packages && cp node_modules/ghostty-web/ghostty-vt.wasm www/ && esbuild src/main.ts --bundle --format=esm --splitting --chunk-names=chunks/[name]-[hash] --sourcemap --outdir=www --servedir=www --serve=127.0.0.1:8123",
-    "build": "pnpm -s build:packages && cp node_modules/ghostty-web/ghostty-vt.wasm www/ && esbuild src/main.ts --bundle --format=esm --splitting --chunk-names=chunks/[name]-[hash] --sourcemap --outdir=www",
+    "dev": "pnpm -s build:packages && cp node_modules/ghostty-web/ghostty-vt.wasm www/ && esbuild src/main.ts --bundle --external:'node:*' --format=esm --splitting --chunk-names=chunks/[name]-[hash] --sourcemap --outdir=www --servedir=www --serve=127.0.0.1:8123",
+    "build": "pnpm -s build:packages && cp node_modules/ghostty-web/ghostty-vt.wasm www/ && esbuild src/main.ts --bundle --external:'node:*' --format=esm --splitting --chunk-names=chunks/[name]-[hash] --sourcemap --outdir=www",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
     "e2e": "node e2e/smoke.cjs",
@@ -28,7 +28,7 @@
     "e2e:terminal": "node e2e/terminal.cjs",
     "e2e:calendar": "node e2e/calendar.cjs",
     "e2e:theme": "node e2e/theme.cjs",
-    "build:packages": "pnpm -s gen:component && mkdir -p www/packages/todo-rs && cp packages/todo-rs/app.json component/gen/todo.js component/gen/todo.core*.wasm www/packages/todo-rs/",
+    "build:packages": "sh scripts/build-packages.sh",
     "e2e:packages": "node e2e/packages.cjs"
   },
   "devDependencies": {

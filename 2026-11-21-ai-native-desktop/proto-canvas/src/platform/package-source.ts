@@ -1,28 +1,32 @@
-// ブラウザでパッケージを読む: app.json の URL から、同じ origin のファイルだけを読む。
-// jco の生成物 (todo.js) はページの中で動く JS なので、能力の境界の外にある。出所を同じ origin に限る
-// (本番では、ホストが .wasm から glue を作り、パッケージの JS は動かさない)。
-import type { ComponentModule, PackageSource } from './packages.ts';
+// ブラウザでパッケージを読む: app.json の URL と、その隣の .wasm。
+// パッケージの JS は動かさない (glue はホストが .wasm から作る) ので、ほかの origin のパッケージも入れられる (CORS が要る)。
+import type { PackageSource } from './packages.ts';
 
-export function urlPackageSource(url: string, base = location.href): PackageSource | string {
+/** 1 つのファイルを読む期限 (接続から本文を読み終えるまで)。応答しないサーバで起動が止まらないように */
+export const PACKAGE_FETCH_TIMEOUT_MS = 10_000;
+
+export function urlPackageSource(url: string, base = location.href, timeoutMs = PACKAGE_FETCH_TIMEOUT_MS): PackageSource | string {
   let u: URL;
   try {
     u = new URL(url, base);
   } catch {
     return 'URL ではない';
   }
-  if (u.origin !== new URL(base).origin) return `同じ origin (${new URL(base).origin}) のパッケージだけを入れられる`;
-  const at = (p: string) => new URL(p, u).href;
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return 'http(s) の URL だけ';
+  // 同じ signal が本文の読み込みも止める (期限を過ぎると json() / arrayBuffer() も TimeoutError で失敗する)
+  const read = async <T>(href: string, body: (r: Response) => Promise<T>): Promise<T> => {
+    const signal = AbortSignal.timeout(timeoutMs);
+    try {
+      const r = await fetch(href, { credentials: 'omit', signal });
+      if (!r.ok) throw new Error(`${href}: ${r.status}`);
+      return await body(r);
+    } catch (e) {
+      if (signal.aborted) throw new Error(`${href}: ${timeoutMs / 1000} 秒で読み終わらない`);
+      throw e;
+    }
+  };
   return {
-    manifest: async () => {
-      const r = await fetch(u.href);
-      if (!r.ok) throw new Error(`${r.status}`);
-      return r.json();
-    },
-    module: (p) => import(/* @vite-ignore */ at(p)) as Promise<ComponentModule>,
-    bytes: async (p) => {
-      const r = await fetch(at(p));
-      if (!r.ok) throw new Error(`${p}: ${r.status}`);
-      return r.arrayBuffer();
-    },
+    manifest: () => read(u.href, (r) => r.json()),
+    bytes: (p) => read(new URL(p, u).href, async (r) => new Uint8Array(await r.arrayBuffer())),
   };
 }
