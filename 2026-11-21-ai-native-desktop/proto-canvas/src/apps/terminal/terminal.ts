@@ -38,6 +38,13 @@ export function createTerminalApp(opts: TerminalOptions): App {
   const empty = (): TerminalScreen => ({ cols, rows, lines: Array.from({ length: rows }, () => []), cursor: null, fg: '#e6e8ef', bg: '#15171d' });
 
   const promptLine = () => vt?.write(`\r\x1b[2K${PROMPT}${draft}`);
+  // あとから届いた結果 (依頼の答えなど) は、今の入力行の上に書き、入力行を書き直す
+  env.print = (s) => {
+    // 窓を閉じたあと (stop で端末を手放したあと) に答えが届いても書かない
+    if (!vt || pty || stopped) return;
+    vt.write(`\r\x1b[2K${s}\r\n${PROMPT}${draft}`);
+    publish();
+  };
 
   const publish = (root?: string) => {
     const snap = vt?.snapshot();
@@ -156,7 +163,7 @@ export function terminalManifest(load: () => Promise<VtFactory>): AppManifest {
     title: 'Terminal',
     description: 'libghostty-vt の端末。内蔵シェル、またはホストのシェル',
     kind: 'js',
-    capabilities: ['storage', 'clipboard.read', 'clipboard.write', 'notifications', 'apps.launch', 'terminal.pty', 'data:calendar.events'],
+    capabilities: ['storage', 'clipboard.read', 'clipboard.write', 'notifications', 'apps.launch', 'terminal.pty', 'data:calendar.events', 'intent:calendar.add-event'],
     multiInstance: true,
     create: (id, services) => createTerminalApp({ id, services, vt: once }),
   };

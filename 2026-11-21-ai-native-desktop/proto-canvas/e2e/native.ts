@@ -51,8 +51,8 @@ interface State {
 }
 
 /** ホストを起こし、--control で話す */
-async function startHost(extra: string[] = []) {
-  const p = spawn(process.execPath, [path.join(root, 'native', 'host.ts'), '--headless', '1500x860', '--control', '--kv', kvFile, ...extra], { env, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessWithoutNullStreams;
+async function startHost(extra: string[] = [], kv = kvFile) {
+  const p = spawn(process.execPath, [path.join(root, 'native', 'host.ts'), '--headless', '1500x860', '--control', '--kv', kv, ...extra], { env, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessWithoutNullStreams;
   // 終わったことは起こした時点から覚えておく (テストの途中で落ちても、stop が待ち続けないように)
   const exited = new Promise<number | null>((r) => p.on('exit', (code) => r(code)));
   p.stdin.on('error', () => {});
@@ -219,6 +219,44 @@ await step('ダークテーマ: 同じ画面を THEMES.dark の色で描く', as
   assert.ok(statSync(file).size > 20000);
 });
 
+await step('パッケージ: WIT のコンポーネントを worker_threads で動かす。保存はファイルに残り、応答しないコンポーネントは期限で止めて再起動できる', async () => {
+  await host.stop();
+  const pkgKv = path.join(tmp, 'packages.json');
+  const pkg = (id: string) => path.join(root, 'www', 'packages', id, 'app.json');
+  host = await startHost(['--fresh', '--package', pkg('todo-rs'), '--package', pkg('spin-rs')], pkgKv);
+  await host.cmd({ t: 'close', app: 'settings' });
+  await host.cmd({ t: 'close', app: 'notes' });
+  assert.match(JSON.stringify(await host.cmd({ t: 'launch', app: 'todo-rs' })), /"result":""/);
+  const tree = async (app: string) => ((await host.cmd({ t: 'tree', app })) as { tree: { nodes: { id: string; label?: string; checked?: boolean }[] }[] }).tree[0]?.nodes ?? [];
+  const until = async (f: () => Promise<boolean>, what: string, ms = 8000) => {
+    for (let t = 0; t < ms; t += 100) {
+      if (await f()) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(`${what} にならない`);
+  };
+  await until(async () => !!(await host.rects())['todo-rs/i1'], 'todo-rs の i1');
+  await host.clickRect((await host.rects())['todo-rs/i1']);
+  await until(async () => (await tree('todo-rs')).find((n) => n.id === 'i1')?.checked === true, 'i1 が完了');
+  await until(async () => /i1/.test(JSON.parse(readFileSync(pkgKv, 'utf8'))['app.todo-rs.items'] ?? ''), '保存がファイルに残る');
+  if (shots) await host.capture(path.join(shotsDir, 'native-package.png'));
+
+  assert.match(JSON.stringify(await host.cmd({ t: 'launch', app: 'spin-rs' })), /"result":""/);
+  await until(async () => !!(await host.rects())['spin-rs/spin'], 'spin-rs の「固まる」');
+  await host.clickRect((await host.rects())['spin-rs/spin']);
+  // コンポーネントが止まっている間も、ホストは答える
+  const t0 = performance.now();
+  await host.state();
+  assert.ok(performance.now() - t0 < 1000, 'ホストは固まらない');
+  await until(async () => /応答しない/.test((await tree('spin-rs')).find((n) => n.id === 'root')?.label ?? ''), '応答しない');
+  await host.clickRect((await host.rects())['spin-rs/x-restart']);
+  await until(async () => (await tree('spin-rs')).find((n) => n.id === 'count')?.label === '数える (0)', '再起動');
+  await host.stop();
+  // 入れたパッケージは次の起動でも読む (--package なしで)
+  host = await startHost([], pkgKv);
+  assert.ok((await host.state()).windows.some((w) => w.id === 'todo-rs'), 'パッケージの窓も復元する');
+});
+
 await step('ホストのシェル: --pty では擬似端末の helper を直接起こす (WebSocket の橋は使わない)。許可はパネルで答える', async () => {
   await host.stop();
   host = await startHost(['--pty']);
@@ -270,6 +308,27 @@ await step('守り: 読めない命令には error を返して動き続ける�
   assert.match(err, /別のホスト/);
   const narrow = spawn(process.execPath, [path.join(root, 'native', 'host.ts'), '--headless', '500x400', '--kv', path.join(tmp, 'other.json')], { env });
   assert.equal(await new Promise((r) => narrow.on('exit', r)), 2);
+});
+
+await step('アプリどうしの依頼: Terminal の cal add がパネルに「アプリの依頼」として出て、人が「実行する」と Calendar に書かれる', async () => {
+  await host.stop();
+  host = await startHost(['--fresh'], path.join(tmp, 'intent.json'));
+  await host.cmd({ t: 'launch', app: 'terminal' });
+  for (let i = 0; i < 50 && !(await host.rects())['terminal/input']; i++) await new Promise((r) => setTimeout(r, 100));
+  const screen = async () => ((await host.cmd({ t: 'tree', app: 'terminal' })) as { tree: { nodes: { id: string; value?: string }[] }[] }).tree[0].nodes.find((n) => n.id === 'screen')!.value ?? '';
+  for (let i = 0; i < 50 && !/libghostty-vt/.test(await screen()); i++) await new Promise((r) => setTimeout(r, 100));
+  await host.clickRect((await host.rects())['terminal/input']);
+  await host.cmd({ t: 'text', text: 'cal add 2026-12-24 忘年会' });
+  await host.cmd({ t: 'key', code: 'Enter', key: 'Enter', alt: false, shift: false });
+  const s = await host.state();
+  // パネルは幅で折り返すので、つなげて見る
+  assert.ok(s.texts.join('').includes('2026-12-24 に予定「忘年会」を追加する'), `パネルに受ける側の説明: ${s.texts.join('|')}`);
+  const action = s.buttons.find((b) => b.action.startsWith('intent:') && b.action.endsWith(':1'))!.action;
+  if (shots) await host.capture(path.join(shotsDir, 'native-intent.png'));
+  await host.press(action);
+  for (let i = 0; i < 30 && !/カレンダーに追加した/.test(await screen()); i++) await new Promise((r) => setTimeout(r, 100));
+  assert.match(await screen(), /カレンダーに追加した: 2026-12-24 忘年会/);
+  assert.deepEqual(JSON.parse(JSON.parse(readFileSync(path.join(tmp, 'intent.json'), 'utf8'))['app.calendar.events']), { '2026-12-24': ['忘年会'] });
 });
 
 // ---- MCP: AI のクライアント → MCP サーバ → ネイティブのホスト。承認はホストのパネル (人) ----

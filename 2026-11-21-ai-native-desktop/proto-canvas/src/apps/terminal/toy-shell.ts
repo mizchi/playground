@@ -15,6 +15,8 @@ export interface ToyShellEnv {
   history: string[];
   /** 今の日時 (テスト用) */
   now?: () => Date;
+  /** あとから届いた結果を端末に書く (依頼の答えなど) */
+  print?: (s: string) => void;
 }
 
 const nl = (s: string) => s.replace(/\r?\n/g, '\r\n');
@@ -34,6 +36,7 @@ const HELP = [
   ['clear', '画面を消す'],
   ['date', '今の日時'],
   ['cal', '今月のカレンダー (今日は反転、予定はカレンダーのアプリから)'],
+  ['cal add <YYYY-MM-DD> <題名>', 'カレンダーに予定の追加を頼む (intent 能力。頼むたびに人が答える)'],
   ['colors', '色の見本 (16 色・256 色・24bit)'],
   ['ls / cat <名前> / write <名前> <内容> / rm <名前>', 'ファイル (storage 能力)'],
   ['copy <文字> / paste', 'クリップボード (clipboard 能力)'],
@@ -62,6 +65,15 @@ export function runToyCommand(line: string, env: ToyShellEnv): string {
     case 'date':
       return new Date().toString();
     case 'cal': {
+      if (args[0] === 'add') {
+        if (!sv) return need();
+        const [, date = '', ...title] = args;
+        const r = sv.intents.request('calendar.add-event', { date, title: title.join(' ') }, (done) =>
+          env.print?.(done.ok ? c('32', `カレンダーに追加した: ${date} ${title.join(' ')}`) : done.reason === 'denied' ? c('33', '人が断った') : c('31', `追加できなかった (${done.reason})`)),
+        );
+        if (!r.ok) return r.reason === 'invalid' ? c('31', '使い方: cal add <YYYY-MM-DD> <題名>') : r.reason === 'unavailable' ? c('31', '予定を受けるアプリが無い') : why(r);
+        return c('33', `カレンダーに頼んだ (${r.value})。右のパネルで人が答える`);
+      }
       const n = env.now?.() ?? new Date();
       const y = n.getFullYear();
       const m = n.getMonth();

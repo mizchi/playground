@@ -4,6 +4,7 @@
 //   node native/host.ts                          # 窓を開く
 //   node native/host.ts --headless 1280x800      # 窓なし (オフスクリーン)。--control で標準入力から操作・画面の書き出し
 //   オプション: --kv <file> (保存先) / --font <ttf> / --theme light|dark / --pty (ホストの bash) / --mcp ws://127.0.0.1:8130 / --renderer <path>
+//             --package <app.json> (パッケージを入れる。次の起動でも読む) / --a11y (AT-SPI にツリーを出す。Linux のスクリーンリーダー)
 //
 // 役割の分け方
 // - Node: プラットフォーム (アプリ・能力・保存・セッション)、shell (意味ツリー → 描画命令)、文字の計測 (mizchi/font)、人だけが答えるパネル
@@ -12,7 +13,7 @@ import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { builtinManifests } from '../src/apps/manifests.ts';
@@ -27,7 +28,9 @@ import type { DrawOp, ImeToHost } from '../src/protocol.ts';
 import type { Shell, Step } from '../src/shell.ts';
 import { THEMES } from '../src/theme.ts';
 import type { ThemeName } from '../src/theme.ts';
+import type { AppManifest } from '../src/platform/types.ts';
 import { fileKeyValue } from './kv.ts';
+import { nativeRunner, readNativePackage } from './packages.ts';
 import { PANEL_W, drawPanel } from './panel.ts';
 import type { PanelButton } from './panel.ts';
 import { directPtyConnector } from './pty.ts';
@@ -41,6 +44,8 @@ const opt = (name: string) => {
   return i >= 0 ? argv[i + 1] : undefined;
 };
 const flag = (name: string) => argv.includes(name);
+/** 何度でも書けるオプション (--package a --package b) */
+const opts = (name: string) => argv.flatMap((a, i) => (a === name && argv[i + 1] ? [argv[i + 1]] : []));
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
 const headless = opt('--headless');
 // 窓の最小の幅 (shell + 人が答えるパネル)。窓なしでもこれより狭くはしない
@@ -86,7 +91,34 @@ const terminal = terminalManifest(async () => {
   const g = await instantiateGhostty(await readFile(here('../node_modules/ghostty-web/ghostty-vt.wasm')));
   return (c, r) => createVt(g, c, r);
 });
-const platform = createPlatform({ apps: [...builtinManifests, terminal], initial: ['todo', 'settings', 'notes'], measure, templates, kv, restoreSession: !flag('--fresh') });
+// ---- パッケージ (app.json + WIT のコンポーネント)。コンポーネントは worker_threads で動かし、応答しなければ止める ----
+// 入れたパッケージ (app.json のパス) は保存しておき、次の起動でも読む (窓の復元より先に)。--package で足す
+const PACKAGES_KEY = 'native.packages';
+const savedPackages = (() => {
+  try {
+    const v: unknown = JSON.parse(kv.get(PACKAGES_KEY) ?? '[]');
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+})();
+const packagePaths = [...new Set([...savedPackages, ...opts('--package').map((p) => resolve(p))])];
+const runner = nativeRunner(() => platform.services, { actionMs: Number(opt('--component-timeout') ?? 2000) });
+const packageManifests: AppManifest[] = [];
+const takenIds = new Set([...builtinManifests.map((m) => m.id), terminal.id]);
+for (const path of packagePaths) {
+  const r = await readNativePackage(path, runner);
+  if (!r.ok) log(`パッケージ ${path} を読めない: ${r.errors.join(' / ')}`);
+  else if (takenIds.has(r.manifest.id)) log(`パッケージ ${path} の id ${r.manifest.id} はすでに使われている。読み込まない`);
+  else {
+    takenIds.add(r.manifest.id);
+    packageManifests.push(r.manifest);
+    log(`パッケージ: ${r.manifest.id} (${path})`);
+  }
+}
+kv.set(PACKAGES_KEY, JSON.stringify(packagePaths));
+
+const platform = createPlatform({ apps: [...builtinManifests, terminal, ...packageManifests], initial: ['todo', 'settings', 'notes'], measure, templates, kv, restoreSession: !flag('--fresh') });
 if (flag('--pty')) platform.services.pty = directPtyConnector();
 const theme: ThemeName = (opt('--theme') as ThemeName | undefined) ?? (kv.get('platform.theme') === 'dark' ? 'dark' : 'light');
 const colors = THEMES[theme];
@@ -212,6 +244,7 @@ function render() {
     workspace,
     merges: sv.merges.filter((m) => m.status === 'pending'),
     prompts: sv.prompts.filter((p) => p.status === 'pending').map((p) => ({ id: p.id, text: `${p.appTitle} が ${capLabel(p.capability)} の許可を求めている` })),
+    intents: sv.intents.filter((i) => i.status === 'pending').map((i) => ({ id: i.id, text: `${i.fromTitle} が ${i.toTitle} に頼んでいる: ${i.summary}` })),
     proposals: platform.shell.proposals.filter((p) => p.status === 'pending').map((p) => ({ id: p.id, intent: p.intent, steps: p.steps.map(describeStep), sensitive: p.sensitive })),
     status: [mcpStatus, `${theme === 'dark' ? 'ダーク' : 'ライト'}・${size.scale}x`].filter(Boolean),
   };
@@ -246,6 +279,77 @@ function render() {
   }
 }
 
+// ---- スクリーンリーダー (Linux の AT-SPI)。ブラウザの ARIA のミラーの代わり ----
+// native/atspi/server.py (system の Python 3.12 + Gio) に意味ツリーとパネルを渡し、スクリーンリーダーからの操作を人の操作として受ける
+let a11y: ReturnType<typeof spawn> | null = null;
+let a11ySent = '';
+const announced = { proposals: 0, prompts: 0, notes: 0, intents: 0 };
+if (flag('--a11y')) {
+  a11y = spawn(process.env.ATSPI_PYTHON ?? '/usr/bin/python3.12', [here('./atspi/server.py')], { stdio: ['pipe', 'pipe', 'inherit'] });
+  a11y.stdin!.on('error', () => {});
+  // Python が無いなど、起こせなくてもデスクトップは動かし続ける (スクリーンリーダーの口が無いだけ)
+  a11y.on('error', (e) => {
+    log(`AT-SPI のサーバを起こせない: ${e.message}`);
+    a11y = null;
+  });
+  a11y.on('exit', (code) => {
+    log(`AT-SPI のサーバが終わった (${code})`);
+    a11y = null;
+  });
+  createInterface({ input: a11y.stdout! }).on('line', (line) => {
+    let m: { t: string; app?: string; node?: string; action?: string; data?: string; message?: string; bus?: string };
+    try {
+      m = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (m.t === 'ready') {
+      log(`AT-SPI: ${m.bus}`);
+      a11ySent = '';
+      reply({ t: 'a11y-ready', bus: m.bus });
+      schedule();
+    } else if (m.t === 'error') log('AT-SPI:', m.message);
+    else if (m.t === 'panel' && m.action) press(m.action);
+    else if (m.t === 'action' && m.app && m.node) {
+      // 届くまでの間にワークスペースを切り替えた・窓を閉じた、なら捨てる (今の shell に無い窓は操作しない)
+      if (!shell.windows().some((w) => w.id === m.app)) return;
+      // スクリーンリーダーの操作は、人の意味的な操作 (ブラウザの ARIA のミラーと同じ)
+      if (m.action === 'click') shell.activate(m.app, m.node);
+      else if (m.action === 'focus') shell.dispatch({ app: m.app, target: m.node, action: 'focus', by: 'human' });
+      else if (m.action === 'setValue') shell.dispatch({ app: m.app, target: m.node, action: 'setValue', data: m.data ?? '', by: 'human' });
+      schedule();
+    }
+  });
+}
+function syncA11y() {
+  if (!a11y?.stdin?.writable) return;
+  const a = shell.accessibility();
+  const msg = JSON.stringify({
+    t: 'tree',
+    windows: a.windows.map((w) => ({ ...w, focus: shell.tree(w.app).focus })),
+    rects: Object.fromEntries(a.rects),
+    panel: presented.map((b) => ({ action: b.action, label: b.label, rect: b.rect, context: b.context ?? '' })),
+  });
+  if (msg !== a11ySent) {
+    a11ySent = msg;
+    a11y.stdin.write(`${msg}\n`);
+  }
+  // 提案・許可の要求・通知を読み上げる (ブラウザの aria-live と同じもの)
+  const say = (text: string) => a11y!.stdin!.write(`${JSON.stringify({ t: 'announce', text })}\n`);
+  const sv = platform.services;
+  for (const p of platform.shell.proposals.slice(announced.proposals)) say(`AI の提案 ${p.id}: ${p.intent}。${p.sensitive ? '承認が必要です。' : ''}`);
+  announced.proposals = platform.shell.proposals.length;
+  for (const p of sv.prompts.slice(announced.prompts)) say(`${p.appTitle} が ${capLabel(p.capability)} の許可を求めています`);
+  announced.prompts = sv.prompts.length;
+  for (const i of sv.intents.slice(announced.intents)) say(`${i.fromTitle} が ${i.toTitle} に頼んでいます: ${i.summary}`);
+  announced.intents = sv.intents.length;
+  const last = sv.notifications.at(-1);
+  if (last && last.id > announced.notes) {
+    say(`通知 ${last.title}: ${last.body ?? ''}`);
+    announced.notes = last.id;
+  }
+}
+
 // ---- 入力 ----
 let pointerInPanel = false;
 let pendingDouble: { x: number; y: number } | null = null;
@@ -255,6 +359,7 @@ function press(action: string) {
   if (kind === 'ws') switchWorkspace(Number(id));
   else if (kind === 'grant') platform.services.answer(id, ok === '1', 'human');
   else if (kind === 'merge') platform.services.answerMerge(id, ok === '1', 'human');
+  else if (kind === 'intent') platform.services.answerIntent(id, ok === '1', 'human');
   else if (kind === 'prop') ok === '1' ? platform.shell.approve(id) : platform.shell.reject(id);
   schedule();
 }
@@ -351,6 +456,7 @@ createInterface({ input: renderer.stdout! }).on('line', (line) => {
         presented = sentButtons;
       }
       sentButtons = null;
+      if (!dirty) syncA11y();
       if (!e.skipped) {
         lastInstances = e.n;
         lastMs = e.ms;
@@ -432,6 +538,9 @@ if (control)
         // 人がランチャーから開くのと同じ (テストで使う)
         reply({ t: 'launched', id: c.id, result: platform.launch(c.app as string, 'human') });
         break;
+      case 'close':
+        reply({ t: 'closed', id: c.id, result: platform.close(c.app as string, 'human') });
+        break;
       case 'propose':
         reply({ t: 'proposed', id: c.id, result: platform.shell.propose(c.intent as string, c.steps as Step[]) });
         break;
@@ -447,3 +556,4 @@ if (control)
   });
 
 process.on('SIGINT', () => send(MSG.quit));
+process.on('exit', () => a11y?.kill());

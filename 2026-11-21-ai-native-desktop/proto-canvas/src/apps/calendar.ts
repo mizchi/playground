@@ -167,6 +167,20 @@ export function calendarEvents(services: AppServices, args: { year?: number; mon
     .flatMap((date) => events[date].map((title) => ({ date, title })));
 }
 
+/** 依頼 calendar.add-event の引数を確かめる (日付は実在する YYYY-MM-DD、題名は 1..100 文字で制御文字なし) */
+export function parseAddEvent(args: Record<string, unknown>): { date: string; title: string } | null {
+  const { date, title } = args;
+  if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  const [y, m, d] = date.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) return null;
+  if (typeof title !== 'string') return null;
+  const t = title.trim();
+  // eslint-disable-next-line no-control-regex
+  if (!t || [...t].length > 100 || /[\u0000-\u001f\u007f]/.test(t)) return null;
+  return { date, title: t };
+}
+
 export const calendarManifest: AppManifest = {
   id: 'calendar',
   title: 'Calendar',
@@ -177,4 +191,20 @@ export const calendarManifest: AppManifest = {
   create: (id, services) => createCalendarApp({ id, services }),
   provides: { 'calendar.events': { description: '月の予定 (日付と題名。読み取りだけ)' } },
   provide: (topic, args, services) => (topic === 'calendar.events' ? calendarEvents(services, args as { year?: number; month?: number }) : null),
+  handles: { 'calendar.add-event': { description: '予定を追加する (日付と題名)' } },
+  // 人に見せる説明は、受ける側 (Calendar) が引数から作る
+  describe: (topic, args) => {
+    const e = topic === 'calendar.add-event' ? parseAddEvent(args) : null;
+    return e ? `${e.date} に予定「${e.title}」を追加する` : null;
+  },
+  handle: (topic, args, services) => {
+    const e = topic === 'calendar.add-event' ? parseAddEvent(args) : null;
+    if (!e) return { ok: false, reason: 'invalid' };
+    const r = services.storage.get('events');
+    if (!r.ok) return r;
+    const events = r.value ? (JSON.parse(r.value) as Record<string, string[]>) : {};
+    events[e.date] = [...(events[e.date] ?? []), e.title];
+    const w = services.storage.set('events', JSON.stringify(events));
+    return w.ok ? { ok: true, value: e } : w;
+  },
 };

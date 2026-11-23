@@ -35,7 +35,8 @@
     "build:native": "native/build.sh",
     "native": "node native/host.ts",
     "e2e:native": "node e2e/native.ts",
-    "e2e:native-window": "node e2e/native-window.ts"
+    "e2e:native-window": "node e2e/native-window.ts",
+    "e2e:native-a11y": "node e2e/native-a11y.ts"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "^1.42.0",

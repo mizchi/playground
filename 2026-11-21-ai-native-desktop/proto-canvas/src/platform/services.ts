@@ -1,6 +1,6 @@
 // システムのサービス (クリップボード・通知・保存領域・アプリの起動)。どの呼び出しも能力を確かめ、監査ログに残す。
 import type { Storage } from '../cache.ts';
-import type { AppServices, Capability, GrantPrompt, GrantState, MergeRequest, Notification, PtyConnector, ServiceResult, StorageChange, Workspace } from './types.ts';
+import type { AppServices, Capability, GrantPrompt, GrantState, IntentRequest, MergeRequest, Notification, PtyConnector, ServiceResult, StorageChange, Workspace } from './types.ts';
 import type { AppRegistry } from './registry.ts';
 
 export interface ServiceAudit {
@@ -13,7 +13,7 @@ export interface ServiceAudit {
 }
 
 /** 宣言しているときの既定の状態 */
-const DEFAULT_GRANT: Record<Exclude<Capability, `data:${string}`>, GrantState> = {
+const DEFAULT_GRANT: Record<Exclude<Capability, `data:${string}` | `intent:${string}`>, GrantState> = {
   storage: 'granted', // 自分の保存領域だけ
   'clipboard.write': 'granted',
   'clipboard.read': 'ask', // 他のアプリが書いたものを読めるので、尋ねる
@@ -35,6 +35,9 @@ export const memoryKeyValue = (): KeyValue => {
   return { get: (k) => m.get(k), set: (k, v) => void m.set(k, v), keys: () => [...m.keys()] };
 };
 
+/** 依頼の説明の長さの上限 (文字)。パネルでは切らずに全部出す */
+export const INTENT_SUMMARY_MAX = 200;
+
 export class ServiceHost {
   readonly audit: ServiceAudit[] = [];
   readonly prompts: GrantPrompt[] = [];
@@ -46,6 +49,9 @@ export class ServiceHost {
   /** ホストの擬似端末の口 (main.ts が ?pty= のときに差し込む) */
   pty: PtyConnector | null = null;
   readonly merges: MergeRequest[] = [];
+  /** 書き込みの依頼 (頼むたびに人が答える) */
+  readonly intents: IntentRequest[] = [];
+  private intentDone = new Map<string, (r: ServiceResult<unknown>) => void>();
   /** agent のワークスペースの書き込み (kv のキー → 値)。人が持ち込むまで本物には書かない */
   private overlay = new Map<string, string>();
   /** 重ねた層のキーを最初に書いた時点の本物の値 (stale の判定の基準。agent はこの値を元に作業した) */
@@ -80,6 +86,8 @@ export class ServiceHost {
     if (cap === 'apps.launch' && m.system) return 'granted';
     // ほかのアプリのデータは、いつも尋ねる
     if (cap.startsWith('data:')) return 'ask';
+    // 書き込みの依頼は、宣言していれば頼める。頼むたびに人が答えるので、能力としては尋ねない
+    if (cap.startsWith('intent:')) return 'granted';
     return DEFAULT_GRANT[cap as keyof typeof DEFAULT_GRANT];
   }
 
@@ -189,6 +197,42 @@ export class ServiceHost {
           return { ok: true, value: structuredClone(value) };
         },
       },
+      intents: {
+        request: (topic, args, onDone) => {
+          const handler = this.registry.list({ includeSystem: true }).find((m) => m.handles?.[topic] && m.handle);
+          if (!handler) return { ok: false, reason: 'unavailable' };
+          const r = this.check(app, window, `intent:${topic}`, `request ${topic} to ${handler.id}`);
+          if (!r.ok) return fail(r);
+          // 写せない引数 (関数・Symbol など) や、受ける側が説明を作れない引数は、人に出さずに invalid
+          let copy: Record<string, unknown>;
+          let summary: string | null;
+          try {
+            copy = structuredClone(args);
+            summary = handler.describe?.(topic, structuredClone(copy)) ?? null;
+          } catch {
+            return { ok: false, reason: 'invalid' };
+          }
+          // 説明は短く (人が承認の前に全部読めるように)、制御文字を含まない
+          // eslint-disable-next-line no-control-regex
+          if (typeof summary !== 'string' || !summary.trim() || [...summary].length > INTENT_SUMMARY_MAX || /[\u0000-\u001f\u007f]/.test(summary)) return { ok: false, reason: 'invalid' };
+          const req: IntentRequest = {
+            id: `i${this.seq++}`,
+            from: app,
+            fromTitle: this.registry.manifest(app)?.title ?? app,
+            window,
+            to: handler.id,
+            toTitle: handler.title,
+            topic,
+            summary,
+            args: copy,
+            status: 'pending',
+          };
+          this.intents.push(req);
+          if (onDone) this.intentDone.set(req.id, onDone);
+          this.onChange();
+          return { ok: true, value: req.id };
+        },
+      },
       pty: {
         available: () => !!this.pty,
         open: (cols, rows, onData, onExit) => {
@@ -224,6 +268,7 @@ export class ServiceHost {
       clipboard: { read: () => outside('clipboard.read', 'read'), write: () => outside('clipboard.write', 'write') },
       notify: () => outside('notifications', 'notify'),
       apps: { list: human.apps.list, launch: (id) => outside('apps.launch', `launch ${id}`) },
+      intents: { request: (topic) => outside(`intent:${topic}`, `request ${topic}`) },
       pty: { available: () => false, open: () => outside('terminal.pty', 'open') },
       storage: {
         get: (key) => {
@@ -341,6 +386,53 @@ export class ServiceHost {
       .keys()
       .filter((k) => k.startsWith(prefix))
       .map((k): [string, string] => [k.slice(prefix.length), this.kv.get(k) ?? '']);
+  }
+
+  /**
+   * 書き込みの依頼に答える。答えられるのは人だけ。実行は受ける側のアプリが、自分の能力付きのサービスで行う。
+   * 受ける側が書いた保存領域のキーは、開いている窓に知らせる (読み直す)
+   */
+  answerIntent(id: string, approve: boolean, by: 'human' | 'agent'): string {
+    const req = this.intents.find((x) => x.id === id);
+    if (!req || req.status !== 'pending') return '依頼が無い';
+    if (by !== 'human') return '依頼に答えられるのは人だけ';
+    const done = this.intentDone.get(id);
+    this.intentDone.delete(id);
+    if (!approve) {
+      req.status = 'rejected';
+      this.audit.push({ at: Date.now(), app: req.from, window: req.window, capability: `intent:${req.topic}`, op: `request ${req.topic} to ${req.to} (${id})`, result: 'denied' });
+      done?.({ ok: false, reason: 'denied' });
+      this.onChange();
+      return '';
+    }
+    const handler = this.registry.manifest(req.to);
+    const written = new Set<string>();
+    const base = this.servicesFor(req.to, `${id}#intent`);
+    const sv: AppServices = {
+      ...base,
+      storage: {
+        ...base.storage,
+        set: (key, value) => {
+          const r = base.storage.set(key, value);
+          if (r.ok) written.add(key);
+          return r;
+        },
+      },
+    };
+    let r: ServiceResult<unknown>;
+    try {
+      r = handler?.handle ? handler.handle(req.topic, structuredClone(req.args), sv) : { ok: false, reason: 'unavailable' };
+    } catch (e) {
+      r = { ok: false, reason: 'invalid' };
+      req.result = String((e as Error).message ?? e);
+    }
+    req.status = r.ok ? 'done' : 'failed';
+    if (!r.ok) req.result ??= r.reason;
+    this.audit.push({ at: Date.now(), app: req.to, window: `${id}#intent`, capability: `intent:${req.topic}`, op: `handle ${req.topic} from ${req.from} (${id})`, result: r.ok ? 'ok' : 'denied' });
+    for (const key of written) for (const cb of this.storageListeners.get(req.to) ?? []) cb(key);
+    done?.(r.ok ? { ok: true, value: structuredClone(r.value) } : r);
+    this.onChange();
+    return '';
   }
 
   /** 人が読んだ通知を消す */
