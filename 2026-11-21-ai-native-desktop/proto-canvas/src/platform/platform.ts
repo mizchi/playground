@@ -119,6 +119,15 @@ export function createPlatform(cfg: PlatformConfig): Platform {
   ash.onWindowClosed = (id) => registry.forget(id);
   services.onOverlayChange = () => desk.refresh();
 
+  // 通知は、どちらのワークスペースを見ていても、窓より上の層に出す (出どころの名前は manifest から付ける)
+  const noticeSeen = new Map<number, number>();
+  for (const s of [sh, ash]) {
+    s.notices = () =>
+      services.notifications.map((n) => ({ id: n.id, source: registry.manifest(n.app)?.title ?? n.app, title: n.title, body: n.body, window: n.window }));
+    s.noticeSeen = noticeSeen;
+    s.onDismissNotice = (id) => services.dismiss(id);
+  }
+
   let lastSaved = '';
   return {
     shell: sh,

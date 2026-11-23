@@ -49,6 +49,9 @@ export const CHROME_PAIRS: { name: string; fg: ColorToken; bg: ColorToken; size:
   { name: 'sensitive なボタン', fg: 'accentText', bg: 'danger', size: 14, weight: 600 },
   { name: 'チェックの印', fg: 'accentText', bg: 'accent', size: 13, weight: 700 },
   { name: 'IME の変換中の文字', fg: 'accent', bg: 'surface', size: 14, weight: 400 },
+  { name: '通知の出どころ', fg: 'muted', bg: 'surface', size: 12, weight: 600 },
+  { name: '通知の題名', fg: 'text', bg: 'surface', size: 14, weight: 600 },
+  { name: '通知の本文', fg: 'text', bg: 'surface', size: 13, weight: 400 },
   { name: '本文', fg: 'text', bg: 'surface', size: 14, weight: 400 },
   { name: '補足の文字', fg: 'muted', bg: 'surface', size: 13, weight: 400 },
 ];

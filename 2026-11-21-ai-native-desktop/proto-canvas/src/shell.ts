@@ -106,7 +106,26 @@ export interface Frame {
   /** まだ動いている (次のフレームを要求する) */
   animating: boolean;
   cursor: 'default' | 'grab' | 'grabbing' | 'col-resize' | 'row-resize' | 'pointer' | 'not-allowed';
+  /** この時刻 (frame の now と同じ時計) に次のフレームが要る (通知が消え始めるときなど)。animating でないときだけ見る */
+  wakeAt?: number;
 }
+
+/** 画面に出す通知。出どころ (source) はプラットフォームが manifest から付ける (アプリは自分の名前を偽れない) */
+export interface ShellNotice {
+  id: number;
+  source: string;
+  title: string;
+  body?: string;
+  /** 通知を出した窓 (押すとその窓へフォーカスする) */
+  window?: AppId;
+}
+
+/** 通知を画面に出しておく時間 (ms)。過ぎてもパネルの一覧には残る */
+export const NOTICE_MS = 6000;
+const NOTICE_FADE_IN = 150;
+const NOTICE_FADE_OUT = 300;
+const NOTICE_W = 320;
+const NOTICE_MAX = 3;
 
 /** 窓のドラッグ中の状態 */
 export interface WindowDrag {
@@ -141,6 +160,12 @@ export class Shell {
   policy = { autoApproveSafe: false, agentDirect: false };
   /** 画面の右下に出す札 (agent のワークスペースなど) */
   badge: string | null = null;
+  /** 通知 (プラットフォームが差し込む)。窓より上の、アプリが描けない層に出す */
+  notices: () => ShellNotice[] = () => [];
+  /** 人が通知を閉じたとき */
+  onDismissNotice: (id: number) => void = () => {};
+  /** 通知を初めて描いた時刻 (2 つのワークスペースで同じ Map を共有し、切り替えで出し直さない) */
+  noticeSeen = new Map<number, number>();
   /** Alt+1 / Alt+2 (ワークスペースの切り替え。プラットフォームが差し込む) */
   onWorkspaceKey: (n: number) => void = () => {};
   /** タイルの分割ツリー */
@@ -161,6 +186,7 @@ export class Shell {
 
   private wins: Win[] = [];
   private closeRects = new Map<AppId, Rect>();
+  private noticeRects: { id: number; rect: Rect; close: Rect; window?: AppId }[] = [];
   /** launch の提案のプレビューで使う、まだ無い窓の名前 */
   private pendingTitles = new Map<AppId, string>();
   private focusedWin = 0;
@@ -267,6 +293,17 @@ export class Shell {
 
   // ---- 人間の入力 (意味的な入力に変換する) ----
   pointerDown(x: number, y: number): void {
+    // 通知は窓より上にあるので先に見る。× で閉じる。本文を押すと、出した窓へフォーカスして閉じる
+    const note = this.noticeRects.find((n) => inside(n.rect, x, y));
+    if (note) {
+      if (!inside(note.close, x, y) && note.window && this.wins.some((w) => w.app.id === note.window)) {
+        if (this.minimized.includes(note.window)) this.restoreApp(note.window, 'human');
+        this.focusApp(note.window);
+      }
+      this.onDismissNotice(note.id);
+      this.onChange();
+      return;
+    }
     const chip = this.chips.find((c) => inside(c.rect, x, y));
     if (chip) {
       this.restoreApp(chip.app, 'human');
@@ -677,7 +714,8 @@ export class Shell {
           this.drag = null;
           if (this.preview) this.preview.alpha.target = 0;
           this.pill.target = 0;
-        } else if (this.zoomed) this.zoomed = null;
+        } else if (this.noticeRects.length) this.onDismissNotice(this.noticeRects[0].id); // 出ている通知の新しいものから閉じる
+        else if (this.zoomed) this.zoomed = null;
         this.onChange();
         break;
       case 'MoveLeft':
@@ -1156,6 +1194,7 @@ export class Shell {
     if (g) cursor = g.drop && !g.valid ? 'not-allowed' : 'grabbing';
     else if (div && !this.zoomed) cursor = div.dir === 'row' ? 'col-resize' : 'row-resize';
     else if (this.chips.some((c) => inside(c.rect, hv.x, hv.y))) cursor = 'pointer';
+    else if (this.noticeRects.some((n) => inside(n.rect, hv.x, hv.y))) cursor = 'pointer';
     else if ([...this.titles.values()].some((r) => inside(r, hv.x, hv.y))) cursor = 'grab';
     else if (this.hits.some((h) => inside(h.hit.rect, hv.x, hv.y))) cursor = 'pointer';
 
@@ -1166,6 +1205,10 @@ export class Shell {
       ops.push(['text', { x: width - bw, y: height - 22, str: this.badge, size: 12, weight: 600, color: 'accentText' }]);
     }
 
+    // 通知 (いちばん上の層。アプリの描画は窓の中に切られているので、ここには届かない)
+    const nt = this.drawNotices(ops, width, now);
+    animating ||= nt.animating;
+
     // 描き終えてから知らせる (アプリが木を更新すると、次のフレームで反映される)
     for (const r of resizes) {
       const key = `${r.w.app.id}/${r.node}`;
@@ -1174,7 +1217,65 @@ export class Shell {
       this.gridSent.set(key, v);
       r.w.app.onResize!(r.node, r.cols, r.rows);
     }
-    return { ops, ime, windows, animating, cursor };
+    return { ops, ime, windows, animating, cursor, wakeAt: nt.wakeAt };
+  }
+
+  /** 右下 (ドックと札の上) に、新しいものを下にして積む */
+  private drawNotices(ops: DrawOp[], width: number, now: number): { animating: boolean; wakeAt?: number } {
+    const all = this.notices();
+    this.noticeRects = [];
+    const ids = new Set(all.map((n) => n.id));
+    for (const id of this.noticeSeen.keys()) if (!ids.has(id)) this.noticeSeen.delete(id);
+    const shown: { n: ShellNotice; age: number }[] = [];
+    for (const n of all) {
+      if (!this.noticeSeen.has(n.id)) this.noticeSeen.set(n.id, now);
+      const age = now - this.noticeSeen.get(n.id)!;
+      if (age < NOTICE_MS) shown.push({ n, age });
+    }
+    let animating = false;
+    let wakeAt: number | undefined;
+    const w = Math.min(NOTICE_W, width - 24);
+    if (w < 120) return { animating };
+    const x = width - w - 12;
+    let bottom = this.area.y + this.area.h - 12 - (this.badge ? 34 : 0);
+    for (const { n, age } of shown.slice(-NOTICE_MAX).reverse()) {
+      const h = n.body ? 72 : 52;
+      const y = bottom - h;
+      if (y < 4) break;
+      bottom = y - 8;
+      const alpha = Math.min(1, age / NOTICE_FADE_IN, (NOTICE_MS - age) / NOTICE_FADE_OUT);
+      if (age < NOTICE_FADE_IN || NOTICE_MS - age < NOTICE_FADE_OUT) animating = true;
+      else wakeAt = Math.min(wakeAt ?? Infinity, now + (NOTICE_MS - NOTICE_FADE_OUT - age));
+      const rect = { x, y, w, h };
+      const close = { x: x + w - 28, y: y + 6, w: 22, h: 22 };
+      ops.push(['layer', { alpha: Math.max(0, alpha) }]);
+      ops.push(['rect', { ...rect, radius: 10, fill: 'surface', stroke: 'accent', lineWidth: 1.5 }]);
+      const tw = w - 24 - 26;
+      ops.push(['text', { x: x + 12, y: y + 16, str: this.fitText(`${n.source} からの通知`, tw, 12, 600), size: 12, weight: 600, color: 'muted' }]);
+      ops.push(['text', { x: x + 12, y: y + 36, str: this.fitText(n.title, tw, 14, 600), size: 14, weight: 600, color: 'text' }]);
+      if (n.body) ops.push(['text', { x: x + 12, y: y + 56, str: this.fitText(n.body, w - 24, 13, 400), size: 13, weight: 400, color: 'text' }]);
+      const hot = inside(close, this.hover.x, this.hover.y);
+      if (hot) ops.push(['rect', { ...close, radius: 6, fill: 'bg' }]);
+      ops.push(['text', { x: close.x + 6, y: close.y + 11, str: '×', size: 15, weight: 600, color: hot ? 'text' : 'muted' }]);
+      ops.push(['pop']);
+      this.noticeRects.push({ id: n.id, rect, close, window: n.window });
+    }
+    return { animating, wakeAt };
+  }
+
+  /** 幅に収まらなければ末尾を … にする (改行は空白にする) */
+  private fitText(str: string, w: number, size: number, weight: number): string {
+    const s = str.replace(/\s+/g, ' ');
+    if (this.measure(s, size, weight) <= w) return s;
+    const cs = [...s];
+    let lo = 0;
+    let hi = cs.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (this.measure(cs.slice(0, mid).join('') + '…', size, weight) <= w) lo = mid;
+      else hi = mid - 1;
+    }
+    return cs.slice(0, lo).join('') + '…';
   }
 }
 

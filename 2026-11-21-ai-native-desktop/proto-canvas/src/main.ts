@@ -652,8 +652,13 @@ function render() {
   if (frame.animating) {
     dirty = true;
     requestAnimationFrame(render);
+  } else if (frame.wakeAt !== undefined) {
+    // 通知が消え始める時刻に描き直す (それまではフレームを回さない)
+    clearTimeout(wakeTimer);
+    wakeTimer = setTimeout(schedule, Math.max(0, frame.wakeAt - performance.now()));
   }
 }
+let wakeTimer: ReturnType<typeof setTimeout> | undefined;
 render();
 backend.focusInput();
 // 最初のフレームまで来たので、起動の見張りを外す (窓の復元でパッケージの窓も作り終えている)

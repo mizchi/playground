@@ -29,6 +29,7 @@
 | アプリの例: Calendar | `src/apps/calendar.ts` | 月の表を ARIA の table で出す。列は等幅の行 (`equal`) で揃える。予定は storage、今日の予定を通知 |
 | テーマ | `src/theme.ts`, `www/index.html` | ライト / ダーク (システムに従う・明示)。lowering はダークを `prefers-color-scheme: dark` の色の宣言として出し、veriss が両方のコントラストを検査する |
 | ワークスペース | `src/platform/services.ts`, `src/apps/agent-desk.ts`, `src/platform/platform.ts` | 人と agent のワークスペース (Alt+1 / Alt+2)。agent は自分のワークスペースで直接操作し、保存は重ねた層に溜まる。持ち込みは人が承認する |
+| 通知 | `src/shell.ts` (`drawNotices`), `src/platform/platform.ts` | 通知を窓より上の層に描く (アプリから描けない)。出どころは manifest の名前。6 秒で消え、押すと出した窓へ移る |
 | タイル | `src/tiling.ts`, `src/anim.ts`, `src/shell.ts` | 分割ツリー。窓のタイトルバーを掴んで運ぶと分割・入れ替えができる (下記)。境界はドラッグで動かせる。最小幅を下回ると「はみ出し」を出す |
 
 右のパネルでは、次のことができる。
@@ -106,6 +107,7 @@ pnpm build && pnpm e2e:calendar   # Calendar の通し確認 (列の揃い、予
 pnpm build && pnpm e2e:theme      # テーマの切り替え (OS の設定、明示、保存、Canvas の画素)
 pnpm build && pnpm e2e:packages   # パッケージ (WIT のコンポーネント) をパネルから入れ、開き、保存する
 pnpm build && pnpm e2e:workspace  # agent のワークスペースで編集し、人がパネルで持ち込みを承認する
+pnpm build && pnpm e2e:notices    # 通知が Canvas の上に出て、押すと窓へ移り、6 秒で消える
 pnpm pty                 # ホストの擬似端末の橋。表示された URL を ?pty= に渡すと、Terminal の「ホストのシェルにつなぐ」が使える
 ```
 
@@ -137,7 +139,7 @@ Node 24 以上が必要 (`.node-version`)。veriss がそれを要求する。�
 
 ## 結果
 
-- 単体テスト 126 件 (うち veriss の検証 12 件、sway への写像 4 件)、E2E 12 件、レイアウト操作の E2E 14 件、Terminal の E2E 14 件、Calendar の E2E 6 件、テーマの E2E 6 件、パッケージの E2E 9 件、ワークスペースの E2E 4 件が通る (Node 24、Playwright の Chromium)
+- 単体テスト 132 件 (うち veriss の検証 12 件、sway への写像 4 件)、E2E 12 件、レイアウト操作の E2E 14 件、Terminal の E2E 14 件、Calendar の E2E 6 件、テーマの E2E 6 件、パッケージの E2E 9 件、ワークスペースの E2E 4 件、通知の E2E 5 件が通る (Node 24、Playwright の Chromium)
 - E2E の IME は、CDP の `Input.imeSetComposition` で実際の composition イベントを起こして確かめた。preedit は木に入らず、確定した `卵` だけが値になる
 - LLM の template の代わりに「カード」template を適用すると、件数が変わっても (3 件 → 5 件) 同じキャッシュに当たる。pin すると再読み込み後も残る
 - 操作を落とす template は、既定レンダラに戻り、理由がパネルに出る
