@@ -25,7 +25,7 @@ export interface ComponentExports {
   app: { start(): void; onAction(req: { target: string; action: WitAction; data?: string; by: 'human' | 'agent' }): void };
 }
 
-const toWit = (a: ActionName): WitAction => a.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`) as WitAction;
+export const toWit = (a: ActionName): WitAction => a.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`) as WitAction;
 const fromWit = (a: WitAction): ActionName => a.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase()) as ActionName;
 
 /** WIT の tree-update を P1 の TreeUpdate にする */

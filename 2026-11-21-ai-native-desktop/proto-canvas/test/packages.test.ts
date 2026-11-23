@@ -7,7 +7,8 @@ import * as shim from '@bytecodealliance/preview2-shim';
 import { builtinManifests } from '../src/apps/manifests.ts';
 import { memoryStorage } from '../src/cache.ts';
 import { loadPackage, parsePackage } from '../src/platform/packages.ts';
-import { hostPackageTools } from '../src/platform/package-tools.ts';
+import { hostPackageTools as tools } from '../src/platform/package-tools.ts';
+import { inProcessRunner } from '../src/platform/packages.ts';
 import type { ComponentModule, PackageSource } from '../src/platform/packages.ts';
 import { createPlatform } from '../src/platform/platform.ts';
 import { memoryKeyValue } from '../src/platform/services.ts';
@@ -22,11 +23,12 @@ const fsSource = (patch: (m: Record<string, unknown>) => Record<string, unknown>
   manifest: async () => patch(JSON.parse(await readFile(path.join(root, 'packages', 'todo-rs', 'app.json'), 'utf8'))),
   bytes: async (p) => new Uint8Array(await readFile(path.join(root, 'component', p))),
 });
-/** Node: 生成した glue を data: URL で読み込む */
-const tools = hostPackageTools(async (js) => (await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)) as ComponentModule);
+/** Node: 生成した glue を data: URL で読み込み、メインスレッドで動かす */
+const dataModule = async (js: string) => (await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)) as ComponentModule;
+const runner = () => inProcessRunner(wasi, dataModule);
 
 const make = async (kv: KeyValue = memoryKeyValue()) => {
-  const r = await loadPackage(fsSource(), wasi, tools);
+  const r = await loadPackage(fsSource(), tools, runner());
   assert.ok(r.ok, JSON.stringify(!r.ok && r.errors));
   const p = createPlatform({ apps: builtinManifests, initial: ['todo'], measure, templates: memoryStorage(), kv });
   assert.equal(p.install(r.manifest), '');
@@ -99,13 +101,13 @@ test('項目の文字のタブ・改行・バックスラッシュは、保存�
 });
 
 test('world gui-app の app (start / on-action) を export しないコンポーネントは入れない', async () => {
-  const r = await loadPackage(fsSource(), wasi, { ...tools, loadModule: async () => ({ instantiate: () => ({}) }) });
+  const r = await loadPackage(fsSource(), tools, inProcessRunner(wasi, async () => ({ instantiate: () => ({}) })));
   assert.ok(!r.ok);
   assert.deepEqual(r.errors, ['gui:app/app (start と on-action) を export していない']);
 });
 
 test('宣言していない能力の import を求めるコンポーネントは入れない (どの能力が足りないかを言う)', async () => {
-  const r = await loadPackage(fsSource((m) => ({ ...m, capabilities: [] })), wasi, tools);
+  const r = await loadPackage(fsSource((m) => ({ ...m, capabilities: [] })), tools, runner());
   assert.ok(!r.ok);
   assert.deepEqual(r.errors, ['gui:app/storage を import している (能力 storage を宣言していない)']);
 });
@@ -127,7 +129,7 @@ test('app.json の検査: パッケージの外のパス、知らない能力、
 });
 
 test('入っているアプリ (同梱のアプリを含む) と同じ id のパッケージは入れない (なりすまし)', async () => {
-  const r = await loadPackage(fsSource((m) => ({ ...m, id: 'settings', title: 'Settings' })), wasi, tools);
+  const r = await loadPackage(fsSource((m) => ({ ...m, id: 'settings', title: 'Settings' })), tools, runner());
   assert.ok(r.ok);
   const p = createPlatform({ apps: builtinManifests, initial: ['todo'], measure, templates: memoryStorage(), kv: memoryKeyValue() });
   assert.match(p.install(r.manifest), /すでに入っている/);

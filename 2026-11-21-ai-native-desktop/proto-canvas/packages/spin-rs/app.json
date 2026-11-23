@@ -1,0 +1,9 @@
+{
+  "id": "spin-rs",
+  "title": "Spin (Rust)",
+  "description": "応答しないコンポーネントの見本 (検証用)。「固まる」で on-action から戻らない",
+  "kind": "component",
+  "capabilities": [],
+  "multiInstance": false,
+  "component": "spin.wasm"
+}

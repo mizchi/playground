@@ -25,7 +25,7 @@
 | MCP | `mcp/server.ts`, `src/mcp-link.ts` | AI 向けの口。読む・提案する・待つだけで、承認の tool は無い |
 | プラットフォーム | `src/platform/`, `src/apps/manifests.ts`, `src/apps/launcher.ts` | アプリの manifest と registry、能力の確認付きのシステムのサービス (storage / clipboard / 通知 / アプリの起動 / 擬似端末)、許可の要求 (人だけが答える)、セッションの保存と復元 ([../PLATFORM.md](../PLATFORM.md)) |
 | アプリの例: Terminal | `src/apps/terminal/`, `pty/server.ts` | libghostty-vt (ghostty-web の wasm) の端末。画面は意味ツリーの `log`。内蔵シェル、または `?pty=` でホストの bash |
-| アプリのパッケージ | `src/platform/packages.ts`, `src/platform/package-tools.ts`, `packages/todo-rs/` | `app.json` + `.wasm`。glue はホストが jco の `generate` で作る (パッケージの JS は動かさない)。能力 = import |
+| アプリのパッケージ | `src/platform/packages.ts`, `src/platform/worker-runner.ts`, `packages/` | `app.json` + `.wasm`。glue はホストが jco の `generate` で作る (パッケージの JS は動かさない)。能力 = import。コンポーネントは Worker で動き、応答しなければ止める |
 | アプリの例: Calendar | `src/apps/calendar.ts` | 月の表を ARIA の table で出す。列は等幅の行 (`equal`) で揃える。予定は storage、今日の予定を通知 |
 | テーマ | `src/theme.ts`, `www/index.html` | ライト / ダーク (システムに従う・明示)。lowering はダークを `prefers-color-scheme: dark` の色の宣言として出し、veriss が両方のコントラストを検査する |
 | タイル | `src/tiling.ts`, `src/anim.ts`, `src/shell.ts` | 分割ツリー。窓のタイトルバーを掴んで運ぶと分割・入れ替えができる (下記)。境界はドラッグで動かせる。最小幅を下回ると「はみ出し」を出す |
@@ -134,7 +134,7 @@ Node 24 以上が必要 (`.node-version`)。veriss がそれを要求する。�
 
 ## 結果
 
-- 単体テスト 116 件 (うち veriss の検証 12 件、sway への写像 4 件)、E2E 12 件、レイアウト操作の E2E 14 件、Terminal の E2E 14 件、Calendar の E2E 6 件、テーマの E2E 6 件、パッケージの E2E 8 件が通る (Node 24、Playwright の Chromium)
+- 単体テスト 116 件 (うち veriss の検証 12 件、sway への写像 4 件)、E2E 12 件、レイアウト操作の E2E 14 件、Terminal の E2E 14 件、Calendar の E2E 6 件、テーマの E2E 6 件、パッケージの E2E 9 件が通る (Node 24、Playwright の Chromium)
 - E2E の IME は、CDP の `Input.imeSetComposition` で実際の composition イベントを起こして確かめた。preedit は木に入らず、確定した `卵` だけが値になる
 - LLM の template の代わりに「カード」template を適用すると、件数が変わっても (3 件 → 5 件) 同じキャッシュに当たる。pin すると再読み込み後も残る
 - 操作を落とす template は、既定レンダラに戻り、理由がパネルに出る

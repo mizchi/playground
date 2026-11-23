@@ -131,6 +131,15 @@ const localKeyValue: KeyValue = {
       /* 保存できなくても動く */
     }
   },
+  keys: () => {
+    try {
+      return Object.keys(localStorage)
+        .filter((k) => k.startsWith(KV_PREFIX))
+        .map((k) => k.slice(KV_PREFIX.length));
+    } catch {
+      return [];
+    }
+  },
 };
 // Terminal: libghostty-vt (ghostty-web の ghostty-vt.wasm) は最初の窓を開くときに読み込む
 const terminal = terminalManifest(async () => {
@@ -141,14 +150,26 @@ const terminal = terminalManifest(async () => {
 });
 // 入れたパッケージ (app.json の URL) は、セッションを復元する前に読み込む (窓のアプリが入っていないと復元できない)
 const PACKAGES_KEY = 'platform.packages';
-const loadWasi = async () => (await import('@bytecodealliance/preview2-shim')) as unknown as Record<string, Record<string, unknown>>;
+// コンポーネントは Worker で動かす (応答しなければ止める)。?component-timeout=ms で操作の期限を変えられる (検証用)
+let runner: import('./platform/packages.ts').ComponentRunner | null = null;
+async function packageRunner() {
+  if (runner) return runner;
+  const { workerRunner } = await import('./platform/worker-runner.ts');
+  const actionMs = Number(params.get('component-timeout') ?? 2000);
+  runner = workerRunner(
+    () => new Worker(new URL('platform/component-worker.js', location.href), { type: 'module' }),
+    () => ({ grant: (app, cap) => platform.services.grant(app, cap), storageEntries: (app) => platform.services.storageEntries(app) }),
+    { actionMs },
+  );
+  return runner;
+}
 async function readPackage(url: string) {
   const { loadPackage } = await import('./platform/packages.ts');
   const { urlPackageSource } = await import('./platform/package-source.ts');
-  const { blobModule, hostPackageTools } = await import('./platform/package-tools.ts');
+  const { hostPackageTools } = await import('./platform/package-tools.ts');
   const src = urlPackageSource(url);
   if (typeof src === 'string') return { ok: false as const, errors: [src] };
-  return loadPackage(src, await loadWasi(), hostPackageTools(blobModule));
+  return loadPackage(src, hostPackageTools, await packageRunner());
 }
 const packageUrls: string[] = (() => {
   try {

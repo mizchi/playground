@@ -82,14 +82,18 @@ async function step(name, fn) {
 
   await step('コンポーネントのアプリで項目を足すと、能力 storage (import) で保存される', async () => {
     await page.evaluate(() => window.shell.activate('todo-rs', 'input'));
+    // フォーカスはコンポーネント (Worker) が返す木で決まる。返ってから打つ
+    await page.waitForFunction(() => window.shell.tree('todo-rs').focus === 'input');
     await page.keyboard.insertText('WIT から保存');
+    await page.waitForFunction(() => window.shell.tree('todo-rs').get('input').value === 'WIT から保存');
     await page.evaluate(() => window.shell.activate('todo-rs', 'add'));
-    assert.match(await page.evaluate(() => localStorage.getItem('ai-native-desktop.kv.app.todo-rs.items')), /WIT から保存/);
+    // コンポーネントは Worker で動くので、保存は少し後に届く
+    await page.waitForFunction(() => /WIT から保存/.test(localStorage.getItem('ai-native-desktop.kv.app.todo-rs.items') ?? ''));
   });
 
   await step('再読み込みしても、パッケージも窓も項目も残る', async () => {
     await page.reload();
-    await page.waitForFunction(() => window.platform && window.shell.windows().some((w) => w.id === 'todo-rs'));
+    await page.waitForFunction(() => window.platform && window.shell.windows().some((w) => w.id === 'todo-rs') && window.shell.tree('todo-rs').get('list'));
     const labels = await page.evaluate(() => {
       const t = window.shell.tree('todo-rs');
       return t.get('list').children.map((c) => t.get(c).label);
@@ -132,6 +136,33 @@ async function step(name, fn) {
     await page.waitForFunction(() => window.platform);
     assert.ok(!(await page.evaluate(() => window.platform.registry.manifest('todo-rs'))));
     assert.match(await page.textContent('#pkgErr'), /安全モード/);
+  });
+
+  await step('コンポーネントは Worker で動く: 止まらないコンポーネントは期限で止められ、デスクトップは固まらない。再起動できる', async () => {
+    await page.goto(page.url().split('?')[0] + '?session=off');
+    await page.waitForFunction(() => window.platform);
+    await page.fill('#pkgUrl', 'packages/spin-rs/app.json');
+    await page.click('#pkgInstall');
+    await page.waitForFunction(() => document.getElementById('pkgErr').textContent === '');
+    await page.click('#installed [data-launch="spin-rs"]');
+    await page.waitForFunction(() => window.shell.tree('spin-rs').get('count'));
+    const label = () => page.evaluate(() => window.shell.tree('spin-rs').get('root').label);
+    await page.evaluate(() => window.shell.activate('spin-rs', 'count'));
+    await page.waitForFunction(() => window.shell.tree('spin-rs').get('count').label === '数える (1)');
+    // 固まる: on-action から戻らない。メインスレッドは動き続ける (evaluate がすぐ返り、ほかのアプリも操作できる)
+    await page.evaluate(() => window.shell.activate('spin-rs', 'spin'));
+    const t0 = Date.now();
+    await page.evaluate(() => window.shell.dispatch({ app: 'todo', target: 'i1', action: 'click', by: 'human' }));
+    assert.ok(Date.now() - t0 < 500, 'メインスレッドは固まらない');
+    assert.equal(await page.evaluate(() => window.shell.tree('todo').get('i1').checked), true);
+    // 期限 (2 秒) で止められ、窓は「応答しない」になる
+    await page.waitForFunction(() => /応答しない/.test(window.shell.tree('spin-rs').get('root').label), null, { timeout: 5000 });
+    assert.match(await page.evaluate(() => window.shell.tree('spin-rs').get('x-stopped').label), /2 秒で返らなかった/);
+    // 再起動すると、新しい Worker で動く
+    await page.evaluate(() => window.shell.activate('spin-rs', 'x-restart'));
+    await page.waitForFunction(() => window.shell.tree('spin-rs').get('count')?.label === '数える (0)');
+    assert.equal(await label(), 'Spin (wasm)');
+    assert.ok(!(await page.evaluate(() => window.shell.tree('spin-rs').get('x-restart'))), '止めたときの表示は消える');
   });
 
   await step('ページエラーなし', async () => assert.deepEqual(errors, []));
