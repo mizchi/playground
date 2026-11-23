@@ -1,9 +1,10 @@
 //! Todo アプリを WIT のコンポーネントにしたもの (src/apps/todo.ts と同じ振る舞い)。
-//! import は host.emit だけ。std が持ち込む WASI の import には、ホストが拒否する実装を渡す (ファイルは読めない)。
-wit_bindgen::generate!({ world: "gui-app", path: "../wit" });
+//! import は host.emit と storage (能力 storage)。std が持ち込む WASI の import には、ホストが拒否する実装を渡す (ファイルは読めない)。
+wit_bindgen::generate!({ world: "gui-app-storage", path: "../wit" });
 
 use exports::gui::app::app::Guest;
 use gui::app::host::emit;
+use gui::app::storage;
 use gui::app::types::{ActionName, ActionRequest, Node, Role, TreeUpdate};
 use std::cell::RefCell;
 
@@ -66,16 +67,44 @@ fn build(root: bool) -> TreeUpdate {
     })
 }
 
+/// 項目を 1 行ずつ "id\tdone\ttext" で保存する (serde を使わない最小の形)
+fn save() {
+    let data = S.with(|s| {
+        s.borrow().items.iter().map(|i| format!("{}\t{}\t{}", i.id, if i.done { 1 } else { 0 }, i.text.replace(['\t', '\n'], " "))).collect::<Vec<_>>().join("\n")
+    });
+    if !storage::set("items", &data) {
+        S.with(|s| s.borrow_mut().status = "保存できなかった".into());
+    }
+}
+
+fn load() {
+    let Some(data) = storage::get("items") else { return };
+    let items: Vec<Item> = data
+        .lines()
+        .filter_map(|l| {
+            let mut p = l.splitn(3, '\t');
+            Some(Item { id: p.next()?.into(), done: p.next()? == "1", text: p.next()?.into() })
+        })
+        .collect();
+    S.with(|s| {
+        let s = &mut *s.borrow_mut();
+        s.seq = items.iter().filter_map(|i| i.id.strip_prefix('i')?.parse::<u32>().ok()).max().unwrap_or(0) + 1;
+        s.items = items;
+    });
+}
+
 struct Component;
 
 impl Guest for Component {
     fn start() {
+        load();
         // 借用を外してから host を呼ぶ (host が同期で呼び返しても困らないように)
         let u = build(true);
         emit(&u);
     }
 
     fn on_action(req: ActionRequest) {
+        let changed = matches!((req.target.as_str(), req.action), ("add", ActionName::Click)) || (req.action == ActionName::Click && req.target.starts_with('i'));
         S.with(|s| {
             let s = &mut *s.borrow_mut();
             match (req.target.as_str(), req.action) {
@@ -106,6 +135,10 @@ impl Guest for Component {
                 _ => {}
             }
         });
+        // 借用を外してから保存する (host の呼び出しの中で状態を借りない)
+        if changed {
+            save();
+        }
         let u = build(false);
         emit(&u);
     }

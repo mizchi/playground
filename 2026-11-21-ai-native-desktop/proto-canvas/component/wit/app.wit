@@ -52,7 +52,21 @@ interface app {
   on-action: func(req: action-request);
 }
 
+/// 能力 storage: アプリ自身の保存領域 (同じアプリの窓で共有)。manifest で storage を宣言したアプリにだけ、ホストがこの import を渡す
+interface storage {
+  get: func(key: string) -> option<string>;
+  /// 保存できたら true (人が保存を拒否していれば false)
+  set: func(key: string, value: string) -> bool;
+}
+
 world gui-app {
   import host;
+  export app;
+}
+
+/// 保存領域を使うアプリ。import が能力そのもの: storage を宣言していないアプリには、この import を渡さない (リンクできない)
+world gui-app-storage {
+  import host;
+  import storage;
   export app;
 }

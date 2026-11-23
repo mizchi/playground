@@ -18,7 +18,10 @@ const measure = (s: string, size: number) => [...s].length * size * 0.6;
 
 const wasmApp = (preopens: 'none' | 'root') =>
   createComponentApp('wasm', (host) => {
-    const imports = { ...wasiImports(shim as unknown as Record<string, Record<string, unknown>>, { preopens, version: '0.2.9' }), ...hostImports(host) };
+    // 能力 storage の import (このテストでは、窓ごとの Map に置く)
+    const kv = new Map<string, string>();
+    const storage = { get: (k: string) => kv.get(k), set: (k: string, v: string) => (kv.set(k, v), true) };
+    const imports = { ...wasiImports(shim as unknown as Record<string, Record<string, unknown>>, { preopens, version: '0.2.9' }), ...hostImports(host), 'gui:app/storage': storage };
     return instantiate(core, imports as never) as unknown as ComponentExports;
   });
 const node = (shell: Shell, label: string) => shell.tree('wasm').walk().find((n) => n.label === label);
@@ -78,6 +81,7 @@ test('読み込み時の検査: コンポーネントの import を一覧でき�
   const wit = execFileSync(jco, ['wit', path.join(import.meta.dirname, '..', 'component', 'todo.wasm')], { encoding: 'utf8' });
   const imports = [...wit.matchAll(/^\s*import ([\w:/.-]+)@/gm)].map((m) => m[1]);
   assert.ok(imports.includes('gui:app/host'));
+  assert.ok(imports.includes('gui:app/storage'), '能力 storage は import として見える');
   assert.ok(imports.includes('wasi:filesystem/preopens'), 'std がファイルシステムの import を持ち込む');
   // ホストの方針: 許可した import 以外を持つコンポーネントは読み込まない、という検査ができる
   const allow = new Set(['gui:app/host', 'gui:app/types']);

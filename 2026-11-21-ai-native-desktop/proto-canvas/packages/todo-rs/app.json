@@ -1,0 +1,10 @@
+{
+  "id": "todo-rs",
+  "title": "Todo (Rust)",
+  "description": "Rust で書いた WIT のコンポーネントの Todo。項目を保存する (能力 storage = import gui:app/storage)",
+  "kind": "component",
+  "capabilities": ["storage"],
+  "multiInstance": false,
+  "entry": "todo.js",
+  "core": ["todo.core.wasm", "todo.core2.wasm", "todo.core3.wasm"]
+}

@@ -18,6 +18,8 @@ export class AppRegistry implements WindowFactory {
 
   install(m: AppManifest): void {
     if (!/^[a-z][a-z0-9-]*$/.test(m.id)) throw new Error(`アプリの id が不正: ${m.id}`);
+    // 入っているアプリ (同梱のアプリを含む) を、あとから入れたもので置き換えさせない (なりすまし)
+    if (this.apps.has(m.id)) throw new Error(`アプリ ${m.id} はすでに入っている`);
     this.apps.set(m.id, m);
   }
 
