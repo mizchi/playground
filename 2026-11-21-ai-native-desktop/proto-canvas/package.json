@@ -31,7 +31,11 @@
     "build:packages": "sh scripts/build-packages.sh",
     "e2e:packages": "node e2e/packages.cjs",
     "e2e:workspace": "node e2e/workspace.cjs",
-    "e2e:notices": "node e2e/notices.cjs"
+    "e2e:notices": "node e2e/notices.cjs",
+    "build:native": "native/build.sh",
+    "native": "node native/host.ts",
+    "e2e:native": "node e2e/native.ts",
+    "e2e:native-window": "node e2e/native-window.ts"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "^1.42.0",

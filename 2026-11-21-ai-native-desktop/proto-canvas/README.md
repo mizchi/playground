@@ -30,6 +30,7 @@
 | テーマ | `src/theme.ts`, `www/index.html` | ライト / ダーク (システムに従う・明示)。lowering はダークを `prefers-color-scheme: dark` の色の宣言として出し、veriss が両方のコントラストを検査する |
 | ワークスペース | `src/platform/services.ts`, `src/apps/agent-desk.ts`, `src/platform/platform.ts` | 人と agent のワークスペース (Alt+1 / Alt+2)。agent は自分のワークスペースで直接操作し、保存は重ねた層に溜まる。持ち込みは人が承認する |
 | 通知 | `src/shell.ts` (`drawNotices`), `src/platform/platform.ts` | 通知を窓より上の層に描く (アプリから描けない)。出どころは manifest の名前。6 秒で消え、押すと出した窓へ移る |
+| ネイティブのホスト | `native/host.ts`, `native/renderer/main.odin`, `native/panel.ts` | ブラウザを使わずに動かす。Node でプラットフォームと shell を組み立て、Odin の描画プロセス (SDL3 + wgpu-native) が描く。人だけが答えるパネルはホストが描く |
 | タイル | `src/tiling.ts`, `src/anim.ts`, `src/shell.ts` | 分割ツリー。窓のタイトルバーを掴んで運ぶと分割・入れ替えができる (下記)。境界はドラッグで動かせる。最小幅を下回ると「はみ出し」を出す |
 
 右のパネルでは、次のことができる。
@@ -111,6 +112,19 @@ pnpm build && pnpm e2e:notices    # 通知が Canvas の上に出て、押すと
 pnpm pty                 # ホストの擬似端末の橋。表示された URL を ?pty= に渡すと、Terminal の「ホストのシェルにつなぐ」が使える
 ```
 
+### ネイティブのホスト (ブラウザを使わない)
+
+描画プロセス (`native/renderer`) のビルドには、Odin、wgpu-native (v29.0.1.1。Odin の `vendor/wgpu/lib/wgpu-<os>-<arch>-release/lib/` に置く)、SDL3、Odin の stb (`vendor/stb/src` でビルド) が要る。
+
+```sh
+pnpm fonts
+SDL3_LIB=/path/to/sdl3/lib pnpm build:native   # native/bin/renderer (ODIN= で odin の場所を変える)
+pnpm native                                    # 窓を開く。-- --pty でホストの bash、-- --mcp ws://127.0.0.1:8130 で AI とつなぐ
+pnpm native -- --headless 1280x800 --control   # 窓なし。標準入力の JSON Lines で操作し、{"t":"capture","path":"x.png"} で書き出す
+pnpm e2e:native          # 窓なしの通し確認 (Vulkan が要る。この環境は lavapipe)
+pnpm e2e:native-window   # Xvfb の X11 の窓で、xdotool のマウス・キーボードを入れる
+```
+
 ### AI (MCP クライアント) からつなぐ
 
 ```sh
@@ -139,7 +153,7 @@ Node 24 以上が必要 (`.node-version`)。veriss がそれを要求する。�
 
 ## 結果
 
-- 単体テスト 138 件 (うち veriss の検証 12 件、sway への写像 4 件)、E2E 12 件、レイアウト操作の E2E 14 件、Terminal の E2E 14 件、Calendar の E2E 6 件、テーマの E2E 6 件、パッケージの E2E 9 件、ワークスペースの E2E 4 件、通知の E2E 5 件が通る (Node 24、Playwright の Chromium)
+- 単体テスト 142 件 (うち veriss の検証 12 件、sway への写像 4 件)、E2E 12 件、レイアウト操作の E2E 14 件、Terminal の E2E 14 件、Calendar の E2E 6 件、テーマの E2E 6 件、パッケージの E2E 9 件、ワークスペースの E2E 4 件、通知の E2E 5 件、ネイティブのホストの E2E 10 件 (窓なし) と 7 件 (X11 の窓) が通る (Node 24、Playwright の Chromium)
 - E2E の IME は、CDP の `Input.imeSetComposition` で実際の composition イベントを起こして確かめた。preedit は木に入らず、確定した `卵` だけが値になる
 - LLM の template の代わりに「カード」template を適用すると、件数が変わっても (3 件 → 5 件) 同じキャッシュに当たる。pin すると再読み込み後も残る
 - 操作を落とす template は、既定レンダラに戻り、理由がパネルに出る

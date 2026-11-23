@@ -8,8 +8,8 @@ import * as ffiModule from '../../node_modules/@mizchi/veriss/text-metrics/_buil
 const ffi = ffiModule as { load_font(d: Uint8Array): number; font_info(h: number): string; shape(h: number, t: string, s: number, axes: string, lang: string, lig: boolean): string };
 import type { Measure } from '../protocol.ts';
 
-export async function loadFontMeasure(url: string, family: string): Promise<Measure> {
-  const data = new Uint8Array(await (await fetch(url)).arrayBuffer());
+/** フォントのバイト列から計測を作る (ブラウザでもネイティブのホスト (Node) でも同じ) */
+export function createFontMeasure(data: Uint8Array, family: string): Measure {
   const shaper = {
     load: (d: Uint8Array) => ffi.load_font(d),
     info: (h: number) => JSON.parse(ffi.font_info(h)),
@@ -17,9 +17,6 @@ export async function loadFontMeasure(url: string, family: string): Promise<Meas
       JSON.parse(ffi.shape(h, text, size, JSON.stringify(axes ?? {}), language, ligatures)),
   };
   const metrics = createTextMetrics({ fonts: { [family]: { data, weight: 400 } }, shaper });
-  const face = new FontFace(family, data, { weight: '100 900' });
-  await face.load();
-  document.fonts.add(face);
   const cache = new Map<string, number>();
   return (str, size) => {
     if (!str) return 0;
@@ -31,4 +28,14 @@ export async function loadFontMeasure(url: string, family: string): Promise<Meas
     }
     return w;
   };
+}
+
+/** ブラウザ: URL から読み、Canvas でも同じフォントで描けるように FontFace にも入れる */
+export async function loadFontMeasure(url: string, family: string): Promise<Measure> {
+  const data = new Uint8Array(await (await fetch(url)).arrayBuffer());
+  const measure = createFontMeasure(data, family);
+  const face = new FontFace(family, data, { weight: '100 900' });
+  await face.load();
+  document.fonts.add(face);
+  return measure;
 }
