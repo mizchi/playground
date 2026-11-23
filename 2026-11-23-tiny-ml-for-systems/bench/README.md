@@ -161,6 +161,8 @@ cd bench/python && .venv/bin/python bench.py --scores
 cd ../rust && RUSTC_BOOTSTRAP=1 cargo run --release -- scores && RUSTC_BOOTSTRAP=1 cargo run --release -- sim
 ```
 
+（この節の出力は、TTL の行を足す前のもの。最新の全体は次の節にある）
+
 ```
 cache 282 MB, eval on last 70% of 600000 requests
 policy                                       OHR     BHR
@@ -207,6 +209,89 @@ oracle は「未来を見て、H リクエスト以内にまた来るものだ�
 - AUC がほぼ同じでも（0.931〜0.934）、閾値 0.5 で入れる量が変わり、ヒット率は 2〜3 ポイント動く。学習区間で閾値を選び直しても、一貫しては良くならなかった（区間によって分布が違うため）。
 - `moka` が admission の上限（27.1%）を超えたのは、追い出し方も変えているため。頻度で追い出す相手を選び、小さくて人気のあるものを多く残すので、OHR は高いが BHR は低い。
 - 結論：リクエスト数を減らしたいなら、まず `moka` を使う（ML は要らない）。転送量を減らしたいなら、LRU + 小さい MLP の admission が一番良く、作る言語はどれでもよい。
+
+## 微分可能プログラミング：ヒット率そのものを最適化する（JAX と Rust の std::autodiff）
+
+ここまでの ML は「H リクエスト以内にまた来るか」という近似のラベルを学習していた。
+微分可能プログラミングを使うと、最適化したい量（容量の制約の下でのヒット）を直接、損失として書ける。
+
+キャッシュを TTL（保持期間）で書き直すと、全体が微分できる式になる。
+各リクエスト s に TTL_s = exp(f_θ(x_s)) を割り当て（f_θ は 11-16-1 の MLP）、次のアクセスまでの間隔を g_s とする。
+
+| 量 | 式 | 微分できる形 |
+|---|---|---|
+| ヒット | g_s ≤ TTL_s なら 1 | sigmoid((log TTL_s − log g_s) / 0.25) |
+| 平均占有量 | Σ size_s × min(g_s, TTL_s) / 行数 | そのまま |
+| 損失 | − ヒット + 10 × max(0, 占有量 / 容量 − 1)² | そのまま |
+
+ヒットは OHR 用（リクエスト数で数える）と BHR 用（バイトで重みづけ）の 2 通りを学習した。
+学習は先頭 30% だけを使い、学習区間の外に出る間隔は「来なかった」として扱う（未来を見ない）。
+学習の後、バイアスを二分探索でずらし、学習区間の平均占有量をちょうど容量に合わせた。
+評価は、容量を厳密に守る TTL キャッシュ（期限の早いものから追い出す）で行った。
+
+```bash
+python/.venv/bin/python jax/ttl.py bhr && python/.venv/bin/python jax/ttl.py ohr
+rustup toolchain install nightly && rustup +nightly component add enzyme
+cd autodiff && RUSTFLAGS="-Zautodiff=Enable" cargo +nightly run --release -- bhr   # ohr も同様
+cd ../rust && RUSTC_BOOTSTRAP=1 cargo run --release -- sim
+```
+
+JAX（jax 0.12.1）と Rust（nightly 1.102 の `std::autodiff`）で同じ損失を書き、同じ決定的な初期値から 500 ステップ学習した。
+
+| | JAX | Rust `std::autodiff` |
+|---|---|---|
+| 損失を書く部分 | `terms()` と `loss()` で約 15 行（配列の演算） | `log_ttl()`・`terms()`・`loss()` で約 35 行（普通の for ループ） |
+| 微分の書き方 | `jax.value_and_grad(loss)` | `#[autodiff_reverse(d_loss, Duplicated, Const, ..., Active)]` |
+| ステップ 1 の損失 | −0.1367 | −0.1367 |
+| 学習後（補正後）の soft BHR / OHR | 0.2297 / 0.4114 | 0.2299 / 0.4112 |
+| 学習時間（500 ステップ × 18 万行） | 14.6 秒（jit、XLA） | 101〜107 秒（1 スレッド） |
+| セットアップ | `uv pip install jax` | nightly + enzyme コンポーネント、`lto = "fat"`、`RUSTFLAGS="-Zautodiff=Enable"` |
+
+キャッシュのシミュレーション（上の表と同じ条件）:
+
+```
+cache 282 MB, eval on last 70% of 600000 requests
+policy                                       OHR     BHR
+LRU (admit all)                           14.66%   8.08%
+LRU + doorkeeper (2nd hit)                20.23%  12.86%
+moka 0.12 (TinyLFU)                       35.83%  12.56%
+quick_cache 0.7 (S3-FIFO)                 22.52%  15.07%
+LRU + py-lightgbm p>0.5                   24.64%  16.93%
+LRU + py-lightgbm p>0.2 (tuned)           25.37%  17.31%
+LRU + py-sklearn-histgb p>0.5             24.91%  16.20%
+LRU + py-sklearn-histgb p>0.2 (tuned)     25.39%  17.33%
+LRU + py-sklearn-logreg p>0.5             25.39%  16.88%
+LRU + py-sklearn-logreg p>0.1 (tuned)     24.64%  16.32%
+LRU + py-sklearn-mlp16 p>0.5              26.61%  17.20%
+LRU + py-sklearn-mlp16 p>0.2 (tuned)      26.01%  17.21%
+LRU + rust-own-logreg p>0.5               23.85%  14.75%
+LRU + rust-own-logreg p>0.1 (tuned)       23.51%  15.25%
+LRU + rust-own-mlp16 p>0.5                25.41%  17.52%
+LRU + rust-own-mlp16 p>0.2 (tuned)        25.54%  17.25%
+LRU + rust-perpetual-b0.5 p>0.5           24.74%  16.89%
+LRU + rust-perpetual-b0.5 p>0.1 (tuned)   23.75%  15.86%
+LRU + rust-perpetual-b1 p>0.5             24.43%  16.51%
+LRU + rust-perpetual-b1 p>0.2 (tuned)     25.80%  17.42%
+LRU + ts-own-logreg p>0.5                 23.43%  14.78%
+LRU + ts-own-logreg p>0.2 (tuned)         25.92%  17.03%
+LRU + ts-own-mlp16 p>0.5                  25.03%  17.39%
+LRU + ts-own-mlp16 p>0.2 (tuned)          24.97%  17.30%
+LRU + oracle (future)                     27.13%  19.14%
+TTL cache, constant TTL=1546              14.22%   7.72%
+TTL cache, learned jax-bhr                24.14%  16.84%
+TTL cache, learned jax-ohr                40.00%   8.76%
+TTL cache, learned rust-autodiff-bhr      24.16%  16.89%
+TTL cache, learned rust-autodiff-ohr      39.99%   8.74%
+```
+
+### 読み取れること
+
+- OHR を直接最適化した TTL は 40.0% で、`moka`（約 36%）も、これまでのどの ML の admission（最高 26.6%）も、admission の上限（27.1%）も上回った。admission だけでなく「どれだけ長く残すか」まで学習しているため。
+- BHR を直接最適化した TTL は 16.8〜16.9% で、近似のラベルで学習した MLP の admission（17.2〜17.5%）と同じ水準にとどまった。BHR では、目的を直接書く利点は出なかった。
+- JAX と Rust は、同じ損失・同じ初期値から、ほぼ同じ結果に収束した（実キャッシュの OHR 40.00% と 39.99%）。
+- JAX のほうが 7 倍速かった。Rust 版は 1 スレッドのスカラーのループで、並列化もベクトル化もしていない。
+- 定数の TTL（1546）は LRU とほぼ同じ（14.2%）。差はすべて、特徴量から TTL を決めたことによる。
+- `moka` は実行ごとに BHR も揺れた（11.6〜12.6%）。
 
 ## 測っていないこと
 

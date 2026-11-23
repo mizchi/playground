@@ -264,6 +264,45 @@ fn lru_range(ids: &[u32], sizes: &[u32], cap: u64, start: usize, end: usize, adm
     })
 }
 
+/// TTL 付きキャッシュ (容量は厳密に守る)。アクセスのたびに期限を now + TTL に更新し、
+/// 容量が足りなければ期限の早いものから追い出す。新しいものの期限が追い出す相手より早ければ入れない。
+fn ttl_cache(ids: &[u32], sizes: &[u32], cap: u64, ttl: impl Fn(usize) -> f64) -> Hit {
+    let mut map: HashMap<u32, (u32, u64)> = HashMap::new();
+    let mut order: BTreeMap<(u64, u32), ()> = BTreeMap::new();
+    let mut used = 0u64;
+    let expiry = |t: usize| (t as f64 + ttl(t).min(1e12)).ceil() as u64;
+    measure(ids, sizes, |t| {
+        let (id, size, now) = (ids[t], sizes[t], t as u64);
+        if let Some(&(sz, exp)) = map.get(&id) {
+            order.remove(&(exp, id));
+            if exp >= now {
+                let e = expiry(t);
+                map.insert(id, (sz, e));
+                order.insert((e, id), ());
+                return true;
+            }
+            map.remove(&id);
+            used -= sz as u64;
+        }
+        if ttl(t) < 1.0 || size as u64 > cap {
+            return false;
+        }
+        let e = expiry(t);
+        while used + size as u64 > cap {
+            let (&(vexp, vid), _) = order.iter().next().unwrap();
+            if vexp >= now && vexp > e {
+                return false; // 追い出す相手のほうが長く残る予定なら、新しいほうを入れない
+            }
+            order.remove(&(vexp, vid));
+            used -= map.remove(&vid).unwrap().0 as u64;
+        }
+        map.insert(id, (size, e));
+        order.insert((e, id), ());
+        used += size as u64;
+        false
+    })
+}
+
 #[derive(Clone)]
 struct SizeWeighter;
 impl quick_cache::Weighter<u32, u32> for SizeWeighter {
@@ -324,6 +363,19 @@ fn simulate() {
         rows.push((format!("LRU + {name} p>{best} (tuned)"), lru_with(&ids, &sizes, cap, |t| s[t] > best)));
     }
     rows.push(("LRU + oracle (future)".into(), lru_with(&ids, &sizes, cap, |t| y[t] > 0.5)));
+
+    // 微分可能プログラミングで学習した TTL (../jax/ttl.py、../autodiff)
+    let h0: f64 = meta.split("\"H\":").nth(1).unwrap().split(',').next().unwrap().parse().unwrap();
+    rows.push((format!("TTL cache, constant TTL={h0}"), ttl_cache(&ids, &sizes, cap, |_| h0)));
+    if let Ok(dir) = fs::read_dir(format!("{DATA}/ttl")) {
+        let mut files: Vec<_> = dir.map(|e| e.unwrap().path()).collect();
+        files.sort();
+        for f in files {
+            let ttl = read_f32(f.to_str().unwrap());
+            let name = f.file_stem().unwrap().to_string_lossy().to_string();
+            rows.push((format!("TTL cache, learned {name}"), ttl_cache(&ids, &sizes, cap, |t| ttl[t] as f64)));
+        }
+    }
 
     println!("cache {} MB, eval on last 70% of {} requests", cap / 1_000_000, ids.len());
     println!("{:<40} {:>7} {:>7}", "policy", "OHR", "BHR");
