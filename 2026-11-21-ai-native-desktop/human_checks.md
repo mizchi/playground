@@ -135,7 +135,7 @@ Odin のビルドの許可を得て、wasm 版の backend をブラウザで確�
 1. mac の Chrome (WebGPU が有効なもの) で `?backend=odin-gpu&font=fonts/ipaexg.ttf` を開く。表示に必要なものは、`pnpm build:odin-gpu && pnpm fonts && pnpm build` で用意する
 2. 窓のドラッグ、スクロール、IME の入力をして、表示の崩れ・ちらつき・文字のにじみを見る
 3. デバイスピクセル比 2 (Retina) で、文字の鮮明さを Canvas 版と比べる
-4. (任意) mac で wgpu-native を使って、ネイティブの単体アプリとして動かす。wgpu-native の配布物は github.com のリリースにあり、この cloud 環境からは取れなかった
+4. (任意) ネイティブで動かすのは H14 に移した (Linux の X11 では自動で確かめた)
 
 **記録**: 表示の不具合、Canvas 版との見た目の差。
 
@@ -168,6 +168,23 @@ Odin のビルドの許可を得て、wasm 版の backend をブラウザで確�
 3. VoiceOver で Calendar の表を辿る (VO+矢印)。曜日の見出しと日付が対で読まれるか、選んだ日が分かるか
 
 **見るところ**: まぶしさ、強調色の目立ち方、選んだ日と今日の区別 (今は選んだ日だけを強調し、今日は見出しの「今日」で示す)。
+
+**結果**: (未記入)
+
+## H14. ネイティブのホストを実機で使う
+
+**何を**: ネイティブのホスト (`proto-canvas/native/`) が、実際のデスクトップ (mac の Metal、Linux の Wayland / X11 の実際の GPU) で使えるか。自動テストは Xvfb (窓のマネージャ無し) と lavapipe (ソフトウェアの Vulkan) で行った (VALIDATION.md の 8i)。
+
+**手順**
+
+1. Odin を用意し、wgpu-native (v29.0.1.1) を Odin の `vendor/wgpu/lib/wgpu-<os>-<arch>-release/lib/` に置き、`vendor/stb/src` で stb をビルドする。SDL3 を入れる (mac は Homebrew の `sdl3`)
+2. フォントを用意する。Linux は `pnpm fonts` (`fonts-ipaexfont` の場所から写す)。mac は IPAex ゴシック (https://moji.or.jp/ipafont/ の `ipaexg.ttf`) を落とし、`proto-canvas/www/fonts/ipaexg.ttf` に置く (または `pnpm native -- --font <ttf のパス>`)
+3. `cd proto-canvas && pnpm install && SDL3_LIB=<SDL3 の lib> pnpm build:native` で描画プロセスを作り、`pnpm native` で開く
+4. 日本語の IME (mac の日本語入力、Linux の fcitx5 / ibus) で Todo に入力する。候補の窓がキャレットの近くに出るか
+5. Retina / HiDPI で文字の鮮明さを見る。窓の × で閉じると、両方のプロセスが終わるか
+6. `node mcp/server.ts` を MCP クライアントに登録し、`pnpm native -- --mcp ws://127.0.0.1:8130` で AI からの提案をパネルで承認する
+
+**記録**: 表示の不具合、IME の候補の位置、閉じたときの振る舞い、体感の速さ。
 
 **結果**: (未記入)
 

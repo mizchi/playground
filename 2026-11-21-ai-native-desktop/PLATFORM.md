@@ -23,6 +23,7 @@
 ┌ 描画 backend (src/backend/) ────────────────────────────────────────────┐
 │  display list (P4b) → Canvas 2D │ Odin (CPU) │ Odin + wgpu (主)            │
 │  ARIA のミラー DOM (a11y) / IME (P5)                                       │
+│  ネイティブ: native/renderer (SDL3 + wgpu-native) に標準入出力で送る         │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -217,6 +218,37 @@ agent ──直接操作──▶ agent のワークスペース (Shell)       �
 
 ![agent のワークスペース](proto-canvas/docs/workspace-agent.png)
 
+## ネイティブのホスト
+
+ブラウザを使わず、デスクトップのアプリとして動かす (`proto-canvas/native/`)。`createPlatform` と shell は DOM に依存しないので、ブラウザの `main.ts` の代わりに Node のホストが同じものを組み立てる。描画は Odin の描画プロセスに任せる。
+
+```
+┌ Node のホスト (native/host.ts) ─────────────────────┐        ┌ 描画プロセス (native/renderer, Odin) ─────┐
+│ createPlatform / shell / 文字の計測 (mizchi/font)    │ 描画命令 │ backend-odin-gpu (ブラウザと同じコード)    │
+│ 保存: JSON ファイル (KeyValue)                       │ ──────▶ │ → wgpu-native (Vulkan / Metal / DX12)     │
+│ 擬似端末: pty_helper.py を直接                        │ 標準入力 │ SDL3 の窓・マウス・キー・文字入力 (IME)    │
+│ 人だけが答えるパネル (許可・提案・持ち込み)           │ ◀────── │ 窓なし: オフスクリーンに描き PNG に書く   │
+│ MCP: connectMcp (ブラウザと同じ)                      │ 入力     └───────────────────────────────────────────┘
+└──────────────────────────────────────────────────────┘ (JSON Lines)
+```
+
+- 2 つのプロセスに分けた理由は [DECISIONS.md](./DECISIONS.md) (2026-11-23)。TypeScript の shell とプラットフォームはそのまま使い、Odin は描画と OS の窓だけを受け持つ
+- **通信**: ホスト → 描画は `[u32 長さ][種類][中身]` の繰り返し (`native/wire.ts`)。描画命令 (P4b の DrawOp) は色 token を RGBA に解決して送り、座標は論理ピクセルのまま (拡大率は描画側が掛ける)。描画 → ホストは JSON Lines (`ready` / `size` / `down` / `key` / `text` / `preedit` / `frame` ...)
+- 1 フレームずつ送り、描画プロセスの `frame` の返事を待ってから次を送る (溜めない)。通知が消える時刻などは `Frame.wakeAt` で起きる
+- **入力**: SDL3 の scancode を、ブラウザの `KeyboardEvent.code` と同じ名前にして送る。キーの対応 (Alt + 方向キーなど) はブラウザと共通の `src/backend/keys.ts`。文字は SDL3 の文字入力 (`TEXT_INPUT` → `ime-commit`、`TEXT_EDITING` → `ime-preedit`) で、shell が入力欄にフォーカスしたとき (`ime-enable`) だけ始める。キャレットの位置を `SetTextInputArea` に渡し、IME の候補窓をそこに出す
+- **人だけが答えるパネル**: ブラウザでは DOM のパネルが受け持つ口 (許可の要求・AI の提案・持ち込み) を、ホストが自分で描く (`native/panel.ts`)。shell に渡す幅の外 (右端 320px) に、shell の描画命令のあとで描くので、アプリはここに描けない。色の組は veriss の見本 (`CHROME_PAIRS`) に入れた
+  - いつも出す (窓の最小の幅は 720px、窓なしでもそれより狭い大きさは断る)。縦に収まらなければスクロールする
+  - 押す場所の判定は、描画プロセスが**表示したフレーム**のボタンで行う。表示されてから 0.5 秒たっていないボタンは押せない (カードが差し込まれて、見ていたボタンの位置に別の承認ボタンが来た直後の押し間違い・誘導を防ぐ)
+  - キーボード: F6 でパネルへ移り、Tab / Enter で答える。フォーカスはボタンの action に付くので、並びが変わっても別のボタンへ移らない。見える位置まで送ってから押せる
+  - 提案の手順と持ち込みの変更は、省略せずにすべて出す (承認する前に、実行されるものを全部見られる)
+- **保存**: `KeyValue` は 1 つの JSON ファイル (`~/.local/share/ai-native-desktop/kv.json`、`--kv` で変える)。一時ファイルに書いてから rename し、済んでから手元の値を変える。1 つのファイルを使うホストは 1 つだけ (`<file>.lock`)。テンプレートのキャッシュも同じファイルに入る
+- **擬似端末**: ブラウザでは WebSocket の橋 (`pty/server.ts`) を通すが、ネイティブでは同じ `pty_helper.py` を直接起こす (`--pty` のときだけ。許可はパネルで答える)
+- **MCP**: `--mcp ws://...` で、ブラウザと同じ `connectMcp` を使う (Node 24 の WebSocket)。AI の提案と持ち込みは、ホストのパネルで人が承認する
+- 窓なし (`--headless 1280x800`) では描画プロセスがオフスクリーンに描き、`--control` の標準入力から入力を入れて PNG に書き出せる (テスト・CI 用)
+- まだ無いもの: パッケージ (WIT のコンポーネント) の読み込み (ブラウザの Worker の代わりに worker_threads が要る)、スクリーンリーダー (ブラウザの ARIA のミラーの代わりに、AT-SPI / NSAccessibility へ写す必要がある)、文字の太さ (フォントは 1 つ)
+
+![ネイティブのホスト (Xvfb の X11 の窓)](proto-canvas/docs/native-window.png)
+
 ## 広げていく順番
 
 0. ~~**アプリどうしのデータの受け渡し**~~ (済: provides と `data:<topic>`。書き込みや「この予定をカレンダーに追加」のような依頼は、まだ無い)
@@ -224,4 +256,5 @@ agent ──直接操作──▶ agent のワークスペース (Shell)       �
 2. ~~**窓の大きさの通知**~~ (済: P2' の格子の大きさ)
 3. ~~**ワークスペース**~~ (済: agent のワークスペースと重ねた層、人が承認する持ち込み。持ち込みはキー単位で、一部だけ選ぶことはまだできない)
 4. ~~**通知を Canvas の上に**~~ (済: shell の最上の層。許可の要求はホストの UI のまま)
-5. **ネイティブのホスト**: `createPlatform` は DOM に依存しないので、Odin + wgpu のネイティブのホストから同じ組み立てを呼ぶ (KeyValue はファイル、擬似端末は直接)
+5. ~~**ネイティブのホスト**~~ (済: Node のホスト + Odin の描画プロセス (SDL3 + wgpu-native)。KeyValue はファイル、擬似端末は直接)
+6. **ネイティブでのパッケージとスクリーンリーダー**: WIT のコンポーネントを worker_threads で動かす。意味ツリーを AT-SPI (Linux) / NSAccessibility (mac) に写す

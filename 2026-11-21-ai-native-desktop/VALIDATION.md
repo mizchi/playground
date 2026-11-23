@@ -21,6 +21,7 @@
 | 6a | 性能 (1000 件のリスト、窓 10 枚) | 済 (スクロールが無い穴を塞いだ) |
 | 6b | スクリーンリーダー向けの ARIA のミラー DOM | 済 (自動検証まで。実際の VoiceOver は human_checks.md の H4) |
 | 7 | AI 向けの口 (MCP サーバ) | 済 |
+| 8i | ネイティブのホスト (Node + Odin の描画プロセス、SDL3 + wgpu-native) | 済 (Linux の X11 まで。mac と実際の IME は [human_checks.md](./human_checks.md) の H14) |
 
 ## 1a. 提案から承認までの間に状況が変わる問題
 
@@ -412,6 +413,29 @@ GTK3 アプリを AT-SPI で読み、意味ツリー (ARIA の語彙) に写し�
 - 本文を押すと、裏のタブにある窓やズームで隠れた窓も表に出してから移る
 - 通知の文字の色の組 (出どころ・題名・本文) を色の組の見本に足し、ライトとダークで veriss のコントラスト検査を通った
 - 実ブラウザ: Todo をすべて完了 → 許可の要求にパネルで答える → Canvas の右下に通知。押すと Todo へフォーカスが移る。操作しなくても 6 秒後に描き直されて消える
+
+### 8i. ネイティブのホスト (`e2e/native.ts`, `e2e/native-window.ts`, `test/native.test.ts`、すべて通った)
+
+環境: Odin dev-2026-11 (公式リポジトリから scratchpad にビルド)、wgpu-native v29.0.1.1 (Odin の vendor と同じ版。github.com のリリースから取れた)、SDL3 3.2 (ソースからビルド)、GPU は lavapipe (Mesa のソフトウェアの Vulkan)。
+
+- 描画プロセスは wgpu-native の Vulkan で準備でき (adapter は llvmpipe)、shell の窓 3 枚とホストのパネルを 1 回のインスタンス描画で描く (約 270 個)
+- `backend-odin-gpu` を、ブラウザの入口 (`main_js.odin`) と共通の部分に分けた。ブラウザの `e2e/odin-gpu.cjs` も通る (Canvas 2D との画素の差・クリック・時間)
+- 窓なし: ポインタで Todo のチェックを押すと意味的な操作になり、保存は JSON ファイルに書かれる。入力欄を押すと IME が有効になり、変換中の文字は描くが木には入れず、確定した文字だけが入る
+- Alt+2 / Alt+1 でワークスペースを切り替える。許可の要求はホストのパネルに出て、キーボード (F6 → Tab → Enter) で許可できる。許可のあとの通知は shell が Canvas の上に描く
+- 再起動すると、ファイルからセッションと保存領域が戻る。ダークテーマでも描ける
+- `--pty` では `pty_helper.py` を直接起こし、パネルで許可すると本物の bash が libghostty-vt の上で動く (`echo $((6*7))` → 42)
+- MCP: AI のクライアント (公式 SDK) → MCP サーバ → ネイティブのホスト。AI の提案と、agent のワークスペースからの持ち込みは、ホストのパネルを人が押したときだけ実行される
+- **本物の窓** (Xvfb の X11): SDL3 の窓に wgpu-native の表面 (BGRA8Unorm) で描き、X の画面から取った画素が theme.ts の色になっている。xdotool の X11 のクリック・文字の入力 (`buy eggs`)・Alt+2 / Alt+1 が、SDL3 → 描画プロセス → ホスト → shell と届く。窓の大きさを変えると描き直す。Ctrl+C で両方のプロセスが 0 で終わる
+- 1 フレームの時間 (X11 の窓、ホバーで 20 回描き直し): ホスト側 (shell.frame + パネル + 符号化) は平均 0.43ms、描画プロセス (解読 + GPU への提出と表示、lavapipe) は平均 3.70ms
+- パネル: 出たばかりのボタンは押しても実行されず、0.5 秒たつと押せる。手順はすべて出し、収まらないボタンはスクロールで見える位置に送る
+- 守り: 読めない `--control` の行には error を返して動き続ける。同じ保存先を 2 つ目のホストでは開かない (lock)。720x400 より狭い窓なしの大きさは断る
+- 単体テスト: キーの対応 (ブラウザと共通)、命令の形、ファイルの KeyValue (壊れたファイルは空から、lock、rename が失敗した値はもう一度書ける)、パネルのボタン・全部の手順・スクロール・折り返し
+
+### 見つけたこと
+
+- **SDL3 の X11 の窓の × は、窓のマネージャが送る** (WM_DELETE_WINDOW)。窓のマネージャの無い Xvfb では送られず、`xdotool windowclose` は窓を壊すだけ (描画プロセスは BadWindow で落ちる)。閉じる操作は実機で確かめる ([human_checks.md](./human_checks.md) の H14)
+- **wgpu-native の callback** は `AllowProcessEvents` で頼み、`InstanceProcessEvents` を回して受け取る。ブラウザの `wgpu.js` は callback の mode を見ない
+- **Todo の入力欄は Enter で追加しない** (`click` を持たないので)。ネイティブの e2e で、Enter で増えたと思った項目が入力欄の文字だったことで気付いた。テストは「追加」を押すように直した
 
 ### 8d. ダークテーマと veriss のコントラスト検査 (`test/theme.test.ts`, `e2e/theme.cjs`、すべて通った)
 

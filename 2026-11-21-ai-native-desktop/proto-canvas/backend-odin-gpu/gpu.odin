@@ -1,6 +1,7 @@
 // PAL の Odin backend の GPU 版 (vendor:wgpu)。js_wasm32 ではブラウザの WebGPU を、ネイティブでは wgpu-native (mac は Metal) を使う。
 // 描画命令をすべて GPU のインスタンス (四角形) にし、1 フレームを 1 回のインスタンス描画で描く。
 // 角丸・枠線・破線・クリップ・透明度はフラグメントシェーダで計算し (CPU 版 raster.odin と同じ式)、文字は字形のアトラスから描く。
+// ブラウザの入口は main_js.odin、ネイティブの入口は native/renderer (このパッケージを import する)。
 package gpu
 
 import "base:runtime"
@@ -39,6 +40,8 @@ state: struct {
 	device:   wgpu.Device,
 	queue:    wgpu.Queue,
 	config:   wgpu.SurfaceConfiguration,
+	/// 表面と描画先の形式。ブラウザは BGRA8、ネイティブは表面が推奨する形式 (sRGB でないもの) を選ぶ
+	format:   wgpu.TextureFormat,
 	pipeline: wgpu.RenderPipeline,
 	vbuf:     wgpu.Buffer,
 	ubuf:     wgpu.Buffer,
@@ -131,37 +134,18 @@ struct VOut {
 }
 `
 
-main :: proc() {
-	state.ctx = context
-	state.instance = wgpu.CreateInstance(nil)
-	if state.instance == nil {
-		state.failed = true
-		return
-	}
-	if !offscreen {
-		state.surface = wgpu.InstanceCreateSurface(state.instance, &wgpu.SurfaceDescriptor{
-			nextInChain = &wgpu.SurfaceSourceCanvasHTMLSelector{sType = .SurfaceSourceCanvasHTMLSelector, selector = "#gpu-screen"},
-		})
-	}
-	wgpu.InstanceRequestAdapter(state.instance, &{compatibleSurface = state.surface}, {callback = on_adapter})
-}
-
-on_adapter :: proc "c" (status: wgpu.RequestAdapterStatus, adapter: wgpu.Adapter, message: string, u1, u2: rawptr) {
-	context = state.ctx
-	if status != .Success || adapter == nil {
-		state.failed = true
-		return
-	}
-	state.adapter = adapter
-	wgpu.AdapterRequestDevice(adapter, nil, {callback = on_device})
-}
-
 on_device :: proc "c" (status: wgpu.RequestDeviceStatus, device: wgpu.Device, message: string, u1, u2: rawptr) {
 	context = state.ctx
 	if status != .Success || device == nil {
 		state.failed = true
 		return
 	}
+	setup(device)
+}
+
+/// device がそろったら、パイプライン・バッファ・字形のアトラスを作る
+setup :: proc(device: wgpu.Device) {
+	if state.format == .Undefined do state.format = .BGRA8Unorm
 	state.device = device
 	state.queue = wgpu.DeviceGetQueue(device)
 
@@ -199,7 +183,7 @@ on_device :: proc "c" (status: wgpu.RequestDeviceStatus, device: wgpu.Device, me
 			module = module,
 			entryPoint = "fs",
 			targetCount = 1,
-			targets = &wgpu.ColorTargetState{format = .BGRA8Unorm, blend = &blend, writeMask = wgpu.ColorWriteMaskFlags_All},
+			targets = &wgpu.ColorTargetState{format = state.format, blend = &blend, writeMask = wgpu.ColorWriteMaskFlags_All},
 		},
 		primitive = {topology = .TriangleList},
 		multisample = {count = 1, mask = 0xFFFFFFFF},
@@ -255,11 +239,11 @@ alloc :: proc "c" (n: i32) -> rawptr {
 resize :: proc "c" (w, h: u32) {
 	context = state.ctx
 	W, H = w, h
-	if offscreen do return
+	if offscreen || w == 0 || h == 0 do return
 	state.config = wgpu.SurfaceConfiguration{
 		device = state.device,
 		usage = {.RenderAttachment},
-		format = .BGRA8Unorm,
+		format = state.format,
 		width = w,
 		height = h,
 		presentMode = .Fifo,
@@ -513,7 +497,7 @@ capture :: proc "c" () -> i32 {
 		if cap.buf != nil do wgpu.BufferRelease(cap.buf)
 		cap.w, cap.h = W, H
 		cap.bpr = (W * 4 + 255) / 256 * 256
-		cap.tex = wgpu.DeviceCreateTexture(state.device, &{usage = {.RenderAttachment, .CopySrc}, dimension = ._2D, size = {W, H, 1}, format = .BGRA8Unorm, mipLevelCount = 1, sampleCount = 1})
+		cap.tex = wgpu.DeviceCreateTexture(state.device, &{usage = {.RenderAttachment, .CopySrc}, dimension = ._2D, size = {W, H, 1}, format = state.format, mipLevelCount = 1, sampleCount = 1})
 		cap.buf = wgpu.DeviceCreateBuffer(state.device, &{usage = {.CopyDst, .MapRead}, size = u64(cap.bpr * H)})
 		delete(cap.pixels)
 		cap.pixels = make([]u8, int(W * H * 4))
@@ -542,13 +526,14 @@ on_mapped :: proc "c" (status: wgpu.MapAsyncStatus, message: wgpu.StringView, u1
 	}
 	if cap.state != 1 do return // 失敗のあとに成功が来ることがある (wgpu.js の .catch().then())
 	src := wgpu.BufferGetConstMappedRange(cap.buf, 0, uint(cap.bpr * cap.h))
+	bgra := state.format == .BGRA8Unorm || state.format == .BGRA8UnormSrgb
 	for y in 0 ..< int(cap.h) {
 		for x in 0 ..< int(cap.w) {
 			s := y * int(cap.bpr) + x * 4
 			d := (y * int(cap.w) + x) * 4
-			cap.pixels[d + 0] = src[s + 2] // BGRA → RGBA
+			cap.pixels[d + 0] = src[s + (bgra ? 2 : 0)] // BGRA → RGBA
 			cap.pixels[d + 1] = src[s + 1]
-			cap.pixels[d + 2] = src[s + 0]
+			cap.pixels[d + 2] = src[s + (bgra ? 0 : 2)]
 			cap.pixels[d + 3] = src[s + 3]
 		}
 	}

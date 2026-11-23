@@ -1,5 +1,6 @@
 // PAL の web-canvas backend: display list の描画、文字の計測、IME の委譲 (隠し textarea)。
-import type { ColorToken, DrawOp, ImeFromHost, ImeToHost, LayoutKey, Measure } from '../protocol.ts';
+import type { ColorToken, DrawOp, ImeFromHost, ImeToHost, Measure } from '../protocol.ts';
+import { mapKey } from './keys.ts';
 
 export const FONT_FAMILY = 'system-ui, "Hiragino Sans", "Noto Sans JP", sans-serif';
 const TOKENS: ColorToken[] = ['bg', 'surface', 'text', 'muted', 'accent', 'accentText', 'border', 'danger', 'ghost'];
@@ -120,31 +121,11 @@ export function createCanvasBackend(canvas: HTMLCanvasElement, sink: HTMLTextAre
   });
   sink.addEventListener('keydown', (e) => {
     if (e.isComposing || composing || e.keyCode === 229) return;
-    // レイアウトのキー操作。mac の Option は e.key を変えるので e.code で見る
-    if (e.altKey) {
-      const map: Record<string, LayoutKey> = {
-        ArrowLeft: 'MoveLeft',
-        ArrowRight: 'MoveRight',
-        ArrowUp: 'MoveUp',
-        ArrowDown: 'MoveDown',
-        Enter: 'Zoom',
-        KeyM: 'Minimize',
-        KeyE: 'Equalize',
-        KeyL: 'Launcher',
-        Digit1: 'Workspace1',
-        Digit2: 'Workspace2',
-      };
-      const k = map[e.code];
-      if (k) {
-        e.preventDefault();
-        ev.input({ t: 'key', key: k });
-        return;
-      }
-    }
-    const key = e.key === 'Tab' ? (e.shiftKey ? 'ShiftTab' : 'Tab') : e.key === ' ' && !imeEnabled ? 'Space' : e.key;
-    if (key === 'Tab' || key === 'ShiftTab' || key === 'Space' || key === 'Enter' || key === 'Escape' || (key === 'Backspace' && imeEnabled)) {
+    // レイアウトのキー操作・Tab・Enter など (ネイティブのホストと同じ対応。src/backend/keys.ts)
+    const m = mapKey({ code: e.code, key: e.key, alt: e.altKey, shift: e.shiftKey }, imeEnabled);
+    if (m) {
       e.preventDefault();
-      ev.input({ t: 'key', key });
+      ev.input(m);
     }
   });
 
