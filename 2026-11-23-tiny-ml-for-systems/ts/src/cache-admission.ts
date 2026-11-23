@@ -165,7 +165,9 @@ for (const capFrac of [0.005, 0.02]) {
     const dir = process.env.DUMP_DIR;
     writeFileSync(`${dir}/cache_X.f32`, new Uint8Array(X.buffer));
     writeFileSync(`${dir}/cache_y.f32`, new Uint8Array(y.buffer));
-    writeFileSync(`${dir}/cache.json`, JSON.stringify({ n: T, d: NF, train: Math.floor(T * TRAIN_FRAC), H }));
+    writeFileSync(`${dir}/cache_id.u32`, new Uint8Array(Uint32Array.from(trace, (r) => r.id).buffer));
+    writeFileSync(`${dir}/cache_size.u32`, new Uint8Array(Uint32Array.from(trace, (r) => r.size).buffer));
+    writeFileSync(`${dir}/cache.json`, JSON.stringify({ n: T, d: NF, train: Math.floor(T * TRAIN_FRAC), H, capacity }));
     console.log(`dumped ${T} x ${NF} to ${dir} (H=${H})`);
     process.exit(0);
   }

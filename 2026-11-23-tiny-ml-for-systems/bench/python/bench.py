@@ -92,3 +92,17 @@ bench("cache", "sklearn LogisticRegression", lambda x, y: LogisticRegression(max
 bench("cache", "sklearn MLP (16,)", mlp((16,), 128, 4), sk, c)
 bench("cache", "lightgbm 100 trees", lgb_fit, lgb_proba, c)
 bench("cache", "sklearn HistGB", lambda x, y: HistGradientBoostingClassifier(random_state=1).fit(x, y), sk, c)
+
+
+# ---- キャッシュのヒット率用：先頭 30% で学習したモデルの、全 60 万行のスコアを書く (../rust の sim が読む)
+if "--scores" in os.sys.argv:
+    xtr, ytr, xte, yte = c
+    xall = np.concatenate([xtr, xte])
+    for name, fit, proba in [
+        ("py-sklearn-logreg", lambda x, y: LogisticRegression(max_iter=200).fit(x, y), sk),
+        ("py-sklearn-mlp16", mlp((16,), 128, 4), sk),
+        ("py-lightgbm", lgb_fit, lgb_proba),
+        ("py-sklearn-histgb", lambda x, y: HistGradientBoostingClassifier(random_state=1).fit(x, y), sk),
+    ]:
+        proba(fit(xtr, ytr), xall).astype("<f4").tofile(DATA / "scores" / f"{name}.f32")
+        print(f"wrote scores/{name}.f32")

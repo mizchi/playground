@@ -146,6 +146,68 @@ b = lgb.train({"objective": "binary"}, lgb.Dataset(X, y), num_boost_round=100); 
 
 この 2 つのデータでは、GBDT の AUC の上乗せは小さかった（url で 0.984 → 0.995、cache ではほぼ 0）。
 
+## 同じ問題を解く：キャッシュのヒット率（容量 0.5%）
+
+AUC ではなく、キャッシュのヒット率そのもので比べた。
+各手段のモデルを「LRU に入れるかどうか」の判断に差し込み、ML を使わない定番のキャッシュ（`moka`、`quick_cache`）とも比べる。
+
+特徴量はキャッシュの中身に依存しない（参照回数・前回からの間隔・種別・サイズ）。
+そこで各手段は全 60 万リクエストのスコアを `data/scores/` に書き、Rust の 1 つのシミュレータが同じ条件で評価する。
+LRU・doorkeeper・oracle の値は、TS の実験（`ts/src/cache-admission.ts`）の値と一致した。
+
+```bash
+cd ../ && DUMP_DIR=bench/data node ts/src/cache-admission.ts && node bench/ts/bench.ts --scores
+cd bench/python && .venv/bin/python bench.py --scores
+cd ../rust && RUSTC_BOOTSTRAP=1 cargo run --release -- scores && RUSTC_BOOTSTRAP=1 cargo run --release -- sim
+```
+
+```
+cache 282 MB, eval on last 70% of 600000 requests
+policy                                       OHR     BHR
+LRU (admit all)                           14.66%   8.08%
+LRU + doorkeeper (2nd hit)                20.23%  12.86%
+moka 0.12 (TinyLFU)                       35.75%  11.69%
+quick_cache 0.7 (S3-FIFO)                 22.52%  15.07%
+LRU + py-lightgbm p>0.5                   24.64%  16.93%
+LRU + py-lightgbm p>0.2 (tuned)           25.37%  17.31%
+LRU + py-sklearn-histgb p>0.5             24.91%  16.20%
+LRU + py-sklearn-histgb p>0.2 (tuned)     25.39%  17.33%
+LRU + py-sklearn-logreg p>0.5             25.39%  16.88%
+LRU + py-sklearn-logreg p>0.1 (tuned)     24.64%  16.32%
+LRU + py-sklearn-mlp16 p>0.5              26.61%  17.20%
+LRU + py-sklearn-mlp16 p>0.2 (tuned)      26.01%  17.21%
+LRU + rust-own-logreg p>0.5               23.85%  14.75%
+LRU + rust-own-logreg p>0.1 (tuned)       23.51%  15.25%
+LRU + rust-own-mlp16 p>0.5                25.41%  17.52%
+LRU + rust-own-mlp16 p>0.2 (tuned)        25.54%  17.25%
+LRU + rust-perpetual-b0.5 p>0.5           24.74%  16.89%
+LRU + rust-perpetual-b0.5 p>0.1 (tuned)   23.75%  15.86%
+LRU + rust-perpetual-b1 p>0.5             24.43%  16.51%
+LRU + rust-perpetual-b1 p>0.2 (tuned)     25.80%  17.42%
+LRU + ts-own-logreg p>0.5                 23.43%  14.78%
+LRU + ts-own-logreg p>0.2 (tuned)         25.92%  17.03%
+LRU + ts-own-mlp16 p>0.5                  25.03%  17.39%
+LRU + ts-own-mlp16 p>0.2 (tuned)          24.97%  17.30%
+LRU + oracle (future)                     27.13%  19.14%
+```
+
+OHR はリクエスト数で数えたヒット率（応答の速さに効く）、BHR はバイト数で数えたヒット率（裏側への転送量に効く）。
+`p>0.5` は閾値を 0.5 に固定した版、`(tuned)` は学習区間（先頭 30%）の中で OHR が最大になる閾値を選び直した版。
+oracle は「未来を見て、H リクエスト以内にまた来るものだけを LRU に入れる」で、admission だけの上限。追い出し方まで含めた上限ではない。
+`moka` は実行ごとに少し揺れた（3 回で OHR 35.75〜36.11%）。ほかの行は毎回同じ値になる。
+
+### 読み取れること
+
+| 改善したいもの | 一番良かったもの | 値 | ML の admission との差 |
+|---|---|---|---|
+| OHR（リクエスト数） | `moka`（TinyLFU、ML なし） | 約 36% | ML の admission の最高（26.6%）より 9 ポイント高い |
+| BHR（バイト数） | LRU + MLP の admission | 17.2〜17.5% | `quick_cache`（15.1%）より 2 ポイント高い。`moka` は 11.7% |
+
+- ML の admission は、どの言語・ライブラリで作っても OHR 23.4〜26.6%、BHR 14.8〜17.5% に収まった。手段による差は、閾値とキャリブレーション（確率の出方）による差と同じくらいの大きさしかない。
+- AUC がほぼ同じでも（0.931〜0.934）、閾値 0.5 で入れる量が変わり、ヒット率は 2〜3 ポイント動く。学習区間で閾値を選び直しても、一貫しては良くならなかった（区間によって分布が違うため）。
+- `moka` が admission の上限（27.1%）を超えたのは、追い出し方も変えているため。頻度で追い出す相手を選び、小さくて人気のあるものを多く残すので、OHR は高いが BHR は低い。
+- 結論：リクエスト数を減らしたいなら、まず `moka` を使う（ML は要らない）。転送量を減らしたいなら、LRU + 小さい MLP の admission が一番良く、作る言語はどれでもよい。
+
 ## 測っていないこと
 
 - PyTorch。download.pytorch.org がこの環境のネットワーク設定で塞がれていて、PyPI の wheel は CUDA の依存で大きすぎた。

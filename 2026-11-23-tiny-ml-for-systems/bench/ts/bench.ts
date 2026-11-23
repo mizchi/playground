@@ -36,3 +36,16 @@ bench("url", url, [256, 1], 8, 64);
 bench("url", url, [256, 8, 1], 8, 64);
 bench("cache", cache, [11, 1], 4, 128);
 bench("cache", cache, [11, 16, 1], 4, 128);
+
+// ---- キャッシュのヒット率用：先頭 30% で学習したモデルの、全 60 万行のスコアを書く (../rust の sim が読む)
+if (process.argv.includes("--scores")) {
+  const { writeFileSync } = await import("node:fs");
+  for (const [name, sizes] of [["ts-own-logreg", [11, 1]], ["ts-own-mlp16", [11, 16, 1]]] as const) {
+    const m = new MLP([...sizes], mulberry32(1));
+    m.fit(cache.xtr, cache.ytr, { epochs: 4, batchSize: 128, lr: 3e-3, rng: mulberry32(2) });
+    const s = new Float32Array(600_000);
+    for (let i = 0; i < s.length; i++) s[i] = m.predict(cx, i * 11);
+    writeFileSync(new URL(`scores/${name}.f32`, DATA), new Uint8Array(s.buffer));
+    console.log(`wrote scores/${name}.f32`);
+  }
+}
