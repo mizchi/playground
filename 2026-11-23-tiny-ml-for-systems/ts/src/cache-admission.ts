@@ -150,6 +150,26 @@ for (const capFrac of [0.005, 0.02]) {
   const meanReqSize = trace.reduce((s, r) => s + r.size, 0) / T;
   const H = Math.round(capacity / meanReqSize);
 
+  // DUMP_DIR=... のときは、全リクエストの特徴量とラベルを書き出して終わる (bench/ の Rust・Python 比較用)
+  if (process.env.DUMP_DIR) {
+    const { writeFileSync } = await import("node:fs");
+    const X = new Float32Array(T * NF), y = new Float32Array(T);
+    const hist = new Map<number, Hist>();
+    for (let t = 0; t < T; t++) {
+      const req = trace[t];
+      const h = hist.get(req.id);
+      features(req, h, t, X, t * NF);
+      y[t] = nextUse[t] >= 0 && nextUse[t] - t <= H ? 1 : 0;
+      if (h) { h.count++; h.last = t; } else hist.set(req.id, { count: 1, last: t });
+    }
+    const dir = process.env.DUMP_DIR;
+    writeFileSync(`${dir}/cache_X.f32`, new Uint8Array(X.buffer));
+    writeFileSync(`${dir}/cache_y.f32`, new Uint8Array(y.buffer));
+    writeFileSync(`${dir}/cache.json`, JSON.stringify({ n: T, d: NF, train: Math.floor(T * TRAIN_FRAC), H }));
+    console.log(`dumped ${T} x ${NF} to ${dir} (H=${H})`);
+    process.exit(0);
+  }
+
   // 学習データ: 先頭 30% のミス時点の特徴量とラベル
   const n = Math.floor(T * TRAIN_FRAC);
   const X = new Float32Array(n * NF), y = new Float32Array(n);
