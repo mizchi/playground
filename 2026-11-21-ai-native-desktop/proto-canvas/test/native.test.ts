@@ -83,6 +83,7 @@ test('ホストのパネル: 待っているものごとに答えるボタンを
     {
       workspace: 1,
       merges: [{ id: 'm1', by: 'agent', intent: 'メモを足す', changes: [{ app: 'notes', key: 'notes' }] }],
+      intents: [{ id: 'i9', text: 'Terminal が Calendar に頼んでいる: 2026-11-24 に予定「会議」を追加する' }],
       prompts: [{ id: 'g1', text: 'Todo が 通知 の許可を求めている' }],
       proposals: [{ id: 'p1', intent: 'あ'.repeat(200), steps: ['todo / i1 を click'], sensitive: true }],
       status: [],
@@ -92,22 +93,22 @@ test('ホストのパネル: 待っているものごとに答えるボタンを
     measure,
     'merge:m1:1',
   );
-  assert.deepEqual(f.buttons.map((b) => b.action), ['ws:1', 'ws:2', 'merge:m1:1', 'merge:m1:0', 'grant:g1:1', 'grant:g1:0', 'prop:p1:1', 'prop:p1:0']);
+  assert.deepEqual(f.buttons.map((b) => b.action), ['ws:1', 'ws:2', 'merge:m1:1', 'merge:m1:0', 'intent:i9:1', 'intent:i9:0', 'grant:g1:1', 'grant:g1:0', 'prop:p1:1', 'prop:p1:0']);
   for (const b of f.buttons) assert.ok(b.rect.x >= 1000 && b.rect.x + b.rect.w <= 1000 + PANEL_W, `${b.label} はパネルの中`);
   // フォーカスの輪は 3 番目のボタン (merge:m1:1) の周り
   const ring = f.ops.find((o) => o[0] === 'rect' && (o[1] as { lineWidth?: number }).lineWidth === 2 && (o[1] as { stroke?: string }).stroke === 'accent');
   assert.ok(ring && Math.abs((ring[1] as { x: number }).x - (f.buttons[2].rect.x - 3)) < 0.01);
   // 手順はすべて出す (承認の前に全部見られる)
-  const many = drawPanel({ workspace: 1, merges: [], prompts: [], proposals: [{ id: 'p2', intent: '多い', steps: ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((x) => `todo / ${x} を click`), sensitive: false }], status: [] }, 0, 800, measure, null);
+  const many = drawPanel({ workspace: 1, merges: [], intents: [], prompts: [], proposals: [{ id: 'p2', intent: '多い', steps: ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((x) => `todo / ${x} を click`), sensitive: false }], status: [] }, 0, 800, measure, null);
   const texts = many.ops.filter((o) => o[0] === 'text').map((o) => (o[1] as { str: string }).str);
   assert.ok(texts.includes('7. todo / g を click'));
   // 縦に収まらないボタンは visible でない。スクロールすると見える
   const prompts = Array.from({ length: 6 }, (_, i) => ({ id: `g${i}`, text: `要求 ${i}` }));
-  const small = drawPanel({ workspace: 1, merges: [], prompts, proposals: [], status: [] }, 0, 300, measure, null);
+  const small = drawPanel({ workspace: 1, merges: [], intents: [], prompts, proposals: [], status: [] }, 0, 300, measure, null);
   const last = small.buttons.at(-1)!;
   assert.equal(last.visible, false);
   assert.ok(small.contentH > 300);
-  const scrolled = drawPanel({ workspace: 1, merges: [], prompts, proposals: [], status: [] }, 0, 300, measure, null, small.contentH - 300);
+  const scrolled = drawPanel({ workspace: 1, merges: [], intents: [], prompts, proposals: [], status: [] }, 0, 300, measure, null, small.contentH - 300);
   assert.equal(scrolled.buttons.at(-1)!.visible, true);
   const lines = wrap('あ'.repeat(200), 100, 10, measure, 2);
   assert.equal(lines.length, 2);

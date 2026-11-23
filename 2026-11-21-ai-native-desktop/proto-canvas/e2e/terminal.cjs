@@ -158,6 +158,23 @@ async function step(name, fn) {
     await waitScreen(/\n\d\d\/07 定例会議/);
   });
 
+  await step('cal add はカレンダーに予定の追加を頼む。パネルに受ける側の説明が出て、人が「実行する」と書かれる', async () => {
+    const now = new Date();
+    const key = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-09`;
+    await page.evaluate(() => window.shell.activate('terminal', 'input'));
+    await typeLine(`cal add ${key} 歯医者`);
+    await waitScreen(/カレンダーに頼んだ/);
+    await page.waitForSelector('#intents [data-ok="1"]');
+    assert.match(await page.textContent('#intents'), new RegExp(`Terminal が Calendar に頼んでいる: ${key} に予定「歯医者」を追加する`));
+    await page.click('#intents [data-ok="1"]');
+    await waitScreen(new RegExp(`カレンダーに追加した: ${key} 歯医者`));
+    const events = await page.evaluate(() => JSON.parse(window.platform.services.servicesFor('calendar', 'calendar').storage.get('events').value));
+    assert.deepEqual(events[key], ['歯医者']);
+    await page.evaluate(() => window.shell.activate('terminal', 'input'));
+    await typeLine('cal');
+    await waitScreen(/\n\d\d\/09 歯医者/);
+  });
+
   await step('agent のコマンドは承認するまで実行されず、承認後は agent として記録される', async () => {
     const r = await page.evaluate(() =>
       window.agent.propose('whoami を実行する', [

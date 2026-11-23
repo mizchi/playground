@@ -441,6 +441,16 @@ GTK3 アプリを AT-SPI で読み、意味ツリー (ARIA の語彙) に写し�
 - **wgpu-native の callback** は `AllowProcessEvents` で頼み、`InstanceProcessEvents` を回して受け取る。ブラウザの `wgpu.js` は callback の mode を見ない
 - **Todo の入力欄は Enter で追加しない** (`click` を持たないので)。ネイティブの e2e で、Enter で増えたと思った項目が入力欄の文字だったことで気付いた。テストは「追加」を押すように直した
 
+### 8j. アプリどうしの依頼 (`test/intents.test.ts`, `e2e/terminal.cjs`, `e2e/native.ts`、すべて通った)
+
+- 引数の形: 実在する YYYY-MM-DD と、1..100 文字で制御文字の無い題名だけを受ける
+- 宣言していないアプリは頼めない (`undeclared`)。受けるアプリが無ければ `unavailable`。引数が合わなければ人に出さずに `invalid`
+- 依頼の説明は受ける側 (Calendar) が作り、頼む側が渡した `summary` は使わない。答えるまでは書かない。agent は答えられない。二度は実行しない
+- 人が「実行する」と Calendar の保存領域に書かれ、開いている Calendar の窓が読み直して予定を出す。監査ログに `handle calendar.add-event from ...` が残る
+- 人が断ると、頼んだ側に `denied` が届き、何も書かない。agent のワークスペースからは頼めない
+- 実ブラウザ: Terminal の `cal add <日付> 歯医者` → パネルに「Terminal が Calendar に頼んでいる: … に予定「歯医者」を追加する」→ 実行する → 端末に「カレンダーに追加した」と出て、`cal` の一覧にも出る (Calendar の窓は開いていない)
+- ネイティブ: 同じ依頼がホストのパネルに「アプリの依頼」として出て、押すと Calendar に書かれる
+
 ### 8d. ダークテーマと veriss のコントラスト検査 (`test/theme.test.ts`, `e2e/theme.cjs`、すべて通った)
 
 - `index.html` の CSS 変数 (ライト・明示したダーク・OS に従うダーク) は `theme.ts` と同じ

@@ -310,6 +310,27 @@ await step('守り: 読めない命令には error を返して動き続ける�
   assert.equal(await new Promise((r) => narrow.on('exit', r)), 2);
 });
 
+await step('アプリどうしの依頼: Terminal の cal add がパネルに「アプリの依頼」として出て、人が「実行する」と Calendar に書かれる', async () => {
+  await host.stop();
+  host = await startHost(['--fresh'], path.join(tmp, 'intent.json'));
+  await host.cmd({ t: 'launch', app: 'terminal' });
+  for (let i = 0; i < 50 && !(await host.rects())['terminal/input']; i++) await new Promise((r) => setTimeout(r, 100));
+  const screen = async () => ((await host.cmd({ t: 'tree', app: 'terminal' })) as { tree: { nodes: { id: string; value?: string }[] }[] }).tree[0].nodes.find((n) => n.id === 'screen')!.value ?? '';
+  for (let i = 0; i < 50 && !/libghostty-vt/.test(await screen()); i++) await new Promise((r) => setTimeout(r, 100));
+  await host.clickRect((await host.rects())['terminal/input']);
+  await host.cmd({ t: 'text', text: 'cal add 2026-12-24 忘年会' });
+  await host.cmd({ t: 'key', code: 'Enter', key: 'Enter', alt: false, shift: false });
+  const s = await host.state();
+  // パネルは幅で折り返すので、つなげて見る
+  assert.ok(s.texts.join('').includes('2026-12-24 に予定「忘年会」を追加する'), `パネルに受ける側の説明: ${s.texts.join('|')}`);
+  const action = s.buttons.find((b) => b.action.startsWith('intent:') && b.action.endsWith(':1'))!.action;
+  if (shots) await host.capture(path.join(shotsDir, 'native-intent.png'));
+  await host.press(action);
+  for (let i = 0; i < 30 && !/カレンダーに追加した/.test(await screen()); i++) await new Promise((r) => setTimeout(r, 100));
+  assert.match(await screen(), /カレンダーに追加した: 2026-12-24 忘年会/);
+  assert.deepEqual(JSON.parse(JSON.parse(readFileSync(path.join(tmp, 'intent.json'), 'utf8'))['app.calendar.events']), { '2026-12-24': ['忘年会'] });
+});
+
 // ---- MCP: AI のクライアント → MCP サーバ → ネイティブのホスト。承認はホストのパネル (人) ----
 await host.stop();
 const wsPort = 8300 + Math.floor(Math.random() * 500);

@@ -60,6 +60,7 @@ interface AppManifest {
 | `apps.launch` | 尋ねる (システムのアプリは許可) | ほかのアプリを開く |
 | `terminal.pty` | 尋ねる | ホストの本物のシェル。ホストが擬似端末の橋を用意しているときだけ使える |
 | `data:<topic>` | 尋ねる (いつも) | ほかのアプリが提供するデータを読む (例: `data:calendar.events`)。下の「アプリどうしのデータ」 |
+| `intent:<topic>` | 頼むたびに人が答える | ほかのアプリに書き込みを頼む (例: `intent:calendar.add-event`)。下の「アプリどうしの依頼」 |
 
 - 状態は `granted` / `denied` / `ask`。`ask` の能力を使うと、呼び出しは `pending` で返り、ホストの UI に許可の要求が出る
 - **許可の要求に答えられるのは人だけ** (`answer(id, granted, 'human')`)。agent の答えは拒否する。MCP にも答える tool は無い
@@ -119,6 +120,28 @@ services.data.query('calendar.events', { year, month })               // 初め�
 - 宣言していないアプリは尋ねることもできない (`undeclared`)。提供するアプリが無ければ `unavailable`
 - 監査ログには `query calendar.events from calendar` のように、誰のデータを読んだかが残る
 - 引数と答えは `structuredClone` で渡す (参照を共有しない)。WIT にするときは、提供する側を `export`、読む側を能力付きの `import` にする
+
+## アプリどうしの依頼 (書き込み)
+
+読み取り (provides) と同じ形で、書き込みは**依頼**にする。受ける側が manifest で宣言し、頼む側は能力として宣言する。頼むたびに人が答える。
+
+```ts
+// 受ける側 (Calendar)
+handles: { 'calendar.add-event': { description: '予定を追加する (日付と題名)' } },
+describe: (topic, args) => '2026-11-24 に予定「会議」を追加する',   // 人に見せる説明。引数が形に合わなければ null
+handle: (topic, args, services) => { ...自分の保存領域に書く... },  // 人が「実行する」を押したあとに呼ばれる
+
+// 頼む側 (Terminal の cal add)
+capabilities: [..., 'intent:calendar.add-event'],
+services.intents.request('calendar.add-event', { date, title }, (r) => ...)   // すぐ返るのは依頼の id。結果は人が答えたあとに届く
+```
+
+- **説明は受ける側が作る**。頼む側が渡した文 (`summary` など) は使わないので、頼む側は「何をするか」を偽れない。引数が形に合わない依頼は、人に出さずに `invalid` で返す
+- 頼むたびに、パネルに「Terminal が Calendar に頼んでいる: 2026-11-24 に予定「会議」を追加する [実行する] [断る]」が出る。**答えられるのは人だけ** (`answerIntent(id, ok, 'human')`)。スクリーンリーダーには読み上げる
+- 実行は、受ける側のアプリの能力付きのサービスで行う (頼む側は相手の保存領域に触れない)。受ける側の窓が開いていなくても受けられる。書いた保存領域のキーは、開いている窓に `storage.onChange` で知らせる
+- 頼む側には、人が断れば `denied`、受ける側が失敗すれば理由、できれば結果が届く。監査ログには `request` (頼む側) と `handle` (受ける側) が残る
+- agent のワークスペースからは頼めない (外へ出る能力と同じ。重ねた層の外に書くことになるので)
+- 能力の宣言は要るが、許可の要求 (ask) は出さない。頼むたびに人が答えるので、二重に尋ねない
 
 ## 描画 backend
 
@@ -254,10 +277,11 @@ agent ──直接操作──▶ agent のワークスペース (Shell)       �
 
 ## 広げていく順番
 
-0. ~~**アプリどうしのデータの受け渡し**~~ (済: provides と `data:<topic>`。書き込みや「この予定をカレンダーに追加」のような依頼は、まだ無い)
+0. ~~**アプリどうしのデータの受け渡し**~~ (済: provides と `data:<topic>`。書き込みは 7 の依頼)
 1. ~~**アプリの入れ方を増やす**~~ (済: `app.json` + WIT のコンポーネント。能力 = import。glue はホストが `.wasm` から作る)
 2. ~~**窓の大きさの通知**~~ (済: P2' の格子の大きさ)
 3. ~~**ワークスペース**~~ (済: agent のワークスペースと重ねた層、人が承認する持ち込み。持ち込みはキー単位で、一部だけ選ぶことはまだできない)
 4. ~~**通知を Canvas の上に**~~ (済: shell の最上の層。許可の要求はホストの UI のまま)
 5. ~~**ネイティブのホスト**~~ (済: Node のホスト + Odin の描画プロセス (SDL3 + wgpu-native)。KeyValue はファイル、擬似端末は直接)
 6. ~~**ネイティブでのパッケージとスクリーンリーダー**~~ (済: worker_threads でコンポーネント、AT-SPI (Linux) に意味ツリー。mac の NSAccessibility はまだ)
+7. ~~**アプリどうしの依頼 (書き込み)**~~ (済: handles と `intent:<topic>`。頼むたびに人が答え、説明は受ける側が作る。WIT のコンポーネントからはまだ頼めない)

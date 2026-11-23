@@ -9,13 +9,14 @@ import type { App } from '../apps/app.ts';
  * - apps.launch: ほかのアプリを起動する
  * - terminal.pty: ホストの本物のシェル (擬似端末) につなぐ。ホストが pty の橋を用意しているときだけ使える
  * - data:<topic>: ほかのアプリが提供するデータを読む (例: data:calendar.events)。提供する側は manifest の provides で宣言する
+ * - intent:<topic>: ほかのアプリに書き込みを頼む (例: intent:calendar.add-event)。受ける側は manifest の handles で宣言する。頼むたびに人が答える
  */
-export type Capability = 'storage' | 'clipboard.read' | 'clipboard.write' | 'notifications' | 'apps.launch' | 'terminal.pty' | `data:${string}`;
+export type Capability = 'storage' | 'clipboard.read' | 'clipboard.write' | 'notifications' | 'apps.launch' | 'terminal.pty' | `data:${string}` | `intent:${string}`;
 
 /** 能力の状態。ask は「初めて使うときに人に尋ねる」 */
 export type GrantState = 'granted' | 'denied' | 'ask';
 
-export type ServiceResult<T> = { ok: true; value: T } | { ok: false; reason: 'denied' | 'pending' | 'undeclared' | 'unavailable' };
+export type ServiceResult<T> = { ok: true; value: T } | { ok: false; reason: 'denied' | 'pending' | 'undeclared' | 'unavailable' | 'invalid' };
 
 /** 擬似端末への接続 (ホストのシェル) */
 export interface PtyHandle {
@@ -42,6 +43,11 @@ export interface AppServices {
   apps: { list(): ServiceResult<{ id: string; title: string; description: string }[]>; launch(id: string): ServiceResult<void> };
   /** ほかのアプリが提供するデータを読む (data:<topic> の能力が要る)。提供するアプリが無ければ unavailable */
   data: { query(topic: string, args?: Record<string, unknown>): ServiceResult<unknown> };
+  /**
+   * ほかのアプリに書き込みを頼む (intent:<topic> の能力が要る)。人が答えるまで待つので、返すのは依頼の id。
+   * 結果 (人が断った・受ける側が失敗した・できた) は onDone に届く。受けるアプリが無ければ unavailable、引数が受ける側の形に合わなければ invalid
+   */
+  intents: { request(topic: string, args: Record<string, unknown>, onDone?: (r: ServiceResult<unknown>) => void): ServiceResult<string> };
   /** ホストのシェルを開く。出力は onData に届く */
   pty: { available(): boolean; open(cols: number, rows: number, onData: (data: string) => void, onExit: (why: string) => void): ServiceResult<PtyHandle> };
   /** 人が許可の要求に答えたとき (ask のあと) */
@@ -69,6 +75,30 @@ export interface AppManifest {
    */
   provides?: Record<string, { description: string }>;
   provide?(topic: string, args: Record<string, unknown>, services: AppServices): unknown;
+  /**
+   * ほかのアプリから受ける書き込みの依頼。describe は人に見せる説明を作る (頼む側ではなく、受ける側が作る。頼む側は説明を偽れない)。
+   * 引数が形に合わなければ null を返す (依頼は人に出さずに invalid)。handle は人が答えたあとに、受ける側の能力付きのサービスで実行する
+   */
+  handles?: Record<string, { description: string }>;
+  describe?(topic: string, args: Record<string, unknown>): string | null;
+  handle?(topic: string, args: Record<string, unknown>, services: AppServices): ServiceResult<unknown>;
+}
+
+/** 書き込みの依頼 (人が答える) */
+export interface IntentRequest {
+  id: string;
+  from: string;
+  fromTitle: string;
+  window: string;
+  to: string;
+  toTitle: string;
+  topic: string;
+  /** 受ける側が作った説明 */
+  summary: string;
+  args: Record<string, unknown>;
+  /** done: 実行した / rejected: 人が断った / failed: 受ける側が失敗した */
+  status: 'pending' | 'done' | 'rejected' | 'failed';
+  result?: string;
 }
 
 /** 窓がどのワークスペースにあるか。agent のワークスペースでは、保存領域への書き込みは重ねた層に溜まり、本物は変わらない */

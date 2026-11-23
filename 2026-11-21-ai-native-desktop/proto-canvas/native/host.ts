@@ -244,6 +244,7 @@ function render() {
     workspace,
     merges: sv.merges.filter((m) => m.status === 'pending'),
     prompts: sv.prompts.filter((p) => p.status === 'pending').map((p) => ({ id: p.id, text: `${p.appTitle} が ${capLabel(p.capability)} の許可を求めている` })),
+    intents: sv.intents.filter((i) => i.status === 'pending').map((i) => ({ id: i.id, text: `${i.fromTitle} が ${i.toTitle} に頼んでいる: ${i.summary}` })),
     proposals: platform.shell.proposals.filter((p) => p.status === 'pending').map((p) => ({ id: p.id, intent: p.intent, steps: p.steps.map(describeStep), sensitive: p.sensitive })),
     status: [mcpStatus, `${theme === 'dark' ? 'ダーク' : 'ライト'}・${size.scale}x`].filter(Boolean),
   };
@@ -282,7 +283,7 @@ function render() {
 // native/atspi/server.py (system の Python 3.12 + Gio) に意味ツリーとパネルを渡し、スクリーンリーダーからの操作を人の操作として受ける
 let a11y: ReturnType<typeof spawn> | null = null;
 let a11ySent = '';
-const announced = { proposals: 0, prompts: 0, notes: 0 };
+const announced = { proposals: 0, prompts: 0, notes: 0, intents: 0 };
 if (flag('--a11y')) {
   a11y = spawn(process.env.ATSPI_PYTHON ?? '/usr/bin/python3.12', [here('./atspi/server.py')], { stdio: ['pipe', 'pipe', 'inherit'] });
   a11y.stdin!.on('error', () => {});
@@ -333,6 +334,8 @@ function syncA11y() {
   announced.proposals = platform.shell.proposals.length;
   for (const p of sv.prompts.slice(announced.prompts)) say(`${p.appTitle} が ${capLabel(p.capability)} の許可を求めています`);
   announced.prompts = sv.prompts.length;
+  for (const i of sv.intents.slice(announced.intents)) say(`${i.fromTitle} が ${i.toTitle} に頼んでいます: ${i.summary}`);
+  announced.intents = sv.intents.length;
   const last = sv.notifications.at(-1);
   if (last && last.id > announced.notes) {
     say(`通知 ${last.title}: ${last.body ?? ''}`);
@@ -349,6 +352,7 @@ function press(action: string) {
   if (kind === 'ws') switchWorkspace(Number(id));
   else if (kind === 'grant') platform.services.answer(id, ok === '1', 'human');
   else if (kind === 'merge') platform.services.answerMerge(id, ok === '1', 'human');
+  else if (kind === 'intent') platform.services.answerIntent(id, ok === '1', 'human');
   else if (kind === 'prop') ok === '1' ? platform.shell.approve(id) : platform.shell.reject(id);
   schedule();
 }

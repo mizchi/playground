@@ -12,6 +12,8 @@ export interface PanelState {
   workspace: 1 | 2;
   merges: { id: string; by: string; intent: string; changes: { app: string; key: string }[] }[];
   prompts: { id: string; text: string }[];
+  /** アプリどうしの書き込みの依頼 (説明は受ける側のアプリが作る) */
+  intents: { id: string; text: string }[];
   proposals: { id: string; intent: string; steps: string[]; sensitive: boolean }[];
   status: string[];
 }
@@ -109,6 +111,12 @@ export function drawPanel(s: PanelState, x0: number, h: number, measure: Measure
       for (const c of m.changes) lines(`${c.app} / ${c.key}`, 12, 'text', 2);
       row([{ action: `merge:${m.id}:1`, label: '人のワークスペースに書く', primary: true }, { action: `merge:${m.id}:0`, label: '却下' }], x0 + PAD + 10);
     });
+  for (const i of s.intents)
+    card(true, () => {
+      text(`アプリの依頼 ${i.id}`, 13, 600, 'text', x0 + PAD + 10);
+      lines(i.text, 13, 'text', 4);
+      row([{ action: `intent:${i.id}:1`, label: '実行する', primary: true }, { action: `intent:${i.id}:0`, label: '断る' }], x0 + PAD + 10);
+    });
   for (const p of s.prompts)
     card(true, () => {
       lines(p.text, 13, 'text', 3);
@@ -121,7 +129,7 @@ export function drawPanel(s: PanelState, x0: number, h: number, measure: Measure
       p.steps.forEach((st, i) => lines(`${i + 1}. ${st}`, 12, 'muted', 3));
       row([{ action: `prop:${p.id}:1`, label: '承認', primary: true }, { action: `prop:${p.id}:0`, label: '却下' }], x0 + PAD + 10);
     });
-  if (!s.merges.length && !s.prompts.length && !s.proposals.length) text('答えを待っているものは無い', 12, 400, 'muted');
+  if (!s.merges.length && !s.intents.length && !s.prompts.length && !s.proposals.length) text('答えを待っているものは無い', 12, 400, 'muted');
   y += 6;
   for (const l of s.status) text(l, 12, 400, 'muted');
   text('F6 でパネルへ。Tab で移り、Enter で押す', 12, 400, 'muted');

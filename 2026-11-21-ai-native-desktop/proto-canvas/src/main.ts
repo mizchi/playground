@@ -265,6 +265,7 @@ const aria = createAriaMirror(
 const seen = new Map<Shell, { proposals: number; audit: number }>();
 let seenPrompts = 0;
 let seenNotes = 0;
+let seenIntents = 0;
 /** AI の提案と、拒否された操作を読み上げる (承認の判断を音声でもできるように) */
 function announce() {
   const sn = seen.get(shell) ?? seen.set(shell, { proposals: 0, audit: 0 }).get(shell)!;
@@ -275,6 +276,8 @@ function announce() {
   sn.audit = shell.audit.length;
   const sv = platform.services;
   for (const p of sv.prompts.slice(seenPrompts)) aria.announce(`${p.appTitle} が ${capLabel(p.capability)} の許可を求めています`);
+  for (const i of sv.intents.slice(seenIntents)) aria.announce(`${i.fromTitle} が ${i.toTitle} に頼んでいます: ${i.summary}`);
+  seenIntents = sv.intents.length;
   seenPrompts = sv.prompts.length;
   const last = sv.notifications.at(-1);
   if (last && last.id > seenNotes) {
@@ -374,6 +377,7 @@ panel.innerHTML = `
   <div class="row"><label>テーマ <select id="theme"><option value="system">システムに従う</option><option value="light">ライト</option><option value="dark">ダーク</option></select></label></div>
   <div class="row" role="group" aria-label="ワークスペース">ワークスペース <button data-ws="1" id="ws1">人 (Alt+1)</button><button data-ws="2" id="ws2">agent (Alt+2)</button></div>
   <div id="merges"></div>
+  <div id="intents"></div>
   <div id="prompts"></div>
   <div id="notices"></div>
 
@@ -499,6 +503,8 @@ panel.addEventListener('click', (e) => {
   else if (d.ws) switchWorkspace(Number(d.ws));
   // 持ち込みに答える (人だけ)
   else if (d.merge) platform.services.answerMerge(d.merge, d.ok === '1', 'human');
+  // アプリどうしの書き込みの依頼に答える (人だけ)
+  else if (d.intent) platform.services.answerIntent(d.intent, d.ok === '1', 'human');
   else return;
   schedule();
   backend.focusInput();
@@ -574,6 +580,14 @@ function renderPanel(frame: ReturnType<Shell['frame']>) {
     $('merges').innerHTML = mergesHtml;
     $('merges').dataset.html = mergesHtml;
   }
+  // 説明 (summary) は受ける側のアプリが作ったもの。頼む側は説明を偽れない
+  $('intents').innerHTML = sv.intents
+    .filter((i) => i.status === 'pending')
+    .map(
+      (i) => `<div class="card sensitive" role="alertdialog" aria-label="アプリの依頼"><div><b>${escapeHtml(i.fromTitle)}</b> が <b>${escapeHtml(i.toTitle)}</b> に頼んでいる: ${escapeHtml(i.summary)}</div>
+        <div class="row"><button class="primary" data-intent="${i.id}" data-ok="1">実行する</button><button data-intent="${i.id}" data-ok="0">断る</button></div></div>`,
+    )
+    .join('');
   $('prompts').innerHTML = sv.prompts
     .filter((p) => p.status === 'pending')
     .map(
