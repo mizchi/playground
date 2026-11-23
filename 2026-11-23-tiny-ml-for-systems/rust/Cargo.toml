@@ -1,0 +1,10 @@
+[package]
+name = "tiny-ml"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# 依存クレートは使わない (std のみ)
+
+[profile.release]
+debug = false
