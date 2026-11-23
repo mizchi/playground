@@ -35,6 +35,9 @@ export const memoryKeyValue = (): KeyValue => {
   return { get: (k) => m.get(k), set: (k, v) => void m.set(k, v), keys: () => [...m.keys()] };
 };
 
+/** 依頼の説明の長さの上限 (文字)。パネルでは切らずに全部出す */
+export const INTENT_SUMMARY_MAX = 200;
+
 export class ServiceHost {
   readonly audit: ServiceAudit[] = [];
   readonly prompts: GrantPrompt[] = [];
@@ -200,9 +203,18 @@ export class ServiceHost {
           if (!handler) return { ok: false, reason: 'unavailable' };
           const r = this.check(app, window, `intent:${topic}`, `request ${topic} to ${handler.id}`);
           if (!r.ok) return fail(r);
-          const copy = structuredClone(args);
-          const summary = handler.describe?.(topic, structuredClone(copy)) ?? null;
-          if (summary === null) return { ok: false, reason: 'invalid' };
+          // 写せない引数 (関数・Symbol など) や、受ける側が説明を作れない引数は、人に出さずに invalid
+          let copy: Record<string, unknown>;
+          let summary: string | null;
+          try {
+            copy = structuredClone(args);
+            summary = handler.describe?.(topic, structuredClone(copy)) ?? null;
+          } catch {
+            return { ok: false, reason: 'invalid' };
+          }
+          // 説明は短く (人が承認の前に全部読めるように)、制御文字を含まない
+          // eslint-disable-next-line no-control-regex
+          if (typeof summary !== 'string' || !summary.trim() || [...summary].length > INTENT_SUMMARY_MAX || /[\u0000-\u001f\u007f]/.test(summary)) return { ok: false, reason: 'invalid' };
           const req: IntentRequest = {
             id: `i${this.seq++}`,
             from: app,

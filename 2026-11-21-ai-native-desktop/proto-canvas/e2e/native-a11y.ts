@@ -166,6 +166,9 @@ await step('AI の提案は announcement のイベントで届き、パネルの
   await until(() => events.some((e) => e.type === 'object:announcement' && (e.text ?? '').includes(`AI の提案 ${id}`)), '提案の読み上げ');
   let approve: Acc | undefined;
   await until(() => !!(approve = find(dump(), (x) => x.role === 'push button' && x.name === '承認')), 'パネルの承認ボタン');
+  // 「承認」だけでは何に答えるか分からないので、説明に提案の全文が入る
+  const d = JSON.parse(execFileSync('/usr/bin/python3.12', ['-W', 'ignore::DeprecationWarning', path.join(root, 'e2e', 'atspi-probe.py'), 'desc', approve!.path], { encoding: 'utf8', timeout: 15000 }));
+  assert.match(d.description, new RegExp(`AI の提案 ${id}: コンパクト表示にする。1\\. settings / compact を click`));
   bridge('action', 'AI-native desktop', approve!.path, 'click');
   await until(async () => ((await cmd({ t: 'state' })) as { proposals: { id: string; status: string }[] }).proposals.find((x) => x.id === id)?.status === 'done', '提案が実行される');
 });

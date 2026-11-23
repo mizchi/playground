@@ -581,13 +581,18 @@ function renderPanel(frame: ReturnType<Shell['frame']>) {
     $('merges').dataset.html = mergesHtml;
   }
   // 説明 (summary) は受ける側のアプリが作ったもの。頼む側は説明を偽れない
-  $('intents').innerHTML = sv.intents
+  const intentsHtml = sv.intents
     .filter((i) => i.status === 'pending')
     .map(
       (i) => `<div class="card sensitive" role="alertdialog" aria-label="アプリの依頼"><div><b>${escapeHtml(i.fromTitle)}</b> が <b>${escapeHtml(i.toTitle)}</b> に頼んでいる: ${escapeHtml(i.summary)}</div>
         <div class="row"><button class="primary" data-intent="${i.id}" data-ok="1">実行する</button><button data-intent="${i.id}" data-ok="0">断る</button></div></div>`,
     )
     .join('');
+  // 変わったときだけ書き換える (キーボードのフォーカスを、ほかの更新で失わない)
+  if ($('intents').dataset.html !== intentsHtml) {
+    $('intents').innerHTML = intentsHtml;
+    $('intents').dataset.html = intentsHtml;
+  }
   $('prompts').innerHTML = sv.prompts
     .filter((p) => p.status === 'pending')
     .map(

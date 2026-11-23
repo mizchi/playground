@@ -328,7 +328,7 @@ function syncA11y() {
     t: 'tree',
     windows: a.windows.map((w) => ({ ...w, focus: shell.tree(w.app).focus })),
     rects: Object.fromEntries(a.rects),
-    panel: presented.map((b) => ({ action: b.action, label: b.label, rect: b.rect })),
+    panel: presented.map((b) => ({ action: b.action, label: b.label, rect: b.rect, context: b.context ?? '' })),
   });
   if (msg !== a11ySent) {
     a11ySent = msg;

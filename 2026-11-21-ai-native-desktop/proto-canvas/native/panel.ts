@@ -25,6 +25,8 @@ export interface PanelButton {
   rect: Rect;
   /** パネルの見えている範囲に、ボタン全体が入っている */
   visible: boolean;
+  /** ボタンが答える対象の全文 (スクリーンリーダーに説明として渡す。「実行する」だけでは何に答えるか分からないので) */
+  context?: string;
 }
 
 export interface PanelFrame {
@@ -72,7 +74,9 @@ export function drawPanel(s: PanelState, x0: number, h: number, measure: Measure
     for (const l of wrap(str, inner - 20, size, measure, max)) text(l, size, 400, color, x0 + PAD + 10);
   };
   /** ボタンを横に並べる */
-  const row = (items: { action: string; label: string; primary?: boolean; pressed?: boolean }[], x = x0 + PAD) => {
+  /** 人が答える文は、切らずに全部出す (縦に収まらなければパネルをスクロールする) */
+  const ALL = 1000;
+  const row = (items: { action: string; label: string; primary?: boolean; pressed?: boolean }[], x = x0 + PAD, context?: string) => {
     let bx = x;
     for (const it of items) {
       const bw = Math.ceil(measure(it.label, 13, 600)) + 22;
@@ -81,7 +85,7 @@ export function drawPanel(s: PanelState, x0: number, h: number, measure: Measure
       ops.push(['rect', { ...r, radius: 6, fill: filled ? 'accent' : 'surface', stroke: filled ? undefined : 'border' }]);
       ops.push(['text', { x: r.x + 11, y: r.y + 14, str: it.label, size: 13, weight: 600, color: filled ? 'accentText' : 'text' }]);
       if (focus === it.action) ops.push(['rect', { x: r.x - 3, y: r.y - 3, w: r.w + 6, h: r.h + 6, radius: 8, stroke: 'accent', lineWidth: 2 }]);
-      buttons.push({ action: it.action, label: it.label, rect: r, visible: r.y >= 0 && r.y + r.h <= h });
+      buttons.push({ action: it.action, label: it.label, rect: r, visible: r.y >= 0 && r.y + r.h <= h, context });
       bx += bw + 8;
     }
     y += 28 + 10;
@@ -107,27 +111,27 @@ export function drawPanel(s: PanelState, x0: number, h: number, measure: Measure
   for (const m of s.merges)
     card(true, () => {
       text(`持ち込みの提案 ${m.id} (${m.by === 'agent' ? 'agent' : '人'})`, 13, 600, 'text', x0 + PAD + 10);
-      lines(m.intent, 12, 'muted', 2);
-      for (const c of m.changes) lines(`${c.app} / ${c.key}`, 12, 'text', 2);
-      row([{ action: `merge:${m.id}:1`, label: '人のワークスペースに書く', primary: true }, { action: `merge:${m.id}:0`, label: '却下' }], x0 + PAD + 10);
+      lines(m.intent, 12, 'muted', ALL);
+      for (const c of m.changes) lines(`${c.app} / ${c.key}`, 12, 'text', ALL);
+      row([{ action: `merge:${m.id}:1`, label: '人のワークスペースに書く', primary: true }, { action: `merge:${m.id}:0`, label: '却下' }], x0 + PAD + 10, `持ち込みの提案 ${m.id}: ${m.intent}。変更: ${m.changes.map((c) => `${c.app} / ${c.key}`).join('、')}`);
     });
   for (const i of s.intents)
     card(true, () => {
       text(`アプリの依頼 ${i.id}`, 13, 600, 'text', x0 + PAD + 10);
-      lines(i.text, 13, 'text', 4);
-      row([{ action: `intent:${i.id}:1`, label: '実行する', primary: true }, { action: `intent:${i.id}:0`, label: '断る' }], x0 + PAD + 10);
+      lines(i.text, 13, 'text', ALL);
+      row([{ action: `intent:${i.id}:1`, label: '実行する', primary: true }, { action: `intent:${i.id}:0`, label: '断る' }], x0 + PAD + 10, `アプリの依頼 ${i.id}: ${i.text}`);
     });
   for (const p of s.prompts)
     card(true, () => {
-      lines(p.text, 13, 'text', 3);
-      row([{ action: `grant:${p.id}:1`, label: '許可', primary: true }, { action: `grant:${p.id}:0`, label: '拒否' }], x0 + PAD + 10);
+      lines(p.text, 13, 'text', ALL);
+      row([{ action: `grant:${p.id}:1`, label: '許可', primary: true }, { action: `grant:${p.id}:0`, label: '拒否' }], x0 + PAD + 10, p.text);
     });
   for (const p of s.proposals)
     card(p.sensitive, () => {
       text(`AI の提案 ${p.id}${p.sensitive ? ' (sensitive)' : ''}`, 13, 600, 'text', x0 + PAD + 10);
-      lines(p.intent, 13, 'text', 2);
-      p.steps.forEach((st, i) => lines(`${i + 1}. ${st}`, 12, 'muted', 3));
-      row([{ action: `prop:${p.id}:1`, label: '承認', primary: true }, { action: `prop:${p.id}:0`, label: '却下' }], x0 + PAD + 10);
+      lines(p.intent, 13, 'text', ALL);
+      p.steps.forEach((st, i) => lines(`${i + 1}. ${st}`, 12, 'muted', ALL));
+      row([{ action: `prop:${p.id}:1`, label: '承認', primary: true }, { action: `prop:${p.id}:0`, label: '却下' }], x0 + PAD + 10, `AI の提案 ${p.id}${p.sensitive ? ' (sensitive)' : ''}: ${p.intent}。${p.steps.map((st, i) => `${i + 1}. ${st}`).join(' ')}`);
     });
   if (!s.merges.length && !s.intents.length && !s.prompts.length && !s.proposals.length) text('答えを待っているものは無い', 12, 400, 'muted');
   y += 6;

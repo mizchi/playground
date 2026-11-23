@@ -40,7 +40,8 @@ export function createTerminalApp(opts: TerminalOptions): App {
   const promptLine = () => vt?.write(`\r\x1b[2K${PROMPT}${draft}`);
   // あとから届いた結果 (依頼の答えなど) は、今の入力行の上に書き、入力行を書き直す
   env.print = (s) => {
-    if (!vt || pty) return;
+    // 窓を閉じたあと (stop で端末を手放したあと) に答えが届いても書かない
+    if (!vt || pty || stopped) return;
     vt.write(`\r\x1b[2K${s}\r\n${PROMPT}${draft}`);
     publish();
   };

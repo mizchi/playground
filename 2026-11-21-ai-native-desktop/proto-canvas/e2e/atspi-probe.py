@@ -6,6 +6,7 @@
   atspi-probe.py at-point <道> <x> <y>              GetAccessibleAtPoint の名前
   atspi-probe.py insert <道> <pos> <文字> <バイト数>
   atspi-probe.py size <道>                           GetPosition / GetSize
+  atspi-probe.py desc <道>                           名前と説明
 """
 import json
 import sys
@@ -46,6 +47,8 @@ elif cmd == "at-point":
 elif cmd == "insert":
     ok = Atspi.EditableText.insert_text(n, int(sys.argv[3]), sys.argv[4], int(sys.argv[5]))
     print(json.dumps({"ok": ok}))
+elif cmd == "desc":
+    print(json.dumps({"name": n.get_name(), "description": n.get_description()}, ensure_ascii=False))
 elif cmd == "size":
     p = Atspi.Component.get_position(n, Atspi.CoordType.WINDOW)
     s = Atspi.Component.get_size(n)

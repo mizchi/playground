@@ -90,6 +90,23 @@ test('人が断ると、頼んだ側に denied が届き、何も書かない', 
   assert.equal(kv.get('app.calendar.events'), undefined);
 });
 
+test('写せない引数や、長すぎる・制御文字を含む説明は、人に出さずに invalid', async () => {
+  const long: AppManifest = {
+    ...asker([]),
+    id: 'receiver',
+    title: 'Receiver',
+    handles: { 'x.do': { description: '' } },
+    describe: (_t, a) => String(a.text),
+    handle: () => ({ ok: true, value: null }),
+  };
+  const { p } = await make([asker(['intent:calendar.add-event', 'intent:x.do']), long]);
+  const sv = p.services.servicesFor('asker', 'asker');
+  assert.deepEqual(sv.intents.request('calendar.add-event', { date: '2026-11-24', title: Symbol('x') as unknown as string }), { ok: false, reason: 'invalid' });
+  assert.deepEqual(sv.intents.request('x.do', { text: 'あ'.repeat(201) }), { ok: false, reason: 'invalid' });
+  assert.deepEqual(sv.intents.request('x.do', { text: '1行目\n2行目' }), { ok: false, reason: 'invalid' });
+  assert.ok(sv.intents.request('x.do', { text: 'あ'.repeat(200) }).ok);
+});
+
 test('agent のワークスペースからは頼めない (外へ出る能力と同じ)', async () => {
   const { p } = await make([asker(['intent:calendar.add-event'])]);
   const r = p.services.servicesFor('asker', 'asker-2', 'agent').intents.request('calendar.add-event', { date: '2026-11-24', title: '会議' });
@@ -99,7 +116,8 @@ test('agent のワークスペースからは頼めない (外へ出る能力と
 
 test('Terminal の cal add: 依頼を出し、人が答えると結果を端末に書く。Calendar を開いていなくても受けられる', async () => {
   const { p, kv } = await make([], ['terminal']);
-  await tick();
+  // libghostty-vt を読み終えるまで、Terminal はコマンドを受けない
+  for (let i = 0; i < 100 && !/libghostty-vt/.test(p.shell.tree('terminal').get('screen')?.value ?? ''); i++) await new Promise((r) => setTimeout(r, 20));
   const run = async (cmd: string) => {
     p.shell.dispatch({ app: 'terminal', target: 'input', action: 'setValue', data: cmd, by: 'human' });
     p.shell.dispatch({ app: 'terminal', target: 'input', action: 'click', by: 'human' });

@@ -446,7 +446,7 @@ GTK3 アプリを AT-SPI で読み、意味ツリー (ARIA の語彙) に写し�
 
 ### 8j. アプリどうしの依頼 (`test/intents.test.ts`, `e2e/terminal.cjs`, `e2e/native.ts`、すべて通った)
 
-- 引数の形: 実在する YYYY-MM-DD と、1..100 文字で制御文字の無い題名だけを受ける
+- 引数の形: 実在する YYYY-MM-DD と、1..100 文字で制御文字の無い題名だけを受ける。写せない引数 (Symbol など)、200 文字を超える・制御文字を含む説明は invalid
 - 宣言していないアプリは頼めない (`undeclared`)。受けるアプリが無ければ `unavailable`。引数が合わなければ人に出さずに `invalid`
 - 依頼の説明は受ける側 (Calendar) が作り、頼む側が渡した `summary` は使わない。答えるまでは書かない。agent は答えられない。二度は実行しない
 - 人が「実行する」と Calendar の保存領域に書かれ、開いている Calendar の窓が読み直して予定を出す。監査ログに `handle calendar.add-event from ...` が残る
