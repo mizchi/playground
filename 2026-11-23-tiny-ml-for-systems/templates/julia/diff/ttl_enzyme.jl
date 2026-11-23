@@ -109,6 +109,14 @@ hit, occ = terms(p, Xtr, lg, g, z, w)
 println("calibrated: soft $target $(round(hit; digits=4))  occupancy/capacity $(round(occ / cap; digits=3))")
 println("train $(round(train_s; digits=2))s ($steps steps, full batch $tr rows, 1 thread, 初回のコンパイルを含む)")
 
+# 重みを共通の JSON 形式で書く (TS / Rust の MLP.fromJSON で読み、exp(predictLogit(x)) が TTL)
+nums(v) = "[" * join(string.(v), ",") * "]"
+outdir = joinpath(@__DIR__, "..", "out")
+mkpath(outdir)
+write(joinpath(outdir, "ttl-enzyme-$target.json"),
+    "{\"sizes\":[$D,$H,1],\"W\":[" * nums(p[1:H*D]) * "," * nums(p[H*D+H+1:H*D+2H]) * "]," *
+    "\"b\":[" * nums(p[H*D+1:H*D+H]) * "," * nums([p[NP]]) * "]}")
+
 mkpath(joinpath(data, "ttl"))
 write(joinpath(data, "ttl", "jl-template-enzyme-$target.f32"), Float32[exp(log_ttl(p, X, i)) for i in 1:n])
 println("wrote ttl/jl-template-enzyme-$target.f32")

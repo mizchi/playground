@@ -1,0 +1,12 @@
+[package]
+name = "ttl-autodiff-template"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# std::autodiff (Enzyme) を使う。nightly と enzyme コンポーネントが必要:
+#   rustup toolchain install nightly && rustup +nightly component add enzyme
+#   RUSTFLAGS="-Zautodiff=Enable" cargo +nightly run --release -- bhr
+
+[profile.release]
+lto = "fat"

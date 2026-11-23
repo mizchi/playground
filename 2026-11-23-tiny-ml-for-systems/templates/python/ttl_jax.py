@@ -104,6 +104,15 @@ hit, occ = terms_j(p)
 print(f"calibrated: soft {TARGET} {float(hit):.4f}  occupancy/capacity {float(occ) / CAP:.3f}")
 print(f"train {train_s:.2f}s ({steps} steps, full batch {TR} rows, jit)")
 
+# 重みを共通の JSON 形式で書く (TS / Rust の MLP.fromJSON で読み、exp(predictLogit(x)) が TTL)
+out = Path(__file__).resolve().parent / "out"
+out.mkdir(exist_ok=True)
+(out / f"ttl-jax-{TARGET}.json").write_text(json.dumps({
+    "sizes": [D, H, 1],
+    "W": [np.asarray(p["W1"]).ravel().tolist(), np.asarray(p["w2"]).tolist()],
+    "b": [np.asarray(p["b1"]).tolist(), [float(p["b2"])]],
+}))
+
 ttl = np.exp(np.asarray(log_ttl(p, jnp.asarray(X, jnp.float64)))).astype("<f4")
 (DATA / "ttl").mkdir(exist_ok=True)
 ttl.tofile(DATA / "ttl" / f"py-template-jax-{TARGET}.f32")
