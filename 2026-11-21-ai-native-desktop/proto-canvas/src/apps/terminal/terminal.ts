@@ -156,7 +156,7 @@ export function terminalManifest(load: () => Promise<VtFactory>): AppManifest {
     title: 'Terminal',
     description: 'libghostty-vt の端末。内蔵シェル、またはホストのシェル',
     kind: 'js',
-    capabilities: ['storage', 'clipboard.read', 'clipboard.write', 'notifications', 'apps.launch', 'terminal.pty'],
+    capabilities: ['storage', 'clipboard.read', 'clipboard.write', 'notifications', 'apps.launch', 'terminal.pty', 'data:calendar.events'],
     multiInstance: true,
     create: (id, services) => createTerminalApp({ id, services, vt: once }),
   };

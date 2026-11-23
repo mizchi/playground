@@ -143,6 +143,21 @@ async function step(name, fn) {
     await waitScreen(/\$ paste\nクリップボードの中身\n/);
   });
 
+  await step('cal はカレンダーの予定を読む。許可の要求に、提供するアプリと中身が出る', async () => {
+    const now = new Date();
+    const key = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-07`;
+    // カレンダーの保存領域に予定を置く (カレンダーの窓は開いていない)
+    await page.evaluate((key) => window.platform.services.servicesFor('calendar', 'calendar').storage.set('events', JSON.stringify({ [key]: ['定例会議'] })), key);
+    await typeLine('cal');
+    await waitScreen(/カレンダーの許可を待っている/);
+    await page.waitForSelector('#prompts [data-allow="1"]');
+    assert.match(await page.textContent('#prompts'), /Terminal が Calendar の「月の予定 \(日付と題名。読み取りだけ\)」の読み取り の許可を求めている/);
+    await page.click('#prompts [data-allow="1"]');
+    await page.evaluate(() => window.shell.activate('terminal', 'input'));
+    await typeLine('cal');
+    await waitScreen(/\n\d\d\/07 定例会議/);
+  });
+
   await step('agent のコマンドは承認するまで実行されず、承認後は agent として記録される', async () => {
     const r = await page.evaluate(() =>
       window.agent.propose('whoami を実行する', [

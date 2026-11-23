@@ -13,6 +13,8 @@ export interface ToyShellEnv {
   /** 最後に入力した actor */
   actor: Actor;
   history: string[];
+  /** 今の日時 (テスト用) */
+  now?: () => Date;
 }
 
 const nl = (s: string) => s.replace(/\r?\n/g, '\r\n');
@@ -31,7 +33,7 @@ const HELP = [
   ['echo <文字>', '表示する'],
   ['clear', '画面を消す'],
   ['date', '今の日時'],
-  ['cal', '今月のカレンダー (今日は反転)'],
+  ['cal', '今月のカレンダー (今日は反転、予定はカレンダーのアプリから)'],
   ['colors', '色の見本 (16 色・256 色・24bit)'],
   ['ls / cat <名前> / write <名前> <内容> / rm <名前>', 'ファイル (storage 能力)'],
   ['copy <文字> / paste', 'クリップボード (clipboard 能力)'],
@@ -60,14 +62,26 @@ export function runToyCommand(line: string, env: ToyShellEnv): string {
     case 'date':
       return new Date().toString();
     case 'cal': {
-      const n = new Date();
+      const n = env.now?.() ?? new Date();
       const y = n.getFullYear();
       const m = n.getMonth();
+      // 予定はカレンダーのアプリから読む (data:calendar.events の能力。初めては人に尋ねる)
+      const q = sv ? sv.data.query('calendar.events', { year: y, month: m }) : null;
+      const events = q?.ok ? (q.value as { date: string; title: string }[]) : [];
+      const busy = new Set(events.map((e) => Number(e.date.slice(8))));
       const first = new Date(y, m, 1).getDay();
       const days = new Date(y, m + 1, 0).getDate();
-      const cells = [...Array(first).fill('  '), ...Array.from({ length: days }, (_, i) => (i + 1 === n.getDate() ? c('7', String(i + 1).padStart(2)) : String(i + 1).padStart(2)))];
+      const cell = (d: number) => {
+        const s = String(d).padStart(2);
+        const today = d === n.getDate();
+        return today && busy.has(d) ? c('7;1;33', s) : today ? c('7', s) : busy.has(d) ? c('1;33', s) : s;
+      };
+      const cells = [...Array(first).fill('  '), ...Array.from({ length: days }, (_, i) => cell(i + 1))];
       const weeks = Array.from({ length: Math.ceil(cells.length / 7) }, (_, w) => cells.slice(w * 7, w * 7 + 7).join(' '));
-      return [`      ${y}年${m + 1}月`, `${c('31', '日')} 月 火 水 木 金 ${c('34', '土')}`, ...weeks].join('\r\n');
+      const out = [`      ${y}年${m + 1}月`, `${c('31', '日')} 月 火 水 木 金 ${c('34', '土')}`, ...weeks];
+      if (q && !q.ok && q.reason !== 'unavailable') out.push(q.reason === 'pending' ? c('33', '予定はカレンダーの許可を待っている (右のパネルで答える)') : c('2', `予定は読めない (${q.reason})`));
+      for (const e of events) out.push(`${c('1;33', e.date.slice(5).replace('-', '/'))} ${e.title}`);
+      return out.join('\r\n');
     }
     case 'colors': {
       const basic = Array.from({ length: 16 }, (_, i) => `${ESC}${i < 8 ? 40 + i : 100 + i - 8}m  ${ESC}0m`).join('');

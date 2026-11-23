@@ -8,8 +8,9 @@ import type { App } from '../apps/app.ts';
  * - notifications: 通知
  * - apps.launch: ほかのアプリを起動する
  * - terminal.pty: ホストの本物のシェル (擬似端末) につなぐ。ホストが pty の橋を用意しているときだけ使える
+ * - data:<topic>: ほかのアプリが提供するデータを読む (例: data:calendar.events)。提供する側は manifest の provides で宣言する
  */
-export type Capability = 'storage' | 'clipboard.read' | 'clipboard.write' | 'notifications' | 'apps.launch' | 'terminal.pty';
+export type Capability = 'storage' | 'clipboard.read' | 'clipboard.write' | 'notifications' | 'apps.launch' | 'terminal.pty' | `data:${string}`;
 
 /** 能力の状態。ask は「初めて使うときに人に尋ねる」 */
 export type GrantState = 'granted' | 'denied' | 'ask';
@@ -32,6 +33,8 @@ export interface AppServices {
   notify(title: string, body?: string): ServiceResult<void>;
   storage: { get(key: string): ServiceResult<string | undefined>; set(key: string, value: string): ServiceResult<void> };
   apps: { list(): ServiceResult<{ id: string; title: string; description: string }[]>; launch(id: string): ServiceResult<void> };
+  /** ほかのアプリが提供するデータを読む (data:<topic> の能力が要る)。提供するアプリが無ければ unavailable */
+  data: { query(topic: string, args?: Record<string, unknown>): ServiceResult<unknown> };
   /** ホストのシェルを開く。出力は onData に届く */
   pty: { available(): boolean; open(cols: number, rows: number, onData: (data: string) => void, onExit: (why: string) => void): ServiceResult<PtyHandle> };
   /** 人が許可の要求に答えたとき (ask のあと) */
@@ -53,6 +56,12 @@ export interface AppManifest {
   system?: boolean;
   /** 窓を作る。services はこの窓に渡す能力付きのサービス */
   create(windowId: string, services: AppServices): App;
+  /**
+   * ほかのアプリに提供するデータ (読み取りだけ)。窓を開いていなくても答えられるよう、manifest の関数として持つ。
+   * services は提供する側のアプリの能力付きのサービス (自分の保存領域を読むなど)。返す値は JSON で表せるもの
+   */
+  provides?: Record<string, { description: string }>;
+  provide?(topic: string, args: Record<string, unknown>, services: AppServices): unknown;
 }
 
 /** 許可の要求 (人が答える) */

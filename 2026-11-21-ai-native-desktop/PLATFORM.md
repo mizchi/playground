@@ -58,6 +58,7 @@ interface AppManifest {
 | `notifications` | 尋ねる | 通知を出す |
 | `apps.launch` | 尋ねる (システムのアプリは許可) | ほかのアプリを開く |
 | `terminal.pty` | 尋ねる | ホストの本物のシェル。ホストが擬似端末の橋を用意しているときだけ使える |
+| `data:<topic>` | 尋ねる (いつも) | ほかのアプリが提供するデータを読む (例: `data:calendar.events`)。下の「アプリどうしのデータ」 |
 
 - 状態は `granted` / `denied` / `ask`。`ask` の能力を使うと、呼び出しは `pending` で返り、ホストの UI に許可の要求が出る
 - **許可の要求に答えられるのは人だけ** (`answer(id, granted, 'human')`)。agent の答えは拒否する。MCP にも答える tool は無い
@@ -65,6 +66,26 @@ interface AppManifest {
 - 許可の要求・通知は **アプリから描けない面 (ホストの UI)** に出す。アプリの template は窓の中にしか描けないので、許可のダイアログを偽装できない。スクリーンリーダーには `aria-live` で読み上げる
 
 WIT にするときは、能力ごとに interface を分け、manifest の宣言に合わせてホストが import を与える (与えない import は link できない)。今の `component/wit/app.wit` は `host.emit` だけなので、そこに optional な import として足していく。
+
+## アプリどうしのデータ
+
+共有の保存領域は作らない。データを持つアプリが**提供するもの**を manifest で宣言し、読みたいアプリは**能力**として宣言する (Android の ContentProvider に近いが、読み取りだけ)。
+
+```ts
+// 提供する側 (Calendar)
+provides: { 'calendar.events': { description: '月の予定 (日付と題名。読み取りだけ)' } },
+provide: (topic, args, services) => calendarEvents(services, args),   // services は Calendar 自身の能力付きのサービス
+
+// 読む側 (Terminal)
+capabilities: [..., 'data:calendar.events'],
+services.data.query('calendar.events', { year, month })               // 初めては pending → 人が許可 → 値
+```
+
+- 提供は manifest の関数なので、提供する側の窓が開いていなくても答えられる。提供する側は自分の保存領域だけを読み、読む側の保存領域には触れない
+- 読む側の能力はいつも「尋ねる」から始まる。許可の要求には、提供するアプリと中身 (「Calendar の『月の予定』の読み取り」) が出る。答えられるのは人だけ
+- 宣言していないアプリは尋ねることもできない (`undeclared`)。提供するアプリが無ければ `unavailable`
+- 監査ログには `query calendar.events from calendar` のように、誰のデータを読んだかが残る
+- 引数と答えは `structuredClone` で渡す (参照を共有しない)。WIT にするときは、提供する側を `export`、読む側を能力付きの `import` にする
 
 ## 描画 backend
 
@@ -122,7 +143,7 @@ ghostty-web 0.4.0 の wasm は、別の端末を `free()` したあとのメモ�
 - 日のセルは `click` で選ぶ (`selected`)。予定のある日は「•」が付く。選んだ日の予定は `list`、追加は textbox (Enter でも追加)
 - 予定は storage、今日の予定があれば開いたときに通知する (notifications)。予定の削除は `sensitive` で、agent からは毎回承認が要る。追加は sensitive でないので、自動承認の対象にできる
 - 表の列を揃えるため、box に `equal` (horizontal の子を等幅にする。CSS の `flex: 1 1 0`) を足し、既定レンダラの `row` に使った。等幅の行に広げられたボタンは幅いっぱいに描き、文字は中央に置く。veriss へは `flex: 1 0 0; min-width: <固有幅>` として写す
-- ターミナルの内蔵シェルにも `cal` (今月、今日は反転) を足した。アプリの保存領域はアプリごとなので、ターミナルからカレンダーの予定は読めない (アプリどうしでデータを渡す口は、まだ無い)
+- ターミナルの内蔵シェルの `cal` は、カレンダーの予定を `data:calendar.events` で読み、予定のある日に印を付けて一覧を出す (上の「アプリどうしのデータ」)
 
 ## テーマ (ライト / ダーク)
 
@@ -139,7 +160,7 @@ ghostty-web 0.4.0 の wasm は、別の端末を `free()` したあとのメモ�
 
 ## 広げていく順番
 
-0. **アプリどうしのデータの受け渡し**: 共有の保存領域ではなく、意図 (intent) のような口で、受け取る側が能力として宣言する (例: ターミナルの `cal` がカレンダーの予定を読む)
+0. ~~**アプリどうしのデータの受け渡し**~~ (済: provides と `data:<topic>`。書き込みや「この予定をカレンダーに追加」のような依頼は、まだ無い)
 1. **アプリの入れ方を増やす**: manifest を JSON にして、wasm コンポーネント (`kind: 'component'`) を URL から入れる。能力は WIT の import と 1 対 1 にする
 2. ~~**窓の大きさの通知**~~ (済: P2' の格子の大きさ)
 3. **ワークスペース**: 人と agent が別のワークスペースで作業し、agent の結果を人のワークスペースに提案として持ち込む

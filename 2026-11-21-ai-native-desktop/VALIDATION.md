@@ -363,6 +363,14 @@ GTK3 アプリを AT-SPI で読み、意味ツリー (ARIA の語彙) に写し�
 - agent は予定を提案で追加できる (自動承認可)。削除は sensitive で承認が要る
 - スクリーンリーダー向けのミラーは表として出る (columnheader 7 個)
 
+### 8e. アプリどうしのデータ (`test/terminal.test.ts`, `e2e/terminal.cjs`、すべて通った)
+
+- ターミナルの `cal` は、カレンダーの予定を `data:calendar.events` で読む。カレンダーの窓は開いていなくてよい
+- 初めては許可の要求が出る (pending)。agent の答えは拒否され、人が許可すると読める。ほかの月の予定は出さず、予定のある日に印が付く
+- 許可の要求の文に、提供するアプリと中身 (「Calendar の『月の予定 (日付と題名。読み取りだけ)』の読み取り」) が出る (実ブラウザ)
+- 宣言していないアプリ (Notes) は `undeclared` で、尋ねることもしない。提供するアプリが無い topic は `unavailable`
+- 監査ログに、誰のデータを読んだか (`query calendar.events from calendar`) が残る
+
 ### 8d. ダークテーマと veriss のコントラスト検査 (`test/theme.test.ts`, `e2e/theme.cjs`、すべて通った)
 
 - `index.html` の CSS 変数 (ライト・明示したダーク・OS に従うダーク) は `theme.ts` と同じ

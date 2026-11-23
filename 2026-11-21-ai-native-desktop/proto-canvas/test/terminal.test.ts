@@ -219,3 +219,35 @@ test('ホストの擬似端末にも、窓の大きさを知らせる', async ()
   const s = screen(p).screen!;
   assert.equal(written.filter((w) => w.startsWith('resize')).at(-1), `resize ${s.cols}x${s.rows}`);
 });
+
+test('アプリ間のデータ: ターミナルの cal は、カレンダーの予定を (人が許可してから) 読む。カレンダーの窓は開いていなくてよい', async () => {
+  const p = await make();
+  const now = new Date();
+  const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  // カレンダーの保存領域に予定を入れておく (カレンダーの窓は開いていない)
+  p.services.servicesFor('calendar', 'calendar').storage.set('events', JSON.stringify({ [`${ym}-03`]: ['歯医者'], '1999-01-01': ['昔の予定'] }));
+  assert.ok(!p.shell.windows().some((w) => w.id === 'calendar'));
+  run(p, 'cal');
+  assert.match(screen(p).value!, /カレンダーの許可を待っている/);
+  const pr = p.services.prompts.find((x) => x.capability === 'data:calendar.events')!;
+  assert.equal(p.services.answer(pr.id, true, 'agent'), '許可の要求に答えられるのは人だけ');
+  p.services.answer(pr.id, true, 'human');
+  run(p, 'cal');
+  const text = screen(p).value!;
+  assert.match(text, /\n\d\d\/03 歯医者/);
+  assert.doesNotMatch(text, /昔の予定/, 'ほかの月の予定は出さない');
+  // 予定のある日は色付き (黄色の太字) で描かれる
+  const marked = screen(p).screen!.lines.flat().find((r) => r.text.trim() === '3' && r.bold);
+  assert.ok(marked, '3 日に印');
+  // 監査ログに、誰が誰のデータを読んだかが残る
+  assert.ok(p.services.audit.some((a) => a.app === 'terminal' && a.capability === 'data:calendar.events' && a.result === 'ok' && a.op.includes('from calendar')));
+});
+
+test('アプリ間のデータ: 宣言していないアプリは読めない。提供するアプリが無ければ unavailable', async () => {
+  const p = await make();
+  const notes = p.services.servicesFor('notes', 'notes');
+  assert.deepEqual(notes.data.query('calendar.events'), { ok: false, reason: 'undeclared' });
+  const term = p.services.servicesFor('terminal', 'terminal');
+  assert.deepEqual(term.data.query('mail.inbox'), { ok: false, reason: 'unavailable' });
+  assert.equal(p.services.prompts.length, 0, '尋ねることもしない');
+});
