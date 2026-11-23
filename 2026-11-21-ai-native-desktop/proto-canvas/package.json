@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm -s build:packages && cp node_modules/ghostty-web/ghostty-vt.wasm www/ && esbuild src/main.ts --bundle --external:'node:*' --format=esm --splitting --chunk-names=chunks/[name]-[hash] --sourcemap --outdir=www --servedir=www --serve=127.0.0.1:8123",
-    "build": "pnpm -s build:packages && cp node_modules/ghostty-web/ghostty-vt.wasm www/ && esbuild src/main.ts --bundle --external:'node:*' --format=esm --splitting --chunk-names=chunks/[name]-[hash] --sourcemap --outdir=www",
+    "dev": "pnpm -s build:packages && cp node_modules/ghostty-web/ghostty-vt.wasm www/ && esbuild src/main.ts src/platform/component-worker.ts --bundle --external:'node:*' --format=esm --splitting --chunk-names=chunks/[name]-[hash] --sourcemap --outdir=www --servedir=www --serve=127.0.0.1:8123",
+    "build": "pnpm -s build:packages && cp node_modules/ghostty-web/ghostty-vt.wasm www/ && esbuild src/main.ts src/platform/component-worker.ts --bundle --external:'node:*' --format=esm --splitting --chunk-names=chunks/[name]-[hash] --sourcemap --outdir=www",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
     "e2e": "node e2e/smoke.cjs",

@@ -105,3 +105,50 @@ test('文字列の空白は HTML と同じ規則で潰す (計測・描画・low
   const low = lower(view, measure);
   assert.ok(low.html.includes('>A B<') && low.html.includes('>押す ボタン<'));
 });
+
+test('人のフォーカスは shell が先に動かす: アプリの返事 (Worker など) より前に打った文字も、その入力欄に届く', () => {
+  // 返事を後回しにするアプリ (Worker で動くコンポーネントの代わり)
+  const got: string[] = [];
+  let emit: (u: import('../src/protocol.ts').TreeUpdate) => void = () => {};
+  let focus: string | null = null;
+  const pending: (() => void)[] = [];
+  const publish = (root?: string) =>
+    emit({ t: 'tree-update', app: 'slow', root, focus, nodes: [
+      { id: 'root', role: 'x-window', label: 'Slow', children: ['a', 'b'] },
+      { id: 'a', role: 'textbox', label: 'A', value: '', actions: ['focus', 'replaceSelectedText'] },
+      { id: 'b', role: 'textbox', label: 'B', value: '', actions: ['focus', 'replaceSelectedText'] },
+    ] });
+  const slow = {
+    id: 'slow',
+    start(e: typeof emit) {
+      emit = e;
+      publish('root');
+    },
+    onAction(req: import('../src/protocol.ts').ActionRequest) {
+      got.push(`${req.action}:${req.target}:${req.data ?? ''}`);
+      pending.push(() => {
+        if (req.action === 'focus') focus = req.target;
+        publish();
+      });
+    },
+  };
+  const shell = new Shell([slow], measure, memoryStorage());
+  shell.frame(800, 600);
+  shell.activate('slow', 'b');
+  assert.equal(shell.tree('slow').focus, 'b', '返事の前にフォーカスが動く');
+  shell.input({ t: 'ime-commit', text: 'あ' });
+  assert.deepEqual(got, ['focus:b:', 'replaceSelectedText:b:あ']);
+  // アプリの返事が来ても同じ (アプリが別の場所へ回せば、そちらが勝つ)
+  for (const f of pending.splice(0)) f();
+  assert.equal(shell.tree('slow').focus, 'b');
+});
+
+test('保存領域の写しは、どんなキーもただの文字列として扱う (__proto__ や constructor)', async () => {
+  const { memoryKeyValue, ServiceHost } = await import('../src/platform/services.ts');
+  const kv = memoryKeyValue();
+  kv.set('app.x.__proto__', 'p');
+  kv.set('app.x.constructor', 'c');
+  kv.set('app.y.other', 'o');
+  const host = new ServiceHost(kv);
+  assert.deepEqual(new Map(host.storageEntries('x')), new Map([['__proto__', 'p'], ['constructor', 'c']]));
+});

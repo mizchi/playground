@@ -26,11 +26,13 @@ const DEFAULT_GRANT: Record<Exclude<Capability, `data:${string}`>, GrantState> =
 export interface KeyValue {
   get(key: string): string | undefined;
   set(key: string, value: string): void;
+  /** 保存されているキー (アプリの保存領域の写しを作るのに使う) */
+  keys(): string[];
 }
 
 export const memoryKeyValue = (): KeyValue => {
   const m = new Map<string, string>();
-  return { get: (k) => m.get(k), set: (k, v) => void m.set(k, v) };
+  return { get: (k) => m.get(k), set: (k, v) => void m.set(k, v), keys: () => [...m.keys()] };
 };
 
 export class ServiceHost {
@@ -185,6 +187,15 @@ export class ServiceHost {
         this.grantListeners.get(app)!.push(cb);
       },
     };
+  }
+
+  /** アプリの保存領域の中身 (Worker で動くコンポーネントに写しを渡すため。許可の確認は呼ぶ側で行う) */
+  storageEntries(app: string): [string, string][] {
+    const prefix = `app.${app}.`;
+    return this.kv
+      .keys()
+      .filter((k) => k.startsWith(prefix))
+      .map((k): [string, string] => [k.slice(prefix.length), this.kv.get(k) ?? '']);
   }
 
   /** 人が読んだ通知を消す */

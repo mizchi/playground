@@ -2,9 +2,14 @@
 // glue (コンポーネントを JS から呼ぶためのコード) は、ホストが .wasm から生成する (jco の generate をホストで動かす)。
 // 能力 = import。ホストは、宣言して許可された能力の import だけを渡す。宣言していない import を持つコンポーネントは入れない。
 // ブラウザでは URL から、テストではファイルから読む (読み方は PackageSource、glue の生成と読み込みは PackageTools で差し替える)。
-import { createComponentApp, hostImports, wasiImports } from '../apps/component-app.ts';
-import type { ComponentExports, WitTreeUpdate } from '../apps/component-app.ts';
+import type { App } from '../apps/app.ts';
+import { createComponentApp } from '../apps/component-app.ts';
+import type { ComponentExports } from '../apps/component-app.ts';
+import { componentImports, hasAppExports, instantiateGlue } from './component-imports.ts';
+import type { ComponentModule, Glue, StorageBackend } from './component-imports.ts';
 import type { AppManifest, AppServices, Capability } from './types.ts';
+
+export type { ComponentModule, Glue };
 
 /** app.json の形 */
 export interface PackageManifest {
@@ -18,11 +23,6 @@ export interface PackageManifest {
   component: string;
 }
 
-/** ホストが生成した glue (jco の --instantiation sync の形) */
-export interface ComponentModule {
-  instantiate(getCoreModule: (path: string) => WebAssembly.Module, imports: Record<string, unknown>): unknown;
-}
-
 export interface PackageSource {
   /** app.json の中身 */
   manifest(): Promise<unknown>;
@@ -30,12 +30,58 @@ export interface PackageSource {
   bytes(path: string): Promise<Uint8Array>;
 }
 
-/** glue を作って読み込む道具 (ホストのもの。パッケージからは来ない) */
+/** glue を作る道具 (ホストのもの。パッケージからは来ない) */
 export interface PackageTools {
   /** jco の generate: コンポーネントから glue の JS と core wasm を作り、import の一覧を返す */
   generate(component: Uint8Array): Promise<{ files: [string, Uint8Array][]; imports: string[] }>;
-  /** 生成した JS を ES module として読み込む */
-  loadModule(js: string): Promise<ComponentModule>;
+}
+
+/**
+ * コンポーネントを動かす場所。テストではメインスレッド (in-process)、ブラウザでは Worker (応答しなければ止められる)
+ */
+export interface ComponentRunner {
+  /** 試しにインスタンスを作り、export を確かめる。問題があれば理由、なければ null */
+  probe(glue: Glue, pkg: PackageManifest): Promise<string | null>;
+  /** 窓を作る */
+  create(glue: Glue, pkg: PackageManifest, windowId: string, services: AppServices): App;
+}
+
+/** サービスの storage を、コンポーネントの storage の口にする */
+export function storageBackend(services: AppServices): StorageBackend {
+  return {
+    // WIT: result<option<string>, string>。読めないとき (拒否・許可待ち) は err にして、キーが無いだけ (ok(none)) と分ける
+    get: (key) => {
+      const r = services.storage.get(key);
+      return r.ok ? { tag: 'ok', val: r.value } : { tag: 'err', val: r.reason };
+    },
+    set: (key, value) => services.storage.set(key, value).ok,
+  };
+}
+
+/** メインスレッドで動かす (テスト用。止まらないコンポーネントは止められない) */
+export function inProcessRunner(wasiShim: Record<string, Record<string, unknown>>, loadModule: (js: string) => Promise<ComponentModule>): ComponentRunner {
+  const modules = new Map<string, Promise<ComponentModule>>();
+  const mod = (glue: Glue) => modules.get(glue.js) ?? modules.set(glue.js, loadModule(glue.js)).get(glue.js)!;
+  const loaded = new Map<string, ComponentModule>();
+  const denied: StorageBackend = { get: () => ({ tag: 'err', val: 'denied' }), set: () => false };
+  return {
+    async probe(glue, pkg) {
+      try {
+        const m = await mod(glue);
+        loaded.set(glue.js, m);
+        return hasAppExports(instantiateGlue(m, glue, componentImports(pkg.capabilities, wasiShim, { emit: () => {} }, denied)))
+          ? null
+          : 'gui:app/app (start と on-action) を export していない';
+      } catch (e) {
+        return `インスタンスを作れない: ${String((e as Error).message ?? e)}`;
+      }
+    },
+    create(glue, pkg, windowId, services) {
+      const m = loaded.get(glue.js);
+      if (!m) throw new Error('probe の前に create した');
+      return createComponentApp(windowId, (host) => instantiateGlue(m, glue, componentImports(pkg.capabilities, wasiShim, host, storageBackend(services))) as ComponentExports);
+    },
+  };
 }
 
 /** 能力 → それが渡す import の名前 (WIT の interface)。ここに無い能力は、コンポーネントには渡せない */
@@ -68,24 +114,6 @@ export function parsePackage(v: unknown): { ok: true; value: PackageManifest } |
   return { ok: true, value: o as unknown as PackageManifest };
 }
 
-/** WASI の実装 (preview2-shim) を受け取り、能力に応じた import を作る */
-export function importsFor(pkg: PackageManifest, wasiShim: Record<string, Record<string, unknown>>, host: { emit(u: WitTreeUpdate): void }, services: AppServices): Record<string, unknown> {
-  const imports: Record<string, unknown> = { ...wasiImports(wasiShim, { preopens: 'none', version: '0.2.9' }), ...hostImports(host) };
-  if (pkg.capabilities.includes('storage')) {
-    const storage = {
-      // WIT: result<option<string>, string>。読めないとき (拒否・許可待ち) は err にして、キーが無いだけ (ok(none)) と分ける
-      get: (key: string) => {
-        const r = services.storage.get(key);
-        return r.ok ? { tag: 'ok', val: r.value } : { tag: 'err', val: r.reason };
-      },
-      set: (key: string, value: string) => services.storage.set(key, value).ok,
-    };
-    imports['gui:app/storage'] = storage;
-    imports['gui:app/storage@0.1.0'] = storage;
-  }
-  return imports;
-}
-
 function missingReason(name: string): string {
   const base = name.replace(/@[0-9.]+$/, '');
   const cap = (Object.entries(CAPABILITY_IMPORTS) as [Capability, string[]][]).find(([, names]) => names.includes(base))?.[0];
@@ -96,12 +124,12 @@ function missingReason(name: string): string {
  * パッケージを読み、AppManifest にする。
  * 1. ホストが .wasm から glue を作る (パッケージの JS は動かさない)
  * 2. コンポーネントの import の一覧 (glue の生成で分かる) を、宣言した能力と照らし合わせる
- * 3. 空のサービスで一度インスタンスを作り、world gui-app の app を export しているかを確かめる
+ * 3. runner で一度インスタンスを作り、world gui-app の app を export しているかを確かめる (Worker なら期限付き)
  */
 export async function loadPackage(
   src: PackageSource,
-  wasiShim: Record<string, Record<string, unknown>>,
   tools: PackageTools,
+  runner: ComponentRunner,
 ): Promise<{ ok: true; manifest: AppManifest; pkg: PackageManifest } | { ok: false; errors: string[] }> {
   let raw: unknown;
   try {
@@ -125,33 +153,20 @@ export async function loadPackage(
   const missing = gen.imports.filter((i) => !BASE_IMPORTS.test(i) && !capImports.has(i.replace(/@[0-9.]+$/, '')));
   if (missing.length) return { ok: false, errors: missing.map(missingReason) };
 
-  let mod: ComponentModule;
-  const cores = new Map<string, WebAssembly.Module>();
+  let glue: Glue;
   try {
     const js = gen.files.find(([n]) => n.endsWith('.js'));
     if (!js) throw new Error('glue の JS が生成されなかった');
-    for (const [n, bytes] of gen.files) if (n.endsWith('.wasm')) cores.set(n, await WebAssembly.compile(bytes as BufferSource));
-    mod = await tools.loadModule(new TextDecoder().decode(js[1]));
+    const cores: [string, WebAssembly.Module][] = [];
+    for (const [n, bytes] of gen.files) if (n.endsWith('.wasm')) cores.push([n, await WebAssembly.compile(bytes as BufferSource)]);
+    glue = { js: new TextDecoder().decode(js[1]), cores };
   } catch (e) {
-    return { ok: false, errors: [`glue を読み込めない: ${String((e as Error).message ?? e)}`] };
+    return { ok: false, errors: [`glue を作れない: ${String((e as Error).message ?? e)}`] };
   }
-  const getCore = (p: string) => {
-    // 同じ名前のファイルが別のディレクトリにあっても取り違えないよう、パスが一致するものを先に探す
-    const m = cores.get(p) ?? cores.get(p.split('/').pop()!);
-    if (!m) throw new Error(`core wasm ${p} が生成されていない`);
-    return m;
-  };
 
-  // export の検査 (import の検査とは別): world gui-app の app (start / on-action) を出していなければ、開けないので入れない
-  const denied: AppServices['storage'] = { get: () => ({ ok: false, reason: 'denied' }), set: () => ({ ok: false, reason: 'denied' }) };
-  let dryExports: unknown;
-  try {
-    dryExports = mod.instantiate(getCore, importsFor(pkg, wasiShim, { emit: () => {} }, { storage: denied } as AppServices));
-  } catch (e) {
-    return { ok: false, errors: [`インスタンスを作れない: ${String((e as Error).message ?? e)}`] };
-  }
-  const app = (dryExports as { app?: { start?: unknown; onAction?: unknown } } | null)?.app;
-  if (typeof app?.start !== 'function' || typeof app?.onAction !== 'function') return { ok: false, errors: ['gui:app/app (start と on-action) を export していない'] };
+  // export の検査 (import の検査とは別)
+  const why = await runner.probe(glue, pkg);
+  if (why) return { ok: false, errors: [why] };
 
   const manifest: AppManifest = {
     id: pkg.id,
@@ -160,8 +175,7 @@ export async function loadPackage(
     kind: 'component',
     capabilities: pkg.capabilities,
     multiInstance: pkg.multiInstance,
-    create: (id, services) =>
-      createComponentApp(id, (host) => mod.instantiate(getCore, importsFor(pkg, wasiShim, host, services)) as ComponentExports),
+    create: (id, services) => runner.create(glue, pkg, id, services),
   };
   return { ok: true, manifest, pkg };
 }

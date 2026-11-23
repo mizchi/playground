@@ -15,3 +15,4 @@ www/wgpu.js
 www/ghostty-vt.wasm
 www/packages/
 www/vendor/
+www/platform/
