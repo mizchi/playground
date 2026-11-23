@@ -152,6 +152,12 @@ fn bench_perpetual(task: &str, s: &Split, budget: f32) {
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("dump-bloom") => dump_bloom(),
+        Some("run-own") => {
+            bench_mlp("url", &load_bloom(), &[256, 1], 8, 64);
+            bench_mlp("url", &load_bloom(), &[256, 8, 1], 8, 64);
+            bench_mlp("cache", &load_cache(), &[11, 1], 4, 128);
+            bench_mlp("cache", &load_cache(), &[11, 16, 1], 4, 128);
+        }
         Some("run") => {
             println!("threads: own = 1, perpetual = rayon default ({} cores)", std::thread::available_parallelism().unwrap());
             let b = load_bloom();

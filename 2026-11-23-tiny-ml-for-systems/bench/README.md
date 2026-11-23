@@ -10,7 +10,9 @@
 ```bash
 cd ../ && DUMP_DIR=bench/data node ts/src/cache-admission.ts    # cache のデータ
 cd bench/rust && RUSTC_BOOTSTRAP=1 cargo run --release -- dump-bloom   # url のデータ
-RUSTC_BOOTSTRAP=1 cargo run --release -- run                           # Rust 側
+RUSTC_BOOTSTRAP=1 cargo run --release -- run                           # Rust 側 (perpetual を含む。5 分ほど)
+RUSTC_BOOTSTRAP=1 cargo run --release -- run-own                       # Rust 側の自前の実装だけ
+cd ../.. && node bench/ts/bench.ts                                     # TS 側の自前の実装
 cd ../python && uv venv .venv && uv pip install --python .venv/bin/python numpy scikit-learn lightgbm
 .venv/bin/python bench.py                                              # Python 側
 ```
@@ -42,8 +44,95 @@ cache  lightgbm 100 trees           train    0.37s  AUC 0.9332  1-row    22.7µs
 cache  sklearn HistGB               train    0.82s  AUC 0.9328  1-row   922.5µs  batch     1.1µs
 ```
 
+```
+node 22.23.5
+url    own logreg (1 thread)        train    1.01s  AUC 0.9824  1-row     1.1µs  batch     1.1µs
+url    own MLP [8] (1 thread)       train    3.25s  AUC 0.9849  1-row     3.4µs  batch     3.4µs
+cache  own logreg (1 thread)        train    0.17s  AUC 0.9321  1-row      86ns  batch      86ns
+cache  own MLP [16] (1 thread)      train    0.68s  AUC 0.9341  1-row     366ns  batch     366ns
+```
+
+```
+url    own logreg (1 thread)        train    0.29s  AUC 0.9824  1-row     306ns  batch     306ns
+url    own MLP [8] (1 thread)       train    0.94s  AUC 0.9842  1-row     1.3µs  batch     1.3µs
+cache  own logreg (1 thread)        train    0.10s  AUC 0.9324  1-row      30ns  batch      30ns
+cache  own MLP [16] (1 thread)      train    0.27s  AUC 0.9338  1-row     110ns  batch     110ns
+```
+
+上は TS（`bench/ts/bench.ts`）、下は Rust の `run-own`。
+
 1-row は 1 行ずつ推論したときの 1 行あたりの時間で、システムの判断部品はこの使い方になる。
 batch は全テスト行をまとめて推論したときの 1 行あたりの時間。
+
+## サンプルごとの比較
+
+### セットアップの量
+
+| 手段 | 依存 | 入れる手順 | 大きさ・時間 | 注意 |
+|---|---|---|---|---|
+| TS 自前 | 0 | なし（Node 22.18 以上） | 0 | `nn.ts` 201 行を自分で持つ |
+| Rust 自前 | 0 crate | なし | クリーンビルド 0.7 秒 | `lib.rs` の RNG 32 行 + MLP 132 行 |
+| `perpetual` | 36 crate | `cargo add perpetual` | クリーンビルド 18.8 秒、target 95MB、バイナリ 1.7MB | nightly が必要（`RUSTC_BOOTSTRAP=1` で回避） |
+| Python（scikit-learn + LightGBM） | 8 パッケージ | `uv venv` と `uv pip install numpy scikit-learn lightgbm` | venv 232MB | 推論を TS・Rust に持ち出すには別の経路が要る（ONNX など） |
+
+### 解くまでのコード（cache の例。読み込みと時間計測を除く）
+
+```ts
+// TS 自前（nn.ts を手元に置く）
+const m = new MLP([11, 16, 1], mulberry32(1));
+m.fit(X, y, { epochs: 4, batchSize: 128, lr: 3e-3, rng: mulberry32(2) });
+const p = m.predict(x);
+```
+
+```rust
+// Rust 自前（lib.rs を手元に置く）
+let mut m = Mlp::new(&[11, 16, 1], &mut Rng::new(1));
+m.fit(&x, &y, 4, 128, 3e-3, &mut Rng::new(2));
+let p = m.predict(&row);
+```
+
+```rust
+// perpetual（列優先の f64 に並べ替える必要がある）
+let xcol = col_major(&x, n, d);
+let mut m = PerpetualBooster::default().set_objective(Objective::LogLoss).set_budget(0.5);
+m.fit(&Matrix::new(&xcol, n, d), &y64, None, None)?;
+let p = m.predict_proba(&Matrix::new(&row64, 1, d), false, false)[0];
+```
+
+```python
+# Python
+m = LogisticRegression(max_iter=200).fit(X, y); p = m.predict_proba(X_test)[:, 1]
+b = lgb.train({"objective": "binary"}, lgb.Dataset(X, y), num_boost_round=100); p = b.predict(X_test)
+```
+
+### url（6 万行 × 256 次元のハッシュ特徴、テスト 4 万行）
+
+| 手段 | 解けた量（AUC） | 学習 | 1 行推論 | まとめて推論（1 行あたり） |
+|---|---|---|---|---|
+| TS 自前 LR | 0.9824 | 1.01 秒 | 1.1µs | 1.1µs |
+| TS 自前 MLP [8] | 0.9849 | 3.25 秒 | 3.4µs | 3.4µs |
+| Rust 自前 LR | 0.9824 | 0.29 秒 | 306ns | 306ns |
+| Rust 自前 MLP [8] | 0.9842 | 0.94 秒 | 1.3µs | 1.3µs |
+| `perpetual`（budget 0.5） | 0.9951 | 304 秒 | 142.7µs | 24.9µs |
+| scikit-learn LR | 0.9842 | 0.60 秒 | 70.9µs | 215ns |
+| scikit-learn MLP (8,) | 0.9841 | 1.34 秒 | 63.0µs | 371ns |
+| LightGBM（100 本） | 0.9944 | 2.01 秒 | 22.7µs | 1.7µs |
+| scikit-learn HistGB | 0.9943 | 3.29 秒 | 871.9µs | 4.0µs |
+
+### cache（18 万行 × 11 次元で学習、42 万行で評価）
+
+| 手段 | 解けた量（AUC） | 学習 | 1 行推論 | まとめて推論（1 行あたり） |
+|---|---|---|---|---|
+| TS 自前 LR | 0.9321 | 0.17 秒 | 86ns | 86ns |
+| TS 自前 MLP [16] | 0.9341 | 0.68 秒 | 366ns | 366ns |
+| Rust 自前 LR | 0.9324 | 0.10 秒 | 30ns | 30ns |
+| Rust 自前 MLP [16] | 0.9338 | 0.27 秒 | 110ns | 110ns |
+| `perpetual`（budget 0.5） | 0.9316 | 1.38 秒 | 4.9µs | 1.1µs |
+| `perpetual`（budget 1.0） | 0.9327 | 2.48 秒 | 13.5µs | 2.7µs |
+| scikit-learn LR | 0.9311 | 0.45 秒 | 90.3µs | 26ns |
+| scikit-learn MLP (16,) | 0.9332 | 1.48 秒 | 69.1µs | 115ns |
+| LightGBM（100 本） | 0.9332 | 0.37 秒 | 22.7µs | 679ns |
+| scikit-learn HistGB | 0.9328 | 0.82 秒 | 922.5µs | 1.1µs |
 
 ## 読み取れること
 
