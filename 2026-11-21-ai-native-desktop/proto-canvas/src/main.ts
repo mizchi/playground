@@ -556,7 +556,7 @@ function renderPanel(frame: ReturnType<Shell['frame']>) {
   $('ws1').className = workspace === 1 ? 'primary' : '';
   $('ws2').className = workspace === 2 ? 'primary' : '';
   const shortV = (v: string | undefined) => escapeHtml(v === undefined ? '(なし)' : v.length > 60 ? `${v.slice(0, 60)}…` : v);
-  $('merges').innerHTML = sv.merges
+  const mergesHtml = sv.merges
     .filter((m) => m.status === 'pending')
     .map(
       (m) => `<div class="card sensitive" role="alertdialog" aria-label="持ち込みの提案"><div><b>持ち込みの提案 ${m.id}</b> (${m.by === 'agent' ? 'agent' : '人'}): ${escapeHtml(m.intent)}</div>
@@ -569,6 +569,11 @@ function renderPanel(frame: ReturnType<Shell['frame']>) {
         <div class="row"><button class="primary" data-merge="${m.id}" data-ok="1">人のワークスペースに書く</button><button data-merge="${m.id}" data-ok="0">却下</button></div></div>`,
     )
     .join('');
+  // 変わったときだけ書き換える (開いた「全文」やフォーカスを、ほかの更新で閉じない)
+  if ($('merges').dataset.html !== mergesHtml) {
+    $('merges').innerHTML = mergesHtml;
+    $('merges').dataset.html = mergesHtml;
+  }
   $('prompts').innerHTML = sv.prompts
     .filter((p) => p.status === 'pending')
     .map(

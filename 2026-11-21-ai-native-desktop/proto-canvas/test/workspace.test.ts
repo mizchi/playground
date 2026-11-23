@@ -167,3 +167,32 @@ test('作業場のボタンへのフォーカスは、木を出し直しても�
   addTodo(p, 'todo-2', 'ハム'); // 作業場の木が出し直される
   assert.equal(p.agentShell.tree('agent-desk').focus, 'merge');
 });
+
+test('層を捨てると、待っている持ち込みは却下になり、承認しても捨てた値は書かない', () => {
+  const kv = memoryKeyValue();
+  const p = make(kv);
+  p.agent.launch('todo');
+  addTodo(p, 'todo-2', '捨てる項目');
+  const r = p.services.proposeMerge('持ち込む', 'agent');
+  assert.ok(r.ok);
+  assert.equal(p.services.discardOverlay('human'), '');
+  assert.equal(r.merge.status, 'rejected');
+  assert.equal(p.services.answerMerge(r.merge.id, true, 'human'), '提案が無い');
+  assert.equal(kv.get('app.todo.items'), undefined);
+  // あとで作った持ち込みは、ふつうに承認できる
+  addTodo(p, 'todo-2', '新しい項目');
+  const r2 = p.services.proposeMerge('持ち込む', 'agent');
+  assert.ok(r2.ok);
+  assert.equal(p.services.answerMerge(r2.merge.id, true, 'human'), '');
+  assert.match(kv.get('app.todo.items')!, /新しい項目/);
+});
+
+test('作業場のボタンが無効になったら、フォーカスを外す', () => {
+  const p = make();
+  p.agent.launch('todo');
+  addTodo(p, 'todo-2', '卵');
+  p.agentShell.dispatch({ app: 'agent-desk', target: 'merge', action: 'focus', by: 'human' });
+  p.agentShell.dispatch({ app: 'agent-desk', target: 'merge', action: 'click', by: 'human' });
+  assert.equal(p.agentShell.tree('agent-desk').get('merge')!.disabled, true);
+  assert.equal(p.agentShell.tree('agent-desk').focus, null);
+});

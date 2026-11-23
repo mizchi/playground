@@ -320,6 +320,8 @@ export class ServiceHost {
   discardOverlay(by: 'human' | 'agent'): string {
     if (by !== 'human') return '変更を捨てられるのは人だけ';
     const dropped = [...this.overlay.keys()];
+    // 待っている持ち込みは、捨てた層から作ったもの。承認で捨てた値を書かないように却下にする
+    for (const m of this.merges) if (m.status === 'pending') m.status = 'rejected';
     this.overlay.clear();
     this.overlayBase.clear();
     // agent の窓は、捨てた変更を手元に持ったまま。読み直させないと、次の保存で層に戻ってしまう

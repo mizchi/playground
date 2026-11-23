@@ -32,7 +32,7 @@ export function createAgentDeskApp(id: string, host: ServiceHost): App {
     const remove = [...sent].filter((x) => !ids.has(x));
     sent = ids;
     // フォーカスは保つ (Tab で移ったボタンを Enter で押せるように)。ノードが消えたら外す
-    if (focus && !ids.has(focus)) focus = null;
+    if (focus && (!ids.has(focus) || nodes.find((n) => n.id === focus)?.disabled)) focus = null;
     emit({ t: 'tree-update', app: id, root, focus, nodes, remove });
   };
   return {

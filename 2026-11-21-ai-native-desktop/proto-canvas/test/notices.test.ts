@@ -119,3 +119,25 @@ test('どちらのワークスペースでも出る。切り替えても出し�
   assert.ok(texts(p.agentShell.frame(W, H, 2500).ops).includes('A'));
   assert.ok(!texts(p.agentShell.frame(W, H, 2000 + NOTICE_MS + 1).ops).includes('A'), '人の側で最初に出た時刻から数える');
 });
+
+test('本文を押すと、裏のタブにある窓やズームで隠れた窓も表に出してから移る', () => {
+  const p = make();
+  // Notes を Todo のタブに入れる (入れた Notes が表、Todo は裏)
+  assert.equal(p.shell.applyLayout({ type: 'move', app: 'notes', drop: { kind: 'tab', target: 'todo' } }, 'human'), '');
+  p.shell.frame(W, H, 1500);
+  assert.ok(!p.shell.accessibility().windows.some((w) => w.app === 'todo'), 'Todo は裏のタブ');
+  notify(p, 'A');
+  let b = boxes(p.shell.frame(W, H, 2500).ops)[0];
+  click(p.shell, b);
+  p.shell.frame(W, H, 2600);
+  assert.equal(p.shell.accessibility().windows.find((w) => w.focused)?.app, 'todo');
+
+  assert.equal(p.launch('settings'), '');
+  assert.equal(p.shell.applyLayout({ type: 'zoom', app: 'settings' }, 'human'), '');
+  notify(p, 'B');
+  b = boxes(p.shell.frame(W, H, 3000).ops)[0];
+  click(p.shell, b);
+  p.shell.frame(W, H, 3100);
+  assert.equal(p.shell.getLayout().zoomed, null, 'ほかの窓のズームを解く');
+  assert.equal(p.shell.accessibility().windows.find((w) => w.focused)?.app, 'todo');
+});

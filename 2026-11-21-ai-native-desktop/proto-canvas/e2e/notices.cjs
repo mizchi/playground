@@ -94,7 +94,8 @@ async function step(name, fn) {
     // 出ている間は止まっている (wakeAt で起こす)
     assert.equal(await page.evaluate(() => window.lastFrame.animating), false);
     const opsBefore = await page.evaluate(() => window.lastFrame.ops);
-    await page.waitForTimeout(6600);
+    // 消える時刻 (6 秒) のあと、render が描き直すのを待つ (shell.frame を自分では呼ばない)
+    await page.waitForFunction((before) => window.lastFrame.ops < before, opsBefore, { timeout: 10000 });
     // 何も操作しなくても、消える時刻に描き直されている
     assert.ok((await page.evaluate(() => window.lastFrame.ops)) < opsBefore, '描き直されて、通知の分の命令が減った');
     await settle();

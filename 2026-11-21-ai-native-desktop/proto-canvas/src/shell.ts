@@ -297,7 +297,10 @@ export class Shell {
     const note = this.noticeRects.find((n) => inside(n.rect, x, y));
     if (note) {
       if (!inside(note.close, x, y) && note.window && this.wins.some((w) => w.app.id === note.window)) {
+        // 隠れている窓は見えるようにしてから移る (ドック → 戻す、裏のタブ → 表に、ほかの窓のズーム → 解く)
         if (this.minimized.includes(note.window)) this.restoreApp(note.window, 'human');
+        this.tiles = activateTab(this.tiles, note.window);
+        if (this.zoomed && this.zoomed !== note.window) this.zoomed = null;
         this.focusApp(note.window);
       }
       this.onDismissNotice(note.id);
