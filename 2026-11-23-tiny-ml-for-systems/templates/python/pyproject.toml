@@ -1,0 +1,9 @@
+[project]
+name = "tinyml-template"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+# 微分可能プログラミング版 (ttl_jax.py) を使うときだけ
+diff = ["jax"]

@@ -16,6 +16,7 @@ rust/  src/lib.rs (Mlp, int8 QuantMlp, Bloom, n-gram hashing)  src/urls.rs
 explainer/  mizchi/explainer スキルで書いた速習資料 (図つき、出力は再実行して照合)
 bench/      Rust (自前・perpetual) と Python (scikit-learn・LightGBM) の比較
 GUIDE.md    いつ・どこで・どの入力量で・どの出力に、何を使うかの整理
+templates/  同じパターンの Python・Julia の雛形
 ```
 
 図つきの解説は [explainer/README.md](explainer/README.md)。「入れてよいかをどう判定するか」に絞って、このページの実験を読み直している。
