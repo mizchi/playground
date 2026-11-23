@@ -40,6 +40,8 @@ export interface Platform {
   /** アプリを新しい窓で開く (人の操作として。agent は shell.propose で launch を提案する) */
   launch(appId: string, by?: Actor): string;
   close(windowId: AppId, by?: Actor): string;
+  /** アプリを入れる (パッケージなど)。入っている id と同じなら断る。成功なら '' */
+  install(m: AppManifest): string;
   /** 今のセッション。変わっていれば保存する */
   saveSession(): Session;
 }
@@ -97,6 +99,15 @@ export function createPlatform(cfg: PlatformConfig): Platform {
     services,
     launch: (appId, by = 'human') => sh.applyLayout({ type: 'launch', app: appId }, by),
     close: (id, by = 'human') => sh.applyLayout({ type: 'close', app: id }, by),
+    install(m) {
+      try {
+        registry.install(m);
+        sh.onChange();
+        return '';
+      } catch (e) {
+        return String((e as Error).message ?? e);
+      }
+    },
     saveSession() {
       const l = sh.getLayout();
       const s: Session = { v: 1, windows: sh.windows().map((w) => ({ id: w.id, app: registry.appOf(w.id) ?? w.id })), tiles: l.tiles, minimized: l.minimized, zoomed: l.zoomed };

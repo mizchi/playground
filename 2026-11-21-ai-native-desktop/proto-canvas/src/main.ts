@@ -139,8 +139,39 @@ const terminal = terminalManifest(async () => {
   if (!res.ok) throw new Error(`ghostty-vt.wasm: ${res.status}`);
   return loadVtFactory(await res.arrayBuffer());
 });
+// 入れたパッケージ (app.json の URL) は、セッションを復元する前に読み込む (窓のアプリが入っていないと復元できない)
+const PACKAGES_KEY = 'platform.packages';
+const loadWasi = async () => (await import('@bytecodealliance/preview2-shim')) as unknown as Record<string, Record<string, unknown>>;
+async function readPackage(url: string) {
+  const { loadPackage } = await import('./platform/packages.ts');
+  const { urlPackageSource } = await import('./platform/package-source.ts');
+  const src = urlPackageSource(url);
+  if (typeof src === 'string') return { ok: false as const, errors: [src] };
+  return loadPackage(src, await loadWasi());
+}
+const packageUrls: string[] = (() => {
+  try {
+    // 手で書き換えられた・壊れた値でも起動できるように、文字列の配列のときだけ使う
+    const v: unknown = perf ? [] : JSON.parse(localKeyValue.get(PACKAGES_KEY) ?? '[]');
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+})();
+const packageManifests: AppManifest[] = [];
+// 同梱のアプリと、先に読んだパッケージの id は使わせない (後から同じ id を返すようになったパッケージで、起動が止まらないように)
+const takenIds = new Set([...builtinManifests.map((m) => m.id), terminal.id]);
+for (const url of packageUrls) {
+  const r = await readPackage(url);
+  if (!r.ok) console.warn(`パッケージ ${url} を読めない: ${r.errors.join(' / ')}`);
+  else if (takenIds.has(r.manifest.id)) console.warn(`パッケージ ${url} の id ${r.manifest.id} はすでに使われている。読み込まない`);
+  else {
+    takenIds.add(r.manifest.id);
+    packageManifests.push(r.manifest);
+  }
+}
 const platform = createPlatform({
-  apps: [...(perf ? builtinManifests.map((m) => (m.id === 'todo' ? perfTodo : m)) : builtinManifests), terminal],
+  apps: [...(perf ? builtinManifests.map((m) => (m.id === 'todo' ? perfTodo : m)) : builtinManifests), terminal, ...packageManifests],
   initial: ['todo', 'settings', 'notes', ...Array.from({ length: Number(params.get('extra') ?? 0) }, () => 'todo')],
   measure: (s, z, w) => measureImpl(s, z, w),
   templates: storage,
@@ -272,6 +303,9 @@ panel.innerHTML = `
   <div class="row" id="installed"></div>
   <div class="muted">F6 でデスクトップとこのパネルの間を移る。Alt+L でランチャー (それ自体も意味ツリーを出すアプリ)。窓はタイトルバーの × で閉じる。</div>
   <div id="openWins"></div>
+  <div class="row"><label>パッケージ <input id="pkgUrl" value="packages/todo-rs/app.json" size="28" spellcheck="false" aria-label="パッケージ (app.json) の URL"></label><button id="pkgInstall">入れる</button></div>
+  <div class="muted">WIT のコンポーネントのアプリ。能力は import として渡す (宣言していない import を求めるものは入らない)。同じ origin のものだけ。</div>
+  <div id="pkgErr" class="err" role="alert"></div>
 
   <h2>レイアウト</h2>
   <div class="row"><label><input type="checkbox" id="live"> ライブプレビュー (ほかの窓が場所を空ける)</label></div>
@@ -388,6 +422,20 @@ panel.addEventListener('click', (e) => {
   backend.focusInput();
 });
 const openApps = () => shell.windows().map((w) => w.id);
+// パッケージを入れる (人の操作だけ。agent / MCP には口が無い)
+$('pkgInstall').addEventListener('click', async () => {
+  const url = $<HTMLInputElement>('pkgUrl').value.trim();
+  $('pkgErr').textContent = '読み込み中…';
+  const r = await readPackage(url);
+  const why = r.ok ? platform.install(r.manifest) : r.errors.join('\n');
+  $('pkgErr').textContent = why;
+  if (!why) {
+    localKeyValue.set(PACKAGES_KEY, JSON.stringify([...new Set([...packageUrls, url])]));
+    packageUrls.push(url);
+    aria.announce(`${r.ok ? r.manifest.title : ''} を入れた`);
+  }
+  schedule();
+});
 // F6: デスクトップ (Canvas) とパネルの間でフォーカスを移す。Canvas の中の Tab はアプリの部品を巡るので、パネルへはこれで行く
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'F6') return;

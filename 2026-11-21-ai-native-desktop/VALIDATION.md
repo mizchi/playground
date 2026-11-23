@@ -371,6 +371,18 @@ GTK3 アプリを AT-SPI で読み、意味ツリー (ARIA の語彙) に写し�
 - 宣言していないアプリ (Notes) は `undeclared` で、尋ねることもしない。提供するアプリが無い topic は `unavailable`
 - 監査ログに、誰のデータを読んだか (`query calendar.events from calendar`) が残る
 
+### 8f. アプリのパッケージ (`test/packages.test.ts`, `test/component.test.ts`, `e2e/packages.cjs`、すべて通った)
+
+- パッケージ (`app.json` + Rust の WIT のコンポーネント) を入れると、ランチャーから開けるアプリになる
+- 能力 storage = import `gui:app/storage`: 項目はアプリの保存領域に残り (監査ログに `set items`)、次の起動でも読める。人が保存を拒否すると、コンポーネントの `set` は false になり、アプリが「保存できなかった」と出す
+- 保存領域を拒否された窓は「読めない」ので書かない。保存済みの項目は既定の項目で上書きされず、あとで許可されると、書く前に読み直して保存済みの項目に戻る
+- 項目の文字のタブ・改行・バックスラッシュは、保存して読み直しても変わらない (逃がして 1 項目 1 行に保つ)
+- `app` (start / on-action) を export しないコンポーネントは入らない
+- 実ブラウザ: 保存したパッケージの一覧が `null` / `{}` に壊れていても、同じ id のパッケージが二重にあっても起動する (二重のものは 1 つだけ入る)
+- `capabilities` から storage を外した app.json では入らない。理由は「gui:app/storage を import している (能力 storage を宣言していない)」
+- app.json の検査: `../` や絶対パス、知らない能力、形の崩れを断る。同梱の Settings と同じ id のパッケージは入らない
+- 実ブラウザ: ほかの origin のパッケージは断る。パネルから入れ、F6 でデスクトップへ戻り、Alt+L のランチャーから開く。コンポーネントで足した項目は localStorage に保存され、再読み込みしてもパッケージ・窓・項目が戻る
+
 ### 8d. ダークテーマと veriss のコントラスト検査 (`test/theme.test.ts`, `e2e/theme.cjs`、すべて通った)
 
 - `index.html` の CSS 変数 (ライト・明示したダーク・OS に従うダーク) は `theme.ts` と同じ
