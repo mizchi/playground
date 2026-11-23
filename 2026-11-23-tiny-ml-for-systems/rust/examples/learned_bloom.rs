@@ -60,11 +60,14 @@ fn eval(name: &str, model_bits: usize, score: &mut dyn FnMut(&str) -> f32, keys:
     let fp = test.iter().filter(|k| q(k)).count();
     let ns = t0.elapsed().as_nanos() as f64 / test.len() as f64;
     let sfp = shifted.iter().filter(|k| q(k)).count();
+    // 1 行を短く保つ (資料にそのまま引用し、スマホ幅でも数字が切れないように)
+    println!("{name}: total {}", kb(model_bits + backup.size_bits()));
+    println!("  model {} + backup {}", kb(model_bits), kb(backup.size_bits()));
     println!(
-        "{name:<26} total {:>8} (model {} + backup {})  test FPR={:.3}%  shifted FPR={:.1}%  FN={fn_}  {ns:.0} ns/q",
-        kb(model_bits + backup.size_bits()), kb(model_bits), kb(backup.size_bits()),
+        "  test FPR={:.3}%  shifted FPR={:.1}%",
         100.0 * fp as f64 / test.len() as f64, 100.0 * sfp as f64 / shifted.len() as f64,
     );
+    println!("  FN={fn_}  {ns:.0} ns/q");
 }
 
 fn main() {
@@ -92,18 +95,20 @@ fn main() {
     let ns = t0.elapsed().as_nanos() as f64 / test_neg.len() as f64;
     let sfp = shifted.iter().filter(|k| plain.has(k.as_bytes())).count();
     println!("target FPR 1%, {} keys", keys.len());
+    println!("plain Bloom: total {}", kb(plain.size_bits()));
     println!(
-        "{:<26} total {:>8}  test FPR={:.3}%  shifted FPR={:.1}%  {ns:.0} ns/q",
-        "plain Bloom", kb(plain.size_bits()),
+        "  test FPR={:.3}%  shifted FPR={:.1}%",
         100.0 * fp as f64 / test_neg.len() as f64, 100.0 * sfp as f64 / shifted.len() as f64
     );
+    println!("  {ns:.0} ns/q");
 
     for sizes in [vec![D, 1], vec![D, 8, 1]] {
         let mut model = Mlp::new(&sizes, &mut Rng::new(1));
         let t0 = Instant::now();
         model.fit(&x, &y, 8, 64, 3e-3, &mut Rng::new(2));
         let label = if sizes.len() == 2 { "logreg".to_string() } else { format!("mlp {:?}", sizes) };
-        println!("--- {label}: {} params, train {} ms", model.param_count(), t0.elapsed().as_millis());
+        println!("--- {label}: {} params", model.param_count());
+        println!("  train {} ms", t0.elapsed().as_millis());
 
         let mut feat = vec![0f32; D];
         let bits32 = model.param_count() * 32;

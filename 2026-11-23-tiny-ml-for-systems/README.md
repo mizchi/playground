@@ -13,7 +13,10 @@ ts/    nn.ts (MLP+backprop+Adam, ~200行)  bloom.ts  urls.ts
        gradcheck.ts  learned-bloom.ts  cache-admission.ts
 rust/  src/lib.rs (Mlp, int8 QuantMlp, Bloom, n-gram hashing)  src/urls.rs
        examples/learned_bloom.rs  examples/branch_predictor.rs
+explainer/  mizchi/explainer スキルで書いた速習資料 (図つき、出力は再実行して照合)
 ```
+
+図つきの解説は [explainer/README.md](explainer/README.md)。「入れてよいかをどう判定するか」に絞って、このページの実験を読み直している。
 
 ## 動かし方
 

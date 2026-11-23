@@ -1,0 +1,263 @@
+{
+ "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
+ "config": {
+  "font": "system-ui, -apple-system, \"Hiragino Sans\", \"Noto Sans JP\", sans-serif",
+  "axis": {
+   "labelFontSize": 13,
+   "titleFontSize": 14,
+   "grid": false
+  },
+  "legend": {
+   "labelFontSize": 13,
+   "titleFontSize": 13,
+   "orient": "bottom"
+  },
+  "title": {
+   "fontSize": 15
+  },
+  "view": {
+   "stroke": null
+  }
+ },
+ "padding": {
+  "left": 64,
+  "right": 24,
+  "top": 8,
+  "bottom": 8
+ },
+ "title": "ヒット率 — MLP が「2 回目」と上限の間のどこにあるか",
+ "vconcat": [
+  {
+   "title": {
+    "text": "キャッシュ 0.5%",
+    "fontSize": 14,
+    "anchor": "start"
+   },
+   "width": 260,
+   "height": 130,
+   "data": {
+    "values": [
+     {
+      "size": "キャッシュ 0.5%",
+      "policy": "LRU（全部入れる）",
+      "ohr": 14.66
+     },
+     {
+      "size": "キャッシュ 0.5%",
+      "policy": "2 回目で入れる",
+      "ohr": 20.23
+     },
+     {
+      "size": "キャッシュ 0.5%",
+      "policy": "MLP で判断",
+      "ohr": 24.62
+     },
+     {
+      "size": "キャッシュ 0.5%",
+      "policy": "上限（未来を見る）",
+      "ohr": 27.13
+     }
+    ]
+   },
+   "layer": [
+    {
+     "mark": "bar",
+     "encoding": {
+      "y": {
+       "field": "policy",
+       "type": "nominal",
+       "sort": [
+        "LRU（全部入れる）",
+        "2 回目で入れる",
+        "MLP で判断",
+        "上限（未来を見る）"
+       ],
+       "title": null
+      },
+      "x": {
+       "field": "ohr",
+       "type": "quantitative",
+       "title": "オブジェクトのヒット率（%）",
+       "scale": {
+        "domain": [
+         0,
+         55
+        ]
+       }
+      },
+      "color": {
+       "field": "policy",
+       "type": "nominal",
+       "legend": null,
+       "sort": [
+        "LRU（全部入れる）",
+        "2 回目で入れる",
+        "MLP で判断",
+        "上限（未来を見る）"
+       ],
+       "scale": {
+        "domain": [
+         "LRU（全部入れる）",
+         "2 回目で入れる",
+         "MLP で判断",
+         "上限（未来を見る）"
+        ],
+        "range": [
+         "#6e7781",
+         "#6e7781",
+         "#d1242f",
+         "#0969da"
+        ]
+       }
+      }
+     }
+    },
+    {
+     "mark": {
+      "type": "text",
+      "align": "left",
+      "dx": 4,
+      "fontSize": 13
+     },
+     "encoding": {
+      "y": {
+       "field": "policy",
+       "type": "nominal",
+       "sort": [
+        "LRU（全部入れる）",
+        "2 回目で入れる",
+        "MLP で判断",
+        "上限（未来を見る）"
+       ]
+      },
+      "x": {
+       "field": "ohr",
+       "type": "quantitative"
+      },
+      "text": {
+       "field": "ohr",
+       "type": "quantitative",
+       "format": ".1f"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "title": {
+    "text": "キャッシュ 2.0%",
+    "fontSize": 14,
+    "anchor": "start"
+   },
+   "width": 260,
+   "height": 130,
+   "data": {
+    "values": [
+     {
+      "size": "キャッシュ 2.0%",
+      "policy": "LRU（全部入れる）",
+      "ohr": 27.45
+     },
+     {
+      "size": "キャッシュ 2.0%",
+      "policy": "2 回目で入れる",
+      "ohr": 39.12
+     },
+     {
+      "size": "キャッシュ 2.0%",
+      "policy": "MLP で判断",
+      "ohr": 40.12
+     },
+     {
+      "size": "キャッシュ 2.0%",
+      "policy": "上限（未来を見る）",
+      "ohr": 44.12
+     }
+    ]
+   },
+   "layer": [
+    {
+     "mark": "bar",
+     "encoding": {
+      "y": {
+       "field": "policy",
+       "type": "nominal",
+       "sort": [
+        "LRU（全部入れる）",
+        "2 回目で入れる",
+        "MLP で判断",
+        "上限（未来を見る）"
+       ],
+       "title": null
+      },
+      "x": {
+       "field": "ohr",
+       "type": "quantitative",
+       "title": "オブジェクトのヒット率（%）",
+       "scale": {
+        "domain": [
+         0,
+         55
+        ]
+       }
+      },
+      "color": {
+       "field": "policy",
+       "type": "nominal",
+       "legend": null,
+       "sort": [
+        "LRU（全部入れる）",
+        "2 回目で入れる",
+        "MLP で判断",
+        "上限（未来を見る）"
+       ],
+       "scale": {
+        "domain": [
+         "LRU（全部入れる）",
+         "2 回目で入れる",
+         "MLP で判断",
+         "上限（未来を見る）"
+        ],
+        "range": [
+         "#6e7781",
+         "#6e7781",
+         "#d1242f",
+         "#0969da"
+        ]
+       }
+      }
+     }
+    },
+    {
+     "mark": {
+      "type": "text",
+      "align": "left",
+      "dx": 4,
+      "fontSize": 13
+     },
+     "encoding": {
+      "y": {
+       "field": "policy",
+       "type": "nominal",
+       "sort": [
+        "LRU（全部入れる）",
+        "2 回目で入れる",
+        "MLP で判断",
+        "上限（未来を見る）"
+       ]
+      },
+      "x": {
+       "field": "ohr",
+       "type": "quantitative"
+      },
+      "text": {
+       "field": "ohr",
+       "type": "quantitative",
+       "format": ".1f"
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

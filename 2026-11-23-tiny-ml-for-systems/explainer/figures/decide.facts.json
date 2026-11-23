@@ -1,0 +1,2 @@
+{ "labels": ["正解はログから後で分かる?", "外れても正しさは守れる?", "先に守る仕組みを作る", "上限とルールの差は大きい?", "ルールで済ませる", "推論は節約分より速い?", "ロジスティック回帰で試す"],
+  "edges": ["label->stop1", "label->fallback", "fallback->build", "build->gap", "fallback->gap", "gap->rule", "gap->cost", "cost->stop2", "cost->lr"] }

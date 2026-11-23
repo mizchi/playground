@@ -137,6 +137,19 @@ fn main() {
     ];
     let results: Vec<_> = preds.iter_mut().map(|p| run(p.as_mut(), iters)).collect();
 
+    // --narrow: 分岐の種類ごとに縦に並べる (資料にそのまま引用し、スマホ幅でも数字が切れないように)
+    if std::env::args().any(|a| a == "--narrow") {
+        for (k, (_, label)) in KINDS.iter().enumerate() {
+            println!("{label}");
+            for (p, r) in preds.iter().zip(&results) {
+                let short = p.name().split(" (").next().unwrap().to_string();
+                let short = if short == "gshare" { p.name().replace(" history)", "").replace(" (", " ") } else { short };
+                println!("  {short:<12} {:>5.1}%", 100.0 * r[k].0 as f64 / r[k].1 as f64);
+            }
+        }
+        return;
+    }
+
     print!("{:<26}", "misprediction rate");
     for p in &preds {
         print!(" | {:>26}", p.name());

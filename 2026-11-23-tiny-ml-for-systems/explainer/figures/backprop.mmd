@@ -1,0 +1,13 @@
+---
+config:
+  flowchart:
+    wrappingWidth: 480
+---
+%% ts/src/nn.ts の predict() と accumulate()。隠れ層 1 つの場合
+flowchart TD
+  a0[入力 a0] -->|W1 を掛けて ReLU| a1[隠れ層 a1]
+  a1 -->|W2 を掛けて sigmoid| p[予測 p]
+  p -->|正解 y を引く| d2[出力の誤差 δ2 = p - y]
+  d2 -->|δ2 と a1 の外積| g2[W2 の勾配]
+  d2 -->|W2 の転置を掛け、a1 が 0 の所を消す| d1[隠れ層の誤差 δ1]
+  d1 -->|δ1 と a0 の外積| g1[W1 の勾配]

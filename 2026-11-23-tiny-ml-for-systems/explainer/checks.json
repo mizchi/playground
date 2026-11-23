@@ -1,0 +1,87 @@
+{
+  "$comment": "本文に載せる出力はここで再実行して照合する。時間（ms・ns/q）は回ごとに変わるので照合しない。図の値は charts.mjs が実験の出力から作り、コミット済みの spec と一致するかを確かめる。",
+  "checks": [
+    {
+      "name": "gradcheck",
+      "cmd": "node ../ts/src/gradcheck.ts",
+      "expect": [
+        "gradient check: max relative error = 3.07e-9 (79 params)",
+        "XOR: 0.000 1.000 1.000 0.000",
+        "OK"
+      ]
+    },
+    {
+      "name": "bloom",
+      "cmd": "node ../ts/src/learned-bloom.ts",
+      "save": "$TMP/bloom.txt",
+      "expect": [
+        "plain Bloom: 35.1 KB",
+        "  test FPR=1.028%  shifted FPR=1.070%",
+        "--- logistic regression: 257 params (1.0 KB as f32)",
+        "  target 1.000%: total 7.1 KB",
+        "    model 1.0 KB + backup 6.1 KB (4805 keys)",
+        "    test FPR=1.059%  shifted FPR=84.115%",
+        "    FN=0",
+        "--- MLP 256-8-1: 2065 params (8.1 KB as f32)",
+        "  target 1.000%: total 13.9 KB",
+        "    model 8.1 KB + backup 5.8 KB (4524 keys)",
+        "--- MLP 256-32-1: 8257 params (32.3 KB as f32)",
+        "  target 1.000%: total 38.0 KB",
+        "    model 32.3 KB + backup 5.7 KB (4540 keys)"
+      ]
+    },
+    {
+      "name": "cache",
+      "cmd": "node ../ts/src/cache-admission.ts",
+      "save": "$TMP/cache.txt",
+      "expect": [
+        "=== cache = 0.5% of unique bytes",
+        "LRU (admit all)                 14.66%",
+        "LRU + doorkeeper (2nd hit)      20.23%",
+        "LRU + MLP admission p>0.5       24.62%",
+        "LRU + oracle admission          27.13%",
+        "=== cache = 2.0% of unique bytes",
+        "LRU + doorkeeper (2nd hit)      39.12%",
+        "LRU + MLP admission p>0.5       40.12%",
+        "LRU + oracle admission          44.12%"
+      ]
+    },
+    {
+      "name": "charts",
+      "cmd": "node figures/charts.mjs $TMP/bloom.txt $TMP/cache.txt",
+      "expect": [
+        "spec: figures/bloom-size.vl.json is up to date",
+        "spec: figures/cache-hit.vl.json is up to date"
+      ]
+    },
+    {
+      "name": "branch",
+      "cwd": "../rust",
+      "cmd": "cargo run --release --quiet --example branch_predictor -- --narrow",
+      "expect": [
+        "= R (next)",
+        "  gshare 12bit   1.0%",
+        "  perceptron     0.0%",
+        "= R xor S (next)",
+        "  gshare 12bit   5.3%",
+        "  perceptron    49.5%",
+        "= R (~20 branches later)",
+        "  gshare 16bit  49.8%",
+        "  perceptron     0.0%"
+      ]
+    },
+    {
+      "name": "rust-bloom",
+      "cwd": "../rust",
+      "cmd": "cargo run --release --quiet --example learned_bloom",
+      "expect": [
+        "logreg f32: total 6.9 KB",
+        "  model 1.0 KB + backup 5.9 KB",
+        "  test FPR=0.994%",
+        "logreg int8: total 6.2 KB",
+        "  model 0.3 KB + backup 6.0 KB",
+        "  test FPR=1.041%"
+      ]
+    }
+  ]
+}

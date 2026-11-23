@@ -58,7 +58,10 @@ for (const target of [0.01, 0.001]) {
   const plain = BloomFilter.forCapacity(keys.length, target);
   for (const k of keys) plain.add(k);
   console.log(`\n=== target FPR ${pct(target)} / ${keys.length} keys ===`);
-  console.log(`plain Bloom        : ${kb(plain.sizeBits).padStart(9)}  test FPR=${pct(fprOf((s) => plain.has(s), testNeg))}  shifted FPR=${pct(fprOf((s) => plain.has(s), shiftedNeg))}  ${nsPerQuery((s) => plain.has(s), testNeg).toFixed(0)} ns/q`);
+  // 1 行を短く保つ (資料にそのまま引用し、スマホ幅でも数字が切れないように)
+  console.log(`plain Bloom: ${kb(plain.sizeBits)}`);
+  console.log(`  test FPR=${pct(fprOf((s) => plain.has(s), testNeg))}  shifted FPR=${pct(fprOf((s) => plain.has(s), shiftedNeg))}`);
+  console.log(`  ${nsPerQuery((s) => plain.has(s), testNeg).toFixed(0)} ns/q`);
 }
 
 for (const cfg of configs) {
@@ -69,7 +72,8 @@ for (const cfg of configs) {
   const valScores = valNeg.map((s) => score(model, s));
   const testAuc = auc([...keyScores, ...valScores], [...keyScores.map(() => 1), ...valScores.map(() => 0)]);
   const modelBits = model.paramCount() * 32; // float32 で保存する想定
-  console.log(`\n--- ${cfg.name}: ${model.paramCount()} params (${kb(modelBits)} as f32), train ${Date.now() - t0} ms, AUC=${testAuc.toFixed(4)}`);
+  console.log(`\n--- ${cfg.name}: ${model.paramCount()} params (${kb(modelBits)} as f32)`);
+  console.log(`  train ${Date.now() - t0} ms, AUC=${testAuc.toFixed(4)}`);
 
   const sortedVal = [...valScores].sort((a, b) => a - b);
   for (const target of [0.01, 0.001]) {
@@ -91,9 +95,9 @@ for (const cfg of configs) {
     const query = (s: string) => score(model, s) >= best.tau || backup.has(s);
     const fn = keys.filter((k) => !query(k)).length;
     const total = modelBits + backup.sizeBits;
-    console.log(
-      `  target ${pct(target)}: total ${kb(total).padStart(9)} (model ${kb(modelBits)} + backup ${kb(backup.sizeBits)} for ${best.nb} keys)` +
-      `  test FPR=${pct(fprOf(query, testNeg))}  shifted FPR=${pct(fprOf(query, shiftedNeg))}  FN=${fn}  ${nsPerQuery(query, testNeg.slice(0, 20000)).toFixed(0)} ns/q`,
-    );
+    console.log(`  target ${pct(target)}: total ${kb(total)}`);
+    console.log(`    model ${kb(modelBits)} + backup ${kb(backup.sizeBits)} (${best.nb} keys)`);
+    console.log(`    test FPR=${pct(fprOf(query, testNeg))}  shifted FPR=${pct(fprOf(query, shiftedNeg))}`);
+    console.log(`    FN=${fn}  ${nsPerQuery(query, testNeg.slice(0, 20000)).toFixed(0)} ns/q`);
   }
 }

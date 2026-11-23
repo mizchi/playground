@@ -1,0 +1,14 @@
+{
+  "name": "tiny-ml-explainer",
+  "private": true,
+  "type": "module",
+  "description": "mizchi/explainer スキルで書いた速習資料の検証用。依存はこのディレクトリに閉じる",
+  "devDependencies": {
+    "@mizchi/vlmkit": "0.24.0",
+    "marked": "18.2.1",
+    "mermaid": "12.3.0",
+    "playwright": "1.63.0",
+    "vega": "6.4.0",
+    "vega-lite": "6.4.3"
+  }
+}

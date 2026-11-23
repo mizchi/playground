@@ -1,0 +1,3 @@
+{ "labels": ["問い合わせの URL", "ロジスティック回帰のスコア p", "取りこぼした鍵 4805 件だけ", "ない：鍵はここに来ない"],
+  "forbidden": ["偽陰性"],
+  "edges": ["x->feat", "feat->model", "model->yes1", "model->backup", "backup->yes2", "backup->no"] }
