@@ -1,0 +1,15 @@
+node_modules/
+www/main.js
+www/main.js.map
+screenshots/
+veriss-diff.json
+sway-bridge.json
+font-diff.json
+atspi-bridge.json
+www/chunks/
+www/fonts/
+www/raster.wasm
+www/odin.js
+www/gpu.wasm
+www/wgpu.js
+www/ghostty-vt.wasm

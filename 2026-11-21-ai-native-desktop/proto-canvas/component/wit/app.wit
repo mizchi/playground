@@ -1,0 +1,58 @@
+// アプリと shell の境界 (PROTOCOL.md の P1 / P2 を型付きにしたもの)。
+// アプリが import できるのは host だけ: できるのは「意味ツリーを出す」ことだけで、画面にもファイルにもネットにも触れない。
+package gui:app@0.1.0;
+
+interface types {
+  enum role {
+    x-window, heading, paragraph, group, %list, listitem, checkbox, switch, textbox, button,
+    radio, combobox, slider, spinbutton, progressbar, tablist, tab, table, row, cell, columnheader, separator, img,
+  }
+  enum action-name { click, focus, set-value, replace-selected-text, increment, decrement }
+  enum actor { human, agent }
+
+  record node {
+    id: string,
+    role: role,
+    label: option<string>,
+    value: option<string>,
+    checked: option<bool>,
+    disabled: bool,
+    sensitive: bool,
+    actions: list<action-name>,
+    children: list<string>,
+  }
+
+  /// P1: app -> shell
+  record tree-update {
+    root: option<string>,
+    focus: option<string>,
+    nodes: list<node>,
+    remove: list<string>,
+  }
+
+  /// P2: shell -> app
+  record action-request {
+    target: string,
+    action: action-name,
+    data: option<string>,
+    by: actor,
+  }
+}
+
+/// shell が提供する
+interface host {
+  use types.{tree-update};
+  emit: func(update: tree-update);
+}
+
+/// アプリが提供する
+interface app {
+  use types.{action-request};
+  start: func();
+  on-action: func(req: action-request);
+}
+
+world gui-app {
+  import host;
+  export app;
+}
