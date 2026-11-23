@@ -33,6 +33,8 @@ export interface Vt {
   readonly cols: number;
   readonly rows: number;
   write(data: string): void;
+  /** 桁と行を変える (libghostty-vt が画面を組み直す) */
+  resize(cols: number, rows: number): void;
   /** 今の画面 (描画用の行と、読み上げ・agent 向けの文字) */
   snapshot(): { screen: TerminalScreen; text: string };
   scrollback(): number;
@@ -53,9 +55,19 @@ export function createVt(ghostty: Ghostty, cols: number, rows: number): Vt {
   // そのままだと空の cell にごみの文字が出るので、最初に画面を消去 (ED 2) して、すべての cell を空白で書かせる
   t.write('\x1b[2J\x1b[H');
   return {
-    cols,
-    rows,
+    get cols() {
+      return cols;
+    },
+    get rows() {
+      return rows;
+    },
     write: (d) => t.write(d),
+    resize(c, r) {
+      if (c === cols && r === rows) return;
+      cols = c;
+      rows = r;
+      t.resize(c, r);
+    },
     scrollback: () => t.getScrollbackLength(),
     free: () => t.free(),
     snapshot() {
@@ -70,9 +82,14 @@ export function createVt(ghostty: Ghostty, cols: number, rows: number): Vt {
       for (let y = 0; y < rows; y++) {
         const row = cells.slice(y * cols, (y + 1) * cols);
         lines.push(runsOf(row, fg0, bg0));
-        text.push(row.map((c) => (c.width === 0 ? '' : c.codepoint ? String.fromCodePoint(c.codepoint) : ' ')).join('').trimEnd());
+        const str = row.map((c) => (c.width === 0 ? '' : c.codepoint ? String.fromCodePoint(c.codepoint) : ' ')).join('');
+        // 折り返した行は、前の行とつなげて 1 行の文にする (agent とスクリーンリーダーには論理的な行を渡す)。
+        // ghostty-web 0.4.0 の isRowWrapped(y) は、d.ts の説明 (次の行へ折り返す) と違い、「y 行目が前の行の続き」のとき true
+        if (y > 0 && t.isRowWrapped(y)) text[text.length - 1] += str;
+        else text.push(str);
       }
       t.markClean();
+      for (let i = 0; i < text.length; i++) text[i] = text[i].trimEnd();
       while (text.length && text.at(-1) === '') text.pop();
       return { screen: { cols, rows, lines, cursor: cur.visible ? { x: cur.viewportX, y: cur.viewportY } : null, fg: fg0, bg: bg0 }, text: text.join('\n') };
     },

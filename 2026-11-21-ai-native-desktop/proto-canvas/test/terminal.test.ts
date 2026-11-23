@@ -65,6 +65,15 @@ test('libghostty-vt: 別の端末を free したあとに作った端末にも�
   b.free();
 });
 
+test('libghostty-vt: 折り返した行は、文字としては 1 行につなげる (描画の格子は行ごと)', async () => {
+  const vt = createVt(await ghostty, 10, 4);
+  vt.write('abcde fghij klm\r\nnext');
+  const { screen: s, text } = vt.snapshot();
+  assert.equal(text, 'abcde fghij klm\nnext', '折り返しの位置の空白も残る');
+  assert.deepEqual(s.lines.slice(0, 2).map((l) => l.map((r) => r.text).join('|')), ['abcde fghi', 'j klm']);
+  vt.free();
+});
+
 test('Terminal は意味ツリーの log として画面を出し、Enter (click) でコマンドを実行する', async () => {
   const p = await make();
   assert.match(screen(p).value!, /Terminal — libghostty-vt/);
@@ -144,13 +153,15 @@ test('ホストの擬似端末: terminal.pty を人が許可するとつなが�
   const fake: PtyConnector = (cols, rows, onData) => {
     out = onData;
     written.push(`open ${cols}x${rows}`);
-    return { write: (d) => written.push(d), close: () => written.push('close') };
+    return { write: (d) => written.push(d), resize: (c, r) => written.push(`resize ${c}x${r}`), close: () => written.push('close') };
   };
   const p = await make(fake);
   p.shell.dispatch({ app: 'terminal', target: 'host', action: 'click', by: 'human' });
   assert.equal(written.length, 0);
   p.services.answer(p.services.prompts.find((x) => x.capability === 'terminal.pty')!.id, true, 'human');
-  assert.deepEqual(written, ['open 72x18']);
+  // 窓に合わせた大きさで開く
+  const sc = screen(p).screen!;
+  assert.deepEqual(written, [`open ${sc.cols}x${sc.rows}`]);
   out('\x1b[32mbash$\x1b[0m ');
   assert.equal(screen(p).value, 'bash$');
   run(p, 'ls -la');
@@ -170,4 +181,41 @@ test('ターミナルは複数の窓で開け、それぞれ別の端末の状�
   assert.match(screen(p).value!, /one/);
   assert.doesNotMatch(screen(p).value!, /two/);
   assert.match(screen(p, 'terminal-2').value!, /two/);
+});
+
+test('窓の大きさに合わせて、端末の桁と行が変わる (shell が格子の単位で知らせる)', async () => {
+  const p = await make();
+  const grid = () => {
+    const s = screen(p).screen!;
+    return [s.cols, s.rows];
+  };
+  // 何フレームか描くと落ち着く (行を変える → 高さが変わる → 余りが減る)
+  const settle = (w: number, h: number) => {
+    for (let i = 0; i < 4; i++) p.shell.frame(w, h);
+  };
+  settle(1400, 800);
+  const [c1, r1] = grid();
+  const term = () => p.shell.frame(1400, 800).windows.find((w) => w.app === 'terminal')!;
+  // 横は窓いっぱい (右の切り取りがない)、縦は窓の余りが 1 行未満
+  assert.ok(c1 * 8 <= term().tile.w && (c1 + 1) * 8 + 50 > term().tile.w, `${c1} 桁 / 窓の幅 ${term().tile.w}`);
+  assert.ok(r1 > 4);
+  p.shell.applyLayout({ type: 'zoom', app: 'terminal' }, 'human');
+  settle(1400, 800);
+  const [c2, r2] = grid();
+  assert.ok(c2 > c1 && r2 >= r1, `${c1}x${r1} → ${c2}x${r2}`);
+  // 端末の状態 (libghostty-vt) も同じ大きさ: 1 行の文字が桁の数まで入る
+  run(p, `echo ${'x'.repeat(c2)}`);
+  assert.ok(screen(p).value!.split('\n').some((l) => l === 'x'.repeat(c2)), '桁いっぱいの行が 1 行に収まる');
+});
+
+test('ホストの擬似端末にも、窓の大きさを知らせる', async () => {
+  const written: string[] = [];
+  const fake: PtyConnector = () => ({ write: (d) => written.push(d), resize: (c, r) => written.push(`resize ${c}x${r}`), close: () => {} });
+  const p = await make(fake);
+  p.services.setGrant('terminal', 'terminal.pty', 'granted');
+  p.shell.dispatch({ app: 'terminal', target: 'host', action: 'click', by: 'human' });
+  p.shell.applyLayout({ type: 'zoom', app: 'terminal' }, 'human');
+  for (let i = 0; i < 4; i++) p.shell.frame(1400, 800);
+  const s = screen(p).screen!;
+  assert.equal(written.filter((w) => w.startsWith('resize')).at(-1), `resize ${s.cols}x${s.rows}`);
 });

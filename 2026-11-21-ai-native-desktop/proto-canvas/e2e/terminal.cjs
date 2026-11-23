@@ -218,10 +218,21 @@ async function step(name, fn) {
     await waitScreen(/[#$]$/); // bash のプロンプト
     await page.evaluate(() => window.shell.activate('terminal', 'input'));
     await typeLine('echo $((6*7)); printf "\\033[31mRED\\033[0m\\n"; stty size');
-    await waitScreen(/\n42\nRED\n18 72\n/);
+    // stty size は、窓に合わせた端末の大きさ (行 桁) を返す
+    const [cols, rows] = await page.evaluate(() => { const s = window.shell.tree('terminal').get('screen').screen; return [s.cols, s.rows]; });
+    assert.ok(cols > 72, `全体に広げた窓の桁 ${cols}`);
+    await waitScreen(new RegExp(`\\n42\\nRED\\n${rows} ${cols}\\n`));
     const red = await page.evaluate(() => window.shell.tree('terminal').get('screen').screen.lines.flat().find((r) => r.text === 'RED'));
     assert.ok(red?.fg && red.fg !== '#e6e8ef', `RED の色 ${red?.fg}`);
     await shot('terminal-04-host-shell');
+    // 窓を戻すと狭くなり、動いているシェルにも新しい大きさが届く (SIGWINCH)
+    await page.keyboard.press('Escape');
+    await settle();
+    await page.waitForFunction((c) => window.shell.tree('terminal').get('screen').screen.cols < c, cols);
+    const [c2, r2] = await page.evaluate(() => { const s = window.shell.tree('terminal').get('screen').screen; return [s.cols, s.rows]; });
+    await page.evaluate(() => window.shell.activate('terminal', 'input'));
+    await typeLine('stty size');
+    await waitScreen(new RegExp(`\\n${r2} ${c2}\\n`));
     await typeLine('exit');
     await waitScreen(/ホストのシェルが終わった/);
   });

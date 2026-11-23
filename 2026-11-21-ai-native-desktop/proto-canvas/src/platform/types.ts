@@ -19,6 +19,8 @@ export type ServiceResult<T> = { ok: true; value: T } | { ok: false; reason: 'de
 /** 擬似端末への接続 (ホストのシェル) */
 export interface PtyHandle {
   write(data: string): void;
+  /** 端末の大きさを変える (TIOCSWINSZ。シェルには SIGWINCH が届く) */
+  resize(cols: number, rows: number): void;
   close(): void;
 }
 /** ホストが用意する擬似端末の口 (無ければ terminal.pty は unavailable) */
