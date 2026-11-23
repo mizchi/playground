@@ -22,10 +22,21 @@ export function directPtyConnector(shell = (process.env.PTY_SHELL ?? 'bash --nop
     child.stderr!.on('data', (d: Buffer) => onData(d.toString('utf8')));
     child.on('exit', (code) => end(`終了コード ${code}`));
     child.on('error', (e) => end(String(e.message)));
+    // helper が先に pipe を閉じたときの書き込みの失敗で、ホストごと落ちないように
+    const ctl = child.stdio[3] as (NodeJS.WritableStream & { writable?: boolean }) | null;
+    child.stdin!.on('error', () => end('入力の pipe が閉じた'));
+    ctl?.on('error', () => {});
     return {
-      write: (d) => void child.stdin!.write(d),
-      resize: (c, r) => void (child.stdio[3] as NodeJS.WritableStream | null)?.write(`resize ${c | 0} ${r | 0}\n`),
-      close: () => void child.kill('SIGHUP'),
+      write: (d) => {
+        if (!ended && child.stdin!.writable) child.stdin!.write(d);
+      },
+      resize: (c, r) => {
+        if (!ended && ctl?.writable !== false) ctl?.write(`resize ${c | 0} ${r | 0}\n`);
+      },
+      close: () => {
+        end('閉じた');
+        child.kill('SIGHUP');
+      },
     };
   };
 }

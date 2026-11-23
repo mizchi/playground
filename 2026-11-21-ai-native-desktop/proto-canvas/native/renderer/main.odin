@@ -452,6 +452,8 @@ main :: proc() {
 			emit(fmt.tprintf(`{{"t":"error","message":%s}}`, json_str(fmt.tprintf("窓を作れない: %s", sdl.GetError()))))
 			return
 		}
+		// shell と、人が答えるパネル (320px) が入る幅より狭くしない
+		_ = sdl.SetWindowMinimumSize(window, 720, 400)
 	}
 	if why := init_gpu(); why != "" {
 		emit(fmt.tprintf(`{{"t":"error","message":%s}}`, json_str(why)))

@@ -1,6 +1,8 @@
 // ネイティブのホストのパネル: ブラウザでは DOM のパネルが受け持つ「人だけが答える」口 (許可の要求・agent の提案・持ち込み) を、
 // ホストが自分で描く。shell の描画命令のあと (窓より上)、shell に渡す幅の外 (右端) に描くので、アプリはここに描けない。
 // キーボード: F6 でパネルへ移り、Tab / Shift+Tab でボタンを移り、Enter / Space で押す。F6 / Escape で戻る。
+// 縦に収まらないときはスクロールする (ホイール。フォーカスしたボタンは見える位置まで送る)。
+// 提案と持ち込みは、手順・変更をすべて出す (承認する前に、実行されるものを全部見られるように)。
 import type { DrawOp, Measure, Rect } from '../src/protocol.ts';
 
 export const PANEL_W = 320;
@@ -19,11 +21,15 @@ export interface PanelButton {
   action: string;
   label: string;
   rect: Rect;
+  /** パネルの見えている範囲に、ボタン全体が入っている */
+  visible: boolean;
 }
 
 export interface PanelFrame {
   ops: DrawOp[];
   buttons: PanelButton[];
+  /** 中身の高さ (スクロールの上限に使う) */
+  contentH: number;
 }
 
 /** 幅に収まるように、文字単位で折り返す (最大 maxLines 行。超えたら … で切る) */
@@ -46,7 +52,8 @@ export function wrap(str: string, w: number, size: number, measure: Measure, max
   return out;
 }
 
-export function drawPanel(s: PanelState, x0: number, h: number, measure: Measure, focus: number | null): PanelFrame {
+/** focus: フォーカスしているボタンの action。scroll: 中身を上へ送る量 */
+export function drawPanel(s: PanelState, x0: number, h: number, measure: Measure, focus: string | null, scroll = 0): PanelFrame {
   const ops: DrawOp[] = [];
   const buttons: PanelButton[] = [];
   const w = PANEL_W;
@@ -54,7 +61,7 @@ export function drawPanel(s: PanelState, x0: number, h: number, measure: Measure
   ops.push(['rect', { x: x0, y: 0, w, h, fill: 'surface' }]);
   ops.push(['rect', { x: x0, y: 0, w: 1, h, fill: 'border' }]);
   ops.push(['clip', { x: x0, y: 0, w, h }]);
-  let y = PAD;
+  let y = PAD - scroll;
   const text = (str: string, size: number, weight: number, color: 'text' | 'muted', x = x0 + PAD) => {
     ops.push(['text', { x, y: y + size * 0.7, str, size, weight, color }]);
     y += Math.round(size * 1.5);
@@ -71,8 +78,8 @@ export function drawPanel(s: PanelState, x0: number, h: number, measure: Measure
       const filled = it.primary || it.pressed;
       ops.push(['rect', { ...r, radius: 6, fill: filled ? 'accent' : 'surface', stroke: filled ? undefined : 'border' }]);
       ops.push(['text', { x: r.x + 11, y: r.y + 14, str: it.label, size: 13, weight: 600, color: filled ? 'accentText' : 'text' }]);
-      if (focus === buttons.length) ops.push(['rect', { x: r.x - 3, y: r.y - 3, w: r.w + 6, h: r.h + 6, radius: 8, stroke: 'accent', lineWidth: 2 }]);
-      buttons.push({ action: it.action, label: it.label, rect: r });
+      if (focus === it.action) ops.push(['rect', { x: r.x - 3, y: r.y - 3, w: r.w + 6, h: r.h + 6, radius: 8, stroke: 'accent', lineWidth: 2 }]);
+      buttons.push({ action: it.action, label: it.label, rect: r, visible: r.y >= 0 && r.y + r.h <= h });
       bx += bw + 8;
     }
     y += 28 + 10;
@@ -99,8 +106,7 @@ export function drawPanel(s: PanelState, x0: number, h: number, measure: Measure
     card(true, () => {
       text(`持ち込みの提案 ${m.id} (${m.by === 'agent' ? 'agent' : '人'})`, 13, 600, 'text', x0 + PAD + 10);
       lines(m.intent, 12, 'muted', 2);
-      for (const c of m.changes.slice(0, 4)) lines(`${c.app} / ${c.key}`, 12, 'text', 1);
-      if (m.changes.length > 4) lines(`ほか ${m.changes.length - 4} 件`, 12, 'muted', 1);
+      for (const c of m.changes) lines(`${c.app} / ${c.key}`, 12, 'text', 2);
       row([{ action: `merge:${m.id}:1`, label: '人のワークスペースに書く', primary: true }, { action: `merge:${m.id}:0`, label: '却下' }], x0 + PAD + 10);
     });
   for (const p of s.prompts)
@@ -112,8 +118,7 @@ export function drawPanel(s: PanelState, x0: number, h: number, measure: Measure
     card(p.sensitive, () => {
       text(`AI の提案 ${p.id}${p.sensitive ? ' (sensitive)' : ''}`, 13, 600, 'text', x0 + PAD + 10);
       lines(p.intent, 13, 'text', 2);
-      p.steps.slice(0, 5).forEach((st, i) => lines(`${i + 1}. ${st}`, 12, 'muted', 1));
-      if (p.steps.length > 5) lines(`ほか ${p.steps.length - 5} 手順`, 12, 'muted', 1);
+      p.steps.forEach((st, i) => lines(`${i + 1}. ${st}`, 12, 'muted', 3));
       row([{ action: `prop:${p.id}:1`, label: '承認', primary: true }, { action: `prop:${p.id}:0`, label: '却下' }], x0 + PAD + 10);
     });
   if (!s.merges.length && !s.prompts.length && !s.proposals.length) text('答えを待っているものは無い', 12, 400, 'muted');
@@ -121,5 +126,5 @@ export function drawPanel(s: PanelState, x0: number, h: number, measure: Measure
   for (const l of s.status) text(l, 12, 400, 'muted');
   text('F6 でパネルへ。Tab で移り、Enter で押す', 12, 400, 'muted');
   ops.push(['pop']);
-  return { ops, buttons };
+  return { ops, buttons, contentH: y + scroll + PAD };
 }

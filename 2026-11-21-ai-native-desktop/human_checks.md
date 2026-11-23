@@ -178,10 +178,11 @@ Odin のビルドの許可を得て、wasm 版の backend をブラウザで確�
 **手順**
 
 1. Odin を用意し、wgpu-native (v29.0.1.1) を Odin の `vendor/wgpu/lib/wgpu-<os>-<arch>-release/lib/` に置き、`vendor/stb/src` で stb をビルドする。SDL3 を入れる (mac は Homebrew の `sdl3`)
-2. `cd proto-canvas && pnpm install && pnpm fonts && SDL3_LIB=<SDL3 の lib> pnpm build:native` で描画プロセスを作り、`pnpm native` で開く
-3. 日本語の IME (mac の日本語入力、Linux の fcitx5 / ibus) で Todo に入力する。候補の窓がキャレットの近くに出るか
-4. Retina / HiDPI で文字の鮮明さを見る。窓の × で閉じると、両方のプロセスが終わるか
-5. `node mcp/server.ts` を MCP クライアントに登録し、`pnpm native -- --mcp ws://127.0.0.1:8130` で AI からの提案をパネルで承認する
+2. フォントを用意する。Linux は `pnpm fonts` (`fonts-ipaexfont` の場所から写す)。mac は IPAex ゴシック (https://moji.or.jp/ipafont/ の `ipaexg.ttf`) を落とし、`proto-canvas/www/fonts/ipaexg.ttf` に置く (または `pnpm native -- --font <ttf のパス>`)
+3. `cd proto-canvas && pnpm install && SDL3_LIB=<SDL3 の lib> pnpm build:native` で描画プロセスを作り、`pnpm native` で開く
+4. 日本語の IME (mac の日本語入力、Linux の fcitx5 / ibus) で Todo に入力する。候補の窓がキャレットの近くに出るか
+5. Retina / HiDPI で文字の鮮明さを見る。窓の × で閉じると、両方のプロセスが終わるか
+6. `node mcp/server.ts` を MCP クライアントに登録し、`pnpm native -- --mcp ws://127.0.0.1:8130` で AI からの提案をパネルで承認する
 
 **記録**: 表示の不具合、IME の候補の位置、閉じたときの振る舞い、体感の速さ。
 

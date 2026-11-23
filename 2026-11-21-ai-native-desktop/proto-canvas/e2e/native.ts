@@ -40,7 +40,7 @@ interface State {
   windows: { id: string; title: string }[];
   focused: string | null;
   ime: string;
-  panelFocus: number | null;
+  panelFocus: string | null;
   buttons: { action: string; label: string; rect: Rect }[];
   texts: string[];
   ops: number;
@@ -53,6 +53,9 @@ interface State {
 /** ホストを起こし、--control で話す */
 async function startHost(extra: string[] = []) {
   const p = spawn(process.execPath, [path.join(root, 'native', 'host.ts'), '--headless', '1500x860', '--control', '--kv', kvFile, ...extra], { env, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessWithoutNullStreams;
+  // 終わったことは起こした時点から覚えておく (テストの途中で落ちても、stop が待ち続けないように)
+  const exited = new Promise<number | null>((r) => p.on('exit', (code) => r(code)));
+  p.stdin.on('error', () => {});
   const stderr: string[] = [];
   p.stderr.on('data', (d) => stderr.push(String(d)));
   const pending = new Map<number, (v: Record<string, unknown>) => void>();
@@ -108,10 +111,21 @@ async function startHost(extra: string[] = []) {
     assert.equal(c.ok, true, 'PNG を書けた');
   };
   const stop = async () => {
-    p.stdin.write(`${JSON.stringify({ t: 'quit' })}\n`);
-    await new Promise((r) => p.on('exit', r));
+    if (p.exitCode === null && p.stdin.writable) p.stdin.write(`${JSON.stringify({ t: 'quit' })}\n`);
+    const done = await Promise.race([exited, new Promise((r) => setTimeout(() => r('timeout'), 5000))]);
+    if (done === 'timeout') {
+      p.kill('SIGKILL');
+      await exited;
+    }
   };
-  return { p, ready, cmd, state, rects, click, clickRect, capture, stop, stderr };
+  /** パネルのボタンを押す。出たばかりのボタンは押せない (0.5 秒) ので、少し待ってから押す */
+  const press = async (action: string) => {
+    await new Promise((r) => setTimeout(r, 600));
+    const b = (await state()).buttons.find((b) => b.action === action);
+    assert.ok(b, `パネルに ${action} がある`);
+    await clickRect(b.rect);
+  };
+  return { p, ready, cmd, state, rects, click, clickRect, press, capture, stop, stderr };
 }
 
 let host = await startHost(['--fresh']);
@@ -171,9 +185,9 @@ await step('許可の要求はホストのパネルに出る。キーボード (
   assert.ok(s.buttons.some((b) => b.label === '許可'));
   await host.cmd({ t: 'key', code: 'F6', key: 'F6', alt: false, shift: false });
   s = await host.state();
-  assert.equal(s.panelFocus, 0);
-  const allow = s.buttons.findIndex((b) => b.label === '許可');
-  for (let i = 0; i < allow; i++) await host.cmd({ t: 'key', code: 'Tab', key: 'Tab', alt: false, shift: false });
+  assert.equal(s.panelFocus, 'ws:1', '最初のボタン');
+  const allow = s.buttons.find((b) => b.label === '許可')!.action;
+  for (let i = 0; i < 10 && (await host.state()).panelFocus !== allow; i++) await host.cmd({ t: 'key', code: 'Tab', key: 'Tab', alt: false, shift: false });
   assert.equal((await host.state()).panelFocus, allow);
   await host.cmd({ t: 'key', code: 'Enter', key: 'Enter', alt: false, shift: false });
   s = await host.state();
@@ -222,7 +236,7 @@ await step('ホストのシェル: --pty では擬似端末の helper を直接�
   let s = await host.state();
   const allow = s.buttons.find((b) => b.label === '許可')!;
   assert.ok(allow, 'terminal.pty の許可の要求');
-  await host.clickRect(allow.rect);
+  await host.press(allow.action);
   await rectOf('terminal/ctrlc'); // 許可されると、端末がそのまま本物のシェルにつなぐ
   const screen = async () => ((await host.cmd({ t: 'tree', app: 'terminal' })) as { tree: { nodes: { id: string; value?: string }[] }[] }).tree[0].nodes.find((n) => n.id === 'screen')!.value ?? '';
   for (let i = 0; i < 50 && !/\$ ?$/m.test(await screen()); i++) await new Promise((r) => setTimeout(r, 100));
@@ -233,6 +247,29 @@ await step('ホストのシェル: --pty では擬似端末の helper を直接�
   assert.match(await screen(), /^42$/m, await screen());
   s = await host.state();
   if (shots) await host.capture(path.join(shotsDir, 'native-terminal.png'));
+});
+
+await step('パネル: 出たばかりのボタンは押せない (入れ替わった直後の押し間違い・誘導を防ぐ)。0.5 秒たつと押せる', async () => {
+  const p = (await host.cmd({ t: 'propose', intent: 'コンパクト表示', steps: [{ app: 'settings', target: 'compact', action: 'click' }] })) as { result: { ok: boolean; proposal: { id: string } } };
+  assert.ok(p.result.ok, JSON.stringify(p.result));
+  const id = p.result.proposal.id;
+  const b = (await host.state()).buttons.find((b) => b.action === `prop:${id}:1`)!;
+  await host.clickRect(b.rect); // すぐに押す
+  assert.equal((await host.state()).proposals.find((x) => x.id === id)!.status, 'pending', '押しても実行されない');
+  await host.press(`prop:${id}:0`);
+  assert.equal((await host.state()).proposals.find((x) => x.id === id)!.status, 'rejected');
+});
+
+await step('守り: 読めない命令には error を返して動き続ける。同じ保存先を 2 つのホストでは開かない。狭すぎる大きさは断る', async () => {
+  host.p.stdin.write('{壊れた行\nnull\n');
+  assert.ok((await host.state()).windows.length > 0, 'ホストは動いている');
+  const second = spawn(process.execPath, [path.join(root, 'native', 'host.ts'), '--headless', '1500x860', '--kv', kvFile], { env });
+  let err = '';
+  second.stderr.on('data', (d) => (err += String(d)));
+  assert.equal(await new Promise((r) => second.on('exit', r)), 1);
+  assert.match(err, /別のホスト/);
+  const narrow = spawn(process.execPath, [path.join(root, 'native', 'host.ts'), '--headless', '500x400', '--kv', path.join(tmp, 'other.json')], { env });
+  assert.equal(await new Promise((r) => narrow.on('exit', r)), 2);
 });
 
 // ---- MCP: AI のクライアント → MCP サーバ → ネイティブのホスト。承認はホストのパネル (人) ----
@@ -263,8 +300,7 @@ await step('MCP: AI はネイティブのホストの画面を読み、提案は
   assert.ok(s.texts.includes(`AI の提案 ${id}`), 'パネルに提案が出る');
   assert.ok(s.texts.includes('MCP: 接続中'));
   if (shots) await host.capture(path.join(shotsDir, 'native-proposal.png'));
-  const approve = s.buttons.find((b) => b.action === `prop:${id}:1`)!;
-  await host.clickRect(approve.rect);
+  await host.press(`prop:${id}:1`);
   const done = await call('wait_proposal', { id, timeout_s: 5 });
   assert.equal(done.value.status, 'done');
 });
@@ -283,15 +319,17 @@ await step('MCP: agent のワークスペースでは承認なしで動かし、
   assert.equal(pm.isError, false, pm.text);
   const mid = (pm.value as { id: string }).id;
   const s = await host.state();
-  const write = s.buttons.find((b) => b.action === `merge:${mid}:1`)!;
-  assert.ok(write, 'パネルに持ち込みの提案');
-  await host.clickRect(write.rect);
+  assert.ok(s.buttons.some((b) => b.action === `merge:${mid}:1`), 'パネルに持ち込みの提案');
+  await host.press(`merge:${mid}:1`);
   const w = await call('wait_merge', { id: mid, timeout_s: 5 });
   assert.equal(w.value.status, 'applied');
   assert.ok((await host.state()).texts.includes('agent のメモ'), '人のワークスペースの Notes に出る');
 });
 
-await host.stop();
-await client.close();
+try {
+  await host.stop();
+} finally {
+  await client.close();
+}
 console.log(failures ? `${failures} failed` : 'all passed');
 process.exit(failures ? 1 : 0);

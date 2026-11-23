@@ -43,6 +43,16 @@ const opt = (name: string) => {
 const flag = (name: string) => argv.includes(name);
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
 const headless = opt('--headless');
+// 窓の最小の幅 (shell + 人が答えるパネル)。窓なしでもこれより狭くはしない
+const MIN_W = 720;
+const MIN_H = 400;
+if (headless) {
+  const [w, h] = headless.split('x').map(Number);
+  if (!(w >= MIN_W && h >= MIN_H)) {
+    console.error(`[host] --headless は ${MIN_W}x${MIN_H} 以上 (パネルを出す幅が要る): ${headless}`);
+    process.exit(2);
+  }
+}
 const control = flag('--control');
 const kvPath = opt('--kv') ?? join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), 'ai-native-desktop', 'kv.json');
 const fontPath = opt('--font') ?? here('../www/fonts/ipaexg.ttf');
@@ -52,7 +62,13 @@ const log = (...a: unknown[]) => console.error('[host]', ...a);
 const reply = (v: unknown) => control && process.stdout.write(`${JSON.stringify(v)}\n`);
 
 // ---- プラットフォーム ----
-const kv = fileKeyValue(kvPath);
+let kv: ReturnType<typeof fileKeyValue>;
+try {
+  kv = fileKeyValue(kvPath);
+} catch (e) {
+  log(String((e as Error).message ?? e));
+  process.exit(1);
+}
 const TEMPLATES_KEY = 'shell.templates';
 const templates: Storage = {
   load: () => {
@@ -139,16 +155,27 @@ let lastMs = 0;
 let hostMs = 0;
 let ime: ImeToHost = { t: 'ime-disable' };
 let cursor = 'default';
-let buttons: PanelButton[] = [];
-/** パネルのボタンのキーボードのフォーカス (null ならデスクトップ) */
-let panelFocus: number | null = null;
+/**
+ * 描画プロセスが表示したフレームのパネルのボタン。押す場所の判定はこれで行う (人が見た画面と同じもの)。
+ * 送ったがまだ表示の返事が来ていないフレームのボタンは sentButtons に置き、返事が来たら入れ替える
+ */
+let presented: PanelButton[] = [];
+let sentButtons: PanelButton[] | null = null;
+/** ボタンが今の位置に表示された時刻。出たばかりのボタンは押させない (入れ替わった直後の押し間違い・誘導を防ぐ) */
+const shownAt = new Map<string, number>();
+const PRESS_DELAY_MS = 500;
+const buttonKey = (b: PanelButton) => `${b.action}@${b.rect.x},${b.rect.y}`;
+/** パネルのキーボードのフォーカス (ボタンの action。null ならデスクトップ)。並びが変わっても同じボタンに留まる */
+let panelFocus: string | null = null;
+let panelScroll = 0;
 const waiters: ((v: unknown) => void)[] = [];
 /** 最初のフレームを描き終えた */
 let framed = false;
 /** 画面の書き出しを頼んだ --control の id (描画プロセスは順に答える) */
 const captureIds: (number | undefined)[] = [];
 
-const panelWidth = () => (size.w >= PANEL_W + 400 ? PANEL_W : 0);
+/** パネルはいつも出す (人が答える口を失わない)。窓の最小の幅は描画プロセスが 720px にする */
+const panelWidth = () => PANEL_W;
 
 function schedule() {
   dirty = true;
@@ -181,23 +208,26 @@ function render() {
   const f = shell.frame(sw, size.h, now);
   (shell === platform.shell ? platform.agentShell : platform.shell).setSize(sw, size.h);
   const sv = platform.services;
-  const panel = pw
-    ? drawPanel(
-        {
-          workspace,
-          merges: sv.merges.filter((m) => m.status === 'pending'),
-          prompts: sv.prompts.filter((p) => p.status === 'pending').map((p) => ({ id: p.id, text: `${p.appTitle} が ${capLabel(p.capability)} の許可を求めている` })),
-          proposals: platform.shell.proposals.filter((p) => p.status === 'pending').map((p) => ({ id: p.id, intent: p.intent, steps: p.steps.map(describeStep), sensitive: p.sensitive })),
-          status: [mcpStatus, `${theme === 'dark' ? 'ダーク' : 'ライト'}・${size.scale}x`].filter(Boolean),
-        },
-        sw,
-        size.h,
-        measure,
-        panelFocus,
-      )
-    : { ops: [], buttons: [] };
-  buttons = panel.buttons;
-  if (panelFocus !== null && panelFocus >= buttons.length) panelFocus = buttons.length ? buttons.length - 1 : null;
+  const st = {
+    workspace,
+    merges: sv.merges.filter((m) => m.status === 'pending'),
+    prompts: sv.prompts.filter((p) => p.status === 'pending').map((p) => ({ id: p.id, text: `${p.appTitle} が ${capLabel(p.capability)} の許可を求めている` })),
+    proposals: platform.shell.proposals.filter((p) => p.status === 'pending').map((p) => ({ id: p.id, intent: p.intent, steps: p.steps.map(describeStep), sensitive: p.sensitive })),
+    status: [mcpStatus, `${theme === 'dark' ? 'ダーク' : 'ライト'}・${size.scale}x`].filter(Boolean),
+  };
+  let panel = drawPanel(st, sw, size.h, measure, panelFocus, panelScroll);
+  // フォーカスしたボタン (答えられて消えたら外す。ほかのボタンへは移さない)
+  if (panelFocus !== null && !panel.buttons.some((b) => b.action === panelFocus)) panelFocus = null;
+  // スクロール: フォーカスしたボタンを見える位置まで送り、中身の高さで抑える
+  let scroll = panelScroll;
+  const fb = panel.buttons.find((b) => b.action === panelFocus);
+  if (fb && !fb.visible) scroll += fb.rect.y < 0 ? fb.rect.y - 12 : fb.rect.y + fb.rect.h - size.h + 12;
+  scroll = Math.max(0, Math.min(scroll, panel.contentH - size.h));
+  if (scroll !== panelScroll) {
+    panelScroll = scroll;
+    panel = drawPanel(st, sw, size.h, measure, panelFocus, panelScroll);
+  }
+  sentButtons = panel.buttons;
   lastOps = [...f.ops, ...panel.ops];
   inflight = true;
   const body = encodeFrame(lastOps, colors);
@@ -236,8 +266,9 @@ function onInput(e: RendererEvent) {
     case 'down':
       pointerInPanel = inPanel(e.x);
       if (pointerInPanel) {
-        const b = buttons.find((b) => e.x >= b.rect.x && e.x < b.rect.x + b.rect.w && e.y >= b.rect.y && e.y < b.rect.y + b.rect.h);
-        if (b) press(b.action);
+        const b = presented.find((b) => b.visible && e.x >= b.rect.x && e.x < b.rect.x + b.rect.w && e.y >= b.rect.y && e.y < b.rect.y + b.rect.h);
+        if (b && performance.now() - (shownAt.get(buttonKey(b)) ?? Infinity) >= PRESS_DELAY_MS) press(b.action);
+        else if (b) log(`出たばかりのボタンは押さない (${b.label})`);
         break;
       }
       panelFocus = null;
@@ -257,16 +288,20 @@ function onInput(e: RendererEvent) {
       break;
     case 'wheel':
       if (!inPanel(e.x)) shell.wheel(e.x, e.y, e.dy);
+      else panelScroll += e.dy;
       break;
     case 'key': {
       if (e.code === 'F6') {
-        panelFocus = panelFocus === null && buttons.length ? 0 : null;
+        panelFocus = panelFocus === null && presented.length ? presented[0].action : null;
         break;
       }
       if (panelFocus !== null) {
-        if (e.code === 'Tab') panelFocus = (panelFocus + (e.shift ? buttons.length - 1 : 1)) % buttons.length;
-        else if (e.code === 'Enter' || e.code === 'Space') press(buttons[panelFocus].action);
-        else if (e.code === 'Escape') panelFocus = null;
+        const i = presented.findIndex((b) => b.action === panelFocus);
+        if (e.code === 'Tab' && presented.length) panelFocus = presented[(i + (e.shift ? presented.length - 1 : 1) + presented.length) % presented.length].action;
+        else if (e.code === 'Enter' || e.code === 'Space') {
+          // 表示されていて、見える位置にあるボタンだけを押す (スクロールの途中なら、描き直しを待つ)
+          if (i >= 0 && presented[i].visible) press(presented[i].action);
+        } else if (e.code === 'Escape') panelFocus = null;
         break;
       }
       const m = mapKey(e, ime.t === 'ime-enable');
@@ -307,6 +342,15 @@ createInterface({ input: renderer.stdout! }).on('line', (line) => {
     case 'frame':
       inflight = false;
       framed = true;
+      // 表示されたフレームのボタンだけを、押せるボタンにする
+      if (sentButtons && !e.skipped) {
+        const now = performance.now();
+        const keys = new Set(sentButtons.map(buttonKey));
+        for (const k of shownAt.keys()) if (!keys.has(k)) shownAt.delete(k);
+        for (const k of keys) if (!shownAt.has(k)) shownAt.set(k, now);
+        presented = sentButtons;
+      }
+      sentButtons = null;
       if (!e.skipped) {
         lastInstances = e.n;
         lastMs = e.ms;
@@ -338,7 +382,15 @@ const settle = () =>
   });
 if (control)
   createInterface({ input: process.stdin }).on('line', async (line) => {
-    const c = JSON.parse(line) as { t: string; id?: number; path?: string } & Record<string, unknown>;
+    let c: { t: string; id?: number; path?: string } & Record<string, unknown>;
+    try {
+      const v: unknown = JSON.parse(line);
+      if (!v || typeof v !== 'object' || Array.isArray(v) || typeof (v as { t?: unknown }).t !== 'string') throw new Error('t (文字列) を持つ object ではない');
+      c = v as typeof c;
+    } catch (err) {
+      reply({ t: 'error', message: `読めない命令: ${String((err as Error).message ?? err)}` });
+      return;
+    }
     await settle();
     switch (c.t) {
       case 'state': {
@@ -352,7 +404,8 @@ if (control)
           windows: shell.windows().map((w) => ({ id: w.id, title: w.title })),
           focused: shell.accessibility().windows.find((w) => w.focused)?.app ?? null,
           ime: ime.t,
-          buttons: buttons.map((b) => ({ action: b.action, label: b.label, rect: b.rect })),
+          buttons: presented.map((b) => ({ action: b.action, label: b.label, rect: b.rect, visible: b.visible })),
+          panelScroll,
           texts,
           ops: lastOps.length,
           instances: lastInstances,

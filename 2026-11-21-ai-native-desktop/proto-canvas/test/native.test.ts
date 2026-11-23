@@ -1,6 +1,6 @@
 // ネイティブのホストの部品: キーの対応 (ブラウザと共通)、描画プロセスへの命令の形、ファイルの KeyValue、パネル
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -60,6 +60,24 @@ test('ファイルの KeyValue: 書くたびにファイルに残り、開き直
   assert.deepEqual(fileKeyValue(path).keys(), []);
 });
 
+test('ファイルの KeyValue: 生きている別のプロセスが使っているファイルは開かない。書けなかった値は、もう一度書ける', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kv-'));
+  const path = join(dir, 'kv.json');
+  writeFileSync(`${path}.lock`, String(process.ppid)); // 親のプロセス (生きている)
+  assert.throws(() => fileKeyValue(path), /別のホスト/);
+  writeFileSync(`${path}.lock`, '999999999'); // 落ちたプロセスの残り
+  const kv = fileKeyValue(path);
+  kv.set('a', '1');
+  // rename の先をディレクトリにして、書き込みを失敗させる
+  rmSync(path);
+  mkdirSync(path);
+  assert.throws(() => kv.set('a', '2'));
+  assert.equal(kv.get('a'), '1', '書けなかった値は手元にも入れない');
+  rmSync(path, { recursive: true });
+  kv.set('a', '2');
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).a, '2', '同じ値でもう一度書ける');
+});
+
 test('ホストのパネル: 待っているものごとに答えるボタンを出す。長い文は折り返して切る', () => {
   const f = drawPanel(
     {
@@ -72,13 +90,25 @@ test('ホストのパネル: 待っているものごとに答えるボタンを
     1000,
     800,
     measure,
-    2,
+    'merge:m1:1',
   );
   assert.deepEqual(f.buttons.map((b) => b.action), ['ws:1', 'ws:2', 'merge:m1:1', 'merge:m1:0', 'grant:g1:1', 'grant:g1:0', 'prop:p1:1', 'prop:p1:0']);
   for (const b of f.buttons) assert.ok(b.rect.x >= 1000 && b.rect.x + b.rect.w <= 1000 + PANEL_W, `${b.label} はパネルの中`);
   // フォーカスの輪は 3 番目のボタン (merge:m1:1) の周り
   const ring = f.ops.find((o) => o[0] === 'rect' && (o[1] as { lineWidth?: number }).lineWidth === 2 && (o[1] as { stroke?: string }).stroke === 'accent');
   assert.ok(ring && Math.abs((ring[1] as { x: number }).x - (f.buttons[2].rect.x - 3)) < 0.01);
+  // 手順はすべて出す (承認の前に全部見られる)
+  const many = drawPanel({ workspace: 1, merges: [], prompts: [], proposals: [{ id: 'p2', intent: '多い', steps: ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((x) => `todo / ${x} を click`), sensitive: false }], status: [] }, 0, 800, measure, null);
+  const texts = many.ops.filter((o) => o[0] === 'text').map((o) => (o[1] as { str: string }).str);
+  assert.ok(texts.includes('7. todo / g を click'));
+  // 縦に収まらないボタンは visible でない。スクロールすると見える
+  const prompts = Array.from({ length: 6 }, (_, i) => ({ id: `g${i}`, text: `要求 ${i}` }));
+  const small = drawPanel({ workspace: 1, merges: [], prompts, proposals: [], status: [] }, 0, 300, measure, null);
+  const last = small.buttons.at(-1)!;
+  assert.equal(last.visible, false);
+  assert.ok(small.contentH > 300);
+  const scrolled = drawPanel({ workspace: 1, merges: [], prompts, proposals: [], status: [] }, 0, 300, measure, null, small.contentH - 300);
+  assert.equal(scrolled.buttons.at(-1)!.visible, true);
   const lines = wrap('あ'.repeat(200), 100, 10, measure, 2);
   assert.equal(lines.length, 2);
   assert.ok(lines[1].endsWith('…') && measure(lines[1], 10) <= 100);
