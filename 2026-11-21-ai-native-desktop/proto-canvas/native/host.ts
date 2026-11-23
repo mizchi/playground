@@ -287,6 +287,11 @@ const announced = { proposals: 0, prompts: 0, notes: 0, intents: 0 };
 if (flag('--a11y')) {
   a11y = spawn(process.env.ATSPI_PYTHON ?? '/usr/bin/python3.12', [here('./atspi/server.py')], { stdio: ['pipe', 'pipe', 'inherit'] });
   a11y.stdin!.on('error', () => {});
+  // Python が無いなど、起こせなくてもデスクトップは動かし続ける (スクリーンリーダーの口が無いだけ)
+  a11y.on('error', (e) => {
+    log(`AT-SPI のサーバを起こせない: ${e.message}`);
+    a11y = null;
+  });
   a11y.on('exit', (code) => {
     log(`AT-SPI のサーバが終わった (${code})`);
     a11y = null;
@@ -306,6 +311,8 @@ if (flag('--a11y')) {
     } else if (m.t === 'error') log('AT-SPI:', m.message);
     else if (m.t === 'panel' && m.action) press(m.action);
     else if (m.t === 'action' && m.app && m.node) {
+      // 届くまでの間にワークスペースを切り替えた・窓を閉じた、なら捨てる (今の shell に無い窓は操作しない)
+      if (!shell.windows().some((w) => w.id === m.app)) return;
       // スクリーンリーダーの操作は、人の意味的な操作 (ブラウザの ARIA のミラーと同じ)
       if (m.action === 'click') shell.activate(m.app, m.node);
       else if (m.action === 'focus') shell.dispatch({ app: m.app, target: m.node, action: 'focus', by: 'human' });

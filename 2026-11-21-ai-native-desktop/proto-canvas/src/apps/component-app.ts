@@ -79,7 +79,8 @@ export function wasiImports(shim: Record<string, Record<string, unknown>>, opts:
   const v = opts.version;
   const cli = shim.cli as Record<string, unknown>;
   const out: Record<string, unknown> = {
-    [`wasi:cli/environment@${v}`]: cli.environment,
+    // 環境変数・引数・作業ディレクトリは渡さない (Node の preview2-shim は、そのままだとホストの process.env と cwd を渡す)
+    [`wasi:cli/environment@${v}`]: { getEnvironment: () => [], getArguments: () => [], initialCwd: () => undefined },
     [`wasi:cli/exit@${v}`]: cli.exit,
     [`wasi:cli/stderr@${v}`]: cli.stderr,
     [`wasi:cli/stdin@${v}`]: cli.stdin,

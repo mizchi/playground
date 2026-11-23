@@ -432,7 +432,10 @@ GTK3 アプリを AT-SPI で読み、意味ツリー (ARIA の語彙) に写し�
 - 単体テスト: キーの対応 (ブラウザと共通)、命令の形、ファイルの KeyValue (壊れたファイルは空から、lock、rename が失敗した値はもう一度書ける)、パネルのボタン・全部の手順・スクロール・折り返し
 
 - パッケージ: Rust の Todo (WIT のコンポーネント) を worker_threads で動かし、チェックの保存が JSON ファイルに残る。応答しないコンポーネント (spin-rs) を押してもホストはすぐ答え、2 秒の期限で止めて「応答しない」と出し、再起動できる。`--package` なしの次の起動でもパッケージを読み、窓を復元する
-- スクリーンリーダー (`e2e/native-a11y.ts`。D-Bus のセッションと AT-SPI のバスを立て、pyatspi から読む): アプリ「AI-native desktop」の下に、窓ごとの frame とパネルの frame が出る。チェックボックス・入力欄・スイッチの役割、checkable / checked / editable の状態、click の action が読める。AT-SPI の click でチェックが付き、EditableText で入力欄に文字が入る。フォーカスが動くと `focused` のイベントが届く。AI の提案は `announcement` で読み上げられ、パネルの「承認」を AT-SPI から押すと実行される
+- スクリーンリーダー (`e2e/native-a11y.ts`。D-Bus のセッションと AT-SPI のバスを立て、pyatspi から読む): アプリ「AI-native desktop」の下に、窓ごとの frame とパネルの frame が出る。チェックボックス・入力欄・スイッチの役割、checkable / checked / editable の状態、click の action が読める。AT-SPI の click でチェックが付き、EditableText で入力欄に文字が入る。フォーカスが動くと `focused` のイベントが届く。AI の提案で `announcement` のイベントが届き (実際に読み上げられるかは H14)、パネルの「承認」を AT-SPI から押すと実行される
+  - 文字の境界 (GetTextAtOffset / GetStringAtOffset の文字・単語・行)、GetAccessibleAtPoint、GetPosition / GetSize、InsertText の長さ (UTF-8 のバイト数、文字の途中では切らない) が AT-SPI の形で答えられる
+  - checked の変化は `state-changed:checked`、項目の追加は、親のリスト「タスク」の `children-changed:add` (位置と子を付けて) で届く
+- コンポーネントには環境変数・引数・作業ディレクトリを渡さない (Node の preview2-shim は、そのままだとホストの process.env (この環境では 181 個) と cwd を渡していた)。コンポーネントの標準出力は、ホストの `--control` の口に混ぜず、標準エラーに印を付けて流す
 
 ### 見つけたこと
 

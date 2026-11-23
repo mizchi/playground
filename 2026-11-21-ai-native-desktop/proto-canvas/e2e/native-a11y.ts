@@ -36,7 +36,15 @@ await sleep(1000);
 // AT-SPI のイベントを聞く (スクリーンリーダーの代わり)
 const events: { type: string; name: string; text: string | null }[] = [];
 const listener = spawn('/usr/bin/python3.12', [path.join(root, 'e2e', 'atspi-listen.py')], { stdio: ['ignore', 'pipe', 'ignore'] });
-createInterface({ input: listener.stdout }).on('line', (l) => events.push(JSON.parse(l)));
+let listening: () => void;
+const listenReady = new Promise<void>((r) => (listening = r));
+createInterface({ input: listener.stdout }).on('line', (l) => {
+  const e = JSON.parse(l);
+  if (e.type === 'listening') listening();
+  events.push(e);
+});
+// イベントを聞き始めてからホストを起こす (先に出たイベントを取りこぼさないように)
+await Promise.race([listenReady, sleep(10000).then(() => Promise.reject(new Error('AT-SPI のイベントを聞き始められない')))]);
 
 const host = spawn(process.execPath, [path.join(root, 'native', 'host.ts'), '--headless', '1500x860', '--control', '--a11y', '--fresh', '--kv', path.join(mkdtempSync(path.join(tmpdir(), 'a11y-')), 'kv.json')], { env, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessWithoutNullStreams;
 const stderr: string[] = [];
@@ -122,7 +130,37 @@ await step('文字の入力 (EditableText) と、フォーカスの移動がス�
   await until(async () => (await tree('todo')).some((n) => (n as { label?: string }).label === '卵を買う'), '項目が増える');
 });
 
-await step('AI の提案は読み上げられ (announcement)、パネルの「承認」をスクリーンリーダーから押せる', async () => {
+await step('文字の境界 (文字・単語・行)、位置からの検索、位置と大きさ、長さ付きの挿入を AT-SPI の形で答える', async () => {
+  const probe = (...args: string[]) => JSON.parse(execFileSync('/usr/bin/python3.12', ['-W', 'ignore::DeprecationWarning', path.join(root, 'e2e', 'atspi-probe.py'), ...args], { encoding: 'utf8', timeout: 15000 }));
+  // 入力欄に「buy 卵」と入れて、境界を問い合わせる
+  let input = find(dump(), (x) => x.name === '新しいタスク')!;
+  bridge('set-text', 'AI-native desktop', input.path, 'buy 卵');
+  await until(async () => (await tree('todo')).find((n) => n.id === 'input')!.value === 'buy 卵', '入力欄');
+  assert.deepEqual(probe('text-at', input.path, '1', '0'), { text: 'u', start: 1, end: 2 });
+  assert.deepEqual(probe('text-at', input.path, '5', '1'), { text: '卵', start: 4, end: 5 });
+  assert.deepEqual(probe('string-at', input.path, '0', '1'), { text: 'buy', start: 0, end: 3 });
+  assert.deepEqual(probe('text-at', input.path, '2', '5'), { text: 'buy 卵', start: 0, end: 5 });
+  // 挿入の長さは UTF-8 のバイト数。「目玉」(6 バイト) の 3 バイトだけなら「目」
+  assert.deepEqual(probe('insert', input.path, '4', '目玉', '3'), { ok: true });
+  await until(async () => (await tree('todo')).find((n) => n.id === 'input')!.value === 'buy 目卵', '3 バイトだけ入る');
+  input = find(dump(), (x) => x.name === '新しいタスク')!;
+  const r = probe('size', input.path);
+  assert.ok(r.w > 100 && r.h > 10, JSON.stringify(r));
+  // 入力欄の真ん中の点は、入力欄
+  assert.deepEqual(probe('at-point', '0', String(r.x + r.w / 2), String(r.y + r.h / 2)), { name: '新しいタスク' });
+});
+
+await step('状態と構造の変化はイベントで届く: checked の変化、子 (項目) の追加は親のリストに位置と子を付けて', async () => {
+  const before = events.length;
+  const i2 = find(dump(), (x) => x.name === '請求書を送る')!;
+  bridge('action', 'AI-native desktop', i2.path, 'click');
+  await until(() => events.slice(before).some((e) => e.type === 'object:state-changed:checked'), 'checked のイベント');
+  const add = find(dump(), (x) => x.name === '追加' && x.role === 'push button')!;
+  bridge('action', 'AI-native desktop', add.path, 'click');
+  await until(() => events.slice(before).some((e) => e.type === 'object:children-changed:add' && e.name === 'タスク'), 'リスト「タスク」の children-changed:add');
+});
+
+await step('AI の提案は announcement のイベントで届き、パネルの「承認」をスクリーンリーダーから押せる', async () => {
   const p = (await cmd({ t: 'propose', intent: 'コンパクト表示にする', steps: [{ app: 'settings', target: 'compact', action: 'click' }] })) as { result: { proposal: { id: string } } };
   const id = p.result.proposal.id;
   await until(() => events.some((e) => e.type === 'object:announcement' && (e.text ?? '').includes(`AI の提案 ${id}`)), '提案の読み上げ');

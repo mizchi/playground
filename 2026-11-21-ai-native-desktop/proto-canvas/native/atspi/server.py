@@ -65,8 +65,8 @@ XML = """
     <method name="Contains"><arg direction="in" type="i"/><arg direction="in" type="i"/><arg direction="in" type="u"/><arg direction="out" type="b"/></method>
     <method name="GetAccessibleAtPoint"><arg direction="in" type="i"/><arg direction="in" type="i"/><arg direction="in" type="u"/><arg direction="out" type="(so)"/></method>
     <method name="GetExtents"><arg direction="in" type="u"/><arg direction="out" type="(iiii)"/></method>
-    <method name="GetPosition"><arg direction="in" type="u"/><arg direction="out" type="(ii)"/></method>
-    <method name="GetSize"><arg direction="out" type="(ii)"/></method>
+    <method name="GetPosition"><arg direction="in" type="u"/><arg direction="out" type="i"/><arg direction="out" type="i"/></method>
+    <method name="GetSize"><arg direction="out" type="i"/><arg direction="out" type="i"/></method>
     <method name="GetLayer"><arg direction="out" type="u"/></method>
     <method name="GetMDIZOrder"><arg direction="out" type="n"/></method>
     <method name="GrabFocus"><arg direction="out" type="b"/></method>
@@ -76,6 +76,11 @@ XML = """
     <property name="CharacterCount" type="i" access="read"/>
     <property name="CaretOffset" type="i" access="read"/>
     <method name="GetText"><arg direction="in" type="i"/><arg direction="in" type="i"/><arg direction="out" type="s"/></method>
+    <method name="GetTextAtOffset"><arg direction="in" type="i"/><arg direction="in" type="u"/><arg direction="out" type="s"/><arg direction="out" type="i"/><arg direction="out" type="i"/></method>
+    <method name="GetTextBeforeOffset"><arg direction="in" type="i"/><arg direction="in" type="u"/><arg direction="out" type="s"/><arg direction="out" type="i"/><arg direction="out" type="i"/></method>
+    <method name="GetTextAfterOffset"><arg direction="in" type="i"/><arg direction="in" type="u"/><arg direction="out" type="s"/><arg direction="out" type="i"/><arg direction="out" type="i"/></method>
+    <method name="GetStringAtOffset"><arg direction="in" type="i"/><arg direction="in" type="u"/><arg direction="out" type="s"/><arg direction="out" type="i"/><arg direction="out" type="i"/></method>
+    <method name="GetCharacterAtOffset"><arg direction="in" type="i"/><arg direction="out" type="i"/></method>
   </interface>
   <interface name="org.a11y.atspi.EditableText">
     <method name="SetTextContents"><arg direction="in" type="s"/><arg direction="out" type="b"/></method>
@@ -109,6 +114,38 @@ ROLES = {
     "x-window": R.PANEL,
 }
 S = Atspi.StateType
+
+
+def span(v, offset, unit):
+    """offset を含む単位 (char / word / line) の [start, end)。この試作の文字は 1 行なので、文・段落・行は全体"""
+    n = len(v)
+    if n == 0:
+        return 0, 0
+    o = max(0, min(offset, n - 1))
+    if unit == "char":
+        return o, o + 1
+    if unit == "word":
+        if v[o].isspace():
+            start = o
+            while start > 0 and v[start - 1].isspace():
+                start -= 1
+            end = o
+            while end < n and v[end].isspace():
+                end += 1
+            return start, end
+        start = o
+        while start > 0 and not v[start - 1].isspace():
+            start -= 1
+        end = o
+        while end < n and not v[end].isspace():
+            end += 1
+        return start, end
+    return 0, n
+
+
+# AtspiTextBoundaryType (GetText*Offset) と AtspiTextGranularity (GetStringAtOffset) を単位にする
+BOUNDARY = {0: "char", 1: "word", 2: "word", 3: "line", 4: "line", 5: "line", 6: "line"}
+GRANULARITY = {0: "char", 1: "word", 2: "line", 3: "line", 4: "line"}
 
 
 def emit(msg):
@@ -263,18 +300,49 @@ class Server:
         for path, n in objects.items():
             if path not in self.registered and n.kind != "cache":
                 self.register(n)
-        changed = [p for p in objects if p not in old or (old[p].name != objects[p].name)]
         self.objects = objects
-        if changed:
-            self.signal(ROOT, "Object", "ChildrenChanged", "add", 0, 0, GLib.Variant("(so)", self.ref(None)))
-        # フォーカスが動いたら知らせる (スクリーンリーダーが読み上げる)
+        self.diff(old, objects)
+        # フォーカスが動いたら知らせる (スクリーンリーダーが読み上げる)。前のノードには focused を外したことを知らせる
         if focus_key != self.focus_key:
+            prev = next((x for x in objects.values() if x.key == self.focus_key), None) if self.focus_key else None
+            if prev:
+                self.signal(prev.path, "Object", "StateChanged", "focused", 0, 0, GLib.Variant("i", 0))
             self.focus_key = focus_key
             if focus_key:
                 n = next((x for x in objects.values() if x.key == focus_key), None)
                 if n:
                     self.signal(n.path, "Object", "StateChanged", "focused", 1, 0, GLib.Variant("i", 0))
                     self.signal(n.path, "Focus", "Focus", "", 0, 0, GLib.Variant("i", 0))
+
+    def diff(self, old, new):
+        """前のツリーと比べて、変わったところのイベントを出す (libatspi のキャッシュと、スクリーンリーダーの読み上げのため)"""
+        for path, n in new.items():
+            o = old.get(path)
+            if o is None or n.kind == "cache":
+                continue
+            # 子の増減は、変わった親で、位置と子を付けて知らせる
+            before = [c.path for c in o.children]
+            after = [c.path for c in n.children]
+            if before != after:
+                for i, c in enumerate(o.children):
+                    if c.path not in after:
+                        self.signal(path, "Object", "ChildrenChanged", "remove", i, 0, GLib.Variant("(so)", self.ref(c)))
+                for i, c in enumerate(n.children):
+                    if c.path not in before:
+                        self.signal(path, "Object", "ChildrenChanged", "add", i, 0, GLib.Variant("(so)", self.ref(c)))
+            if o.name != n.name:
+                self.signal(path, "Object", "PropertyChange", "accessible-name", 0, 0, GLib.Variant("s", n.name))
+            if o.checked != n.checked and n.checked is not None:
+                self.signal(path, "Object", "StateChanged", "checked", 1 if n.checked else 0, 0, GLib.Variant("i", 0))
+            if o.disabled != n.disabled:
+                for st in ("enabled", "sensitive"):
+                    self.signal(path, "Object", "StateChanged", st, 0 if n.disabled else 1, 0, GLib.Variant("i", 0))
+            if (o.value or "") != (n.value or "") and n.value is not None:
+                ov, nv = o.value or "", n.value or ""
+                if ov:
+                    self.signal(path, "Object", "TextChanged", "delete", 0, len(ov), GLib.Variant("s", ov))
+                if nv:
+                    self.signal(path, "Object", "TextChanged", "insert", 0, len(nv), GLib.Variant("s", nv))
 
     def signal(self, path, iface, member, detail, d1, d2, any_data):
         try:
@@ -359,6 +427,21 @@ class Server:
         else:
             emit({"t": "action", "app": n.app, "node": n.node, "action": action, **({"data": data} if data is not None else {})})
 
+    def edit(self, n, value):
+        n.value = value
+        self.act(n, "setValue", value)
+
+    def at_point(self, n, x, y):
+        """n の子孫で (x, y) を含むいちばん深いもの"""
+        for c in n.children:
+            r = c.rect
+            hit = self.at_point(c, x, y)
+            if hit:
+                return hit
+            if r and r["x"] <= x < r["x"] + r["w"] and r["y"] <= y < r["y"] + r["h"]:
+                return c
+        return None
+
     def on_call(self, conn, sender, path, iface, method, params, inv):
         n = self.objects.get(path)
         if n is None:
@@ -417,13 +500,14 @@ class Server:
         if method == "GetExtents":
             return ret("(iiii)", (int(r["x"]), int(r["y"]), int(r["w"]), int(r["h"])))
         if method == "GetPosition":
-            return ret("(ii)", (int(r["x"]), int(r["y"])))
+            return ret("ii", int(r["x"]), int(r["y"]))
         if method == "GetSize":
-            return ret("(ii)", (int(r["w"]), int(r["h"])))
+            return ret("ii", int(r["w"]), int(r["h"]))
         if method == "Contains":
             return ret("b", r["x"] <= a[0] < r["x"] + r["w"] and r["y"] <= a[1] < r["y"] + r["h"])
         if method == "GetAccessibleAtPoint":
-            return ret("(so)", self.ref(None))
+            # 位置はどの座標系でも、ホストの窓の中の座標として見る (この試作は窓 1 枚で、窓の位置を知らない)
+            return ret("(so)", self.ref(self.at_point(n, a[0], a[1])))
         if method == "GetLayer":
             return ret("u", 3)
         if method == "GetMDIZOrder":
@@ -440,22 +524,41 @@ class Server:
             v = n.value or ""
             start, end = a
             return ret("s", v[start : (len(v) if end < 0 else end)])
+        if method in ("GetTextAtOffset", "GetTextBeforeOffset", "GetTextAfterOffset", "GetStringAtOffset"):
+            v = n.value or ""
+            unit = (GRANULARITY if method == "GetStringAtOffset" else BOUNDARY).get(a[1], "char")
+            start, end = span(v, a[0], unit)
+            if method == "GetTextBeforeOffset":
+                start, end = span(v, start - 1, unit) if start > 0 else (0, 0)
+            elif method == "GetTextAfterOffset":
+                start, end = span(v, end, unit) if end < len(v) else (len(v), len(v))
+            return ret("sii", v[start:end], start, end)
+        if method == "GetCharacterAtOffset":
+            v = n.value or ""
+            return ret("i", ord(v[a[0]]) if 0 <= a[0] < len(v) else 0)
+        # 編集は、ホストが木を返す前に続けて届くことがある。送った値を手元にも置き、次の編集はそこから作る
         if method == "SetTextContents":
             if "setValue" in n.actions:
-                self.act(n, "setValue", a[0])
+                self.edit(n, a[0])
                 return ret("b", True)
             return ret("b", False)
         if method == "InsertText":
             if "setValue" in n.actions:
                 v = n.value or ""
                 pos = max(0, min(a[0], len(v)))
-                self.act(n, "setValue", v[:pos] + a[1] + v[pos:])
+                text = a[1]
+                # length は UTF-8 のバイト数 (負なら全部)。文字の途中では切らない
+                raw = text.encode("utf-8")
+                if 0 <= a[2] < len(raw):
+                    text = raw[: a[2]].decode("utf-8", errors="ignore")
+                self.edit(n, v[:pos] + text + v[pos:])
                 return ret("b", True)
             return ret("b", False)
         if method == "DeleteText":
             if "setValue" in n.actions:
                 v = n.value or ""
-                self.act(n, "setValue", v[: a[0]] + v[a[1] :])
+                start, end = max(0, a[0]), (len(v) if a[1] < 0 else a[1])
+                self.edit(n, v[:start] + v[end:])
                 return ret("b", True)
             return ret("b", False)
         return inv.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method)

@@ -21,7 +21,9 @@ export function filePackageSource(appJson: string): PackageSource {
 
 /** worker_threads の Worker を、ブラウザの Worker と同じ口 (onmessage / onerror / postMessage / terminate) にする */
 function nodeWorker(): Worker {
-  const w = new NodeWorker(new URL('./component-worker-node.ts', import.meta.url));
+  // コンポーネントの標準出力・標準エラーは、ホストの標準出力 (--control の口) に混ぜず、ホストの標準エラーに印を付けて流す
+  const w = new NodeWorker(new URL('./component-worker-node.ts', import.meta.url), { stdout: true, stderr: true, stdin: false });
+  for (const s of [w.stdout, w.stderr]) s.on('data', (d: Buffer) => process.stderr.write(`[component] ${d}`));
   const o = {
     onmessage: null as ((e: { data: unknown }) => void) | null,
     onerror: null as ((e: { message: string }) => void) | null,

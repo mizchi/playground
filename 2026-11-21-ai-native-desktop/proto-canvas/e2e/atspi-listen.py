@@ -19,7 +19,7 @@ def on_event(e):
 
 
 listener = Atspi.EventListener.new(on_event)
-for t in ["object:state-changed:focused", "object:announcement", "focus:"]:
+for t in ["object:state-changed:focused", "object:state-changed:checked", "object:children-changed", "object:announcement", "focus:"]:
     listener.register(t)
 print(json.dumps({"type": "listening"}), flush=True)
 Atspi.event_main()

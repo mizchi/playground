@@ -89,3 +89,14 @@ test('読み込み時の検査: コンポーネントの import を一覧でき�
   assert.ok(extra.length > 0);
   console.log(`     import ${imports.length} 個 (WIT の world 以外: ${extra.length} 個、例: ${extra.slice(0, 3).join(', ')})`);
 });
+
+test('WASI: 環境変数・引数・作業ディレクトリは渡さない (Node の preview2-shim でも)', async () => {
+  const { wasiImports } = await import('../src/apps/component-app.ts');
+  const shimMod = await import('@bytecodealliance/preview2-shim');
+  const imports = wasiImports(shimMod as unknown as Record<string, Record<string, unknown>>, { preopens: 'none', version: '0.2.9' });
+  const env = imports['wasi:cli/environment@0.2.9'] as { getEnvironment(): unknown[]; getArguments(): unknown[]; initialCwd(): unknown };
+  assert.deepEqual(env.getEnvironment(), []);
+  assert.deepEqual(env.getArguments(), []);
+  assert.equal(env.initialCwd(), undefined);
+  assert.equal(imports['wasi:cli/environment'], env, '版番号の無い名前も同じ');
+});
