@@ -1,0 +1,2 @@
+naive model delta = 0.146677
+reciprocity-corrected model delta = 0.146459
