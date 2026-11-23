@@ -56,12 +56,44 @@ test('能力 storage = import gui:app/storage: 項目はアプリの保存領域
   assert.deepEqual(labels, ['牛乳を買う', '請求書を送る', 'PR をレビューする', '卵']);
 });
 
-test('人が保存を拒否していれば、コンポーネントの set は false になり、アプリがそれを出す', async () => {
-  const p = await make();
+test('人が保存領域を拒否していれば、読めないので書かない (既定の項目で保存済みの項目を上書きしない)', async () => {
+  const kv = memoryKeyValue();
+  kv.set('app.todo-rs.items', 'i7\t0\t保存済みの項目');
+  const p = await make(kv);
   p.services.setGrant('todo-rs', 'storage', 'denied');
   p.launch('todo-rs');
+  // 読めないので既定の項目で始まる。操作しても保存済みの項目は消えない
   p.shell.dispatch({ app: 'todo-rs', target: 'i1', action: 'click', by: 'human' });
-  assert.equal(p.shell.tree('todo-rs').get('status')!.label, '保存できなかった');
+  assert.equal(p.shell.tree('todo-rs').get('status')!.label, '保存領域を読めないので、保存しない');
+  assert.equal(kv.get('app.todo-rs.items'), 'i7\t0\t保存済みの項目');
+  // あとで許可されたら、書く前に読み直して保存済みの項目に戻る
+  p.services.setGrant('todo-rs', 'storage', 'granted');
+  p.shell.dispatch({ app: 'todo-rs', target: 'i1', action: 'click', by: 'human' });
+  assert.match(p.shell.tree('todo-rs').get('status')!.label!, /保存済みの項目を読み直した/);
+  const t = p.shell.tree('todo-rs');
+  assert.deepEqual(t.get('list')!.children!.map((c) => t.get(c)!.label), ['保存済みの項目']);
+  assert.equal(kv.get('app.todo-rs.items'), 'i7\t0\t保存済みの項目');
+});
+
+test('項目の文字のタブ・改行・バックスラッシュは、保存して読み直しても変わらない', async () => {
+  const kv = memoryKeyValue();
+  const p = await make(kv);
+  p.launch('todo-rs');
+  const text = 'タブ\tと\n改行と \\ と \\t';
+  p.shell.dispatch({ app: 'todo-rs', target: 'input', action: 'setValue', data: text, by: 'human' });
+  p.shell.dispatch({ app: 'todo-rs', target: 'add', action: 'click', by: 'human' });
+  assert.equal(kv.get('app.todo-rs.items')!.split('\n').length, 4, '1 項目 1 行のまま');
+  const q = await make(kv);
+  q.launch('todo-rs');
+  const t = q.shell.tree('todo-rs');
+  assert.equal(t.get(t.get('list')!.children!.at(-1)!)!.label, text);
+});
+
+test('world gui-app の app (start / on-action) を export しないコンポーネントは入れない', async () => {
+  const src = fsSource();
+  const r = await loadPackage({ ...src, module: async () => ({ instantiate: () => ({}) }) }, wasi);
+  assert.ok(!r.ok);
+  assert.deepEqual(r.errors, ['gui:app/app (start と on-action) を export していない']);
 });
 
 test('宣言していない能力の import を求めるコンポーネントは入れない (どの能力が足りないかを言う)', async () => {

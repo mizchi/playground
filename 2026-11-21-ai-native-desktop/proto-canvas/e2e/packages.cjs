@@ -80,6 +80,15 @@ async function step(name, fn) {
     assert.ok(labels.includes('WIT から保存'), labels.join());
   });
 
+  await step('保存したパッケージの一覧が壊れていても、同じ id のパッケージが二重にあっても、起動する', async () => {
+    for (const v of ['null', '{}', JSON.stringify(['packages/todo-rs/app.json', 'packages/todo-rs/app.json?again'])]) {
+      await page.evaluate((v) => localStorage.setItem('ai-native-desktop.kv.platform.packages', v), v);
+      await page.reload();
+      await page.waitForFunction(() => window.platform, null, { timeout: 10000 });
+    }
+    assert.equal(await page.evaluate(() => window.platform.registry.list().filter((m) => m.id === 'todo-rs').length), 1);
+  });
+
   await step('ページエラーなし', async () => assert.deepEqual(errors, []));
   await browser.close();
   server.close();

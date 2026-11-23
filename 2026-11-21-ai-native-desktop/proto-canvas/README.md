@@ -134,7 +134,7 @@ Node 24 以上が必要 (`.node-version`)。veriss がそれを要求する。�
 
 ## 結果
 
-- 単体テスト 112 件 (うち veriss の検証 12 件、sway への写像 4 件)、E2E 12 件、レイアウト操作の E2E 14 件、Terminal の E2E 14 件、Calendar の E2E 6 件、テーマの E2E 6 件、パッケージの E2E 5 件が通る (Node 24、Playwright の Chromium)
+- 単体テスト 114 件 (うち veriss の検証 12 件、sway への写像 4 件)、E2E 12 件、レイアウト操作の E2E 14 件、Terminal の E2E 14 件、Calendar の E2E 6 件、テーマの E2E 6 件、パッケージの E2E 6 件が通る (Node 24、Playwright の Chromium)
 - E2E の IME は、CDP の `Input.imeSetComposition` で実際の composition イベントを起こして確かめた。preedit は木に入らず、確定した `卵` だけが値になる
 - LLM の template の代わりに「カード」template を適用すると、件数が変わっても (3 件 → 5 件) 同じキャッシュに当たる。pin すると再読み込み後も残る
 - 操作を落とす template は、既定レンダラに戻り、理由がパネルに出る

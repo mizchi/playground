@@ -151,16 +151,24 @@ async function readPackage(url: string) {
 }
 const packageUrls: string[] = (() => {
   try {
-    return perf ? [] : (JSON.parse(localKeyValue.get(PACKAGES_KEY) ?? '[]') as string[]);
+    // 手で書き換えられた・壊れた値でも起動できるように、文字列の配列のときだけ使う
+    const v: unknown = perf ? [] : JSON.parse(localKeyValue.get(PACKAGES_KEY) ?? '[]');
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
   } catch {
     return [];
   }
 })();
 const packageManifests: AppManifest[] = [];
+// 同梱のアプリと、先に読んだパッケージの id は使わせない (後から同じ id を返すようになったパッケージで、起動が止まらないように)
+const takenIds = new Set([...builtinManifests.map((m) => m.id), terminal.id]);
 for (const url of packageUrls) {
   const r = await readPackage(url);
-  if (r.ok) packageManifests.push(r.manifest);
-  else console.warn(`パッケージ ${url} を読めない: ${r.errors.join(' / ')}`);
+  if (!r.ok) console.warn(`パッケージ ${url} を読めない: ${r.errors.join(' / ')}`);
+  else if (takenIds.has(r.manifest.id)) console.warn(`パッケージ ${url} の id ${r.manifest.id} はすでに使われている。読み込まない`);
+  else {
+    takenIds.add(r.manifest.id);
+    packageManifests.push(r.manifest);
+  }
 }
 const platform = createPlatform({
   apps: [...(perf ? builtinManifests.map((m) => (m.id === 'todo' ? perfTodo : m)) : builtinManifests), terminal, ...packageManifests],

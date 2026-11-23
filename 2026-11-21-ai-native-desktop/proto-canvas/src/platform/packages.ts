@@ -69,9 +69,10 @@ export function importsFor(pkg: PackageManifest, wasiShim: Record<string, Record
   const imports: Record<string, unknown> = { ...wasiImports(wasiShim, { preopens: 'none', version: '0.2.9' }), ...hostImports(host) };
   if (pkg.capabilities.includes('storage')) {
     const storage = {
+      // WIT: result<option<string>, string>。読めないとき (拒否・許可待ち) は err にして、キーが無いだけ (ok(none)) と分ける
       get: (key: string) => {
         const r = services.storage.get(key);
-        return r.ok ? r.value : undefined;
+        return r.ok ? { tag: 'ok', val: r.value } : { tag: 'err', val: r.reason };
       },
       set: (key: string, value: string) => services.storage.set(key, value).ok,
     };
@@ -123,7 +124,8 @@ export async function loadPackage(
     return { ok: false, errors: [`コンポーネントを読めない: ${String((e as Error).message ?? e)}`] };
   }
   const getCore = (p: string) => {
-    const m = cores.get(p.split('/').pop()!) ?? cores.get(p);
+    // 同じ名前のファイルが別のディレクトリにあっても取り違えないよう、パスが一致するものを先に探す
+    const m = cores.get(p) ?? cores.get(p.split('/').pop()!);
     if (!m) throw new Error(`core wasm ${p} が app.json の core に無い`);
     return m;
   };
@@ -131,14 +133,19 @@ export async function loadPackage(
   // 試しにインスタンスを作る: 渡していない import を求めれば、ここで失敗する
   const denied: AppServices['storage'] = { get: () => ({ ok: false, reason: 'denied' }), set: () => ({ ok: false, reason: 'denied' }) };
   const asked = new Set<string>();
+  let dryExports: unknown;
   try {
     const dry = importsFor(pkg, wasiShim, { emit: () => {} }, { storage: denied } as AppServices);
-    mod.instantiate(getCore, recording(dry, asked));
+    dryExports = mod.instantiate(getCore, recording(dry, asked));
   } catch (e) {
     const provided = new Set(Object.keys(importsFor(pkg, wasiShim, { emit: () => {} }, { storage: denied } as AppServices)));
     const missing = [...asked].filter((k) => !provided.has(k) && !BASE_IMPORTS.test(k));
     return { ok: false, errors: missing.length ? missing.map(missingReason) : [`インスタンスを作れない: ${String((e as Error).message ?? e)}`] };
   }
+
+  // export の検査 (import の検査とは別): world gui-app の app (start / on-action) を出していなければ、開けないので入れない
+  const app = (dryExports as { app?: { start?: unknown; onAction?: unknown } } | null)?.app;
+  if (typeof app?.start !== 'function' || typeof app?.onAction !== 'function') return { ok: false, errors: ['gui:app/app (start と on-action) を export していない'] };
 
   const manifest: AppManifest = {
     id: pkg.id,

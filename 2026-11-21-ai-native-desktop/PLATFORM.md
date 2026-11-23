@@ -76,10 +76,11 @@ WIT にするときは、能力ごとに interface を分け、manifest の宣�
   "multiInstance": false, "entry": "todo.js", "core": ["todo.core.wasm", "todo.core2.wasm", "todo.core3.wasm"] }
 ```
 
-- **能力 = import**。ホストは、宣言した能力の WIT の interface だけを import として渡す。`storage` を宣言したアプリにだけ `gui:app/storage` (`component/wit/app.wit` の world `gui-app-storage`) を渡し、その呼び出しは JS のアプリと同じサービス (許可・監査ログ) を通る
+- **能力 = import**。ホストは、宣言した能力の WIT の interface だけを import として渡す。`storage.get` は `result<option<string>, string>`: 読めないとき (人が拒否している) は err、キーが無いだけなら ok(none)。この 2 つを分けないと、読めなかったアプリが既定の値で保存済みのデータを上書きしてしまう (Rust の Todo は、読めていない窓では書かない)。`storage` を宣言したアプリにだけ `gui:app/storage` (`component/wit/app.wit` の world `gui-app-storage`) を渡し、その呼び出しは JS のアプリと同じサービス (許可・監査ログ) を通る
 - 入れる前に一度インスタンスを作り、**宣言していない import を求めるコンポーネントは入れない**。何が足りないかを言う (「gui:app/storage を import している (能力 storage を宣言していない)」)
 - WASI は渡すが、ファイルは 1 つも開いていない (preopens なし)。Rust の std が WASI を持ち込んでも、ファイルには触れない
-- `app.json` の検査: パッケージの外を指すパス、知らない能力、形の崩れを断る。入っているアプリ (同梱を含む) と同じ id は入れない (なりすまし)
+- `app.json` の検査: パッケージの外を指すパス、知らない能力、形の崩れを断る。入っているアプリ (同梱を含む) と同じ id は入れない (なりすまし)。world `gui-app` の `app` (start / on-action) を export していないものも入れない
+- 起動時に読むパッケージの一覧が壊れていても、後から同じ id を返すようになったパッケージがあっても、起動は止めない (読み飛ばして console に残す)
 - 入れるのは人だけ (パネルの「パッケージ」)。agent と MCP には口が無い。入れた URL は保存し、次の起動ではセッションの復元の前に読み込む
 - **未解決の穴**: jco の生成物 (`todo.js`) はページの中で動く JS なので、能力の境界の外にある。ブラウザでは同じ origin のパッケージだけを入れられるようにした。本番では、ホストが `.wasm` から glue を作り、パッケージの JS は動かさない (jco の transpile をホストで動かすか、ネイティブのホストで wasmtime を使う)
 

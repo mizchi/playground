@@ -20,7 +20,7 @@ const wasmApp = (preopens: 'none' | 'root') =>
   createComponentApp('wasm', (host) => {
     // 能力 storage の import (このテストでは、窓ごとの Map に置く)
     const kv = new Map<string, string>();
-    const storage = { get: (k: string) => kv.get(k), set: (k: string, v: string) => (kv.set(k, v), true) };
+    const storage = { get: (k: string) => ({ tag: 'ok', val: kv.get(k) }), set: (k: string, v: string) => (kv.set(k, v), true) };
     const imports = { ...wasiImports(shim as unknown as Record<string, Record<string, unknown>>, { preopens, version: '0.2.9' }), ...hostImports(host), 'gui:app/storage': storage };
     return instantiate(core, imports as never) as unknown as ComponentExports;
   });
