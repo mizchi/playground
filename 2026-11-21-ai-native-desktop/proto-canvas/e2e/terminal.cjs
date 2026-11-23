@@ -143,6 +143,21 @@ async function step(name, fn) {
     await waitScreen(/\$ paste\nクリップボードの中身\n/);
   });
 
+  await step('cal はカレンダーの予定を読む。許可の要求に、提供するアプリと中身が出る', async () => {
+    const now = new Date();
+    const key = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-07`;
+    // カレンダーの保存領域に予定を置く (カレンダーの窓は開いていない)
+    await page.evaluate((key) => window.platform.services.servicesFor('calendar', 'calendar').storage.set('events', JSON.stringify({ [key]: ['定例会議'] })), key);
+    await typeLine('cal');
+    await waitScreen(/カレンダーの許可を待っている/);
+    await page.waitForSelector('#prompts [data-allow="1"]');
+    assert.match(await page.textContent('#prompts'), /Terminal が Calendar の「月の予定 \(日付と題名。読み取りだけ\)」の読み取り の許可を求めている/);
+    await page.click('#prompts [data-allow="1"]');
+    await page.evaluate(() => window.shell.activate('terminal', 'input'));
+    await typeLine('cal');
+    await waitScreen(/\n\d\d\/07 定例会議/);
+  });
+
   await step('agent のコマンドは承認するまで実行されず、承認後は agent として記録される', async () => {
     const r = await page.evaluate(() =>
       window.agent.propose('whoami を実行する', [
@@ -218,10 +233,21 @@ async function step(name, fn) {
     await waitScreen(/[#$]$/); // bash のプロンプト
     await page.evaluate(() => window.shell.activate('terminal', 'input'));
     await typeLine('echo $((6*7)); printf "\\033[31mRED\\033[0m\\n"; stty size');
-    await waitScreen(/\n42\nRED\n18 72\n/);
+    // stty size は、窓に合わせた端末の大きさ (行 桁) を返す
+    const [cols, rows] = await page.evaluate(() => { const s = window.shell.tree('terminal').get('screen').screen; return [s.cols, s.rows]; });
+    assert.ok(cols > 72, `全体に広げた窓の桁 ${cols}`);
+    await waitScreen(new RegExp(`\\n42\\nRED\\n${rows} ${cols}\\n`));
     const red = await page.evaluate(() => window.shell.tree('terminal').get('screen').screen.lines.flat().find((r) => r.text === 'RED'));
     assert.ok(red?.fg && red.fg !== '#e6e8ef', `RED の色 ${red?.fg}`);
     await shot('terminal-04-host-shell');
+    // 窓を戻すと狭くなり、動いているシェルにも新しい大きさが届く (SIGWINCH)
+    await page.keyboard.press('Escape');
+    await settle();
+    await page.waitForFunction((c) => window.shell.tree('terminal').get('screen').screen.cols < c, cols);
+    const [c2, r2] = await page.evaluate(() => { const s = window.shell.tree('terminal').get('screen').screen; return [s.cols, s.rows]; });
+    await page.evaluate(() => window.shell.activate('terminal', 'input'));
+    await typeLine('stty size');
+    await waitScreen(new RegExp(`\\n${r2} ${c2}\\n`));
     await typeLine('exit');
     await waitScreen(/ホストのシェルが終わった/);
   });

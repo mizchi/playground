@@ -180,7 +180,7 @@ function announce() {
   if (denied.length) aria.announce(`拒否: ${denied.at(-1)!.reason ?? ''}`);
   seenAudit = shell.audit.length;
   const sv = platform.services;
-  for (const p of sv.prompts.slice(seenPrompts)) aria.announce(`${p.appTitle} が ${CAP_LABEL[p.capability]} の許可を求めています`);
+  for (const p of sv.prompts.slice(seenPrompts)) aria.announce(`${p.appTitle} が ${capLabel(p.capability)} の許可を求めています`);
   seenPrompts = sv.prompts.length;
   const last = sv.notifications.at(-1);
   if (last && last.id > seenNotes) {
@@ -196,6 +196,13 @@ const CAP_LABEL: Record<string, string> = {
   'apps.launch': 'アプリの起動',
   'terminal.pty': 'ホストのシェル (擬似端末)',
 };
+/** 能力の名前。ほかのアプリのデータ (data:<topic>) は、提供するアプリと中身を示す */
+function capLabel(cap: string): string {
+  if (!cap.startsWith('data:')) return CAP_LABEL[cap] ?? cap;
+  const topic = cap.slice('data:'.length);
+  const m = platform.registry.list({ includeSystem: true }).find((x) => x.provides?.[topic]);
+  return m ? `${m.title} の「${m.provides![topic].description}」の読み取り` : `${topic} の読み取り`;
+}
 
 // ---- agent API: MCP の tool にそのまま写せる形で window に出す ----
 const agent = {
@@ -413,7 +420,7 @@ function renderPanel(frame: ReturnType<Shell['frame']>) {
   $('prompts').innerHTML = sv.prompts
     .filter((p) => p.status === 'pending')
     .map(
-      (p) => `<div class="card sensitive" role="alertdialog" aria-label="許可の要求"><div><b>${escapeHtml(p.appTitle)}</b> が <b>${CAP_LABEL[p.capability]}</b> の許可を求めている</div>
+      (p) => `<div class="card sensitive" role="alertdialog" aria-label="許可の要求"><div><b>${escapeHtml(p.appTitle)}</b> が <b>${escapeHtml(capLabel(p.capability))}</b> の許可を求めている</div>
         <div class="row"><button class="primary" data-grant="${p.id}" data-allow="1">許可</button><button data-grant="${p.id}" data-allow="0">拒否</button></div></div>`,
     )
     .join('');

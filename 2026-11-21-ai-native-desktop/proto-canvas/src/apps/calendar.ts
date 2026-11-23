@@ -145,6 +145,22 @@ export function createCalendarApp(opts: { id?: string; services?: AppServices; n
   };
 }
 
+export interface CalendarEvent {
+  date: string;
+  title: string;
+}
+
+/** data:calendar.events の答え: 指定した月 (省略で全部) の予定。窓を開いていなくても、保存領域から読む */
+export function calendarEvents(services: AppServices, args: { year?: number; month?: number }): CalendarEvent[] {
+  const r = services.storage.get('events');
+  const events = r.ok && r.value ? (JSON.parse(r.value) as Record<string, string[]>) : {};
+  const prefix = typeof args.year === 'number' && typeof args.month === 'number' ? `${args.year}-${pad(args.month + 1)}-` : '';
+  return Object.keys(events)
+    .filter((d) => d.startsWith(prefix))
+    .sort()
+    .flatMap((date) => events[date].map((title) => ({ date, title })));
+}
+
 export const calendarManifest: AppManifest = {
   id: 'calendar',
   title: 'Calendar',
@@ -153,4 +169,6 @@ export const calendarManifest: AppManifest = {
   capabilities: ['storage', 'notifications'],
   multiInstance: false,
   create: (id, services) => createCalendarApp({ id, services }),
+  provides: { 'calendar.events': { description: '月の予定 (日付と題名。読み取りだけ)' } },
+  provide: (topic, args, services) => (topic === 'calendar.events' ? calendarEvents(services, args as { year?: number; month?: number }) : null),
 };

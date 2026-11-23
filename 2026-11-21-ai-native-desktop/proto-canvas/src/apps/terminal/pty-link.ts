@@ -25,6 +25,11 @@ export function wsPtyConnector(url: string): PtyConnector {
     ws.onclose = () => end(open ? '接続が切れた' : 'つなげなかった');
     return {
       write: (d) => (open ? ws.send(JSON.stringify({ t: 'in', data: d })) : queue.push(d)),
+      resize: (c, r) => {
+        cols = c;
+        rows = r;
+        if (open) ws.send(JSON.stringify({ t: 'resize', cols: c, rows: r }));
+      },
       close: () => ws.close(),
     };
   };

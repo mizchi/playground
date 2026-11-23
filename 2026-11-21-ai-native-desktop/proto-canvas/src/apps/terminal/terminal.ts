@@ -22,8 +22,9 @@ const WELCOME = '\x1b[1mTerminal\x1b[0m \x1b[2m— libghostty-vt (wasm) で動�
 
 export function createTerminalApp(opts: TerminalOptions): App {
   const appId = opts.id ?? 'terminal';
-  const cols = opts.cols ?? 72;
-  const rows = opts.rows ?? 18;
+  // 窓に合わせて変わる (shell が onResize で知らせる)。最初は既定の大きさ
+  let cols = opts.cols ?? 72;
+  let rows = opts.rows ?? 18;
   const sv = opts.services;
   let emit: (u: TreeUpdate) => void = () => {};
   let vt: Vt | null = null;
@@ -34,7 +35,7 @@ export function createTerminalApp(opts: TerminalOptions): App {
   let stopped = false;
   let sent = new Set<NodeId>();
   const env: ToyShellEnv = { services: sv, actor: 'human', history: [] };
-  const empty: TerminalScreen = { cols, rows, lines: Array.from({ length: rows }, () => []), cursor: null, fg: '#e6e8ef', bg: '#15171d' };
+  const empty = (): TerminalScreen => ({ cols, rows, lines: Array.from({ length: rows }, () => []), cursor: null, fg: '#e6e8ef', bg: '#15171d' });
 
   const promptLine = () => vt?.write(`\r\x1b[2K${PROMPT}${draft}`);
 
@@ -43,7 +44,7 @@ export function createTerminalApp(opts: TerminalOptions): App {
     const canPty = !!sv?.pty.available();
     const nodes: SemanticNode[] = [
       { id: 'root', role: 'x-window', label: appId === 'terminal' ? 'Terminal' : `Terminal (${appId})`, children: ['screen', 'entry', 'status'] },
-      { id: 'screen', role: 'log', label: '画面', value: snap?.text ?? '', screen: snap?.screen ?? empty, actions: ['focus'] },
+      { id: 'screen', role: 'log', label: '画面', value: snap?.text ?? '', screen: snap?.screen ?? empty(), actions: ['focus'] },
       { id: 'entry', role: 'group', label: 'コマンド行', children: ['input', 'run', ...(pty ? ['ctrlc'] : canPty ? ['host'] : [])] },
       // Enter (click) で実行。agent からの入力はシェルを動かすので、毎回承認が要る
       { id: 'input', role: 'textbox', label: pty ? 'ホストのシェルへの入力' : 'コマンド', value: draft, sensitive: true, actions: ['focus', 'setValue', 'replaceSelectedText', 'click'] },
@@ -111,7 +112,7 @@ export function createTerminalApp(opts: TerminalOptions): App {
           if (stopped) return;
           vt = make(cols, rows);
           vt.write(WELCOME + PROMPT);
-          status = `内蔵シェル (${cols}×${rows})`;
+          status = `内蔵シェル`;
           publish();
         },
         (err) => {
@@ -128,6 +129,14 @@ export function createTerminalApp(opts: TerminalOptions): App {
       else if (req.target === 'ctrlc' && req.action === 'click') pty?.write('\x03');
       else if (req.target === 'host' && req.action === 'click') connectPty();
       if (!pty && (req.action === 'setValue' || req.action === 'replaceSelectedText')) promptLine();
+      publish();
+    },
+    onResize(node, c, r) {
+      if (node !== 'screen' || (c === cols && r === rows)) return;
+      cols = c;
+      rows = r;
+      vt?.resize(c, r);
+      pty?.resize(c, r);
       publish();
     },
     stop() {
@@ -147,7 +156,7 @@ export function terminalManifest(load: () => Promise<VtFactory>): AppManifest {
     title: 'Terminal',
     description: 'libghostty-vt の端末。内蔵シェル、またはホストのシェル',
     kind: 'js',
-    capabilities: ['storage', 'clipboard.read', 'clipboard.write', 'notifications', 'apps.launch', 'terminal.pty'],
+    capabilities: ['storage', 'clipboard.read', 'clipboard.write', 'notifications', 'apps.launch', 'terminal.pty', 'data:calendar.events'],
     multiInstance: true,
     create: (id, services) => createTerminalApp({ id, services, vt: once }),
   };

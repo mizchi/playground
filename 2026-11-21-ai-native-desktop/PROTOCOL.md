@@ -113,6 +113,17 @@ README の「宣言的 UI ツリー」を一歩進め、**アクセシビリテ�
 - `by` (actor) と `proposal` (承認済み提案の ID) は、shell が付ける封筒 (envelope) である。アプリは `by` を見て拒否してもよい
 - AI 側には MCP として `get_tree` / `propose(actions[])` / `wait(proposal)` を公開する
 
+### P2': 格子の大きさ (shell → app)
+
+格子で描くノード (role `log` の端末の画面) に、窓の中で使える大きさを**桁と行**で知らせる。px でも字の大きさでもなく格子の単位なので、アプリは view も字形も知らないまま、端末の大きさ (TIOCSWINSZ) を決められる。
+
+```json
+{"t":"resize","app":"terminal","node":"screen","cols":118,"rows":31}
+```
+
+- 窓が止まっているとき (アニメーション中・ドラッグ中でないとき) に、変わったときだけ送る
+- 横は部品の幅から、縦は「今の部品の高さ + 窓の余り」から決める。行を変えると部品の高さが変わって余りが減るので、次のフレームで落ち着く
+
 ### P3: View Template (LLM / 既定レンダラ → shell)
 
 json-render 風。カタログ (`stack`, `card`, `checkbox`, `textField`, `badge` ...) の範囲内で書かせる。

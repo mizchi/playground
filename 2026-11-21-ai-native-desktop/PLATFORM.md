@@ -58,6 +58,7 @@ interface AppManifest {
 | `notifications` | 尋ねる | 通知を出す |
 | `apps.launch` | 尋ねる (システムのアプリは許可) | ほかのアプリを開く |
 | `terminal.pty` | 尋ねる | ホストの本物のシェル。ホストが擬似端末の橋を用意しているときだけ使える |
+| `data:<topic>` | 尋ねる (いつも) | ほかのアプリが提供するデータを読む (例: `data:calendar.events`)。下の「アプリどうしのデータ」 |
 
 - 状態は `granted` / `denied` / `ask`。`ask` の能力を使うと、呼び出しは `pending` で返り、ホストの UI に許可の要求が出る
 - **許可の要求に答えられるのは人だけ** (`answer(id, granted, 'human')`)。agent の答えは拒否する。MCP にも答える tool は無い
@@ -65,6 +66,26 @@ interface AppManifest {
 - 許可の要求・通知は **アプリから描けない面 (ホストの UI)** に出す。アプリの template は窓の中にしか描けないので、許可のダイアログを偽装できない。スクリーンリーダーには `aria-live` で読み上げる
 
 WIT にするときは、能力ごとに interface を分け、manifest の宣言に合わせてホストが import を与える (与えない import は link できない)。今の `component/wit/app.wit` は `host.emit` だけなので、そこに optional な import として足していく。
+
+## アプリどうしのデータ
+
+共有の保存領域は作らない。データを持つアプリが**提供するもの**を manifest で宣言し、読みたいアプリは**能力**として宣言する (Android の ContentProvider に近いが、読み取りだけ)。
+
+```ts
+// 提供する側 (Calendar)
+provides: { 'calendar.events': { description: '月の予定 (日付と題名。読み取りだけ)' } },
+provide: (topic, args, services) => calendarEvents(services, args),   // services は Calendar 自身の能力付きのサービス
+
+// 読む側 (Terminal)
+capabilities: [..., 'data:calendar.events'],
+services.data.query('calendar.events', { year, month })               // 初めては pending → 人が許可 → 値
+```
+
+- 提供は manifest の関数なので、提供する側の窓が開いていなくても答えられる。提供する側は自分の保存領域だけを読み、読む側の保存領域には触れない
+- 読む側の能力はいつも「尋ねる」から始まる。許可の要求には、提供するアプリと中身 (「Calendar の『月の予定』の読み取り」) が出る。答えられるのは人だけ
+- 宣言していないアプリは尋ねることもできない (`undeclared`)。提供するアプリが無ければ `unavailable`
+- 監査ログには `query calendar.events from calendar` のように、誰のデータを読んだかが残る
+- 引数と答えは `structuredClone` で渡す (参照を共有しない)。WIT にするときは、提供する側を `export`、読む側を能力付きの `import` にする
 
 ## 描画 backend
 
@@ -104,8 +125,10 @@ display list (P4b) が backend の境界。`DrawOp` は `rect` / `text` / `clip`
 - 画面は意味ツリーの `log` ノード (ARIA の log) にする。文字は `value`、描画用の色付きの格子は `screen`。描画は shell の `terminal` widget が格子に 1 桁ずつ置く
 - コマンド行は `sensitive`: agent の入力は毎回、人の承認が要る。承認された入力は `whoami` で `agent` と出る (actor がアプリまで届く)
 - 既定は内蔵の小さなシェル (`help` / `echo` / `colors` / `ls` / `cat` / `write` / `copy` / `paste` / `notify` / `open` / `whoami` ...)。ファイルは storage、copy / paste はクリップボード、`open` はアプリの起動で、どれも能力の確認を通る
-- `?pty=ws://127.0.0.1:8140/?token=...` で、ホストの擬似端末の橋 (`pty/server.ts`) につなげる。橋は util-linux の `script(1)` で擬似端末を作るので、ネイティブ拡張は要らない。127.0.0.1 だけで待ち、起動ごとの token と Origin を確かめる
-- 窓の幅は可変だが、端末の大きさは固定 (72×18)。狭い窓では右の桁を切り取る。窓の大きさを端末に伝える (TIOCSWINSZ) には、P2 にサイズの通知を足す必要がある (未実装)
+- `?pty=ws://127.0.0.1:8140/?token=...` で、ホストの擬似端末の橋 (`pty/server.ts`) につなげる。橋は Python の標準ライブラリの `pty` で擬似端末を作るので、ネイティブ拡張は要らない。127.0.0.1 だけで待ち、起動ごとの token と Origin を確かめる
+- 端末の大きさは窓に合わせる。shell が P2' (`onResize(node, cols, rows)`) で格子の大きさを知らせ、アプリは libghostty-vt の端末と、ホストの擬似端末 (TIOCSWINSZ。シェルには SIGWINCH が届く) の両方を変える。擬似端末の橋は Python の標準ライブラリの `pty` を使う (`pty/pty_helper.py`。Node だけでは ioctl を呼べない)
+- agent とスクリーンリーダーに渡す文字 (`value`) は、折り返した行を 1 行につなげる (論理的な行)。描画の格子は行ごと
+- ghostty-web 0.4.0 の `isRowWrapped(y)` は、d.ts の説明 (「次の行へ折り返す」) と違い、「y 行目が前の行の続き」のとき true を返す (実測)。`vt.ts` はこの意味で使う
 
 ### 見つけた問題
 
@@ -120,7 +143,7 @@ ghostty-web 0.4.0 の wasm は、別の端末を `free()` したあとのメモ�
 - 日のセルは `click` で選ぶ (`selected`)。予定のある日は「•」が付く。選んだ日の予定は `list`、追加は textbox (Enter でも追加)
 - 予定は storage、今日の予定があれば開いたときに通知する (notifications)。予定の削除は `sensitive` で、agent からは毎回承認が要る。追加は sensitive でないので、自動承認の対象にできる
 - 表の列を揃えるため、box に `equal` (horizontal の子を等幅にする。CSS の `flex: 1 1 0`) を足し、既定レンダラの `row` に使った。等幅の行に広げられたボタンは幅いっぱいに描き、文字は中央に置く。veriss へは `flex: 1 0 0; min-width: <固有幅>` として写す
-- ターミナルの内蔵シェルにも `cal` (今月、今日は反転) を足した。アプリの保存領域はアプリごとなので、ターミナルからカレンダーの予定は読めない (アプリどうしでデータを渡す口は、まだ無い)
+- ターミナルの内蔵シェルの `cal` は、カレンダーの予定を `data:calendar.events` で読み、予定のある日に印を付けて一覧を出す (上の「アプリどうしのデータ」)
 
 ## テーマ (ライト / ダーク)
 
@@ -137,9 +160,9 @@ ghostty-web 0.4.0 の wasm は、別の端末を `free()` したあとのメモ�
 
 ## 広げていく順番
 
-0. **アプリどうしのデータの受け渡し**: 共有の保存領域ではなく、意図 (intent) のような口で、受け取る側が能力として宣言する (例: ターミナルの `cal` がカレンダーの予定を読む)
+0. ~~**アプリどうしのデータの受け渡し**~~ (済: provides と `data:<topic>`。書き込みや「この予定をカレンダーに追加」のような依頼は、まだ無い)
 1. **アプリの入れ方を増やす**: manifest を JSON にして、wasm コンポーネント (`kind: 'component'`) を URL から入れる。能力は WIT の import と 1 対 1 にする
-2. **窓の大きさの通知**: P2 に `resize` (窓の中で使える幅と高さ) を足し、ターミナルの桁数・行数を窓に合わせる
+2. ~~**窓の大きさの通知**~~ (済: P2' の格子の大きさ)
 3. **ワークスペース**: 人と agent が別のワークスペースで作業し、agent の結果を人のワークスペースに提案として持ち込む
 4. **通知を Canvas の上に**: 今はホストの UI (DOM) だけ。shell の描画にも、アプリが触れない層として出す
 5. **ネイティブのホスト**: `createPlatform` は DOM に依存しないので、Odin + wgpu のネイティブのホストから同じ組み立てを呼ぶ (KeyValue はファイル、擬似端末は直接)

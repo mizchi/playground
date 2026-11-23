@@ -5,8 +5,8 @@ import type { Storage } from './cache.ts';
 import { defaultTemplate } from './catalog.ts';
 import { expandTree } from './expand.ts';
 import type { ExpandIssue, TemplateSource, ViewNode } from './expand.ts';
-import { layout } from './layout.ts';
-import type { Overflow } from './layout.ts';
+import { M, layout } from './layout.ts';
+import type { LaidOut, Overflow } from './layout.ts';
 import type { ActionName, ActionRequest, Actor, AppId, DrawOp, ImeFromHost, ImeToHost, Measure, NodeId, Rect, SemanticNode, TreeUpdate } from './protocol.ts';
 import { AnimatedRect, PREVIEW_SPRING, Spring, TILE_SPRING } from './anim.ts';
 import { paint } from './render.ts';
@@ -183,6 +183,8 @@ export class Shell {
   private revealFocus = false;
   private seq = 1;
   private measure: Measure;
+  /** 端末の画面に最後に知らせた桁と行 (窓/ノード → "colsxrows") */
+  private gridSent = new Map<string, string>();
 
   constructor(apps: App[], measure: Measure, storage: Storage) {
     this.measure = measure;
@@ -846,6 +848,7 @@ export class Shell {
     const windows: WindowInfo[] = [];
     let ime: ImeToHost = { t: 'ime-disable' };
     let animating = false;
+    const resizes: { w: Win; node: NodeId; cols: number; rows: number }[] = [];
     const snap = !this.animations || resized || this.snapTiles;
     this.snapTiles = false;
 
@@ -907,6 +910,8 @@ export class Shell {
       animating ||= !sp.step(dt);
       if (sp.x !== 0 || max > 0) lo = layout(view, content.w, this.measure, { x: content.x, y: content.y - sp.x });
       if (this.zoomed !== app) this.minWidths.set(app, lo.minWidth);
+      // 窓が止まっていれば、端末の画面に使える桁と行を知らせる (アニメーション中・ドラッグ中は知らせない)
+      if (settled && app !== dragging && w.app.onResize) gridFits(lo.root, content.h - lo.height, (node, cols, rows) => resizes.push({ w, node, cols, rows }));
       const focused = i === this.focusedWin;
       const pt = paint(lo.root, { focus: focused ? w.tree.focus : null, preedit: focused ? this.preedit : '', ghosts: ghosts.get(app) ?? new Map() }, this.measure, content);
       const title = this.titleOf(app);
@@ -1128,6 +1133,14 @@ export class Shell {
     else if ([...this.titles.values()].some((r) => inside(r, hv.x, hv.y))) cursor = 'grab';
     else if (this.hits.some((h) => inside(h.hit.rect, hv.x, hv.y))) cursor = 'pointer';
 
+    // 描き終えてから知らせる (アプリが木を更新すると、次のフレームで反映される)
+    for (const r of resizes) {
+      const key = `${r.w.app.id}/${r.node}`;
+      const v = `${r.cols}x${r.rows}`;
+      if (this.gridSent.get(key) === v) continue;
+      this.gridSent.set(key, v);
+      r.w.app.onResize!(r.node, r.cols, r.rows);
+    }
     return { ops, ime, windows, animating, cursor };
   }
 }
@@ -1198,4 +1211,20 @@ function stepShapeError(s: unknown, i: number): string | null {
   for (const k of ['app', 'target', 'action'] as const) if (typeof o[k] !== 'string') return `steps[${i}].${k}: 文字列`;
   if (o.data !== undefined && typeof o.data !== 'string') return `steps[${i}].data: 文字列`;
   return null;
+}
+
+/**
+ * 端末の画面 (terminal widget) に使える桁と行。横は部品の幅、縦は今の高さに窓の余り (足りなければ負) を足した高さ。
+ * 行を変えると部品の高さが変わり、余りがその分だけ減るので、次のフレームで行が落ち着く
+ */
+function gridFits(root: LaidOut, slack: number, out: (node: NodeId, cols: number, rows: number) => void): void {
+  const visit = (l: LaidOut) => {
+    if (l.view.kind === 'widget' && l.view.widget === 'terminal') {
+      const cols = Math.max(20, Math.floor((l.rect.w - 2 * M.termPad) / M.termCell));
+      const rows = Math.max(4, Math.floor((l.rect.h - 2 * M.termPad + slack) / M.termLine));
+      out(l.view.node.id, cols, rows);
+    }
+    l.children.forEach(visit);
+  };
+  visit(root);
 }

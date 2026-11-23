@@ -13,7 +13,7 @@ export interface ServiceAudit {
 }
 
 /** 宣言しているときの既定の状態 */
-const DEFAULT_GRANT: Record<Capability, GrantState> = {
+const DEFAULT_GRANT: Record<Exclude<Capability, `data:${string}`>, GrantState> = {
   storage: 'granted', // 自分の保存領域だけ
   'clipboard.write': 'granted',
   'clipboard.read': 'ask', // 他のアプリが書いたものを読めるので、尋ねる
@@ -66,7 +66,9 @@ export class ServiceHost {
     const saved = this.grants.get(app)?.get(cap);
     if (saved) return saved;
     if (cap === 'apps.launch' && m.system) return 'granted';
-    return DEFAULT_GRANT[cap];
+    // ほかのアプリのデータは、いつも尋ねる
+    if (cap.startsWith('data:')) return 'ask';
+    return DEFAULT_GRANT[cap as keyof typeof DEFAULT_GRANT];
   }
 
   setGrant(app: string, cap: Capability, state: GrantState): void {
@@ -156,6 +158,17 @@ export class ServiceHost {
           if (!r.ok) return fail(r);
           const why = this.launch(id, 'human');
           return why ? { ok: false, reason: 'denied' } : { ok: true, value: undefined };
+        },
+      },
+      data: {
+        query: (topic, args = {}) => {
+          const provider = this.registry.list({ includeSystem: true }).find((m) => m.provides?.[topic] && m.provide);
+          if (!provider) return { ok: false, reason: 'unavailable' };
+          const r = this.check(app, window, `data:${topic}`, `query ${topic} from ${provider.id}`);
+          if (!r.ok) return fail(r);
+          // 提供する側は、自分の能力付きのサービスで答える (相手の保存領域には触れない)
+          const value = provider.provide!(topic, structuredClone(args), this.servicesFor(provider.id, `${provider.id}#provider`));
+          return { ok: true, value: structuredClone(value) };
         },
       },
       pty: {
