@@ -28,12 +28,15 @@
 | アプリのパッケージ | `src/platform/packages.ts`, `src/platform/worker-runner.ts`, `packages/` | `app.json` + `.wasm`。glue はホストが jco の `generate` で作る (パッケージの JS は動かさない)。能力 = import。コンポーネントは Worker で動き、応答しなければ止める |
 | アプリの例: Calendar | `src/apps/calendar.ts` | 月の表を ARIA の table で出す。列は等幅の行 (`equal`) で揃える。予定は storage、今日の予定を通知 |
 | テーマ | `src/theme.ts`, `www/index.html` | ライト / ダーク (システムに従う・明示)。lowering はダークを `prefers-color-scheme: dark` の色の宣言として出し、veriss が両方のコントラストを検査する |
+| ワークスペース | `src/platform/services.ts`, `src/apps/agent-desk.ts`, `src/platform/platform.ts` | 人と agent のワークスペース (Alt+1 / Alt+2)。agent は自分のワークスペースで直接操作し、保存は重ねた層に溜まる。持ち込みは人が承認する |
+| 通知 | `src/shell.ts` (`drawNotices`), `src/platform/platform.ts` | 通知を窓より上の層に描く (アプリから描けない)。出どころは manifest の名前。6 秒で消え、押すと出した窓へ移る |
 | タイル | `src/tiling.ts`, `src/anim.ts`, `src/shell.ts` | 分割ツリー。窓のタイトルバーを掴んで運ぶと分割・入れ替えができる (下記)。境界はドラッグで動かせる。最小幅を下回ると「はみ出し」を出す |
 
 右のパネルでは、次のことができる。
 
 - テーマを選ぶ (システムに従う / ライト / ダーク)
 - アプリを開く / 窓を閉じる (Alt+L でランチャー。タイトルバーの × でも閉じる)
+- ワークスペースを切り替える (人 / agent)。agent の持ち込みの要求に答える
 - アプリの許可の要求に答える (クリップボードの読み取り・通知・アプリの起動・ホストのシェル)。通知を見る
 - agent として提案する (ゴースト表示 → 承認 / 却下)
 - template を貼って適用・pin・reject する (LLM の出力の代わり)
@@ -103,6 +106,8 @@ pnpm build && pnpm e2e:terminal   # Terminal (libghostty-vt) の通し確認。�
 pnpm build && pnpm e2e:calendar   # Calendar の通し確認 (列の揃い、予定の追加、再読み込み、表のミラー)
 pnpm build && pnpm e2e:theme      # テーマの切り替え (OS の設定、明示、保存、Canvas の画素)
 pnpm build && pnpm e2e:packages   # パッケージ (WIT のコンポーネント) をパネルから入れ、開き、保存する
+pnpm build && pnpm e2e:workspace  # agent のワークスペースで編集し、人がパネルで持ち込みを承認する
+pnpm build && pnpm e2e:notices    # 通知が Canvas の上に出て、押すと窓へ移り、6 秒で消える
 pnpm pty                 # ホストの擬似端末の橋。表示された URL を ?pty= に渡すと、Terminal の「ホストのシェルにつなぐ」が使える
 ```
 
@@ -112,7 +117,7 @@ pnpm pty                 # ホストの擬似端末の橋。表示された URL 
 pnpm dev    # http://127.0.0.1:8123/?mcp=ws://127.0.0.1:8130 を開く
 ```
 
-MCP クライアントには、`node mcp/server.ts` を stdio のサーバとして登録する。tool は `list_apps` / `list_installed` / `get_tree` / `get_layout` / `propose` / `wait_proposal` の 6 つ。窓を開く・閉じるのも `propose` の layout の手順 (`launch` / `close`) で出す。承認の tool は無いので、提案は画面のパネルで人が承認する。
+MCP クライアントには、`node mcp/server.ts` を stdio のサーバとして登録する。tool は `list_apps` / `list_installed` / `get_tree` / `get_layout` / `propose` / `wait_proposal` と、agent のワークスペースの `workspace_get_tree` / `workspace_launch` / `workspace_act` / `propose_merge` / `wait_merge` の 11 個。窓を開く・閉じるのも `propose` の layout の手順 (`launch` / `close`) で出す。承認の tool は無いので、提案は画面のパネルで人が承認する。
 
 ### sway への写像を試す
 
@@ -134,7 +139,7 @@ Node 24 以上が必要 (`.node-version`)。veriss がそれを要求する。�
 
 ## 結果
 
-- 単体テスト 118 件 (うち veriss の検証 12 件、sway への写像 4 件)、E2E 12 件、レイアウト操作の E2E 14 件、Terminal の E2E 14 件、Calendar の E2E 6 件、テーマの E2E 6 件、パッケージの E2E 9 件が通る (Node 24、Playwright の Chromium)
+- 単体テスト 138 件 (うち veriss の検証 12 件、sway への写像 4 件)、E2E 12 件、レイアウト操作の E2E 14 件、Terminal の E2E 14 件、Calendar の E2E 6 件、テーマの E2E 6 件、パッケージの E2E 9 件、ワークスペースの E2E 4 件、通知の E2E 5 件が通る (Node 24、Playwright の Chromium)
 - E2E の IME は、CDP の `Input.imeSetComposition` で実際の composition イベントを起こして確かめた。preedit は木に入らず、確定した `卵` だけが値になる
 - LLM の template の代わりに「カード」template を適用すると、件数が変わっても (3 件 → 5 件) 同じキャッシュに当たる。pin すると再読み込み後も残る
 - 操作を落とす template は、既定レンダラに戻り、理由がパネルに出る

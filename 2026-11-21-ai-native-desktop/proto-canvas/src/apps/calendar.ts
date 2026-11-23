@@ -36,6 +36,12 @@ export function createCalendarApp(opts: { id?: string; services?: AppServices; n
   if (sv) {
     const r = sv.storage.get('events');
     if (r.ok && r.value) events = JSON.parse(r.value) as Record<string, string[]>;
+    sv.storage.onChange((key) => {
+      if (key !== 'events') return;
+      const r2 = sv.storage.get('events');
+      if (r2.ok) events = r2.value ? (JSON.parse(r2.value) as Record<string, string[]>) : {};
+      publish();
+    });
   }
   const save = () => sv?.storage.set('events', JSON.stringify(events));
   const selKey = () => dateKey(year, month, selected);

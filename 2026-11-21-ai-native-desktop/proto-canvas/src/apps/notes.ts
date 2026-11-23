@@ -8,6 +8,7 @@ export function createNotesApp(opts: { id?: string; services?: AppServices } = {
   const sv = opts.services;
   let emit: (u: TreeUpdate) => void = () => {};
   let notes = ['タイトルバーを掴んで運ぶ', '端で分割、中央で入れ替え', '外周なら全体の端へ'];
+  const initial = [...notes];
   let draft = '';
   let status = '';
   let focus: NodeId | null = null;
@@ -15,6 +16,12 @@ export function createNotesApp(opts: { id?: string; services?: AppServices } = {
   if (sv) {
     const saved = sv.storage.get('notes');
     if (saved.ok && saved.value) notes = JSON.parse(saved.value) as string[];
+    sv.storage.onChange((key) => {
+      if (key !== 'notes') return;
+      const r = sv.storage.get('notes');
+      if (r.ok) notes = r.value ? (JSON.parse(r.value) as string[]) : [...initial];
+      publish();
+    });
     sv.onGrant((cap, granted) => {
       if (cap === 'clipboard.read') {
         status = granted ? 'クリップボードの読み取りが許可された。もう一度「貼り付け」を押す' : 'クリップボードの読み取りは拒否された';

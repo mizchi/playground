@@ -11,7 +11,6 @@ import type { AppServices, Capability, GrantState } from './types.ts';
 /** Worker に渡す storage の写しを作るための、ホスト側の口 (許可の状態は人だけが変える) */
 export interface RunnerHost {
   grant(app: string, cap: Capability): GrantState | undefined;
-  storageEntries(app: string): [string, string][];
 }
 
 export interface RunnerOptions {
@@ -26,10 +25,12 @@ export function workerRunner(spawn: () => Worker, host: () => RunnerHost, opts: 
   const actionMs = opts.actionMs ?? 2000;
   /** 動いている Worker (アプリ id → 窓 id → Worker)。保存領域の書き込みを、同じアプリのほかの窓に知らせる */
   const live = new Map<string, Map<string, Worker>>();
-  const snapshot = (pkg: PackageManifest): StorageSnapshot => {
+  /** 写しは窓のサービスから作る (agent のワークスペースの窓なら、重ねた層を含む) */
+  const snapshot = (pkg: PackageManifest, services: AppServices): StorageSnapshot => {
     if (!pkg.capabilities.includes('storage')) return { state: undefined, data: [] };
     const state = host().grant(pkg.id, 'storage');
-    return { state, data: state === 'granted' ? host().storageEntries(pkg.id) : [] };
+    const r = state === 'granted' ? services.storage.entries() : null;
+    return { state, data: r?.ok ? r.value : [] };
   };
   const send = (w: Worker, m: ToWorker) => w.postMessage(m);
 
@@ -146,7 +147,7 @@ export function workerRunner(spawn: () => Worker, host: () => RunnerHost, opts: 
         w.onmessage = onMessage;
         w.onerror = (e) => kill(`コンポーネントが失敗した: ${e.message}`);
         deadline('start', startMs, '起動 (start)');
-        send(w, { t: 'init', mode: 'run', glue, caps: pkg.capabilities, storage: snapshot(pkg) });
+        send(w, { t: 'init', mode: 'run', glue, caps: pkg.capabilities, storage: snapshot(pkg, services) });
       };
 
       return {
@@ -155,7 +156,15 @@ export function workerRunner(spawn: () => Worker, host: () => RunnerHost, opts: 
           emit = e;
           // 人が許可を変えたら、Worker の写しも変える
           services.onGrant((cap) => {
-            if (cap === 'storage' && worker) send(worker, { t: 'storage', storage: snapshot(pkg) });
+            if (cap === 'storage' && worker) send(worker, { t: 'storage', storage: snapshot(pkg, services) });
+          });
+          // ほかから保存領域が変わったら (持ち込みなど)、Worker を起こし直して読み直させる (コンポーネントは start で読む)
+          services.storage.onChange(() => {
+            if (stopped || !worker) return;
+            detach();
+            pendingRemove = [...sent];
+            sent.clear();
+            boot();
           });
           // shell は窓を作った直後に描くので、根だけ先に同期で出す (Worker の最初の更新で置き換わる)
           emit({ t: 'tree-update', app: windowId, root: 'root', focus: null, nodes: [{ id: 'root', role: 'x-window', label: `${pkg.title} (起動中)`, children: [] }] });

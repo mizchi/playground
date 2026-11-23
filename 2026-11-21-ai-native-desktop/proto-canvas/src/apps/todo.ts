@@ -20,12 +20,22 @@ export function createTodoApp(opts: { id?: string; items?: number; services?: Ap
     { id: 'i3', text: 'PR をレビューする', done: false },
   ];
   for (let i = items.length + 1; i <= (opts.items ?? 3); i++) items.push({ id: `i${i}`, text: `タスク ${i}`, done: i % 3 === 0 });
+  const initial = structuredClone(items);
   if (sv) {
     const saved = sv.storage.get('items');
     if (saved.ok && saved.value) items = JSON.parse(saved.value) as Item[];
   }
   let seq = items.reduce((m, i) => Math.max(m, Number(i.id.slice(1)) || 0), 0) + 1;
   const save = () => sv?.storage.set('items', JSON.stringify(items));
+  // ほかから保存領域が変わったら (agent のワークスペースの変更を人が持ち込んだ、など) 読み直す
+  sv?.storage.onChange((key) => {
+    if (key !== 'items') return;
+    const r = sv.storage.get('items');
+    // 値が消えた (agent の変更を捨てた、など) ときは最初の項目に戻す
+    if (r.ok) items = r.value ? (JSON.parse(r.value) as Item[]) : structuredClone(initial);
+    seq = items.reduce((m, i) => Math.max(m, Number(i.id.slice(1)) || 0), 0) + 1;
+    publish();
+  });
   let draft = '';
   let focus: NodeId | null = null;
   let sent = new Set<NodeId>();

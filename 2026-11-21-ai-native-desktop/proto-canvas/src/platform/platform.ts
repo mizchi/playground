@@ -1,8 +1,10 @@
 // プラットフォームの組み立ての起点。インストール済みのアプリ・システムのサービス・shell をつなぐ。
 // DOM に依存しない (ブラウザの描画 backend は main.ts / backends.ts が選ぶ)。
+import { createAgentDeskApp } from '../apps/agent-desk.ts';
 import type { App } from '../apps/app.ts';
+import { memoryStorage } from '../cache.ts';
 import type { Storage } from '../cache.ts';
-import type { Actor, AppId, Measure } from '../protocol.ts';
+import type { ActionName, Actor, AppId, Measure } from '../protocol.ts';
 import { Shell } from '../shell.ts';
 import { allApps } from '../tiling.ts';
 import type { TileNode } from '../tiling.ts';
@@ -34,7 +36,15 @@ export interface Session {
 }
 
 export interface Platform {
+  /** 人のワークスペース */
   shell: Shell;
+  /** agent のワークスペース: agent は直接操作でき、保存領域への書き込みは重ねた層に溜まる (人が持ち込むまで本物は変わらない) */
+  agentShell: Shell;
+  /** agent の口 (MCP がそのまま使う)。自分のワークスペースでだけ、提案なしで動かせる */
+  agent: {
+    launch(appId: string): string;
+    act(app: AppId, target: string, action: ActionName, data?: string): string;
+  };
   registry: AppRegistry;
   services: ServiceHost;
   /** アプリを新しい窓で開く (人の操作として。agent は shell.propose で launch を提案する) */
@@ -53,10 +63,12 @@ export function createPlatform(cfg: PlatformConfig): Platform {
   // 起動中に作った窓の id (shell ができる前に、窓の工場が開いている窓を知るため)
   const booting: AppId[] = [];
   let shell: Shell | null = null;
+  let agentShell: Shell | null = null;
+  // 窓の id は 2 つのワークスペースを通して重ならない
   const registry = new AppRegistry(
     cfg.apps,
-    () => (shell ? shell.windows().map((w) => w.id) : booting),
-    (app, win) => services.servicesFor(app, win),
+    () => [...(shell ? shell.windows().map((w) => w.id) : booting), ...(agentShell ? agentShell.windows().map((w) => w.id) : [])],
+    (app, win, workspace) => services.servicesFor(app, win, workspace),
   );
   services.registry = registry;
 
@@ -92,9 +104,41 @@ export function createPlatform(cfg: PlatformConfig): Platform {
   const sh = shell;
   services.launch = (appId, by) => sh.applyLayout({ type: 'launch', app: appId }, by);
 
+  // agent のワークスペース (セッションには残さない。重ねた層も起動ごとに空から)
+  const desk = createAgentDeskApp('agent-desk', services) as App & { refresh(): void };
+  const ash = new Shell([desk], cfg.measure, memoryStorage()); // template の保存先は分ける (2 つの cache が同じ場所を上書きしないように)
+  agentShell = ash;
+  ash.policy.agentDirect = true;
+  ash.badge = 'agent のワークスペース';
+  ash.factory = {
+    nextId: (a) => registry.nextId(a),
+    has: (a) => registry.has(a),
+    title: (a) => registry.title(a),
+    create: (a, w) => registry.create(a, w, 'agent'),
+  };
+  ash.onWindowClosed = (id) => registry.forget(id);
+  services.onOverlayChange = () => desk.refresh();
+
+  // 通知は、どちらのワークスペースを見ていても、窓より上の層に出す (出どころの名前は manifest から付ける)
+  const noticeSeen = new Map<number, number>();
+  for (const s of [sh, ash]) {
+    s.notices = () =>
+      services.notifications.map((n) => ({ id: n.id, source: registry.manifest(n.app)?.title ?? n.app, title: n.title, body: n.body, window: n.window }));
+    s.noticeSeen = noticeSeen;
+    s.onDismissNotice = (id) => services.dismiss(id);
+  }
+
   let lastSaved = '';
   return {
     shell: sh,
+    agentShell: ash,
+    agent: {
+      launch: (appId) => ash.applyLayout({ type: 'launch', app: appId }, 'agent'),
+      act: (app, target, action, data) => {
+        const e = ash.dispatch({ app, target, action, data, by: 'agent' });
+        return e.result === 'ok' ? '' : (e.reason ?? 'denied');
+      },
+    },
     registry,
     services,
     launch: (appId, by = 'human') => sh.applyLayout({ type: 'launch', app: appId }, by),
