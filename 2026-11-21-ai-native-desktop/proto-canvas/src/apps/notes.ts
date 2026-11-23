@@ -8,6 +8,7 @@ export function createNotesApp(opts: { id?: string; services?: AppServices } = {
   const sv = opts.services;
   let emit: (u: TreeUpdate) => void = () => {};
   let notes = ['タイトルバーを掴んで運ぶ', '端で分割、中央で入れ替え', '外周なら全体の端へ'];
+  const initial = [...notes];
   let draft = '';
   let status = '';
   let focus: NodeId | null = null;
@@ -18,7 +19,7 @@ export function createNotesApp(opts: { id?: string; services?: AppServices } = {
     sv.storage.onChange((key) => {
       if (key !== 'notes') return;
       const r = sv.storage.get('notes');
-      if (r.ok && r.value) notes = JSON.parse(r.value) as string[];
+      if (r.ok) notes = r.value ? (JSON.parse(r.value) as string[]) : [...initial];
       publish();
     });
     sv.onGrant((cap, granted) => {

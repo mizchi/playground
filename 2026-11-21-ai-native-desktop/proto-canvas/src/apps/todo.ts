@@ -20,6 +20,7 @@ export function createTodoApp(opts: { id?: string; items?: number; services?: Ap
     { id: 'i3', text: 'PR をレビューする', done: false },
   ];
   for (let i = items.length + 1; i <= (opts.items ?? 3); i++) items.push({ id: `i${i}`, text: `タスク ${i}`, done: i % 3 === 0 });
+  const initial = structuredClone(items);
   if (sv) {
     const saved = sv.storage.get('items');
     if (saved.ok && saved.value) items = JSON.parse(saved.value) as Item[];
@@ -30,7 +31,8 @@ export function createTodoApp(opts: { id?: string; items?: number; services?: Ap
   sv?.storage.onChange((key) => {
     if (key !== 'items') return;
     const r = sv.storage.get('items');
-    if (r.ok && r.value) items = JSON.parse(r.value) as Item[];
+    // 値が消えた (agent の変更を捨てた、など) ときは最初の項目に戻す
+    if (r.ok) items = r.value ? (JSON.parse(r.value) as Item[]) : structuredClone(initial);
     seq = items.reduce((m, i) => Math.max(m, Number(i.id.slice(1)) || 0), 0) + 1;
     publish();
   });

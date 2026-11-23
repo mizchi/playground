@@ -261,17 +261,18 @@ const aria = createAriaMirror(
   },
   (app) => shell.restoreApp(app, 'human'),
 );
-let seenProposals = 0;
-let seenAudit = 0;
+/** 読み上げた数は shell (ワークスペース) ごとに持つ。切り替えで飛ばしたり、読み直したりしないように */
+const seen = new Map<Shell, { proposals: number; audit: number }>();
 let seenPrompts = 0;
 let seenNotes = 0;
 /** AI の提案と、拒否された操作を読み上げる (承認の判断を音声でもできるように) */
 function announce() {
-  for (const p of shell.proposals.slice(seenProposals)) aria.announce(`AI の提案 ${p.id}: ${p.intent}。${p.sensitive ? '承認が必要です。' : ''}`);
-  seenProposals = shell.proposals.length;
-  const denied = shell.audit.slice(seenAudit).filter((a) => a.result === 'denied');
+  const sn = seen.get(shell) ?? seen.set(shell, { proposals: 0, audit: 0 }).get(shell)!;
+  for (const p of shell.proposals.slice(sn.proposals)) aria.announce(`AI の提案 ${p.id}: ${p.intent}。${p.sensitive ? '承認が必要です。' : ''}`);
+  sn.proposals = shell.proposals.length;
+  const denied = shell.audit.slice(sn.audit).filter((a) => a.result === 'denied');
   if (denied.length) aria.announce(`拒否: ${denied.at(-1)!.reason ?? ''}`);
-  seenAudit = shell.audit.length;
+  sn.audit = shell.audit.length;
   const sv = platform.services;
   for (const p of sv.prompts.slice(seenPrompts)) aria.announce(`${p.appTitle} が ${capLabel(p.capability)} の許可を求めています`);
   seenPrompts = sv.prompts.length;
@@ -559,7 +560,12 @@ function renderPanel(frame: ReturnType<Shell['frame']>) {
     .filter((m) => m.status === 'pending')
     .map(
       (m) => `<div class="card sensitive" role="alertdialog" aria-label="持ち込みの提案"><div><b>持ち込みの提案 ${m.id}</b> (${m.by === 'agent' ? 'agent' : '人'}): ${escapeHtml(m.intent)}</div>
-        <ol>${m.changes.map((c) => `<li>${escapeHtml(c.app)} / ${escapeHtml(c.key)}: ${shortV(c.before)} → ${shortV(c.after)}</li>`).join('')}</ol>
+        <ol>${m.changes
+          .map(
+            (c) => `<li>${escapeHtml(c.app)} / ${escapeHtml(c.key)}: ${shortV(c.before)} → ${shortV(c.after)}
+              <details><summary>全文</summary><div class="muted">前</div><pre>${escapeHtml(c.before ?? '(なし)')}</pre><div class="muted">後</div><pre>${escapeHtml(c.after)}</pre></details></li>`,
+          )
+          .join('')}</ol>
         <div class="row"><button class="primary" data-merge="${m.id}" data-ok="1">人のワークスペースに書く</button><button data-merge="${m.id}" data-ok="0">却下</button></div></div>`,
     )
     .join('');

@@ -78,7 +78,7 @@ export type Workspace = 'human' | 'agent';
 export interface StorageChange {
   app: string;
   key: string;
-  /** 本物の今の値 (無ければ undefined) */
+  /** agent が重ねた層に書き始めた時点の本物の値 (無ければ undefined)。持ち込むときに本物がこれと違えば stale */
   before: string | undefined;
   after: string;
 }

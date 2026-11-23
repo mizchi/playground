@@ -8,6 +8,7 @@ export function createAgentDeskApp(id: string, host: ServiceHost): App {
   let emit: (u: TreeUpdate) => void = () => {};
   let status = '';
   let sent = new Set<NodeId>();
+  let focus: NodeId | null = null;
   // 文字は折り返さないので、窓の最小幅を押し上げないよう短くする (全文はパネルの持ち込みの提案に出る)
   const short = (v: string | undefined) => (v === undefined ? '(なし)' : v.length > 16 ? `${v.slice(0, 16)}…` : v);
   const publish = (root?: string) => {
@@ -30,7 +31,9 @@ export function createAgentDeskApp(id: string, host: ServiceHost): App {
     const ids = new Set(nodes.map((n) => n.id));
     const remove = [...sent].filter((x) => !ids.has(x));
     sent = ids;
-    emit({ t: 'tree-update', app: id, root, focus: null, nodes, remove });
+    // フォーカスは保つ (Tab で移ったボタンを Enter で押せるように)。ノードが消えたら外す
+    if (focus && !ids.has(focus)) focus = null;
+    emit({ t: 'tree-update', app: id, root, focus, nodes, remove });
   };
   return {
     id,
@@ -39,7 +42,8 @@ export function createAgentDeskApp(id: string, host: ServiceHost): App {
       publish('root');
     },
     onAction(req: ActionRequest) {
-      if (req.target === 'merge' && req.action === 'click') {
+      if (req.action === 'focus') focus = req.target;
+      else if (req.target === 'merge' && req.action === 'click') {
         const r = host.proposeMerge(req.by === 'agent' ? 'agent が作業場から持ち込みを提案した' : '人が作業場から持ち込みを提案した', req.by);
         status = r.ok ? `${r.merge.id} を提案した。人がパネルで答える` : r.reason;
       } else if (req.target === 'discard' && req.action === 'click') {

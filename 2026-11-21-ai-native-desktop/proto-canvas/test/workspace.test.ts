@@ -117,4 +117,53 @@ test('人は変更を捨てられる。agent は捨てられない', () => {
   assert.equal(p.services.discardOverlay('agent'), '変更を捨てられるのは人だけ');
   assert.equal(p.services.discardOverlay('human'), '');
   assert.equal(p.services.pendingChanges().length, 0);
+  // agent の窓も読み直す (捨てた項目を手元に残したまま、次の保存で層に戻さない)
+  assert.ok(!labels(p, 'agent', 'todo-2').includes('捨てる'));
+  p.agent.act('todo-2', 'i1', 'click');
+  assert.doesNotMatch(p.services.pendingChanges()[0].after, /捨てる/);
+});
+
+test('agent が書き始めたあと、提案の前に人が同じ値を変えていても stale になる (人の変更を上書きしない)', () => {
+  const kv = memoryKeyValue();
+  const p = make(kv);
+  p.agent.launch('todo');
+  addTodo(p, 'todo-2', 'agent の項目');
+  p.shell.dispatch({ app: 'todo', target: 'i1', action: 'click', by: 'human' });
+  const human = kv.get('app.todo.items');
+  const r = p.services.proposeMerge('持ち込む', 'agent');
+  assert.ok(r.ok);
+  assert.equal(r.merge.changes[0].before, undefined, 'before は agent が書き始めた時点の値');
+  assert.match(p.services.answerMerge(r.merge.id, true, 'human'), /書かなかった/);
+  assert.equal(kv.get('app.todo.items'), human);
+});
+
+test('提案のあとに agent がさらに書いた分は、承認しても消えずに次の持ち込みに残る', () => {
+  const kv = memoryKeyValue();
+  const p = make(kv);
+  p.agent.launch('todo');
+  addTodo(p, 'todo-2', '一つ目');
+  const r = p.services.proposeMerge('一つ目', 'agent');
+  assert.ok(r.ok);
+  addTodo(p, 'todo-2', '二つ目');
+  assert.equal(p.services.answerMerge(r.merge.id, true, 'human'), '');
+  assert.match(kv.get('app.todo.items')!, /一つ目/);
+  assert.doesNotMatch(kv.get('app.todo.items')!, /二つ目/);
+  const rest = p.services.pendingChanges();
+  assert.equal(rest.length, 1);
+  assert.match(rest[0].after, /二つ目/);
+  assert.equal(rest[0].before, kv.get('app.todo.items'), '基準は持ち込んだ値');
+  const r2 = p.services.proposeMerge('二つ目', 'agent');
+  assert.ok(r2.ok);
+  assert.equal(p.services.answerMerge(r2.merge.id, true, 'human'), '');
+  assert.match(kv.get('app.todo.items')!, /二つ目/);
+});
+
+test('作業場のボタンへのフォーカスは、木を出し直しても保たれる (Enter で押せる)', () => {
+  const p = make();
+  p.agent.launch('todo');
+  addTodo(p, 'todo-2', '卵');
+  p.agentShell.dispatch({ app: 'agent-desk', target: 'merge', action: 'focus', by: 'human' });
+  assert.equal(p.agentShell.tree('agent-desk').focus, 'merge');
+  addTodo(p, 'todo-2', 'ハム'); // 作業場の木が出し直される
+  assert.equal(p.agentShell.tree('agent-desk').focus, 'merge');
 });

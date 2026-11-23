@@ -48,6 +48,10 @@ export class ServiceHost {
   readonly merges: MergeRequest[] = [];
   /** agent のワークスペースの書き込み (kv のキー → 値)。人が持ち込むまで本物には書かない */
   private overlay = new Map<string, string>();
+  /** 重ねた層のキーを最初に書いた時点の本物の値 (stale の判定の基準。agent はこの値を元に作業した) */
+  private overlayBase = new Map<string, string | undefined>();
+  /** agent のワークスペースの窓の storage.onChange (重ねた層を捨てたときに読み直させる) */
+  private agentStorageListeners = new Map<string, ((key: string) => void)[]>();
   private storageListeners = new Map<string, ((key: string) => void)[]>();
   /** 重ねた層が変わったとき (作業場のアプリが差分を出し直す) */
   onOverlayChange: () => void = () => {};
@@ -230,6 +234,7 @@ export class ServiceHost {
         set: (key, value) => {
           const r = this.check(app, window, 'storage', `set ${key} (agent のワークスペース)`);
           if (!r.ok) return r as ServiceResult<void>;
+          if (!this.overlay.has(k(key))) this.overlayBase.set(k(key), this.kv.get(k(key)));
           this.overlay.set(k(key), value);
           this.onOverlayChange();
           this.onChange();
@@ -243,8 +248,11 @@ export class ServiceHost {
           for (const [key, v] of this.overlay) if (key.startsWith(prefix)) m.set(key.slice(prefix.length), v);
           return { ok: true, value: [...m] };
         },
-        // 重ねた層は agent のワークスペースだけのもの。持ち込みで本物が変わっても、こちらは知らせない
-        onChange: () => {},
+        // 重ねた層を捨てたときだけ知らせる (持ち込みでは、agent の窓の中身と本物が同じになるので知らせない)
+        onChange: (cb) => {
+          if (!this.agentStorageListeners.has(app)) this.agentStorageListeners.set(app, []);
+          this.agentStorageListeners.get(app)!.push(cb);
+        },
       },
     };
   }
@@ -255,8 +263,10 @@ export class ServiceHost {
     for (const [key, after] of this.overlay) {
       const m = key.match(/^app\.([^.]+)\.(.+)$/);
       if (!m) continue;
-      const before = this.kv.get(key);
-      if (before !== after) out.push({ app: m[1], key: m[2], before, after });
+      const now = this.kv.get(key);
+      if (now === after) continue;
+      // before は agent が書き始めた時点の本物の値。そのあとに人が変えていれば、持ち込みの承認で stale になる
+      out.push({ app: m[1], key: m[2], before: this.overlayBase.has(key) ? this.overlayBase.get(key) : now, after });
     }
     return out;
   }
@@ -290,8 +300,13 @@ export class ServiceHost {
       return '提案のあとに人のワークスペースの値が変わったので、書かなかった';
     }
     for (const c of m.changes) {
-      this.kv.set(`app.${c.app}.${c.key}`, c.after);
-      this.overlay.delete(`app.${c.app}.${c.key}`);
+      const key = `app.${c.app}.${c.key}`;
+      this.kv.set(key, c.after);
+      // 提案のあとに agent がさらに書いていれば、その分は残す (次の持ち込みで出す)。基準は今書いた値になる
+      if (this.overlay.get(key) === c.after) {
+        this.overlay.delete(key);
+        this.overlayBase.delete(key);
+      } else this.overlayBase.set(key, c.after);
       this.audit.push({ at: Date.now(), app: c.app, window: '(持ち込み)', capability: 'storage', op: `merge ${c.key} (${m.id})`, result: 'ok' });
     }
     m.status = 'applied';
@@ -304,7 +319,14 @@ export class ServiceHost {
   /** agent のワークスペースの変更を捨てる (人だけ) */
   discardOverlay(by: 'human' | 'agent'): string {
     if (by !== 'human') return '変更を捨てられるのは人だけ';
+    const dropped = [...this.overlay.keys()];
     this.overlay.clear();
+    this.overlayBase.clear();
+    // agent の窓は、捨てた変更を手元に持ったまま。読み直させないと、次の保存で層に戻ってしまう
+    for (const key of dropped) {
+      const m = key.match(/^app\.([^.]+)\.(.+)$/);
+      if (m) for (const cb of this.agentStorageListeners.get(m[1]) ?? []) cb(m[2]);
+    }
     this.onOverlayChange();
     this.onChange();
     return '';

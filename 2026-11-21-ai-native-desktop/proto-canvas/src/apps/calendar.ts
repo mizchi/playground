@@ -39,7 +39,7 @@ export function createCalendarApp(opts: { id?: string; services?: AppServices; n
     sv.storage.onChange((key) => {
       if (key !== 'events') return;
       const r2 = sv.storage.get('events');
-      if (r2.ok && r2.value) events = JSON.parse(r2.value) as Record<string, string[]>;
+      if (r2.ok) events = r2.value ? (JSON.parse(r2.value) as Record<string, string[]>) : {};
       publish();
     });
   }
