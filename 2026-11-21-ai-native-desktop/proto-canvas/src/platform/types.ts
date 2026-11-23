@@ -31,7 +31,14 @@ export type PtyConnector = (cols: number, rows: number, onData: (data: string) =
 export interface AppServices {
   clipboard: { read(): ServiceResult<string>; write(text: string): ServiceResult<void> };
   notify(title: string, body?: string): ServiceResult<void>;
-  storage: { get(key: string): ServiceResult<string | undefined>; set(key: string, value: string): ServiceResult<void> };
+  storage: {
+    get(key: string): ServiceResult<string | undefined>;
+    set(key: string, value: string): ServiceResult<void>;
+    /** 保存領域の中身 (Worker で動くコンポーネントに写しを渡すため) */
+    entries(): ServiceResult<[string, string][]>;
+    /** ほかから保存領域が変わったとき (agent のワークスペースの変更を人が持ち込んだ、など)。アプリは読み直す */
+    onChange(cb: (key: string) => void): void;
+  };
   apps: { list(): ServiceResult<{ id: string; title: string; description: string }[]>; launch(id: string): ServiceResult<void> };
   /** ほかのアプリが提供するデータを読む (data:<topic> の能力が要る)。提供するアプリが無ければ unavailable */
   data: { query(topic: string, args?: Record<string, unknown>): ServiceResult<unknown> };
@@ -62,6 +69,28 @@ export interface AppManifest {
    */
   provides?: Record<string, { description: string }>;
   provide?(topic: string, args: Record<string, unknown>, services: AppServices): unknown;
+}
+
+/** 窓がどのワークスペースにあるか。agent のワークスペースでは、保存領域への書き込みは重ねた層に溜まり、本物は変わらない */
+export type Workspace = 'human' | 'agent';
+
+/** agent のワークスペースで溜まった変更 (1 つのキー) */
+export interface StorageChange {
+  app: string;
+  key: string;
+  /** 本物の今の値 (無ければ undefined) */
+  before: string | undefined;
+  after: string;
+}
+
+/** 持ち込みの提案: agent のワークスペースの変更を、人のワークスペース (本物) に書く。人だけが答える */
+export interface MergeRequest {
+  id: string;
+  intent: string;
+  by: 'human' | 'agent';
+  changes: StorageChange[];
+  /** applied: 書いた / rejected: 人が却下 / stale: 提案のあとに本物が変わったので書かなかった */
+  status: 'pending' | 'applied' | 'rejected' | 'stale';
 }
 
 /** 許可の要求 (人が答える) */

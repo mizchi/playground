@@ -1,8 +1,19 @@
 // ブラウザ側: MCP サーバ (mcp/server.ts) からの呼び出しを shell につなぐ。?mcp=ws://127.0.0.1:8130 のときだけ使う。
 // 承認の口は無い。AI ができるのは、読むことと提案することだけ。
+import type { ActionName } from './protocol.ts';
 import type { Shell, Step } from './shell.ts';
 
-export function connectMcp(url: string, shell: Shell, onStatus: (s: string) => void, installed: () => unknown[] = () => []): void {
+/** agent のワークスペースの口 (ここでは提案なしで動かせる。持ち込みは提案で、人が答える) */
+export interface AgentWorkspaceApi {
+  getTree(app?: string): unknown;
+  windows(): unknown;
+  launch(appId: string): string;
+  act(app: string, target: string, action: ActionName, data?: string): string;
+  proposeMerge(intent: string): { ok: true; merge: { id: string; status: string; changes: unknown[] } } | { ok: false; reason: string };
+  merge(id: string): { id: string; status: string; changes: unknown[] } | undefined;
+}
+
+export function connectMcp(url: string, shell: Shell, onStatus: (s: string) => void, installed: () => unknown[] = () => [], workspace?: AgentWorkspaceApi): void {
   let ws: WebSocket;
   const open = () => {
     ws = new WebSocket(url);
@@ -28,6 +39,32 @@ export function connectMcp(url: string, shell: Shell, onStatus: (s: string) => v
       }
       case 'listInstalled':
         return installed();
+      case 'workspaceTree':
+        if (!workspace) throw new Error('agent のワークスペースが無い');
+        return { windows: workspace.windows(), trees: workspace.getTree(p.app as string | undefined) };
+      case 'workspaceLaunch': {
+        if (!workspace) throw new Error('agent のワークスペースが無い');
+        const why = workspace.launch(String(p.app));
+        if (why) throw new Error(why);
+        return { windows: workspace.windows() };
+      }
+      case 'workspaceAct': {
+        if (!workspace) throw new Error('agent のワークスペースが無い');
+        const why = workspace.act(String(p.app), String(p.target), String(p.action) as ActionName, p.data === undefined ? undefined : String(p.data));
+        if (why) throw new Error(`できない: ${why}`);
+        return { ok: true };
+      }
+      case 'proposeMerge': {
+        if (!workspace) throw new Error('agent のワークスペースが無い');
+        const r = workspace.proposeMerge(String(p.intent ?? ''));
+        if (!r.ok) throw new Error(r.reason);
+        return { id: r.merge.id, status: r.merge.status, changes: r.merge.changes, note: '人がパネルで答える。wait_merge で結果を待つ' };
+      }
+      case 'mergeStatus': {
+        const m = workspace?.merge(String(p.id));
+        if (!m) throw new Error(`持ち込みの提案 ${String(p.id)} がない`);
+        return { id: m.id, status: m.status };
+      }
       case 'getTree':
         return shell.getTree(p.app as string | undefined);
       case 'getLayout':

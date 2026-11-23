@@ -134,7 +134,15 @@ export class Shell {
   readonly cache: TemplateCache;
   readonly audit: AuditEntry[] = [];
   readonly proposals: Proposal[] = [];
-  policy = { autoApproveSafe: false };
+  /**
+   * autoApproveSafe: sensitive でない提案は自動で承認する。
+   * agentDirect: agent はこの shell の窓を提案なしで直接操作できる (agent のワークスペース)。sensitive なノードは今まで通り承認が要る
+   */
+  policy = { autoApproveSafe: false, agentDirect: false };
+  /** 画面の右下に出す札 (agent のワークスペースなど) */
+  badge: string | null = null;
+  /** Alt+1 / Alt+2 (ワークスペースの切り替え。プラットフォームが差し込む) */
+  onWorkspaceKey: (n: number) => void = () => {};
   /** タイルの分割ツリー */
   tiles: TileNode;
   /** ドックに入っている窓 (木から外れている) */
@@ -240,7 +248,10 @@ export class Shell {
     if (node.disabled) return deny('disabled');
     // view や agent が何を言っても、アプリが公開した action 以外は起こせない
     if (!node.actions?.includes(req.action)) return deny(`${node.role} は ${req.action} を公開していない`);
-    if (req.by === 'agent') {
+    // agent のワークスペース: sensitive でないノードは、提案なしで直接動かせる (人のフォーカスは奪わないので focus は使わない)
+    const direct = req.by === 'agent' && this.policy.agentDirect && !node.sensitive && !req.proposal;
+    if (direct && req.action === 'focus') return deny('agent は focus を使わない');
+    if (req.by === 'agent' && !direct) {
       const p = this.proposals.find((x) => x.id === req.proposal);
       if (!p || p.status !== 'approved') return deny('承認された提案がない');
       if (!p.steps.some((s) => !isLayoutStep(s) && s.app === req.app && s.target === req.target && s.action === req.action && s.data === req.data))
@@ -378,6 +389,12 @@ export class Shell {
     return count > 0 ? { x: GAP, y: this.size.h - GAP - DOCK_H, w: this.size.w - 2 * GAP, h: DOCK_H } : null;
   }
 
+  /** 描かずに画面の大きさだけを知らせる (見えていないワークスペースの shell。配置の検査に使う) */
+  setSize(width: number, height: number): void {
+    this.size = { w: width, h: height };
+    this.area = this.areaFor(this.minimized.length);
+  }
+
   private areaFor(minimizedCount: number): Rect {
     const dock = count(minimizedCount);
     return { x: GAP, y: GAP, w: this.size.w - 2 * GAP, h: this.size.h - 2 * GAP - dock };
@@ -430,6 +447,8 @@ export class Shell {
 
   /** 分割後に、どの窓も検証済みの最小幅 (veriss で証明する範囲と同じ下限) と最低限の高さを保てるか */
   private invalidReason(next: TileNode, minimizedCount: number): string {
+    // まだ画面の大きさを知らない (一度も描いていない) shell では、幅を確かめられない。最初に描くときに配置する
+    if (this.size.w <= 0 || this.size.h <= 0) return '';
     const { tiles } = computeRects(next, this.areaFor(minimizedCount), GAP);
     for (const [app, r] of tiles) {
       const min = this.minWidths.get(app) ?? 0;
@@ -635,6 +654,10 @@ export class Shell {
         // 入力欄が click (送信) を公開していれば、Enter で送信する (ターミナルのコマンド行など)
         else if (msg.key === 'Enter' && focus?.role === 'textbox' && focus.actions?.includes('click') && !this.preedit)
           this.dispatch({ app, target: focus.id, action: 'click', by: 'human' });
+        break;
+      case 'Workspace1':
+      case 'Workspace2':
+        this.onWorkspaceKey(msg.key === 'Workspace1' ? 1 : 2);
         break;
       case 'Launcher': {
         // ランチャー (システムのアプリ) を開く。開いていればそこへフォーカスする
@@ -1135,6 +1158,13 @@ export class Shell {
     else if (this.chips.some((c) => inside(c.rect, hv.x, hv.y))) cursor = 'pointer';
     else if ([...this.titles.values()].some((r) => inside(r, hv.x, hv.y))) cursor = 'grab';
     else if (this.hits.some((h) => inside(h.hit.rect, hv.x, hv.y))) cursor = 'pointer';
+
+    // ワークスペースの札 (右下。窓のタイトルバーの × と重ならないように。窓より上に描く)
+    if (this.badge) {
+      const bw = Math.ceil(this.measure(this.badge, 12, 600)) + 24;
+      ops.push(['rect', { x: width - bw - 12, y: height - 34, w: bw, h: 24, radius: 12, fill: 'ghost' }]);
+      ops.push(['text', { x: width - bw, y: height - 22, str: this.badge, size: 12, weight: 600, color: 'accentText' }]);
+    }
 
     // 描き終えてから知らせる (アプリが木を更新すると、次のフレームで反映される)
     for (const r of resizes) {

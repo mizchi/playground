@@ -131,6 +131,8 @@ export function createCanvasBackend(canvas: HTMLCanvasElement, sink: HTMLTextAre
         KeyM: 'Minimize',
         KeyE: 'Equalize',
         KeyL: 'Launcher',
+        Digit1: 'Workspace1',
+        Digit2: 'Workspace2',
       };
       const k = map[e.code];
       if (k) {

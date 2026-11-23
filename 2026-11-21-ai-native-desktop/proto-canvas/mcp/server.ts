@@ -81,6 +81,55 @@ server.registerTool(
   ({ intent, steps }) => wrap(() => call('propose', { intent, steps })),
 );
 
+// ---- agent のワークスペース: ここでは提案なしで動かせる。保存領域への書き込みは重ねた層に溜まり、人のワークスペースには届かない ----
+server.registerTool(
+  'workspace_get_tree',
+  {
+    description: 'agent のワークスペース (agent 専用の作業場) の窓と意味ツリー。人のワークスペースとは別',
+    inputSchema: { app: z.string().optional().describe('窓の id (省略で全部)') },
+  },
+  ({ app }) => wrap(() => call('workspaceTree', { app })),
+);
+server.registerTool(
+  'workspace_launch',
+  { description: 'agent のワークスペースでアプリを開く (承認は要らない)。list_installed の id', inputSchema: { app: z.string() } },
+  ({ app }) => wrap(() => call('workspaceLaunch', { app })),
+);
+server.registerTool(
+  'workspace_act',
+  {
+    description:
+      'agent のワークスペースの窓を直接操作する (承認は要らない。sensitive なノードは不可、focus も不可)。' +
+      ' 保存領域への書き込みは重ねた層に溜まり、人のワークスペースには届かない。届けるには propose_merge',
+    inputSchema: { app: z.string(), target: z.string(), action: z.string(), data: z.string().optional() },
+  },
+  ({ app, target, action, data }) => wrap(() => call('workspaceAct', { app, target, action, data })),
+);
+server.registerTool(
+  'propose_merge',
+  {
+    description: 'agent のワークスペースで溜めた変更を、人のワークスペースに持ち込む提案を出す。人が差分を見て承認したときだけ書かれる',
+    inputSchema: { intent: z.string().describe('人に見せる説明') },
+  },
+  ({ intent }) => wrap(() => call('proposeMerge', { intent })),
+);
+server.registerTool(
+  'wait_merge',
+  {
+    description: '持ち込みの提案の結果を待つ。applied (書いた) / rejected (人が却下) / stale (提案のあとに人の側が変わった) / pending (時間切れ)',
+    inputSchema: { id: z.string(), timeout_s: z.number().min(0).max(600).default(60) },
+  },
+  ({ id, timeout_s }) =>
+    wrap(async () => {
+      const until = Date.now() + timeout_s * 1000;
+      for (;;) {
+        const r = (await call('mergeStatus', { id })) as { status: string };
+        if (r.status !== 'pending' || Date.now() >= until) return r;
+        await new Promise((ok) => setTimeout(ok, 200));
+      }
+    }),
+);
+
 server.registerTool(
   'wait_proposal',
   {

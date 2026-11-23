@@ -15,6 +15,12 @@ export function createNotesApp(opts: { id?: string; services?: AppServices } = {
   if (sv) {
     const saved = sv.storage.get('notes');
     if (saved.ok && saved.value) notes = JSON.parse(saved.value) as string[];
+    sv.storage.onChange((key) => {
+      if (key !== 'notes') return;
+      const r = sv.storage.get('notes');
+      if (r.ok && r.value) notes = JSON.parse(r.value) as string[];
+      publish();
+    });
     sv.onGrant((cap, granted) => {
       if (cap === 'clipboard.read') {
         status = granted ? 'クリップボードの読み取りが許可された。もう一度「貼り付け」を押す' : 'クリップボードの読み取りは拒否された';

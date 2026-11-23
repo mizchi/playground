@@ -111,7 +111,7 @@ export type ImeFromHost =
   | { t: 'ime-commit'; text: string }
   | { t: 'key'; key: 'Tab' | 'ShiftTab' | 'Space' | 'Enter' | 'Backspace' | 'Escape' | LayoutKey };
 /** レイアウトのキー操作 (Alt + 方向キー / Enter / M / E) */
-export type LayoutKey = 'MoveLeft' | 'MoveRight' | 'MoveUp' | 'MoveDown' | 'Zoom' | 'Minimize' | 'Equalize' | 'Launcher';
+export type LayoutKey = 'MoveLeft' | 'MoveRight' | 'MoveUp' | 'MoveDown' | 'Zoom' | 'Minimize' | 'Equalize' | 'Launcher' | 'Workspace1' | 'Workspace2';
 
 export interface Rect {
   x: number;

@@ -310,7 +310,7 @@ GTK3 アプリを AT-SPI で読み、意味ツリー (ARIA の語彙) に写し�
 
 `proto-canvas/mcp/server.ts` は MCP サーバ (stdio) で、ブラウザで動く shell と localhost の WebSocket でつながる。
 
-- tool は `list_apps` / `get_tree` / `get_layout` / `propose` / `wait_proposal` の 5 つ
+- tool は `list_apps` / `get_tree` / `get_layout` / `propose` / `wait_proposal` の 5 つ (のちに `list_installed` と、ワークスペースの 5 つを足した。8g)
 - 承認の tool はあえて作らない。AI は自分の提案を承認できず、承認は人が画面で行う
 - `wait_proposal` は、done / rejected / stale / pending (時間切れ) を返す
 
@@ -386,6 +386,18 @@ GTK3 アプリを AT-SPI で読み、意味ツリー (ARIA の語彙) に写し�
 - 実ブラウザ (Worker): 「固まる」で on-action から戻らないコンポーネント (`packages/spin-rs`) を開いて押しても、メインスレッドはすぐ応答し、ほかのアプリも操作できる。2 秒の期限で Worker を止め、窓は「応答しない」と理由を出す。「再起動」で新しい Worker から動く。Todo (Rust) の保存と再読み込みも Worker の中で動く。入力欄を押してすぐ打った文字も入る (shell が先にフォーカスを動かす。単体テストでは返事を後回しにするアプリで確かめた)
 - パッケージは `.wasm` と app.json だけ。glue はホストが jco の `generate` で作り (Node で約 200ms)、import の一覧はそこから分かる
 - 実ブラウザ: http(s) でない URL は断る。**ほかの origin** (CORS を許す別のサーバ) のパッケージをパネルから入れ、F6 でデスクトップへ戻り、Alt+L のランチャーから開く。同じ id のパッケージは別の URL からでも二重に入らない。コンポーネントで足した項目は localStorage に保存され、再読み込みしてもパッケージ・窓・項目が戻る
+
+### 8g. ワークスペース (`test/workspace.test.ts`, `e2e/workspace.cjs`, `e2e/mcp.ts`、すべて通った)
+
+- agent のワークスペースには「agent の作業場」が開いている。agent は提案なしで操作でき、人のワークスペースでは今まで通り提案が要る
+- agent のワークスペースでも、sensitive なノードは承認が要る
+- 保存領域への書き込みは重ねた層に溜まり、本物と人の窓は変わらない。作業場に差分が出る
+- 通知・クリップボードは agent のワークスペースでは拒否され、監査ログに残る
+- 持ち込み: agent が提案し、人が承認すると本物に書き、人の窓が読み直す。agent は答えられない
+- 提案のあとに人が同じ値を変えると、承認しても書かない (stale)
+- 人は重ねた層を捨てられる。agent は捨てられない
+- 実ブラウザ: agent が Todo を開いて項目を足しても人の画面は変わらない。Alt+2 で札・agent の窓・作業場の差分が見え、パネルで承認すると Alt+1 の人の Todo に項目が出る
+- MCP: `workspace_launch` / `workspace_act` を承認なしで使い、`propose_merge` → 人がパネルで承認 → `wait_merge` が applied を返す。持ち込みに答える tool は無い
 
 ### 8d. ダークテーマと veriss のコントラスト検査 (`test/theme.test.ts`, `e2e/theme.cjs`、すべて通った)
 

@@ -29,7 +29,8 @@
     "e2e:calendar": "node e2e/calendar.cjs",
     "e2e:theme": "node e2e/theme.cjs",
     "build:packages": "sh scripts/build-packages.sh",
-    "e2e:packages": "node e2e/packages.cjs"
+    "e2e:packages": "node e2e/packages.cjs",
+    "e2e:workspace": "node e2e/workspace.cjs"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "^1.42.0",

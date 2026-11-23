@@ -6,7 +6,7 @@ import { createAriaMirror } from './backend/aria.ts';
 import { createCanvasBackend } from './backend/canvas.ts';
 import type { CacheEntry, Storage } from './cache.ts';
 import type { ViewTemplate } from './catalog.ts';
-import type { Measure } from './protocol.ts';
+import type { ActionName, Measure } from './protocol.ts';
 import { layout } from './layout.ts';
 import { LOWER_FONT, lower } from './lower.ts';
 import { connectMcp } from './mcp-link.ts';
@@ -158,7 +158,7 @@ async function packageRunner() {
   const actionMs = Number(params.get('component-timeout') ?? 2000);
   runner = workerRunner(
     () => new Worker(new URL('platform/component-worker.js', location.href), { type: 'module' }),
-    () => ({ grant: (app, cap) => platform.services.grant(app, cap), storageEntries: (app) => platform.services.storageEntries(app) }),
+    () => ({ grant: (app, cap) => platform.services.grant(app, cap) }),
     { actionMs },
   );
   return runner;
@@ -237,6 +237,17 @@ shell.onChange = () => {
   if (!perf) platform.saveSession();
 };
 platform.services.onChange = schedule;
+platform.agentShell.onChange = schedule;
+// ワークスペース: Alt+1 で人の、Alt+2 で agent のワークスペースを見る (どちらの窓も動き続ける)
+let workspace: 1 | 2 = 1;
+function switchWorkspace(n: number) {
+  workspace = n === 2 ? 2 : 1;
+  shell = workspace === 1 ? platform.shell : platform.agentShell;
+  Object.assign(window, { shell });
+  aria.announce(workspace === 1 ? '人のワークスペース' : 'agent のワークスペース');
+  schedule();
+}
+for (const sh of [platform.shell, platform.agentShell]) sh.onWorkspaceKey = switchWorkspace;
 // ?pty=ws://127.0.0.1:8140/?token=... で、Terminal から本物のシェルにつなげる (pty/server.ts)
 const ptyUrl = params.get('pty');
 if (ptyUrl) platform.services.pty = wsPtyConnector(ptyUrl);
@@ -287,11 +298,20 @@ function capLabel(cap: string): string {
 }
 
 // ---- agent API: MCP の tool にそのまま写せる形で window に出す ----
+// 人のワークスペースへは提案 (人が承認)、agent のワークスペースでは直接。持ち込みは提案 (人が承認)
 const agent = {
-  getTree: (app?: string) => shell.getTree(app),
-  getLayout: () => shell.getLayout(),
-  propose: (intent: string, steps: Step[]) => shell.propose(intent, steps),
-  proposals: () => shell.proposals,
+  getTree: (app?: string) => platform.shell.getTree(app),
+  getLayout: () => platform.shell.getLayout(),
+  propose: (intent: string, steps: Step[]) => platform.shell.propose(intent, steps),
+  proposals: () => platform.shell.proposals,
+  workspace: {
+    getTree: (app?: string) => platform.agentShell.getTree(app),
+    windows: () => platform.agentShell.windows(),
+    launch: (appId: string) => platform.agent.launch(appId),
+    act: (app: string, target: string, action: ActionName, data?: string) => platform.agent.act(app, target, action, data),
+    proposeMerge: (intent: string) => platform.services.proposeMerge(intent, 'agent'),
+    merge: (id: string) => platform.services.merges.find((m) => m.id === id),
+  },
 };
 // ---- veriss への lowering (e2e/veriss-diff.cjs が使う)。計測は lowering 先の CSS と同じ font で行う ----
 const lowerCtx = document.createElement('canvas').getContext('2d')!;
@@ -309,8 +329,12 @@ Object.assign(window, { shell, platform, agent, lowerFor, shellMeasure: (s: stri
 // ?mcp=ws://127.0.0.1:8130 で、AI 向けの MCP サーバ (mcp/server.ts) とつなぐ
 const mcpUrl = params.get('mcp');
 if (mcpUrl)
-  connectMcp(mcpUrl, shell, (s) => Object.assign(window, { mcpStatus: s }), () =>
-    platform.registry.list().map((m) => ({ id: m.id, title: m.title, description: m.description, multiInstance: m.multiInstance, capabilities: m.capabilities })),
+  connectMcp(
+    mcpUrl,
+    platform.shell,
+    (s) => Object.assign(window, { mcpStatus: s }),
+    () => platform.registry.list().map((m) => ({ id: m.id, title: m.title, description: m.description, multiInstance: m.multiInstance, capabilities: m.capabilities })),
+    agent.workspace,
   );
 
 // ---- panel ----
@@ -347,6 +371,8 @@ const SAMPLE_BAD: ViewTemplate = { type: 'box', axis: 'vertical', children: [{ t
 
 panel.innerHTML = `
   <div class="row"><label>テーマ <select id="theme"><option value="system">システムに従う</option><option value="light">ライト</option><option value="dark">ダーク</option></select></label></div>
+  <div class="row" role="group" aria-label="ワークスペース">ワークスペース <button data-ws="1" id="ws1">人 (Alt+1)</button><button data-ws="2" id="ws2">agent (Alt+2)</button></div>
+  <div id="merges"></div>
   <div id="prompts"></div>
   <div id="notices"></div>
 
@@ -466,8 +492,12 @@ panel.addEventListener('click', (e) => {
   const d = b.dataset;
   if (d.grant) platform.services.answer(d.grant, d.allow === '1', 'human');
   else if (d.dismiss) platform.services.dismiss(Number(d.dismiss));
-  else if (d.launch) platform.launch(d.launch);
-  else if (d.closeWin) platform.close(d.closeWin);
+  // 開く・閉じるは、今見ているワークスペースで
+  else if (d.launch) shell.applyLayout({ type: 'launch', app: d.launch }, 'human');
+  else if (d.closeWin) shell.applyLayout({ type: 'close', app: d.closeWin }, 'human');
+  else if (d.ws) switchWorkspace(Number(d.ws));
+  // 持ち込みに答える (人だけ)
+  else if (d.merge) platform.services.answerMerge(d.merge, d.ok === '1', 'human');
   else return;
   schedule();
   backend.focusInput();
@@ -520,6 +550,19 @@ function escapeHtml(s: string) {
 
 function renderPanel(frame: ReturnType<Shell['frame']>) {
   const sv = platform.services;
+  $('ws1').setAttribute('aria-pressed', String(workspace === 1));
+  $('ws2').setAttribute('aria-pressed', String(workspace === 2));
+  $('ws1').className = workspace === 1 ? 'primary' : '';
+  $('ws2').className = workspace === 2 ? 'primary' : '';
+  const shortV = (v: string | undefined) => escapeHtml(v === undefined ? '(なし)' : v.length > 60 ? `${v.slice(0, 60)}…` : v);
+  $('merges').innerHTML = sv.merges
+    .filter((m) => m.status === 'pending')
+    .map(
+      (m) => `<div class="card sensitive" role="alertdialog" aria-label="持ち込みの提案"><div><b>持ち込みの提案 ${m.id}</b> (${m.by === 'agent' ? 'agent' : '人'}): ${escapeHtml(m.intent)}</div>
+        <ol>${m.changes.map((c) => `<li>${escapeHtml(c.app)} / ${escapeHtml(c.key)}: ${shortV(c.before)} → ${shortV(c.after)}</li>`).join('')}</ol>
+        <div class="row"><button class="primary" data-merge="${m.id}" data-ok="1">人のワークスペースに書く</button><button data-merge="${m.id}" data-ok="0">却下</button></div></div>`,
+    )
+    .join('');
   $('prompts').innerHTML = sv.prompts
     .filter((p) => p.status === 'pending')
     .map(
@@ -537,7 +580,7 @@ function renderPanel(frame: ReturnType<Shell['frame']>) {
   if ($('installed').innerHTML !== html) $('installed').innerHTML = html;
   const wins = shell.windows();
   $('openWins').innerHTML = wins
-    .map((w) => `<div class="card"><b>${escapeHtml(w.title)}</b> <span class="muted">${w.id} (${platform.registry.appOf(w.id) ?? '?'})</span>${wins.length > 1 ? ` <button data-close-win="${w.id}">閉じる</button>` : ''}</div>`)
+    .map((w) => `<div class="card"><b>${escapeHtml(w.title)}</b> <span class="muted">${w.id} (${platform.registry.appOf(w.id) ?? 'システム'})</span>${wins.length > 1 ? ` <button data-close-win="${w.id}">閉じる</button>` : ''}</div>`)
     .join('');
   const treeSel = $<HTMLSelectElement>('treeApp');
   const opts = wins.map((w) => `<option>${escapeHtml(w.id)}</option>`).join('');
@@ -592,6 +635,8 @@ function render() {
   const { w, h } = backend.size();
   const t0 = performance.now();
   const frame = shell.frame(w, h, t0);
+  // 見えていないワークスペースにも画面の大きさを知らせる (agent がそこで窓を開くときの配置の検査に使う)
+  (shell === platform.shell ? platform.agentShell : platform.shell).setSize(w, h);
   const t1 = performance.now();
   backend.draw(frame.ops);
   const t2 = performance.now();

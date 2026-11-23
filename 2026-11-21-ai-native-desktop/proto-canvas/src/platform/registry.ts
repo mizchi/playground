@@ -1,16 +1,16 @@
 // インストール済みのアプリ。shell に差し込む「窓の工場」も兼ねる。
 import type { App } from '../apps/app.ts';
 import type { WindowFactory } from '../shell.ts';
-import type { AppManifest, AppServices } from './types.ts';
+import type { AppManifest, AppServices, Workspace } from './types.ts';
 
 export class AppRegistry implements WindowFactory {
   private apps = new Map<string, AppManifest>();
   /** 窓 id → アプリ id */
   private windowApp = new Map<string, string>();
   private openIds: () => string[];
-  private servicesFor: (appId: string, windowId: string) => AppServices;
+  private servicesFor: (appId: string, windowId: string, workspace: Workspace) => AppServices;
 
-  constructor(manifests: AppManifest[], openIds: () => string[], servicesFor: (appId: string, windowId: string) => AppServices) {
+  constructor(manifests: AppManifest[], openIds: () => string[], servicesFor: (appId: string, windowId: string, workspace: Workspace) => AppServices) {
     for (const m of manifests) this.install(m);
     this.openIds = openIds;
     this.servicesFor = servicesFor;
@@ -54,11 +54,11 @@ export class AppRegistry implements WindowFactory {
     for (let n = 2; ; n++) if (!open.has(`${appId}-${n}`)) return `${appId}-${n}`;
   }
 
-  create(appId: string, windowId: string): App {
+  create(appId: string, windowId: string, workspace: Workspace = 'human'): App {
     const m = this.apps.get(appId);
     if (!m) throw new Error(`アプリ ${appId} はインストールされていない`);
     this.windowApp.set(windowId, appId);
-    const app = m.create(windowId, this.servicesFor(appId, windowId));
+    const app = m.create(windowId, this.servicesFor(appId, windowId, workspace));
     if (app.id !== windowId) throw new Error(`アプリ ${appId} が窓 id ${windowId} を使わなかった (${app.id})`);
     return app;
   }

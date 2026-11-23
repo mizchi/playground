@@ -57,7 +57,7 @@ await page.waitForFunction(() => (window as unknown as { mcpStatus?: string }).m
 
 await step('tool の一覧: 読む・提案する・待つだけ。承認の tool は無い', async () => {
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['get_layout', 'get_tree', 'list_apps', 'list_installed', 'propose', 'wait_proposal']);
+  assert.deepEqual(names, ['get_layout', 'get_tree', 'list_apps', 'list_installed', 'propose', 'propose_merge', 'wait_merge', 'wait_proposal', 'workspace_act', 'workspace_get_tree', 'workspace_launch']);
 });
 
 await step('get_tree / get_layout / list_apps で画面の状態が読める', async () => {
@@ -121,6 +121,29 @@ await step('list_installed で起動できるアプリを知り、launch の提�
   const tree = await call('get_tree', { app: 'terminal' });
   assert.ok(tree.text.includes('libghostty-vt'), 'agent は画面の文字を読める');
   assert.ok(!tree.text.includes('"lines"'), '描画用の格子は渡さない');
+});
+
+await step('agent のワークスペース: 承認なしで開いて操作し、持ち込みは人がパネルで承認したときだけ人の側に書かれる', async () => {
+  const l = await call('workspace_launch', { app: 'todo' });
+  assert.equal(l.isError, false, l.text);
+  const win = ((l.value as unknown as { windows: { id: string }[] }).windows.at(-1) as { id: string }).id;
+  assert.notEqual(win, 'todo', '人の側の窓とは別の窓');
+  for (const [target, action, data] of [['input', 'setValue', 'MCP から足した'], ['add', 'click', undefined]] as const) {
+    const r = await call('workspace_act', { app: win, target, action, data });
+    assert.equal(r.isError, false, r.text);
+  }
+  // 人の側の窓は変わらない
+  assert.ok(!(await call('get_tree', { app: 'todo' })).text.includes('MCP から足した'));
+  // 人の側の窓は、workspace_act では動かせない
+  const human = await call('workspace_act', { app: 'todo', target: 'i1', action: 'click' });
+  assert.equal(human.isError, true);
+  const m = await call('propose_merge', { intent: 'Todo に 1 件足す' });
+  assert.equal(m.isError, false, m.text);
+  const id = (m.value as unknown as { id: string }).id;
+  await page.click(`#merges button[data-merge="${id}"][data-ok="1"]`);
+  const r = await call('wait_merge', { id, timeout_s: 5 });
+  assert.equal((r.value as unknown as { status: string }).status, 'applied');
+  assert.ok((await call('get_tree', { app: 'todo' })).text.includes('MCP から足した'), '人の側の窓が読み直した');
 });
 
 await client.close();

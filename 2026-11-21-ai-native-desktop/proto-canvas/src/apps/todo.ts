@@ -26,6 +26,14 @@ export function createTodoApp(opts: { id?: string; items?: number; services?: Ap
   }
   let seq = items.reduce((m, i) => Math.max(m, Number(i.id.slice(1)) || 0), 0) + 1;
   const save = () => sv?.storage.set('items', JSON.stringify(items));
+  // ほかから保存領域が変わったら (agent のワークスペースの変更を人が持ち込んだ、など) 読み直す
+  sv?.storage.onChange((key) => {
+    if (key !== 'items') return;
+    const r = sv.storage.get('items');
+    if (r.ok && r.value) items = JSON.parse(r.value) as Item[];
+    seq = items.reduce((m, i) => Math.max(m, Number(i.id.slice(1)) || 0), 0) + 1;
+    publish();
+  });
   let draft = '';
   let focus: NodeId | null = null;
   let sent = new Set<NodeId>();

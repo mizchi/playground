@@ -1,6 +1,6 @@
 // システムのサービス (クリップボード・通知・保存領域・アプリの起動)。どの呼び出しも能力を確かめ、監査ログに残す。
 import type { Storage } from '../cache.ts';
-import type { AppServices, Capability, GrantPrompt, GrantState, Notification, PtyConnector, ServiceResult } from './types.ts';
+import type { AppServices, Capability, GrantPrompt, GrantState, MergeRequest, Notification, PtyConnector, ServiceResult, StorageChange, Workspace } from './types.ts';
 import type { AppRegistry } from './registry.ts';
 
 export interface ServiceAudit {
@@ -45,6 +45,12 @@ export class ServiceHost {
   registry!: AppRegistry;
   /** ホストの擬似端末の口 (main.ts が ?pty= のときに差し込む) */
   pty: PtyConnector | null = null;
+  readonly merges: MergeRequest[] = [];
+  /** agent のワークスペースの書き込み (kv のキー → 値)。人が持ち込むまで本物には書かない */
+  private overlay = new Map<string, string>();
+  private storageListeners = new Map<string, ((key: string) => void)[]>();
+  /** 重ねた層が変わったとき (作業場のアプリが差分を出し直す) */
+  onOverlayChange: () => void = () => {};
   private clipboard = '';
   private grants = new Map<string, Map<Capability, GrantState>>();
   private grantListeners = new Map<string, ((cap: Capability, granted: boolean) => void)[]>();
@@ -115,8 +121,9 @@ export class ServiceHost {
     return { ok: true, value: true };
   }
 
-  /** 窓に渡すサービス */
-  servicesFor(app: string, window: string): AppServices {
+  /** 窓に渡すサービス。agent のワークスペースの窓では、保存領域は重ねた層に書き、外へ出る能力は使えない */
+  servicesFor(app: string, window: string, workspace: Workspace = 'human'): AppServices {
+    if (workspace === 'agent') return this.agentServicesFor(app, window);
     const fail = <T>(r: ServiceResult<true>) => r as ServiceResult<T>;
     return {
       clipboard: {
@@ -149,6 +156,11 @@ export class ServiceHost {
           this.kv.set(`app.${app}.${key}`, value);
           return { ok: true, value: undefined };
         },
+        entries: () => {
+          const r = this.check(app, window, 'storage', 'entries');
+          return r.ok ? { ok: true, value: this.storageEntries(app) } : fail(r);
+        },
+        onChange: (cb) => this.onStorageChange(app, cb),
       },
       apps: {
         list: () => {
@@ -187,6 +199,115 @@ export class ServiceHost {
         this.grantListeners.get(app)!.push(cb);
       },
     };
+  }
+
+  private onStorageChange(app: string, cb: (key: string) => void) {
+    if (!this.storageListeners.has(app)) this.storageListeners.set(app, []);
+    this.storageListeners.get(app)!.push(cb);
+  }
+
+  /** agent のワークスペースの窓のサービス */
+  private agentServicesFor(app: string, window: string): AppServices {
+    const human = this.servicesFor(app, window, 'human');
+    const k = (key: string) => `app.${app}.${key}`;
+    // 外へ出る能力 (クリップボード・通知・アプリの起動・ホストのシェル) は使わせない。人の目に触れる前に外へ漏れないように
+    const outside = (cap: Capability, op: string) => {
+      this.audit.push({ at: Date.now(), app, window, capability: cap, op: `${op} (agent のワークスペース)`, result: 'denied' });
+      return { ok: false as const, reason: 'denied' as const };
+    };
+    return {
+      ...human,
+      clipboard: { read: () => outside('clipboard.read', 'read'), write: () => outside('clipboard.write', 'write') },
+      notify: () => outside('notifications', 'notify'),
+      apps: { list: human.apps.list, launch: (id) => outside('apps.launch', `launch ${id}`) },
+      pty: { available: () => false, open: () => outside('terminal.pty', 'open') },
+      storage: {
+        get: (key) => {
+          const r = this.check(app, window, 'storage', `get ${key} (agent のワークスペース)`);
+          if (!r.ok) return r as ServiceResult<string | undefined>;
+          return { ok: true, value: this.overlay.has(k(key)) ? this.overlay.get(k(key)) : this.kv.get(k(key)) };
+        },
+        set: (key, value) => {
+          const r = this.check(app, window, 'storage', `set ${key} (agent のワークスペース)`);
+          if (!r.ok) return r as ServiceResult<void>;
+          this.overlay.set(k(key), value);
+          this.onOverlayChange();
+          this.onChange();
+          return { ok: true, value: undefined };
+        },
+        entries: () => {
+          const r = this.check(app, window, 'storage', 'entries (agent のワークスペース)');
+          if (!r.ok) return r as ServiceResult<[string, string][]>;
+          const m = new Map(this.storageEntries(app));
+          const prefix = `app.${app}.`;
+          for (const [key, v] of this.overlay) if (key.startsWith(prefix)) m.set(key.slice(prefix.length), v);
+          return { ok: true, value: [...m] };
+        },
+        // 重ねた層は agent のワークスペースだけのもの。持ち込みで本物が変わっても、こちらは知らせない
+        onChange: () => {},
+      },
+    };
+  }
+
+  /** agent のワークスペースで溜まった変更 (本物と違うものだけ) */
+  pendingChanges(): StorageChange[] {
+    const out: StorageChange[] = [];
+    for (const [key, after] of this.overlay) {
+      const m = key.match(/^app\.([^.]+)\.(.+)$/);
+      if (!m) continue;
+      const before = this.kv.get(key);
+      if (before !== after) out.push({ app: m[1], key: m[2], before, after });
+    }
+    return out;
+  }
+
+  /** 持ち込みを提案する (agent も人もできる)。変更が無ければ '' 以外を返す */
+  proposeMerge(intent: string, by: 'human' | 'agent'): { ok: true; merge: MergeRequest } | { ok: false; reason: string } {
+    const changes = this.pendingChanges();
+    if (!changes.length) return { ok: false, reason: '持ち込む変更が無い' };
+    const merge: MergeRequest = { id: `m${this.seq++}`, intent, by, changes, status: 'pending' };
+    this.merges.push(merge);
+    this.onOverlayChange();
+    this.onChange();
+    return { ok: true, merge };
+  }
+
+  /** 持ち込みに答える。答えられるのは人だけ。提案のあとに本物が変わっていれば書かない (stale) */
+  answerMerge(id: string, approve: boolean, by: 'human' | 'agent'): string {
+    const m = this.merges.find((x) => x.id === id);
+    if (!m || m.status !== 'pending') return '提案が無い';
+    if (by !== 'human') return '持ち込みに答えられるのは人だけ';
+    if (!approve) {
+      m.status = 'rejected';
+      this.onOverlayChange();
+      this.onChange();
+      return '';
+    }
+    if (m.changes.some((c) => this.kv.get(`app.${c.app}.${c.key}`) !== c.before)) {
+      m.status = 'stale';
+      this.onOverlayChange();
+      this.onChange();
+      return '提案のあとに人のワークスペースの値が変わったので、書かなかった';
+    }
+    for (const c of m.changes) {
+      this.kv.set(`app.${c.app}.${c.key}`, c.after);
+      this.overlay.delete(`app.${c.app}.${c.key}`);
+      this.audit.push({ at: Date.now(), app: c.app, window: '(持ち込み)', capability: 'storage', op: `merge ${c.key} (${m.id})`, result: 'ok' });
+    }
+    m.status = 'applied';
+    for (const c of m.changes) for (const cb of this.storageListeners.get(c.app) ?? []) cb(c.key);
+    this.onOverlayChange();
+    this.onChange();
+    return '';
+  }
+
+  /** agent のワークスペースの変更を捨てる (人だけ) */
+  discardOverlay(by: 'human' | 'agent'): string {
+    if (by !== 'human') return '変更を捨てられるのは人だけ';
+    this.overlay.clear();
+    this.onOverlayChange();
+    this.onChange();
+    return '';
   }
 
   /** アプリの保存領域の中身 (Worker で動くコンポーネントに写しを渡すため。許可の確認は呼ぶ側で行う) */
