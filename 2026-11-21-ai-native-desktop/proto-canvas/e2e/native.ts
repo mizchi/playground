@@ -51,8 +51,8 @@ interface State {
 }
 
 /** ホストを起こし、--control で話す */
-async function startHost(extra: string[] = []) {
-  const p = spawn(process.execPath, [path.join(root, 'native', 'host.ts'), '--headless', '1500x860', '--control', '--kv', kvFile, ...extra], { env, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessWithoutNullStreams;
+async function startHost(extra: string[] = [], kv = kvFile) {
+  const p = spawn(process.execPath, [path.join(root, 'native', 'host.ts'), '--headless', '1500x860', '--control', '--kv', kv, ...extra], { env, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessWithoutNullStreams;
   // 終わったことは起こした時点から覚えておく (テストの途中で落ちても、stop が待ち続けないように)
   const exited = new Promise<number | null>((r) => p.on('exit', (code) => r(code)));
   p.stdin.on('error', () => {});
@@ -217,6 +217,44 @@ await step('ダークテーマ: 同じ画面を THEMES.dark の色で描く', as
   const file = path.join(shots ? shotsDir : tmp, 'native-dark.png');
   await host.capture(file);
   assert.ok(statSync(file).size > 20000);
+});
+
+await step('パッケージ: WIT のコンポーネントを worker_threads で動かす。保存はファイルに残り、応答しないコンポーネントは期限で止めて再起動できる', async () => {
+  await host.stop();
+  const pkgKv = path.join(tmp, 'packages.json');
+  const pkg = (id: string) => path.join(root, 'www', 'packages', id, 'app.json');
+  host = await startHost(['--fresh', '--package', pkg('todo-rs'), '--package', pkg('spin-rs')], pkgKv);
+  await host.cmd({ t: 'close', app: 'settings' });
+  await host.cmd({ t: 'close', app: 'notes' });
+  assert.match(JSON.stringify(await host.cmd({ t: 'launch', app: 'todo-rs' })), /"result":""/);
+  const tree = async (app: string) => ((await host.cmd({ t: 'tree', app })) as { tree: { nodes: { id: string; label?: string; checked?: boolean }[] }[] }).tree[0]?.nodes ?? [];
+  const until = async (f: () => Promise<boolean>, what: string, ms = 8000) => {
+    for (let t = 0; t < ms; t += 100) {
+      if (await f()) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(`${what} にならない`);
+  };
+  await until(async () => !!(await host.rects())['todo-rs/i1'], 'todo-rs の i1');
+  await host.clickRect((await host.rects())['todo-rs/i1']);
+  await until(async () => (await tree('todo-rs')).find((n) => n.id === 'i1')?.checked === true, 'i1 が完了');
+  await until(async () => /i1/.test(JSON.parse(readFileSync(pkgKv, 'utf8'))['app.todo-rs.items'] ?? ''), '保存がファイルに残る');
+  if (shots) await host.capture(path.join(shotsDir, 'native-package.png'));
+
+  assert.match(JSON.stringify(await host.cmd({ t: 'launch', app: 'spin-rs' })), /"result":""/);
+  await until(async () => !!(await host.rects())['spin-rs/spin'], 'spin-rs の「固まる」');
+  await host.clickRect((await host.rects())['spin-rs/spin']);
+  // コンポーネントが止まっている間も、ホストは答える
+  const t0 = performance.now();
+  await host.state();
+  assert.ok(performance.now() - t0 < 1000, 'ホストは固まらない');
+  await until(async () => /応答しない/.test((await tree('spin-rs')).find((n) => n.id === 'root')?.label ?? ''), '応答しない');
+  await host.clickRect((await host.rects())['spin-rs/x-restart']);
+  await until(async () => (await tree('spin-rs')).find((n) => n.id === 'count')?.label === '数える (0)', '再起動');
+  await host.stop();
+  // 入れたパッケージは次の起動でも読む (--package なしで)
+  host = await startHost([], pkgKv);
+  assert.ok((await host.state()).windows.some((w) => w.id === 'todo-rs'), 'パッケージの窓も復元する');
 });
 
 await step('ホストのシェル: --pty では擬似端末の helper を直接起こす (WebSocket の橋は使わない)。許可はパネルで答える', async () => {

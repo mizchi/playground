@@ -3,7 +3,7 @@
 import type { App } from '../apps/app.ts';
 import { fromWitUpdate, toWit } from '../apps/component-app.ts';
 import type { NodeId, TreeUpdate } from '../protocol.ts';
-import type { FromWorker, StorageSnapshot, ToWorker } from './component-worker.ts';
+import type { FromWorker, StorageSnapshot, ToWorker } from './component-worker-core.ts';
 import type { Glue } from './component-imports.ts';
 import type { ComponentRunner, PackageManifest } from './packages.ts';
 import type { AppServices, Capability, GrantState } from './types.ts';

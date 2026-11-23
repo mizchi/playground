@@ -4,6 +4,7 @@
 //   node native/host.ts                          # 窓を開く
 //   node native/host.ts --headless 1280x800      # 窓なし (オフスクリーン)。--control で標準入力から操作・画面の書き出し
 //   オプション: --kv <file> (保存先) / --font <ttf> / --theme light|dark / --pty (ホストの bash) / --mcp ws://127.0.0.1:8130 / --renderer <path>
+//             --package <app.json> (パッケージを入れる。次の起動でも読む)
 //
 // 役割の分け方
 // - Node: プラットフォーム (アプリ・能力・保存・セッション)、shell (意味ツリー → 描画命令)、文字の計測 (mizchi/font)、人だけが答えるパネル
@@ -12,7 +13,7 @@ import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { builtinManifests } from '../src/apps/manifests.ts';
@@ -27,7 +28,9 @@ import type { DrawOp, ImeToHost } from '../src/protocol.ts';
 import type { Shell, Step } from '../src/shell.ts';
 import { THEMES } from '../src/theme.ts';
 import type { ThemeName } from '../src/theme.ts';
+import type { AppManifest } from '../src/platform/types.ts';
 import { fileKeyValue } from './kv.ts';
+import { nativeRunner, readNativePackage } from './packages.ts';
 import { PANEL_W, drawPanel } from './panel.ts';
 import type { PanelButton } from './panel.ts';
 import { directPtyConnector } from './pty.ts';
@@ -41,6 +44,8 @@ const opt = (name: string) => {
   return i >= 0 ? argv[i + 1] : undefined;
 };
 const flag = (name: string) => argv.includes(name);
+/** 何度でも書けるオプション (--package a --package b) */
+const opts = (name: string) => argv.flatMap((a, i) => (a === name && argv[i + 1] ? [argv[i + 1]] : []));
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
 const headless = opt('--headless');
 // 窓の最小の幅 (shell + 人が答えるパネル)。窓なしでもこれより狭くはしない
@@ -86,7 +91,34 @@ const terminal = terminalManifest(async () => {
   const g = await instantiateGhostty(await readFile(here('../node_modules/ghostty-web/ghostty-vt.wasm')));
   return (c, r) => createVt(g, c, r);
 });
-const platform = createPlatform({ apps: [...builtinManifests, terminal], initial: ['todo', 'settings', 'notes'], measure, templates, kv, restoreSession: !flag('--fresh') });
+// ---- パッケージ (app.json + WIT のコンポーネント)。コンポーネントは worker_threads で動かし、応答しなければ止める ----
+// 入れたパッケージ (app.json のパス) は保存しておき、次の起動でも読む (窓の復元より先に)。--package で足す
+const PACKAGES_KEY = 'native.packages';
+const savedPackages = (() => {
+  try {
+    const v: unknown = JSON.parse(kv.get(PACKAGES_KEY) ?? '[]');
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+})();
+const packagePaths = [...new Set([...savedPackages, ...opts('--package').map((p) => resolve(p))])];
+const runner = nativeRunner(() => platform.services, { actionMs: Number(opt('--component-timeout') ?? 2000) });
+const packageManifests: AppManifest[] = [];
+const takenIds = new Set([...builtinManifests.map((m) => m.id), terminal.id]);
+for (const path of packagePaths) {
+  const r = await readNativePackage(path, runner);
+  if (!r.ok) log(`パッケージ ${path} を読めない: ${r.errors.join(' / ')}`);
+  else if (takenIds.has(r.manifest.id)) log(`パッケージ ${path} の id ${r.manifest.id} はすでに使われている。読み込まない`);
+  else {
+    takenIds.add(r.manifest.id);
+    packageManifests.push(r.manifest);
+    log(`パッケージ: ${r.manifest.id} (${path})`);
+  }
+}
+kv.set(PACKAGES_KEY, JSON.stringify(packagePaths));
+
+const platform = createPlatform({ apps: [...builtinManifests, terminal, ...packageManifests], initial: ['todo', 'settings', 'notes'], measure, templates, kv, restoreSession: !flag('--fresh') });
 if (flag('--pty')) platform.services.pty = directPtyConnector();
 const theme: ThemeName = (opt('--theme') as ThemeName | undefined) ?? (kv.get('platform.theme') === 'dark' ? 'dark' : 'light');
 const colors = THEMES[theme];
@@ -431,6 +463,9 @@ if (control)
       case 'launch':
         // 人がランチャーから開くのと同じ (テストで使う)
         reply({ t: 'launched', id: c.id, result: platform.launch(c.app as string, 'human') });
+        break;
+      case 'close':
+        reply({ t: 'closed', id: c.id, result: platform.close(c.app as string, 'human') });
         break;
       case 'propose':
         reply({ t: 'proposed', id: c.id, result: platform.shell.propose(c.intent as string, c.steps as Step[]) });
