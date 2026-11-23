@@ -20,26 +20,28 @@ export type FromWorker =
   | { t: 'storage-get'; key: string }
   | { t: 'storage-set'; key: string; value: string }
   | { t: 'error'; message: string };
-/** storage の許可の状態と、アプリの保存領域の写し (許可されているときだけ中身がある) */
+/** storage の許可の状態と、アプリの保存領域の写し (許可されているときだけ中身がある)。キーは任意の文字列なので組で渡す */
 export interface StorageSnapshot {
   state: GrantState | undefined;
-  data: Record<string, string>;
+  data: [string, string][];
 }
 
 const post = (m: FromWorker) => (self as unknown as Worker).postMessage(m);
 let app: { start(): void; onAction(req: unknown): void } | null = null;
-let storage: StorageSnapshot = { state: undefined, data: {} };
+let state: GrantState | undefined;
+/** 写し (Map: "constructor" や "__proto__" のようなキーも、ただの文字列として扱う) */
+let data = new Map<string, string>();
 
 const backend: StorageBackend = {
   get(key) {
     post({ t: 'storage-get', key });
-    if (storage.state === 'granted') return { tag: 'ok', val: storage.data[key] };
-    return { tag: 'err', val: storage.state === 'denied' ? 'denied' : 'pending' };
+    if (state === 'granted') return { tag: 'ok', val: data.get(key) };
+    return { tag: 'err', val: state === 'denied' ? 'denied' : 'pending' };
   },
   set(key, value) {
     post({ t: 'storage-set', key, value });
-    if (storage.state !== 'granted') return false;
-    storage.data[key] = value;
+    if (state !== 'granted') return false;
+    data.set(key, value);
     return true;
   },
 };
@@ -48,7 +50,8 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
   const m = e.data;
   try {
     if (m.t === 'init') {
-      storage = m.storage;
+      state = m.storage.state;
+      data = new Map(m.storage.data);
       const url = URL.createObjectURL(new Blob([m.glue.js], { type: 'text/javascript' }));
       const mod = (await import(/* @vite-ignore */ url)) as ComponentModule;
       URL.revokeObjectURL(url);
@@ -60,8 +63,10 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
     } else if (m.t === 'action') {
       app!.onAction(m.req);
       post({ t: 'done', seq: m.seq });
-    } else if (m.t === 'storage') storage = m.storage;
-    else if (m.t === 'storage-update') storage.data[m.key] = m.value;
+    } else if (m.t === 'storage') {
+      state = m.storage.state;
+      data = new Map(m.storage.data);
+    } else if (m.t === 'storage-update') data.set(m.key, m.value);
   } catch (err) {
     post({ t: 'error', message: String((err as Error).message ?? err) });
   }

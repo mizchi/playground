@@ -11,7 +11,7 @@ import type { AppServices, Capability, GrantState } from './types.ts';
 /** Worker に渡す storage の写しを作るための、ホスト側の口 (許可の状態は人だけが変える) */
 export interface RunnerHost {
   grant(app: string, cap: Capability): GrantState | undefined;
-  storageEntries(app: string): Record<string, string>;
+  storageEntries(app: string): [string, string][];
 }
 
 export interface RunnerOptions {
@@ -27,9 +27,9 @@ export function workerRunner(spawn: () => Worker, host: () => RunnerHost, opts: 
   /** 動いている Worker (アプリ id → 窓 id → Worker)。保存領域の書き込みを、同じアプリのほかの窓に知らせる */
   const live = new Map<string, Map<string, Worker>>();
   const snapshot = (pkg: PackageManifest): StorageSnapshot => {
-    if (!pkg.capabilities.includes('storage')) return { state: undefined, data: {} };
+    if (!pkg.capabilities.includes('storage')) return { state: undefined, data: [] };
     const state = host().grant(pkg.id, 'storage');
-    return { state, data: state === 'granted' ? host().storageEntries(pkg.id) : {} };
+    return { state, data: state === 'granted' ? host().storageEntries(pkg.id) : [] };
   };
   const send = (w: Worker, m: ToWorker) => w.postMessage(m);
 
@@ -52,7 +52,7 @@ export function workerRunner(spawn: () => Worker, host: () => RunnerHost, opts: 
           w.terminate();
           resolve(`インスタンスを作れない: ${e.message}`);
         };
-        send(w, { t: 'init', mode: 'probe', glue, caps: pkg.capabilities, storage: { state: 'denied', data: {} } });
+        send(w, { t: 'init', mode: 'probe', glue, caps: pkg.capabilities, storage: { state: 'denied', data: [] } });
       });
     },
 

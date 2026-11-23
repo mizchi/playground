@@ -247,6 +247,9 @@ export class Shell {
         return deny('提案に含まれない操作');
     }
     this.audit.push(entry);
+    // 人のフォーカスは先に動かす: アプリ (Worker のコンポーネントなど) の返事を待つ間に打った文字も、その入力欄に届く。
+    // アプリが返す木のフォーカスが正なので、アプリが別の場所へ回せば (ターミナルの画面 → コマンド行など) そちらが勝つ
+    if (req.by === 'human' && req.action === 'focus') w.tree.focus = req.target;
     w.app.onAction(structuredClone({ t: 'action', ...req }));
     return entry;
   }

@@ -190,9 +190,12 @@ export class ServiceHost {
   }
 
   /** アプリの保存領域の中身 (Worker で動くコンポーネントに写しを渡すため。許可の確認は呼ぶ側で行う) */
-  storageEntries(app: string): Record<string, string> {
+  storageEntries(app: string): [string, string][] {
     const prefix = `app.${app}.`;
-    return Object.fromEntries(this.kv.keys().filter((k) => k.startsWith(prefix)).map((k) => [k.slice(prefix.length), this.kv.get(k) ?? '']));
+    return this.kv
+      .keys()
+      .filter((k) => k.startsWith(prefix))
+      .map((k): [string, string] => [k.slice(prefix.length), this.kv.get(k) ?? '']);
   }
 
   /** 人が読んだ通知を消す */

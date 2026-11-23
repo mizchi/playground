@@ -82,8 +82,7 @@ async function step(name, fn) {
 
   await step('コンポーネントのアプリで項目を足すと、能力 storage (import) で保存される', async () => {
     await page.evaluate(() => window.shell.activate('todo-rs', 'input'));
-    // フォーカスはコンポーネント (Worker) が返す木で決まる。返ってから打つ
-    await page.waitForFunction(() => window.shell.tree('todo-rs').focus === 'input');
+    // フォーカスは shell が先に動かすので、Worker の返事を待たずにすぐ打てる
     await page.keyboard.insertText('WIT から保存');
     await page.waitForFunction(() => window.shell.tree('todo-rs').get('input').value === 'WIT から保存');
     await page.evaluate(() => window.shell.activate('todo-rs', 'add'));
