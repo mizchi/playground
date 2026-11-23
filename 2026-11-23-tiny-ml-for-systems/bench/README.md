@@ -247,6 +247,8 @@ JAX（jax 0.12.1）と Rust（nightly 1.102 の `std::autodiff`）で同じ損�
 | 学習時間（500 ステップ × 18 万行） | 14.6 秒（jit、XLA） | 101〜107 秒（1 スレッド） |
 | セットアップ | `uv pip install jax` | nightly + enzyme コンポーネント、`lto = "fat"`、`RUSTFLAGS="-Zautodiff=Enable"` |
 
+Julia の Enzyme.jl 版（`../templates/julia/diff/ttl_enzyme.jl`）も同じ損失・同じ初期値で、ステップ 1 の損失 −0.1367、実キャッシュで OHR 39.99%・BHR 8.74% になった。学習は 22〜24 秒（1 スレッド、初回のコンパイルを含む）。
+
 キャッシュのシミュレーション（上の表と同じ条件）:
 
 ```
