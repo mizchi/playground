@@ -1,0 +1,27 @@
+{
+  "checks": [
+    {
+      "name": "three-zero-certificate",
+      "cwd": "../..",
+      "cmd": "python3 -B explore/three_zero_width.py",
+      "expect": [
+        "minimum width: [0.939890425433994140229836131212678828, 0.939890425433994140229836131798638574]"
+      ]
+    },
+    {
+      "name": "weighted-count",
+      "cwd": "../..",
+      "cmd": "python3 -B 'research_notes/Minimum Width Applications/verify_xi_count.py'",
+      "expect": [
+        "192  36.68677  5   3663114  116.7295541085"
+      ]
+    },
+    {
+      "name": "count-and-three-components",
+      "cmd": "python3 -B draw_examples.py",
+      "expect": [
+        "Normalized observed error after averaging: +0.15841"
+      ]
+    }
+  ]
+}

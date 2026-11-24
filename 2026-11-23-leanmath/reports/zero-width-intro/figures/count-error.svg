@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="244" viewBox="0 0 480 244" role="img" aria-label="10から30まで整数を一個ずつ増やして求めた個数のずれ">
+<g font-family="system-ui,sans-serif" fill="#182e39">
+<text x="16.00" y="27.00" text-anchor="start" font-size="18">実際の個数 − 予想の個数</text>
+<text x="16.00" y="54.00" text-anchor="start" font-size="16">10まで：7 − 6.08 ≈ +0.92</text>
+<text x="33.00" y="183.00" text-anchor="end" font-size="15">0</text>
+<line x1="43.00" y1="178.00" x2="449.00" y2="178.00" stroke="#b6c8cc"/>
+<text x="33.00" y="137.00" text-anchor="end" font-size="15">1</text>
+<line x1="43.00" y1="132.00" x2="449.00" y2="132.00" stroke="#b6c8cc"/>
+<text x="33.00" y="91.00" text-anchor="end" font-size="15">2</text>
+<line x1="43.00" y1="86.00" x2="449.00" y2="86.00" stroke="#b6c8cc"/>
+<circle cx="49.00" cy="135.65" r="4" fill="#006978"/>
+<text x="49.00" y="204.00" text-anchor="middle" font-size="16">10</text>
+<circle cx="68.60" cy="117.61" r="4" fill="#006978"/>
+<circle cx="88.20" cy="145.58" r="4" fill="#006978"/>
+<circle cx="107.80" cy="127.54" r="4" fill="#006978"/>
+<circle cx="127.40" cy="109.51" r="4" fill="#006978"/>
+<circle cx="147.00" cy="91.47" r="4" fill="#006978"/>
+<text x="147.00" y="204.00" text-anchor="middle" font-size="16">15</text>
+<circle cx="166.60" cy="119.43" r="4" fill="#006978"/>
+<circle cx="186.20" cy="101.40" r="4" fill="#006978"/>
+<circle cx="205.80" cy="129.36" r="4" fill="#006978"/>
+<circle cx="225.40" cy="111.33" r="4" fill="#006978"/>
+<circle cx="245.00" cy="139.29" r="4" fill="#006978"/>
+<text x="245.00" y="204.00" text-anchor="middle" font-size="16">20</text>
+<circle cx="264.60" cy="121.26" r="4" fill="#006978"/>
+<circle cx="284.20" cy="103.22" r="4" fill="#006978"/>
+<circle cx="303.80" cy="85.19" r="4" fill="#006978"/>
+<circle cx="323.40" cy="113.15" r="4" fill="#006978"/>
+<circle cx="343.00" cy="141.12" r="4" fill="#006978"/>
+<text x="343.00" y="204.00" text-anchor="middle" font-size="16">25</text>
+<circle cx="362.60" cy="123.08" r="4" fill="#006978"/>
+<circle cx="382.20" cy="151.05" r="4" fill="#006978"/>
+<circle cx="401.80" cy="179.01" r="4" fill="#006978"/>
+<circle cx="421.40" cy="160.97" r="4" fill="#006978"/>
+<circle cx="441.00" cy="142.94" r="4" fill="#006978"/>
+<text x="441.00" y="204.00" text-anchor="middle" font-size="16">30</text>
+<text x="248.00" y="231.00" text-anchor="middle" font-size="16">数える上限</text>
+</g></svg>

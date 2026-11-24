@@ -1,0 +1,141 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    devDependencies:
+      '@mizchi/vlmkit':
+        specifier: 0.24.0
+        version: 0.24.0(playwright@1.61.0)
+      marked:
+        specifier: 18.3.0
+        version: 18.3.0
+      playwright:
+        specifier: 1.61.0
+        version: 1.61.0
+
+packages:
+
+  '@hono/node-server@1.19.19':
+    resolution: {integrity: sha512-Fy9R7PACOzHU9LDpfnuzVyuVYevKQRcEG2mZhmfc+DRdmayEd3RVfa2XOt2IgGcPNgA77Yk63KBszepcMFK5Ng==}
+    engines: {node: '>=18.14.1'}
+    peerDependencies:
+      hono: ^4
+
+  '@mizchi/vlmkit@0.24.0':
+    resolution: {integrity: sha512-yFz/2ipB+OOMkrreQLJUMJwHzV1GoKh5OKIBRjPsZd8S12g4DaAm4qmH/pcP8fD0qfEoQTKg5ylBL7Bb7D4B0Q==}
+    engines: {node: '>=24'}
+    hasBin: true
+    peerDependencies:
+      '@jsquash/webp': ^1
+      '@playwright/test': '>=1.61 <2'
+      playwright: '>=1.61 <2'
+    peerDependenciesMeta:
+      '@jsquash/webp':
+        optional: true
+      '@playwright/test':
+        optional: true
+
+  cac@7.1.1:
+    resolution: {integrity: sha512-8zc+h51HxpodKsA7L4PpBNd+9qlrfuUcyUDE5a793BJfN4NZgwk7v9NmrY3ptZ+Sk0+ToigxSzkb47AsEgyizw==}
+    engines: {node: '>=20.19.0'}
+
+  fsevents@2.3.2:
+    resolution: {integrity: sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA==}
+    engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
+    os: [darwin]
+
+  hono@4.13.21:
+    resolution: {integrity: sha512-h9UsguqfVk4kjUwLvQpHOmOaJpW10jz9lp8bvKUUa04wJG/fabKFBqXZ06D6LFaeKQZtUZRVeg0gfkTTEsX7Mw==}
+    engines: {node: '>=16.9.0'}
+
+  marked@18.3.0:
+    resolution: {integrity: sha512-ed8zmPXlBb3UfGXN5iHMQyMhFpdqLgoV5umUXx/Q1R+FW3q8VpqpyoKUwlENL9appo2UMvNLURDVaT3AMOryGA==}
+    engines: {node: '>= 20'}
+    hasBin: true
+
+  pixelmatch@7.2.0:
+    resolution: {integrity: sha512-xhcb4yHu9sM/G7foGzoLtXYcC0zHEaOXXjRKhGup0fw78Nf2Tkiapv4EQyMzrbcmQPsllAI7DbFY2UT7PlI9Pg==}
+    hasBin: true
+
+  playwright-core@1.61.0:
+    resolution: {integrity: sha512-caX7TrY3Ml6egyDX0WUcTHDxodl/b51y5wJOdCEA36QviK/s2g081hvmGs8eaE3DWb6NYZQ6BjO/QkNRPenoPA==}
+    engines: {node: '>=18'}
+    hasBin: true
+
+  playwright@1.61.0:
+    resolution: {integrity: sha512-Z+7BeeqQPRRzklHsVFP4KTGIyMxKUmfeRA4WisM6G3/XW6nwGeX6fX9qYaDa+CiUqpOkb2f6X3nar05R3kSuJQ==}
+    engines: {node: '>=18'}
+    hasBin: true
+
+  pngjs@7.0.0:
+    resolution: {integrity: sha512-LKWqWJRhstyYo9pGvgor/ivk2w94eSjE3RGVuzLGlr3NmD8bf7RcYGze1mNdEHRP6TRP6rMuDHk5t44hnTRyow==}
+    engines: {node: '>=14.19.0'}
+
+  typescript@6.0.3:
+    resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
+  ws@8.23.0:
+    resolution: {integrity: sha512-wCkmX8QMOrKjgO8HW2WyDbTSGeqkocxgDzS9iR79rEAexty6/2qzilx3Ag8Tqf9ykop3irLKle0MtVn5qjVnoQ==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
+snapshots:
+
+  '@hono/node-server@1.19.19(hono@4.13.21)':
+    dependencies:
+      hono: 4.13.21
+
+  '@mizchi/vlmkit@0.24.0(playwright@1.61.0)':
+    dependencies:
+      '@hono/node-server': 1.19.19(hono@4.13.21)
+      cac: 7.1.1
+      hono: 4.13.21
+      pixelmatch: 7.2.0
+      playwright: 1.61.0
+      pngjs: 7.0.0
+      typescript: 6.0.3
+      ws: 8.23.0
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
+  cac@7.1.1: {}
+
+  fsevents@2.3.2:
+    optional: true
+
+  hono@4.13.21: {}
+
+  marked@18.3.0: {}
+
+  pixelmatch@7.2.0:
+    dependencies:
+      pngjs: 7.0.0
+
+  playwright-core@1.61.0: {}
+
+  playwright@1.61.0:
+    dependencies:
+      playwright-core: 1.61.0
+    optionalDependencies:
+      fsevents: 2.3.2
+
+  pngjs@7.0.0: {}
+
+  typescript@6.0.3: {}
+
+  ws@8.23.0: {}

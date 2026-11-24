@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="244" viewBox="0 0 480 244" role="img" aria-label="四つの上限での寄与。右がプラス、左がマイナス">
+<g font-family="system-ui,sans-serif" fill="#182e39">
+<text x="16.00" y="28.00" text-anchor="start" font-size="18">第1零点に対応する余弦の例</text>
+<text x="23.00" y="62.00" text-anchor="start" font-size="16">上限</text>
+<text x="396.00" y="62.00" text-anchor="middle" font-size="16">重みを掛けた値</text>
+<line x1="243.00" y1="76.00" x2="243.00" y2="205.00" stroke="#b6c8cc"/>
+<text x="22.00" y="99.00" text-anchor="start" font-size="18">100.00</text>
+<rect x="243.00" y="87" width="76.40" height="14" fill="#006978"/>
+<text x="400.00" y="99.00" text-anchor="middle" font-size="18">+0.1528</text>
+<text x="22.00" y="133.00" text-anchor="start" font-size="18">136.49</text>
+<rect x="141.07" y="121" width="101.93" height="14" fill="#904521"/>
+<text x="400.00" y="133.00" text-anchor="middle" font-size="18">−0.2039</text>
+<text x="22.00" y="167.00" text-anchor="start" font-size="18">187.54</text>
+<rect x="197.00" y="155" width="46.00" height="14" fill="#904521"/>
+<text x="400.00" y="167.00" text-anchor="middle" font-size="18">−0.0920</text>
+<text x="22.00" y="201.00" text-anchor="start" font-size="18">255.97</text>
+<rect x="243.00" y="189" width="71.52" height="14" fill="#006978"/>
+<text x="400.00" y="201.00" text-anchor="middle" font-size="18">+0.1430</text>
+<text x="243.00" y="230.00" text-anchor="middle" font-size="16">0</text>
+</g></svg>

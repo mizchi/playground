@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "devDependencies": {
+    "@mizchi/vlmkit": "0.24.0",
+    "marked": "18.3.0",
+    "playwright": "1.61.0"
+  }
+}
