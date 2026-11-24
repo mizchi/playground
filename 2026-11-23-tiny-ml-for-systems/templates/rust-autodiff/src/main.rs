@@ -19,15 +19,19 @@ const MU: f64 = 10.0;
 const LOG_INF: f64 = 30.0;
 
 /// TTL の対数。p = [W1 (H×D) | b1 (H) | w2 (H) | b2]
+///
+/// 添字 (p[j * D + k]) ではなく split_at・chunks_exact・zip で書く。
+/// 順伝播の速さはほぼ同じだが、Enzyme が作る逆伝播が 5.8 倍速くなった (100 ステップ 17.3 秒 → 3.0 秒)。
+/// 添字で書くと、範囲検査とその添字の計算が逆伝播の側にも残るためと考えられる。
 fn log_ttl(p: &[f64], x: &[f32]) -> f64 {
-    let mut out = p[NP - 1];
-    for j in 0..H {
-        let mut z = p[H * D + j];
-        for k in 0..D {
-            z += p[j * D + k] * x[k] as f64;
-        }
+    let (w1, rest) = p.split_at(H * D);
+    let (b1, rest) = rest.split_at(H);
+    let (w2, b2) = rest.split_at(H);
+    let mut out = b2[0];
+    for ((row, b), w) in w1.chunks_exact(D).zip(b1).zip(w2) {
+        let z = b + row.iter().zip(x).map(|(a, v)| a * *v as f64).sum::<f64>();
         if z > 0.0 {
-            out += p[H * D + H + j] * z;
+            out += w * z;
         }
     }
     out
@@ -37,10 +41,10 @@ fn log_ttl(p: &[f64], x: &[f32]) -> f64 {
 fn terms(p: &[f64], x: &[f32], lg: &[f64], g: &[f64], z: &[f64], w: &[f64]) -> (f64, f64) {
     let n = lg.len();
     let (mut hit, mut occ) = (0.0, 0.0);
-    for i in 0..n {
-        let lt = log_ttl(p, &x[i * D..(i + 1) * D]);
-        hit += w[i] / (1.0 + (-(lt - lg[i]) / TAU).exp());
-        occ += z[i] * g[i].min(lt.exp());
+    for ((((xi, lgi), gi), zi), wi) in x.chunks_exact(D).zip(lg).zip(g).zip(z).zip(w) {
+        let lt = log_ttl(p, xi);
+        hit += wi / (1.0 + (-(lt - lgi) / TAU).exp());
+        occ += zi * gi.min(lt.exp());
     }
     (hit, occ / n as f64)
 }

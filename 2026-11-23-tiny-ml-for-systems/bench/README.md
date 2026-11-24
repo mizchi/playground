@@ -244,7 +244,7 @@ JAX（jax 0.12.1）と Rust（nightly 1.102 の `std::autodiff`）で同じ損�
 | 微分の書き方 | `jax.value_and_grad(loss)` | `#[autodiff_reverse(d_loss, Duplicated, Const, ..., Active)]` |
 | ステップ 1 の損失 | −0.1367 | −0.1367 |
 | 学習後（補正後）の soft BHR / OHR | 0.2297 / 0.4114 | 0.2299 / 0.4112 |
-| 学習時間（500 ステップ × 18 万行） | 14.6 秒（jit、XLA） | 101〜107 秒（1 スレッド） |
+| 学習時間（500 ステップ × 18 万行） | 14.6 秒（jit、XLA） | 101〜107 秒（1 スレッド）。イテレータで書き直すと 14.1 秒（`../templates/rust-autodiff`） |
 | セットアップ | `uv pip install jax` | nightly + enzyme コンポーネント、`lto = "fat"`、`RUSTFLAGS="-Zautodiff=Enable"` |
 
 Julia の Enzyme.jl 版（`../templates/julia/diff/ttl_enzyme.jl`）も同じ損失・同じ初期値で、ステップ 1 の損失 −0.1367、実キャッシュで OHR 39.99%・BHR 8.74% になった。学習は 22〜24 秒（1 スレッド、初回のコンパイルを含む）。
@@ -291,7 +291,7 @@ TTL cache, learned rust-autodiff-ohr      39.99%   8.74%
 - OHR を直接最適化した TTL は 40.0% で、`moka`（約 36%）も、これまでのどの ML の admission（最高 26.6%）も、admission の上限（27.1%）も上回った。admission だけでなく「どれだけ長く残すか」まで学習しているため。
 - BHR を直接最適化した TTL は 16.8〜16.9% で、近似のラベルで学習した MLP の admission（17.2〜17.5%）と同じ水準にとどまった。BHR では、目的を直接書く利点は出なかった。
 - JAX と Rust は、同じ損失・同じ初期値から、ほぼ同じ結果に収束した（実キャッシュの OHR 40.00% と 39.99%）。
-- JAX のほうが 7 倍速かった。Rust 版は 1 スレッドのスカラーのループで、並列化もベクトル化もしていない。
+- この版では JAX のほうが 7 倍速かった。原因は損失を添字（`p[j * D + k]`）で書いていたことで、イテレータで書き直した `../templates/rust-autodiff` は 14.1 秒になり、JAX と同じ速さになった（`../templates/README.md`）。
 - 定数の TTL（1546）は LRU とほぼ同じ（14.2%）。差はすべて、特徴量から TTL を決めたことによる。
 - `moka` は実行ごとに BHR も揺れた（11.6〜12.6%）。
 
