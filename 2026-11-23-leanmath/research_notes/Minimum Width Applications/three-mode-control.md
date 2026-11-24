@@ -74,3 +74,5 @@ The default run reports 1,264 certificates, enclosing all durations between 6.42
 ### Gaps
 
 The area coverage and certificate code have been executed with Python integer arithmetic; no Lean kernel verification or hardware test has been performed. Simultaneous four-impulse designs and the general zero-free-interval optimization have prior art. This search did not establish publication priority for a parameter-uniform, continuous-time global optimality certificate on this rectangle.
+
+The [fixed-duration solution for three harmonics](harmonic-residual.md) gives the best attainable residual at every duration for the frequency ratio 1:2:3.
