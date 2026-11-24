@@ -47,8 +47,14 @@ LOG_INF = 30.0
 lgtr = jnp.where(jnp.isinf(gtr), LOG_INF, jnp.log(jnp.where(jnp.isinf(gtr), 1.0, gtr)))
 
 TAU = 0.25
-TARGET = sys.argv[1] if len(sys.argv) > 1 else "bhr"  # bhr: バイトで数える / ohr: リクエスト数で数える
-w = ztr / ztr.sum() if TARGET == "bhr" else jnp.ones(TR) / TR
+# bhr: バイトで数える / ohr: リクエスト数で数える / mix0.7: OHR の重み 0.7 と BHR の重み 0.3 を混ぜる
+TARGET = sys.argv[1] if len(sys.argv) > 1 else "bhr"
+w_bhr, w_ohr = ztr / ztr.sum(), jnp.ones(TR) / TR
+if TARGET.startswith("mix"):
+    alpha = float(TARGET[3:])
+    w = alpha * w_ohr + (1 - alpha) * w_bhr
+else:
+    w = w_bhr if TARGET == "bhr" else w_ohr
 
 
 def log_ttl(p, x):
