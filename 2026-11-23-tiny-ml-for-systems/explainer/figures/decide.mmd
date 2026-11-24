@@ -1,0 +1,18 @@
+---
+config:
+  themeVariables:
+    fontSize: 18px
+  flowchart:
+    wrappingWidth: 480
+---
+%% 入れるかどうかの判断。出どころは ../README.md の「1. いつ使うか」と、この資料の 1〜4 節の実験
+flowchart TD
+  label[正解はログから後で分かる?] -->|はい| fallback[外れても正しさは守れる?]
+  label -->|いいえ| stop1[入れない]
+  fallback -->|はい| gap[上限とルールの差は大きい?]
+  fallback -->|いいえ| build[先に守る仕組みを作る]
+  build --> gap
+  gap -->|はい| cost[推論は節約分より速い?]
+  gap -->|いいえ| rule[ルールで済ませる]
+  cost -->|はい| lr[ロジスティック回帰で試す]
+  cost -->|いいえ| stop2[入れない]

@@ -1,0 +1,198 @@
+{
+ "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
+ "config": {
+  "font": "system-ui, -apple-system, \"Hiragino Sans\", \"Noto Sans JP\", sans-serif",
+  "axis": {
+   "labelFontSize": 13,
+   "titleFontSize": 14,
+   "grid": false
+  },
+  "legend": {
+   "labelFontSize": 13,
+   "titleFontSize": 13,
+   "orient": "bottom"
+  },
+  "title": {
+   "fontSize": 15
+  },
+  "view": {
+   "stroke": null
+  }
+ },
+ "padding": {
+  "left": 64,
+  "right": 24,
+  "top": 8,
+  "bottom": 8
+ },
+ "title": "総サイズ（目標 FPR 1%） — 破線より短ければ得",
+ "width": 260,
+ "height": 170,
+ "layer": [
+  {
+   "data": {
+    "values": [
+     {
+      "name": "普通の Bloom filter",
+      "part": "Bloom filter",
+      "kb": 35.1
+     },
+     {
+      "name": "ロジスティック回帰",
+      "part": "モデル",
+      "kb": 1
+     },
+     {
+      "name": "ロジスティック回帰",
+      "part": "backup",
+      "kb": 6.1
+     },
+     {
+      "name": "MLP 256-8-1",
+      "part": "モデル",
+      "kb": 8.1
+     },
+     {
+      "name": "MLP 256-8-1",
+      "part": "backup",
+      "kb": 5.8
+     },
+     {
+      "name": "MLP 256-32-1",
+      "part": "モデル",
+      "kb": 32.3
+     },
+     {
+      "name": "MLP 256-32-1",
+      "part": "backup",
+      "kb": 5.7
+     }
+    ]
+   },
+   "mark": "bar",
+   "encoding": {
+    "y": {
+     "field": "name",
+     "type": "nominal",
+     "sort": [
+      "普通の Bloom filter",
+      "ロジスティック回帰",
+      "MLP 256-8-1",
+      "MLP 256-32-1"
+     ],
+     "title": null
+    },
+    "x": {
+     "field": "kb",
+     "type": "quantitative",
+     "aggregate": "sum",
+     "title": "KB",
+     "scale": {
+      "domain": [
+       0,
+       45
+      ]
+     }
+    },
+    "color": {
+     "field": "part",
+     "type": "nominal",
+     "title": null,
+     "sort": [
+      "モデル",
+      "backup",
+      "Bloom filter"
+     ],
+     "scale": {
+      "domain": [
+       "モデル",
+       "backup",
+       "Bloom filter"
+      ],
+      "range": [
+       "#d1242f",
+       "#0969da",
+       "#6e7781"
+      ]
+     }
+    },
+    "order": {
+     "field": "part",
+     "sort": "descending"
+    }
+   }
+  },
+  {
+   "data": {
+    "values": [
+     {
+      "name": "普通の Bloom filter",
+      "total": 35.1
+     },
+     {
+      "name": "ロジスティック回帰",
+      "total": 7.1
+     },
+     {
+      "name": "MLP 256-8-1",
+      "total": 13.9
+     },
+     {
+      "name": "MLP 256-32-1",
+      "total": 38
+     }
+    ]
+   },
+   "mark": {
+    "type": "text",
+    "align": "left",
+    "dx": 4,
+    "fontSize": 13
+   },
+   "encoding": {
+    "y": {
+     "field": "name",
+     "type": "nominal",
+     "sort": [
+      "普通の Bloom filter",
+      "ロジスティック回帰",
+      "MLP 256-8-1",
+      "MLP 256-32-1"
+     ]
+    },
+    "x": {
+     "field": "total",
+     "type": "quantitative"
+    },
+    "text": {
+     "field": "total",
+     "type": "quantitative",
+     "format": ".1f"
+    }
+   }
+  },
+  {
+   "data": {
+    "values": [
+     {
+      "kb": 35.1
+     }
+    ]
+   },
+   "mark": {
+    "type": "rule",
+    "strokeDash": [
+     5,
+     4
+    ],
+    "color": "#6e7781"
+   },
+   "encoding": {
+    "x": {
+     "field": "kb",
+     "type": "quantitative"
+    }
+   }
+  }
+ ]
+}

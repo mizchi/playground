@@ -1,0 +1,11 @@
+{
+  "name": "tinyml-template-ts",
+  "private": true,
+  "type": "module",
+  "description": "依存ゼロ。Node 22.18+ の型ストリップで .ts をそのまま実行する",
+  "scripts": {
+    "test": "node test.ts",
+    "train": "node train_cache.ts",
+    "infer": "node infer.ts"
+  }
+}

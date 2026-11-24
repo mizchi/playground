@@ -1,0 +1,13 @@
+---
+config:
+  flowchart:
+    wrappingWidth: 480
+---
+%% ts/src/learned-bloom.ts の query(): score(model, s) >= best.tau || backup.has(s)
+flowchart TD
+  x[問い合わせの URL] --> feat[n-gram を 256 次元にハッシュ]
+  feat --> model[ロジスティック回帰のスコア p]
+  model -->|p が τ 以上| yes1[ある]
+  model -->|p が τ 未満| backup[backup の Bloom filter<br/>取りこぼした鍵 4805 件だけ]
+  backup -->|ビットが全部 1| yes2[ある]
+  backup -->|どれかが 0| no[ない：鍵はここに来ない]

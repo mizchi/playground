@@ -1,0 +1,14 @@
+[package]
+name = "tiny-ml-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tiny-ml = { path = "../../rust" }
+perpetual = "=2.5.0"
+moka = { version = "0.12", features = ["sync"] }
+quick_cache = "0.7.0"
+
+[profile.release]
+debug = false

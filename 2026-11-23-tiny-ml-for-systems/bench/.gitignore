@@ -1,0 +1,3 @@
+data/
+python/.venv/
+rust/target/

@@ -1,0 +1,17 @@
+[package]
+name = "onnx-bench-rust"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tract-onnx = "0.23"
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["load-dynamic", "ndarray"] }
+
+[features]
+# ONNX Runtime 本体 (C++) を使う版。libonnxruntime.so を実行時に読み込む (ORT_DYLIB_PATH)。
+# 既定の、ビルド時に cdn.pyke.io から取得する方式は、この環境のネットワーク設定で塞がれていた
+ort = ["dep:ort"]
+
+[profile.release]
+debug = false
