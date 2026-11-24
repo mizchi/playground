@@ -1,9 +1,5 @@
 # leanmath — 「GRH が真だったら」で何が掘れるか
 
-通常のリーマン予想を仮定すると、平方因子を持たない整数の計数に現れる $\zeta(s)/\zeta(2s)$ は、正の高さの各ゼータ零点 $\rho$ に対して $\rho/2$ に同じ重複度の極を持つ。平均化でこの極を消すための必要十分条件を Lean で検証した。[証明](lean/Leanmath/SquarefreePoles.lean) · [研究ログ](research_notes/ゼータ零点%20最小幅の精密化/lean-certificate.md#where-rh-enters-the-squarefree-averaging-problem)
-
-[独立した例題の図解：周波数比 1:2:3 の三つの振動を抑える時計](reports/harmonic-clock/README.md)
-
 ## 目的
 
 リーマン予想（RH）が解決されたという前提に立ち、そこから確定する事実のうち **人間が掘る価値が低いとして放置してきた隅**を、計算と Lean で探索する。
