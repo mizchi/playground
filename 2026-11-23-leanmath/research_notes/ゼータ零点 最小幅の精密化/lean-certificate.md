@@ -4,6 +4,19 @@ The project uses Lean 4.36.0 and mathlib revision `fc4f59e`. In mathlib, `Rieman
 
 Anthropic's Theorem B bounds the number of simple critical-line zeros in sufficiently high windows (T, 2T]. For each ε > 0, their count is at least (2/3 − ε) times the total count with multiplicities. This quantifier leaves every fixed initial window outside the scope of the estimate if its threshold is large enough. The outcome is compatible with different values for the first three ordinates. [Upstream proof](https://github.com/anthropics/formal-math/blob/11b6c7e3c927df2658f513b6b68ea7f8929c62c5/zeta23/Solution.lean#L60-L66)
 
+## Where RH enters the squarefree averaging problem
+
+For positive imaginary part and a zero $\rho$ of $\zeta$, assume the ordinary RH. The numerator $\zeta(\rho/2)$ is nonzero: $\Re(\rho/2)=1/4$, whereas a zero there would have positive imaginary part and RH would give real part $1/2$. The change of variable $s\mapsto 2s$ preserves local order. Consequently the squarefree Dirichlet series $Q(s)=\zeta(s)/\zeta(2s)$ has a pole at $\rho/2$ of exactly the multiplicity of $\rho$. This supplies the arithmetic reason to impose a cancellation constraint at each selected zero. Mossinghoff, Oliveira e Silva and Trudgian give the Dirichlet series for general $k$-free integers and the simple-pole contribution in §2. The multiplicity statement follows from the classical quotient rule for orders. [Primary source, §2, equations (3)–(6)](https://arxiv.org/pdf/1912.04972)
+
+The local theorem `squarefree_pole_under_rh` proves finiteness and positivity of the multiplicity as well as the exact pole order. The theorem `squarefree_removable_iff_under_rh` proves that an analytic multiplier $K$ removes this singularity precisely when its order at $\rho/2$ is at least that multiplicity. In particular a double zero would require both $K(\rho/2)=0$ and $K'(\rho/2)=0$. This criterion applies to a proposed filter. It gives neither its minimum support width nor a certificate for the first three ordinates. Both theorems take RH as a hypothesis. The finite-clock example with frequencies $1,2,3$ uses a different set of constraints. [Lean proofs](../../lean/Leanmath/SquarefreePoles.lean)
+
+To reproduce from the experiment's `lean` directory:
+
+```sh
+lake build Leanmath.SquarefreePoles
+printf 'import Leanmath.SquarefreePoles\n#print axioms Leanmath.squarefree_pole_under_rh\n#print axioms Leanmath.squarefree_removable_iff_under_rh\n' | lake env lean --stdin
+```
+
 ## A consequence of the published density bound
 
 For an ordinate γ in (T, 2T] with T > 0, two equal observations separated by 2π/γ in log scale annihilate the γ/2 oscillation in every starting phase. This distance is strictly less than 2π/T. Adding this property to the simple critical-line zeros in Theorem B preserves their count, so the same (2/3 − ε) lower bound holds for zeros with this property. The separation can depend on the zero. A common filter for several zeros requires a separate argument.

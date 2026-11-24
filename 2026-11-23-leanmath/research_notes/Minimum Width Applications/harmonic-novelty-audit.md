@@ -1,13 +1,13 @@
 # Three-harmonic averaging: novelty audit and the cost of clock quantization
 
-The strongest candidates are two explicit values for the same optimization. The first gives the best residual at every continuous duration. The second gives the exact price of restricting observations to a symmetric finite clock at two thirds of a period. Both have matching constructions and lower bounds in Lean. The underlying moment criteria and the use of linear programming in input shaping have published antecedents.
+The finite-clock result is a worked specialization of the classical discrete moment problem. Cubic interpolation recovers the bracket and the constants. The calculation uses neither zeta ordinates nor the Riemann hypothesis. The local Lean proof verifies the minimax value. Priority of the continuous-duration formula remains unresolved.
 
 ## Candidate ledger
 
 | Result | What is established | Priority assessment |
 | --- | --- | --- |
 | Continuous three-harmonic minimax curve | A closed formula and an attaining law for every duration, over arbitrary probability measures. The value 1/6 is one point of this curve. | Candidate explicit solution of a low-dimensional instance of a classical moment problem. The zero-error duration is already known. [Curve and proof](harmonic-residual.md) · [Kozma–Oravecz, Thm. 2](https://arxiv.org/pdf/math/0601021) |
-| Finite-clock penalty | Under the bracket conditions below, only the two ticks bracketing the ideal inner site and the endpoints are needed. The increase above 1/6 is an explicit product of the two offsets. | Strongest discrete candidate. Fixed-grid optimization and adjacent-node certificates both have precedents. The particular active nodes and exact penalty are what deserve comparison. [Lean proof](../../lean/Leanmath/HarmonicGrid.lean) · [Discrete moment criteria](https://arxiv.org/abs/1504.02989) |
+| Finite-clock penalty | Under the bracket conditions below, only the two ticks bracketing the ideal inner site and the endpoints are needed. The increase above 1/6 is an explicit product of the two offsets. | Classical point-mass bound with three prescribed moments, followed by a sign check for the minimax objective. [Lean proof](../../lean/Leanmath/HarmonicGrid.lean) · [Discrete moment criteria](https://arxiv.org/abs/1504.02989) |
 | Concentration near the optimum | At two thirds of a period the mass away from the four optimal times is bounded in terms of the excess residual. | Supporting result. The existing constant follows by integrating the same nonnegative cubic and applying Markov's inequality. Quadratic localization certificates have a broader literature, and the present distance exponent is not established as sharp. [Local bound](harmonic-residual.md#near-optimal-distributions) · [Eftekhari et al.](https://arxiv.org/abs/1804.01490) |
 | Zeta-specific application | A strict positive extra width for a third distinct height in one dyadic band. The claimed first-three scale ratio 2.55970 still requires a certified identification of the low zeros and their numerical optimum in Lean. | A separate application. The harmonic results apply to exact frequency ratios 1:2:3. [Band theorem and scope](../ゼータ零点%20最小幅の精密化/pair-gap.md) |
 
@@ -35,6 +35,18 @@ This formula also applies when one side equals 3/4. The penalty then vanishes. T
 **Why distant ticks cannot help.** The continuous certificate has a double root at 3/4. On the discrete grid the polynomial $(z+1/2)(z-a)(z-b)$ is nonnegative, including at every extra tick, and vanishes at the three needed coordinates. Expanding it in $1,\cos t,\cos 2t,\cos 3t$ gives the lower bound. To attain it, set $F(z)=2z^2+z-1$. Assign raw weights $u=(b+1/2)(b+1)(b-3/4)$ at a, $v=(a+1/2)(a+1)(3/4-a)$ at b, and $uF(a)+vF(b)$ at −1/2. Normalize the total and split each mass equally across the reflected times. The signed cosine moments are $(E_G,-E_G,E_G)$. One pass through an unsorted clock finds the bracket; the weights then require only a fixed number of arithmetic operations.
 
 **A boundary check.** Extending the expression to a = −1/4 and b = 1 would predict 1/2. On the clock with coordinates {−1/2, −1/4, 1} the optimum is 5/7. At these nodes $6\cos(3t)-\cos(2t)\ge5$, and weights 0, 32/35, 3/35 give signed moments −1/7, −5/7, 5/7. The rational identities are included in the independent check. [Reproduction script](../../explore/harmonic_residual_check.py)
+
+## Reduction to a classical point-mass bound
+
+Let $I(p)$ be the average of $p(\cos t)$ over a full period. Its moments of degrees zero through three are $(1,0,1/2,0)$. On the ordered nodes $\{-1\}\cup G$, minimize the mass $w$ at $-1$ among probability measures exact for these four moments. This is the discrete power moment LP with objective $f=\mathbf1_{\{-1\}}$. Its fourth divided differences are nonnegative. A tuple excluding $-1$ gives zero, and one containing it gives the reciprocal of a product of four negative differences. The first two nodes are $-1,-1/2$, and $a,b$ are consecutive. These two adjacent pairs form precisely the minimization basis in Prékopa's Theorem A.1 for $m=3$. [Discrete moment LP, §3 and Appendix A](https://rutcor.rutgers.edu/~prekopa/30_2006.pdf)
+
+For a direct proof let $P(z)=(z+1/2)(z-a)(z-b)$. Then $P(z)/P(-1)\le f(z)$ at every node, with equality on the four selected nodes. Integrating the four Lagrange cardinal polynomials gives an exact degree-three quadrature. Its weight at $-1$ is
+$$
+w=I(P)/P(-1)=\frac{2(a+b)-1-2ab}{2(1+a)(1+b)}.
+$$
+The weights at $a,b$ are $(b-3/4)/[(1+a)(a+1/2)(b-a)]$ and $(3/4-a)/[(1+b)(b+1/2)(b-a)]$. Positivity selects the bracket around $3/4$. The weight at $-1/2$ is $[(1-a)(1-b)+ab]/[(a+1/2)(b+1/2)]$. The four weights sum to one by exactness on constants. They realize the lower bound even when an inner weight vanishes.
+
+Removing the atom at $-1$ and normalizing leaves cosine moments $(e,-e,e)$ with $e=w/(1-w)$, since the full-circle averages of the first three Chebyshev polynomials $T_k$ vanish and $T_k(-1)=(-1)^k$. To check that no other sign pattern does better, expand $4P=A T_1-B T_2+T_3-D$, where $A=2+(2a-1)(2b-1)$, $B=2(a+b)-1$, and $D=2(a+b)-1-2ab$. As $P\ge0$ on $G$ and $A,B\ge0$, every admissible residual $d$ satisfies $(A+B+1)d\ge D$. The quadrature attains this bound, since $D/(A+B+1)=w/(1-w)$. Subtracting $1/6$ gives the product of the two offsets in the clock formula. This derivation accounts for the constants irrespective of whether the same expression has appeared in clock notation.
 
 ## Which parts follow from earlier mathematics?
 
