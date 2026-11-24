@@ -27,7 +27,7 @@
       "name": "standalone-figure-contrast",
       "cmd": "node check-figure-contrast.mjs",
       "expect": [
-        "All README figure headings pass on light and dark backgrounds"
+        "All four published PNGs are opaque with readable labels and marks"
       ]
     }
   ]

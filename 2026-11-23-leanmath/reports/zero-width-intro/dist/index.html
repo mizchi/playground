@@ -38,7 +38,7 @@ nav.book { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 
 <p>1から10までの整数のうち、4、9、16、25、…のような平方数で割り切れるものを除くと、1、2、3、5、6、7、10 の <strong>7個</strong> が残ります。この仲間は長い目で見ると全体の約60.8%なので、10までなら予想は約6.08個。実際に数えた方が <strong>0.92個分多い</strong> わけです。</p>
 <h2>上限を変えると、予想の外れ方はどう変わる？</h2>
 <p>11まで数えると11が加わり、実際は8個、予想は約6.69個で、ずれは <strong>+1.31</strong>。12は4で割り切れるので、12まで数えても実際は8個のままです。予想は約7.30個に増え、ずれは <strong>+0.70</strong> に縮みます。</p>
-<figure role="img" aria-label="各整数を上限にして数え直した結果。一つの点が一回分の「実際の個数ひく予想の個数」を表す。横の0の線より上なら、予想より多く見つかった。"><svg xmlns="http://www.w3.org/2000/svg" width="480" height="244" viewBox="0 0 480 244" role="img" aria-label="10から30まで整数を一個ずつ増やして求めた個数のずれ">
+<figure aria-label="各整数を上限にして数え直した結果。一つの点が一回分の「実際の個数ひく予想の個数」を表す。横の0の線より上なら、予想より多く見つかった。"><svg xmlns="http://www.w3.org/2000/svg" width="480" height="244" viewBox="0 0 480 244" role="img" aria-label="10から30まで整数を一個ずつ増やして求めた個数のずれ">
 <rect width="100%" height="100%" fill="#fff"/>
 <g font-family="system-ui,sans-serif" fill="#182e39">
 <text x="16.00" y="27.00" text-anchor="start" font-size="18">実際の個数 − 予想の個数</text>
@@ -77,7 +77,7 @@ nav.book { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 
 <text x="441.00" y="204.00" text-anchor="middle" font-size="16">30</text>
 <text x="248.00" y="231.00" text-anchor="middle" font-size="16">数える上限</text>
 </g></svg>
-<figcaption>各整数を上限にして数え直した結果。一つの点が一回分の「実際の個数ひく予想の個数」を表す。横の0の線より上なら、予想より多く見つかった。 </figcaption></figure>
+<figcaption>各整数を上限にして数え直した結果。一つの点が一回分の「実際の個数ひく予想の個数」を表す。横の0の線より上なら、予想より多く見つかった。</figcaption></figure>
 <p>この点列が、実際に観測できる<strong>ずれ全体</strong>です。これを数式で調べると、上限を一定の倍率で動かすたびに山と谷を繰り返す成分が現れます。ここでいう「波」は、そうした<strong>一つの周期成分</strong>です。形は滑らかなサインやコサインで、周期の違う成分が同じずれの中に重なっています。</p>
 <p>たとえばある成分が、一回目のずれに +2、二回目に −2 だけ寄与したとします。二回の平均では、この成分の寄与は (+2 − 2) ÷ 2 = 0 です。別の成分が同じ二回で +1、+1 なら、そちらの寄与は平均しても +1 残ります。<strong>「消す」とは、選んだ成分が平均結果に足す分をゼロにすることです。</strong></p>
 <p>今回選んだのは、最初の三つのゼータ零点に対応する、速さの違う三成分です。<strong>数える上限を100、約136.49、約187.54、約255.97の四か所に取ると、同じ平均で三成分の寄与を一つずつゼロにできます。</strong> 最初を100に固定して250で止めると、途中の測定を何回増やしても三成分には同時に効きません。100は説明のために選んだ出発点です。四つの上限すべてを同じ倍率で移しても、必要な範囲は最初の上限の約2.55970倍で、混ぜる割合も共通です。</p>
@@ -85,7 +85,7 @@ nav.book { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 
 <p>たとえば関数 <i>f</i>(<i>x</i>) = <i>x</i>² − 4 は、2を入れても −2 を入れても答えが0です。この <strong>答えを0にする入力</strong> を、その関数の「零点」と呼びます。ゼータ零点も同じで、リーマンのゼータ関数 ζ（ゼータ）に入れると答えが0になる数です。</p>
 <p>ゼータ関数の出発点は足し算です。たとえば ζ(2) は 1 + 1/2² + 1/3² + 1/4² + ⋯ で、ζ(3) なら各分母の指数が3になります。この足し算が収束する範囲から、元の値とつじつまが合うように関数を広げると、複素数の平面のほぼ全体で値が定まります。零点を調べるときは、この広げた関数を使います。<a href="https://dlmf.nist.gov/25.2">ゼータ関数の定義（NIST）</a></p>
 <p>図の上半分では、複素数 <i>a</i> + <i>bi</i> を、横に <i>a</i>、縦に <i>b</i> 進んだ点として描きます。たとえば最初の青緑の点は、横がちょうど ½、縦が約14.13。これは「½ + 14.1347… × <i>i</i> を入れると、ゼータ関数の値が0になる」という意味です。<a href="https://www.lmfdb.org/zeros/zeta/list?limit=3&amp;N=1">零点の数値表（LMFDB）</a></p>
-<figure role="img" aria-label="上図の三つの点は、下から順に、上半平面にある最初の三つの非自明な零点。下図の曲線は速さだけを比べる余弦の見本。二成分とも左端で山に来るようにそろえた。"><svg xmlns="http://www.w3.org/2000/svg" width="490" height="545" viewBox="0 0 490 545" role="img" aria-labelledby="zt zd">
+<figure aria-label="上図の三つの点は、下から順に、上半平面にある最初の三つの非自明な零点。下図の曲線は速さだけを比べる余弦の見本。二成分とも左端で山に来るようにそろえた。"><svg xmlns="http://www.w3.org/2000/svg" width="490" height="545" viewBox="0 0 490 545" role="img" aria-labelledby="zt zd">
 <title id="zt">ゼータ零点の位置と、それぞれの高さに対応する波</title>
 <desc id="zd">実部が0.5の線上に、虚部が約14.13、21.02、25.01の零点が並ぶ。下のグラフでは同じ倍率だけ上限を動かす間に第3成分が第1成分より多く振動する。</desc>
 <rect width="100%" height="100%" fill="#fff"/>
@@ -115,7 +115,7 @@ nav.book { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 
 <text x="295" y="535" text-anchor="middle" font-size="16">数える上限の倍率</text>
 </g>
 </svg>
-<figcaption>上図の三つの点は、下から順に、上半平面にある最初の三つの非自明な零点。下図の曲線は速さだけを比べる余弦の見本。二成分とも左端で山に来るようにそろえた。 </figcaption></figure>
+<figcaption>上図の三つの点は、下から順に、上半平面にある最初の三つの非自明な零点。下図の曲線は速さだけを比べる余弦の見本。二成分とも左端で山に来るようにそろえた。</figcaption></figure>
 <p>ゼータ関数には −2、−4、−6、…という規則的な零点もあり、これを「自明な零点」と呼びます。それ以外の零点を「非自明な零点」と呼びます。リーマン予想が述べているのは、<strong>非自明な零点がすべて、横の座標が ½ の縦線に並ぶ</strong>ということです。<a href="https://dlmf.nist.gov/25.10">零点とリーマン予想（NIST）</a></p>
 <p>今回の波の速さを決めるのは、それぞれの点の<strong>縦の座標</strong>です。図の下半分では、左から中央へ進むと数える上限が2倍になり、中央から右へ進むとさらに2倍になります。同じ距離を進む間に、高さ25.01の点に対応する波は、高さ14.13の点に対応する波より多く山と谷を通ります。</p>
 <p>一つの成分だけなら、半周期進むと値の符号が逆になるので、二回の平均で寄与を0にできます。その二倍の速さの成分は、同じ間に一周して元の値に戻ります。三つの速さすべてに効く平均を見つけるには、上限の選び方と混ぜる割合を一緒に決める必要があります。</p>
@@ -147,7 +147,7 @@ nav.book { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 
 </tr>
 </tbody></table>
 <p>一番遅い成分だけを取り出し、100での値を山の頂上の +1 にそろえて計算してみます。下図の棒は、四か所それぞれの余弦の値に、すでに表の割合を掛けたものです。</p>
-<figure role="img" aria-label="第1成分の計算例。二本のプラスの棒の合計と、二本のマイナスの棒の長さの合計が一致する。数値は小数第4位に丸めた。"><svg xmlns="http://www.w3.org/2000/svg" width="480" height="244" viewBox="0 0 480 244" role="img" aria-label="四つの上限での寄与。右がプラス、左がマイナス">
+<figure aria-label="第1成分の計算例。二本のプラスの棒の合計と、二本のマイナスの棒の長さの合計が一致する。数値は小数第4位に丸めた。"><svg xmlns="http://www.w3.org/2000/svg" width="480" height="244" viewBox="0 0 480 244" role="img" aria-label="四つの上限での寄与。右がプラス、左がマイナス">
 <rect width="100%" height="100%" fill="#fff"/>
 <g font-family="system-ui,sans-serif" fill="#182e39">
 <text x="16.00" y="28.00" text-anchor="start" font-size="18">第1零点に対応する余弦の例</text>
@@ -168,12 +168,12 @@ nav.book { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 
 <text x="400.00" y="201.00" text-anchor="middle" font-size="18">+0.1430</text>
 <text x="243.00" y="230.00" text-anchor="middle" font-size="16">0</text>
 </g></svg>
-<figcaption>第1成分の計算例。二本のプラスの棒の合計と、二本のマイナスの棒の長さの合計が一致する。数値は小数第4位に丸めた。 </figcaption></figure>
+<figcaption>第1成分の計算例。二本のプラスの棒の合計と、二本のマイナスの棒の長さの合計が一致する。数値は小数第4位に丸めた。</figcaption></figure>
 <p>丸める前の数で足すと、この成分が平均に残す分は0です。山の途中から始めても同じで、第2、第3の成分も<strong>まったく同じ四か所・同じ割合</strong>で、それぞれ寄与が0になります。一方、四か所で実際に整数を数え、上で説明した通りにずれの尺度をそろえて平均すると <strong>+0.15841</strong> が残ります。他の成分なども含む、ずれ全体の平均だからです。</p>
 <h2>なぜ250で止めると足りない？</h2>
 <p>では、最後を250にして、もっと細かく測ったらどうでしょう。ここで効くのが、<strong>0点以上の点数ばかりのとき、平均点が0点なら、平均に入れた全員が0点だったはず</strong>という理屈です。</p>
 <p>証明では、三つの波を足し合わせて、各観測位置に「点数」を付けます。点数の平均は、三つの波をすべて消せば必ず0です。一方、100から約255.97まででは、ちょうど表の四か所だけが0点で、それ以外はすべてプラスになることを、丸め誤差を含めた計算で確かめられます。</p>
-<figure role="img" aria-label="証明に使った点数を描いた曲線。範囲内で0点に触れるのは四つの印だけ。縦軸は数学的に作った点数で、整数の個数とは別の量。"><svg xmlns="http://www.w3.org/2000/svg" width="480" height="245" viewBox="0 0 480 245" role="img" aria-label="最小の範囲で点数は非負。四つの上限でだけ0になる">
+<figure aria-label="証明に使った点数を描いた曲線。範囲内で0点に触れるのは四つの印だけ。縦軸は数学的に作った点数で、整数の個数とは別の量。"><svg xmlns="http://www.w3.org/2000/svg" width="480" height="245" viewBox="0 0 480 245" role="img" aria-label="最小の範囲で点数は非負。四つの上限でだけ0になる">
 <rect width="100%" height="100%" fill="#fff"/>
 <g font-family="system-ui,sans-serif" fill="#182e39">
 <text x="16.00" y="30.00" text-anchor="start" font-size="18">証明に使う点数</text>
@@ -190,7 +190,7 @@ nav.book { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 
 <text x="438.00" y="198.00" text-anchor="middle" font-size="16">255.97</text>
 <text x="245.00" y="230.00" text-anchor="middle" font-size="16">数える上限</text>
 </g></svg>
-<figcaption>証明に使った点数を描いた曲線。範囲内で0点に触れるのは四つの印だけ。縦軸は数学的に作った点数で、整数の個数とは別の量。 </figcaption></figure>
+<figcaption>証明に使った点数を描いた曲線。範囲内で0点に触れるのは四つの印だけ。縦軸は数学的に作った点数で、整数の個数とは別の量。</figcaption></figure>
 <p>すると、途中の別の場所を平均に加えた瞬間に、平均点はプラスになってしまいます。残った四か所で三つの波を消す条件を解くと割合も表の値に決まり、両端とも必要です。これで250で止める案も、千か所で測る案もまとめて判定できます。</p>
 <p><a id="novelty"></a></p>
 <h2>今回の新規性はどこにある？</h2>
