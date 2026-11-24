@@ -14,7 +14,7 @@ def label(x, y, value, anchor="start", size=18):
             f'font-size="{size}">{escape(str(value))}</text>')
 
 
-def line(x1, y1, x2, y2, color="#b6c8cc"):
+def line(x1, y1, x2, y2, color="#849197"):
     return f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" stroke="{color}"/>'
 
 
@@ -26,6 +26,7 @@ def save(name, height, description, drawing):
     body = "\n".join(drawing)
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="480" height="{height}" '
            f'viewBox="0 0 480 {height}" role="img" aria-label="{escape(description)}">\n'
+           '<rect width="100%" height="100%" fill="#fff"/>\n'
            f'<g font-family="system-ui,sans-serif" fill="#182e39">\n{body}\n</g></svg>\n')
     (HERE / "figures" / f"{name}.svg").write_text(svg, encoding="utf-8")
 
