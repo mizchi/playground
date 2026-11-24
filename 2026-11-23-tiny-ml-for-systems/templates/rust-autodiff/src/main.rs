@@ -131,6 +131,7 @@ fn main() {
     let (hit, occ) = terms(&p, xtr, &lg, g, z, &w);
     println!("calibrated: soft {target} {hit:.4}  occupancy/capacity {:.3}", occ / cap);
     println!("train {train_s:.2}s ({steps} steps, full batch {tr} rows, 1 thread)");
+    println!("bench lang=rust-autodiff task=ttl seconds={train_s:.2} soft={hit:.4}");
 
     // 重みを共通の JSON 形式で書く (TS / Rust の MLP.fromJSON で読み、exp(predictLogit(x)) が TTL)
     let nums = |v: &[f64]| v.iter().map(|x| format!("{x:e}")).collect::<Vec<_>>().join(",");

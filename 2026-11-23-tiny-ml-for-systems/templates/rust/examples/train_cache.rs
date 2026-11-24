@@ -24,6 +24,7 @@ fn main() {
             m.param_count(),
             auc(&scores[train..], &y[train..])
         );
+        println!("bench lang=rust task=train model={name} seconds={train_s:.3} auc={:.4}", auc(&scores[train..], &y[train..]));
         std::fs::write(format!("{out}/{name}.json"), m.to_json()).unwrap();
         write_f32(&format!("{data}/scores/rust-template-{name}.f32"), &scores);
     }

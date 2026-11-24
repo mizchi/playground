@@ -17,13 +17,17 @@ templates/
   rust/            Rust。製品の中での推論の第一候補。学習もできる
     src/lib.rs       MLP・逆伝搬・Adam・int8 量子化・AUC・JSON の読み書き・テスト（依存ゼロ）
     examples/train_cache.rs, examples/infer.rs   TS 版と同じ役割
-  python/          Python。学習と、目的関数を試す場所
+  python/          Python。学習と、目的関数を試す場所。速度を比べる相手にもする
     tinyml.py, test_tinyml.py, train_cache.py   numpy だけの自前実装
+    infer.py         どの言語の重みでも読み込んで推論する（1 行ずつと、まとめて）
     ttl_jax.py       微分可能プログラミング（JAX）
   julia/           Julia。学習と、目的関数を試す場所
     TinyML.jl, test.jl, train_cache.jl   標準ライブラリだけの自前実装
+    infer.jl         どの言語の重みでも読み込んで推論する（1 行ずつと、まとめて）
     diff/ttl_enzyme.jl   微分可能プログラミング（Enzyme.jl）
   rust-autodiff/   微分可能プログラミング（Rust std::autodiff、nightly）
+  compare.py       4 言語を同じ条件で動かし、速度を表にする（標準ライブラリだけ）
+  RESULT.md        compare.py の最新の結果
 ```
 
 ## どれを使うか
@@ -92,6 +96,31 @@ RUSTFLAGS="-Zautodiff=Enable" cargo +nightly run --release -- ohr
 ```
 
 ヒット率は `cd ../bench/rust && RUSTC_BOOTSTRAP=1 cargo run --release -- sim` で、ほかの手段と並べて測れる。
+
+## 速度を比べる
+
+```bash
+python3 compare.py                  # 学習・推論・TTL（JAX と Enzyme.jl）
+python3 compare.py --with-autodiff  # Rust std::autodiff の TTL も（nightly が必要）
+python3 compare.py --out RESULT.md  # 表を書き出す
+```
+
+各スクリプトは `bench lang=... task=... key=value` の行を出し、`compare.py` はその行だけを読んで表にする。
+道具が入っていない言語は「未実行」になる。コマンドは環境変数 `NODE`・`CARGO`・`PYTHON`・`JULIA` で差し替えられる。
+雛形を書き換えたら、もう一度回して `RESULT.md` を更新する。
+
+最新の結果は [RESULT.md](RESULT.md)。要点は次のとおり（4 コアの Linux、各 1 回の実行）。
+
+| | TS | Rust | Python | Julia |
+|---|---|---|---|---|
+| MLP の学習（18 万行 × 4 エポック） | 0.67 秒 | 0.26 秒 | 0.55 秒 | 0.22 秒 |
+| 1 行ずつの推論 | 474 ns | 105 ns | 3132 ns | 453 ns |
+| まとめての推論（1 行あたり） | 474 ns | 105 ns | 42 ns | 162 ns |
+| TTL の学習（微分可能プログラミング） | — | 83.6 秒（std::autodiff） | 11.7 秒（JAX） | 15.9 秒（Enzyme.jl） |
+
+製品の中の判断（1 行ずつ）は Rust が最速で、TS と Julia が同じくらい、Python は 30 倍遅い。
+まとめて推論するなら Python（numpy）が最速になる。学習はどの言語でも 1 秒かからない。
+目的関数を試す微分可能プログラミングは、JAX と Enzyme.jl が Rust の 5〜7 倍速い。
 
 ## 確かめたこと
 

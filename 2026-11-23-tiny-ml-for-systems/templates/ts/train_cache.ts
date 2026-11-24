@@ -24,6 +24,7 @@ for (const [name, sizes] of [["logreg", [d, 1]], ["mlp16", [d, 16, 1]]] as const
   const scores = new Float32Array(n);
   for (let i = 0; i < n; i++) scores[i] = m.predict(X, i * d);
   console.log(`${name.padEnd(7)} ${String(m.paramCount()).padStart(4)} params  train ${trainS.toFixed(2)}s  test AUC ${auc(scores.subarray(train), y.subarray(train)).toFixed(4)}`);
+  console.log(`bench lang=ts task=train model=${name} seconds=${trainS.toFixed(3)} auc=${auc(scores.subarray(train), y.subarray(train)).toFixed(4)}`);
   writeFileSync(`${out}/${name}.json`, JSON.stringify(m.toJSON()));
   writeFileSync(`${data}/scores/ts-template-${name}.f32`, new Uint8Array(scores.buffer));
 }

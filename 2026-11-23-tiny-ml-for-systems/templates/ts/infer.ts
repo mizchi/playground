@@ -43,3 +43,5 @@ if (scoresPath) {
   line += `, max ${ttlMode ? "relative " : ""}|diff| vs trainer = ${maxDiff.toExponential(1)}`;
 }
 console.log(line);
+// TS 版は 1 行ずつの経路しかないので、batch も同じ値
+console.log(`bench lang=ts task=infer one_row_ns=${ns.toFixed(0)} batch_ns=${ns.toFixed(0)}`);

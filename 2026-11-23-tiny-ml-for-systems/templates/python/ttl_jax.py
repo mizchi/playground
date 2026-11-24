@@ -83,6 +83,10 @@ lr, steps = 0.01, 500
 m = jax.tree.map(jnp.zeros_like, p)
 v = jax.tree.map(jnp.zeros_like, p)
 t0 = time.perf_counter()
+jax.block_until_ready(grad(p))  # jit のコンパイル (学習時間から分ける)
+terms_j(p)
+compile_s = time.perf_counter() - t0
+t0 = time.perf_counter()
 for k in range(1, steps + 1):
     val, g = grad(p)
     m = jax.tree.map(lambda a, b: 0.9 * a + 0.1 * b, m, g)
@@ -102,7 +106,8 @@ for _ in range(60):
 p = {**p, "b2": p["b2"] + lo}
 hit, occ = terms_j(p)
 print(f"calibrated: soft {TARGET} {float(hit):.4f}  occupancy/capacity {float(occ) / CAP:.3f}")
-print(f"train {train_s:.2f}s ({steps} steps, full batch {TR} rows, jit)")
+print(f"train {train_s:.2f}s ({steps} steps, full batch {TR} rows, jit) + compile {compile_s:.2f}s")
+print(f"bench lang=python-jax task=ttl seconds={train_s:.2f} compile_seconds={compile_s:.2f} soft={float(hit):.4f}")
 
 # 重みを共通の JSON 形式で書く (TS / Rust の MLP.fromJSON で読み、exp(predictLogit(x)) が TTL)
 out = Path(__file__).resolve().parent / "out"

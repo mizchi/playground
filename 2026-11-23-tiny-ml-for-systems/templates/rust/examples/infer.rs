@@ -28,4 +28,6 @@ fn main() {
         line += &format!(", max |diff| vs trainer = {max:.1e}");
     }
     println!("{line}");
+    // Rust 版は 1 行ずつの経路しかないので、batch も同じ値
+    println!("bench lang=rust task=infer one_row_ns={ns:.0} batch_ns={ns:.0}");
 }

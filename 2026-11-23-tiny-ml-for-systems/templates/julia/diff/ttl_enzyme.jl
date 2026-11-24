@@ -80,6 +80,12 @@ p[NP] = log(h0)
 
 lr, steps = 0.01, 500
 m = zeros(NP); v = zeros(NP)
+# 初回のコンパイル (Enzyme が微分のコードを作る) を学習時間から分ける
+compile_s = @elapsed begin
+    Enzyme.autodiff(ReverseWithPrimal, loss, Active, Duplicated(copy(p), zeros(NP)),
+        Const(Xtr[:, 1:10]), Const(lg[1:10]), Const(g[1:10]), Const(z[1:10]), Const(w[1:10]), Const(cap))
+    terms(p, Xtr[:, 1:10], lg[1:10], g[1:10], z[1:10], w[1:10])
+end
 t0 = time()
 for k in 1:steps
     dp = zeros(NP)
@@ -107,7 +113,8 @@ end
 p[NP] = b2 + lo
 hit, occ = terms(p, Xtr, lg, g, z, w)
 println("calibrated: soft $target $(round(hit; digits=4))  occupancy/capacity $(round(occ / cap; digits=3))")
-println("train $(round(train_s; digits=2))s ($steps steps, full batch $tr rows, 1 thread, 初回のコンパイルを含む)")
+println("train $(round(train_s; digits=2))s ($steps steps, full batch $tr rows, 1 thread) + compile $(round(compile_s; digits=2))s")
+println("bench lang=julia-enzyme task=ttl seconds=$(round(train_s; digits=2)) compile_seconds=$(round(compile_s; digits=2)) soft=$(round(hit; digits=4))")
 
 # 重みを共通の JSON 形式で書く (TS / Rust の MLP.fromJSON で読み、exp(predictLogit(x)) が TTL)
 nums(v) = "[" * join(string.(v), ",") * "]"

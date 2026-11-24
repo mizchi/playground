@@ -32,6 +32,7 @@ for name, sizes in [("logreg", [d, 1]), ("mlp16", [d, 16, 1])]:
     train_s = time.perf_counter() - t0
     scores = m.predict(X)
     print(f"{name:<7} {m.param_count():>4} params  train {train_s:.2f}s  test AUC {auc(scores[train:], y[train:]):.4f}")
+    print(f"bench lang=python task=train model={name} seconds={train_s:.3f} auc={auc(scores[train:], y[train:]):.4f}")
     (out / f"{name}.json").write_text(m.to_json())
     scores.astype("<f4").tofile(data / "scores" / f"py-template-{name}.f32")
 print(f"wrote out/*.json and {data / 'scores'}/py-template-*.f32")

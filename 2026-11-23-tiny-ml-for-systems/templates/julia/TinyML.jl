@@ -12,7 +12,7 @@ module TinyML
 
 using Random
 
-export MLP, fit!, predict, grads, step!, gradcheck, auc, to_json, param_count
+export MLP, fit!, predict, predict_logit, grads, step!, gradcheck, auc, to_json, from_json, param_count
 
 mutable struct MLP
     sizes::Vector{Int}
@@ -47,7 +47,18 @@ function forward(m::MLP, X::AbstractMatrix)
 end
 
 predict(m::MLP, X::AbstractMatrix) = forward(m, X)[2]
-predict(m::MLP, x::AbstractVector) = forward(m, reshape(x, :, 1))[2][1]
+
+"1 行ぶんの、sigmoid をかける前の出力 (製品の判断と同じ使い方)。TTL モデルは exp(predict_logit(m, x)) が TTL"
+function predict_logit(m::MLP, x::AbstractVector)
+    a = x
+    L = length(m.W)
+    for l in 1:L
+        z = m.W[l] * a .+ m.b[l]
+        a = l < L ? max.(z, 0) : z
+    end
+    a[1]
+end
+predict(m::MLP, x::AbstractVector) = 1 / (1 + exp(-predict_logit(m, x)))
 
 "バッチ平均の損失と勾配。逆伝搬の本体"
 function grads(m::MLP, X::AbstractMatrix, y::AbstractVector, w::AbstractVector=ones(length(y)))
@@ -133,6 +144,32 @@ function to_json(m::MLP)
     "{\"sizes\":" * nums(m.sizes) *
     ",\"W\":[" * join([nums(vec(permutedims(W))) for W in m.W], ",") * "]" *
     ",\"b\":[" * join([nums(b) for b in m.b], ",") * "]}"
+end
+
+"どの言語の雛形が書いた重みでも読む (この JSON 形式だけを想定した最小の読み取り)"
+function from_json(text::AbstractString)
+    function section(key)
+        i = findfirst("\"$key\"", text)
+        i === nothing && error("missing $key")
+        start = findnext('[', text, last(i))
+        depth = 0
+        for j in start:lastindex(text)
+            c = text[j]
+            depth += c == '[' ? 1 : c == ']' ? -1 : 0
+            depth == 0 && return text[start:j]
+        end
+        error("unclosed $key")
+    end
+    nums(s) = [parse(Float64, t) for t in split(s, r"[\[\],\s]+") if !isempty(t)]
+    rows(s) = [nums(r) for r in split(s[2:end-1], ']') if !isempty(strip(r, [',', '[', ' ']))]
+    sizes = Int.(nums(section("sizes")))
+    m = MLP(sizes)
+    for (l, (w, b)) in enumerate(zip(rows(section("W")), rows(section("b"))))
+        o, i = sizes[l+1], sizes[l]
+        m.W[l] .= permutedims(reshape(w, i, o))   # row-major (out, in) に戻す
+        m.b[l] .= b
+    end
+    m
 end
 
 end # module

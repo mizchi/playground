@@ -17,12 +17,17 @@ train = n * 3 ÷ 10
 out = joinpath(@__DIR__, "out")
 mkpath(out)
 mkpath(joinpath(data, "scores"))
+# 初回のコンパイルを測定に入れないよう、小さいデータで一度学習しておく
+for sizes in ([d, 1], [d, 16, 1])
+    fit!(MLP(sizes; seed=1), X[:, 1:1000], y[1:1000]; epochs=1)
+end
 for (name, sizes) in [("logreg", [d, 1]), ("mlp16", [d, 16, 1])]
     m = MLP(sizes; seed=1)
     t = @elapsed fit!(m, X[:, 1:train], y[1:train]; epochs=4, batchsize=128, lr=3e-3)
     scores = predict(m, X)
     a = auc(scores[train+1:end], y[train+1:end])
     println(rpad(name, 7), " ", lpad(param_count(m), 4), " params  train $(round(t; digits=2))s  test AUC $(round(a; digits=4))")
+    println("bench lang=julia task=train model=$name seconds=$(round(t; digits=3)) auc=$(round(a; digits=4))")
     write(joinpath(out, "$name.json"), to_json(m))
     write(joinpath(data, "scores", "jl-template-$name.f32"), Float32.(scores))
 end
