@@ -9,35 +9,32 @@ The pattern behind every "GRH derandomizes X" result:
 
 This file contains step 2 and, as a worked instance, the least quadratic non-residue.
 
-STATUS: written without a Lean toolchain (installing one was blocked in the authoring
-session), so nothing here has been compiled yet.  The proofs are short, but expect small API
-name fixes.
 -/
 import Leanmath.Hypotheses
 
 namespace Leanmath
 
-open Subgroup
+
 
 theorem genBound_spec (n : ℕ) [NeZero n] :
-    closure {u : (ZMod n)ˣ | (u : ZMod n).val ≤ genBound n} = ⊤ := by
-  have hne : {x : ℕ | closure {u : (ZMod n)ˣ | (u : ZMod n).val ≤ x} = ⊤}.Nonempty := by
+    Subgroup.closure {u : (ZMod n)ˣ | (u : ZMod n).val ≤ genBound n} = ⊤ := by
+  have hne : {x : ℕ | Subgroup.closure {u : (ZMod n)ˣ | (u : ZMod n).val ≤ x} = ⊤}.Nonempty := by
     refine ⟨n, ?_⟩
     have huniv : {u : (ZMod n)ˣ | (u : ZMod n).val ≤ n} = Set.univ := by
       ext u
-      simp only [Set.mem_setOf_eq, Set.mem_univ, iff_true]
+      simp only [Set.mem_ofPred_eq, Set.mem_univ, iff_true]
       exact (ZMod.val_lt (u : ZMod n)).le
-    show closure {u : (ZMod n)ˣ | (u : ZMod n).val ≤ n} = ⊤
-    rw [huniv, closure_univ]
+    show Subgroup.closure {u : (ZMod n)ˣ | (u : ZMod n).val ≤ n} = ⊤
+    rw [huniv, Subgroup.closure_univ]
   exact Nat.sInf_mem hne
 
 /-- Step 2: every proper subgroup misses a unit of size at most `G(n)`. -/
 theorem exists_not_mem_le_genBound {n : ℕ} [NeZero n] (H : Subgroup (ZMod n)ˣ) (hH : H ≠ ⊤) :
     ∃ u : (ZMod n)ˣ, (u : ZMod n).val ≤ genBound n ∧ u ∉ H := by
   by_contra h
-  push_neg at h
+  push Not at h
   apply hH
-  rw [eq_top_iff, ← genBound_spec n, closure_le]
+  rw [eq_top_iff, ← genBound_spec n, Subgroup.closure_le]
   intro u hu
   exact h u hu
 
@@ -64,7 +61,7 @@ theorem exists_nonsquare_le_genBound {p : ℕ} [hp : Fact p.Prime] (hp2 : p ≠ 
   · exact Nat.pos_of_ne_zero fun h0 => u.ne_zero ((ZMod.val_eq_zero _).mp h0)
   · rintro ⟨r, hr⟩
     rw [ZMod.natCast_zmod_val] at hr
-    have hr0 : r ≠ 0 := by rintro rfl; exact u.ne_zero (by simpa using hr)
+    have hr0 : r ≠ 0 := by rintro rfl; simp at hr
     apply hu
     refine ⟨Units.mk0 r hr0, ?_⟩
     ext
@@ -83,14 +80,32 @@ theorem exists_small_nonsquare (hB : BachBound) {p : ℕ} [hp : Fact p.Prime] (h
 def powers (n ℓ : ℕ) : Subgroup (ZMod n)ˣ := (powMonoidHom ℓ : (ZMod n)ˣ →* (ZMod n)ˣ).range
 
 /-- For `ℓ` prime with `ℓ ∣ p - 1`, the `ℓ`-th powers are a proper subgroup (cyclicity of
-`(ZMod p)ˣ`).  Hence `n_ℓ(p) ≤ G(p)` and, under GRH, deterministic `ℓ`-th roots mod `p`.
-TODO: prove (needs `IsCyclic (ZMod p)ˣ` and a count of the kernel of `x ↦ x^ℓ`). -/
+`(ZMod p)ˣ` has an element of order `ℓ` by Cauchy, so `x ↦ x^ℓ` is not injective, hence not
+surjective).  Hence `n_ℓ(p) ≤ G(p)` and, under GRH, deterministic `ℓ`-th roots mod `p`. -/
 theorem powers_ne_top {p ℓ : ℕ} [Fact p.Prime] (hℓ : ℓ.Prime) (hdvd : ℓ ∣ p - 1) :
     powers p ℓ ≠ ⊤ := by
-  sorry
+  intro htop
+  have : Fact ℓ.Prime := ⟨hℓ⟩
+  have hcard : ℓ ∣ Nat.card (ZMod p)ˣ := by rwa [Nat.card_eq_fintype_card, ZMod.card_units p]
+  obtain ⟨g, hg⟩ := exists_prime_orderOf_dvd_card' ℓ hcard
+  have hsurj : Function.Surjective (powMonoidHom ℓ : (ZMod p)ˣ →* (ZMod p)ˣ) :=
+    MonoidHom.range_eq_top.mp htop
+  have hinj := Finite.injective_iff_surjective.mpr hsurj
+  have h1 : g = 1 := hinj (by simp [powMonoidHom_apply, ← hg, pow_orderOf_eq_one])
+  rw [h1, orderOf_one] at hg
+  exact hℓ.ne_one hg.symm
 
 theorem exists_nonpower_le_genBound {p ℓ : ℕ} [Fact p.Prime] (hℓ : ℓ.Prime) (hdvd : ℓ ∣ p - 1) :
     ∃ u : (ZMod p)ˣ, (u : ZMod p).val ≤ genBound p ∧ u ∉ powers p ℓ :=
   exists_not_mem_le_genBound _ (powers_ne_top hℓ hdvd)
+
+/-- **GRH corollary** (via Bach): for `ℓ ∣ p - 1`, some `ℓ`-th power non-residue is
+`≤ 2 ln² p`, so deterministic `ℓ`-th roots mod `p` (Adleman–Manders–Miller) need no randomness. -/
+theorem exists_small_nonpower (hB : BachBound) {p ℓ : ℕ} [hp : Fact p.Prime] (hℓ : ℓ.Prime)
+    (hdvd : ℓ ∣ p - 1) :
+    ∃ u : (ZMod p)ˣ, ((u : ZMod p).val : ℝ) ≤ 2 * Real.log p ^ 2 ∧ u ∉ powers p ℓ := by
+  obtain ⟨u, hle, hu⟩ := exists_nonpower_le_genBound hℓ hdvd
+  exact ⟨u, (by exact_mod_cast hle : ((u : ZMod p).val : ℝ) ≤ genBound p).trans
+    (hB p hp.out.one_lt), hu⟩
 
 end Leanmath

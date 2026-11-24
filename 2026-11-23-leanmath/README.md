@@ -114,29 +114,46 @@ GRH を経由する証明は「liar の集合 ⊂ 真部分群」という粗い
 
 ## Lean（`lean/`）
 
-| ファイル | 内容 | 状態 |
+Lean 4.36.0 + Mathlib v4.36.0 で **`sorry` なしでビルドが通る**。主定理は次の通り。
+
+```lean
+theorem millerDet_iff (hB : BachBound) (n : ℕ) : millerDet n = true ↔ n.Prime
+```
+
+`millerDet` は `#eval` で実行できる決定的 Miller 判定（基数 2 … 2(⌊log₂ n⌋+1)²）である。GRH 由来の入力は仮定 `hB : BachBound` の一点だけで、それ以外はすべて初等的に証明した。`#print axioms` が返すのは `propext`, `Classical.choice`, `Quot.sound` のみである。
+
+| ファイル | 定理 | 内容 |
 |---|---|---|
-| `Hypotheses.lean` | `RH`（Mathlib の `RiemannHypothesis`）、`GRH`（Dirichlet L）、`genBound` = G(n)、`BachBound` | 定義のみ |
-| `GenBound.lean` | `exists_not_mem_le_genBound`: 真部分群は G(n) 以下の単数を取りこぼす | 証明あり |
-| | `exists_nonsquare_le_genBound`: 最小平方非剰余 ≤ G(p)（無条件） | 証明あり |
-| | `exists_small_nonsquare`: `BachBound →` 平方非剰余 ≤ 2 ln² p | 証明あり |
-| | `powers_ne_top`: ℓ 乗剰余群は真部分群 | `sorry` |
-| `Miller.lean` | `strongLiars_le_proper`（Monier–Rabin） | `sorry` |
-| | `exists_witness_le_genBound`: 最小 witness ≤ G(n)（無条件） | 証明あり（上の sorry に依存） |
-| | `exists_small_witness`: `BachBound →` witness ≤ 2 ln² n | 証明あり |
-| | `millerDet`: 実行可能な決定的 Miller 判定 | 正しさの定理は TODO |
+| `Hypotheses.lean` | — | `RH`（Mathlib の `RiemannHypothesis`）、`GRH`（Dirichlet L）、`genBound` = G(n)、`BachBound`（定義のみ） |
+| `GenBound.lean` | `exists_not_mem_le_genBound` | 真部分群は G(n) 以下の単数を取りこぼす |
+| | `exists_nonsquare_le_genBound` | 最小平方非剰余 ≤ G(p)（無条件） |
+| | `powers_ne_top` / `exists_nonpower_le_genBound` | ℓ \| p−1 なら ℓ 乗剰余群は真部分群（Cauchy）。よって n_ℓ(p) ≤ G(p) |
+| | `exists_small_nonsquare` / `exists_small_nonpower` | `BachBound →` 平方・ℓ 乗非剰余が 2 ln² p 以下に存在する |
+| `Miller.lean` | `strongLiars_le_proper` | **Monier–Rabin**: 奇合成数の strong liar は真部分群に入る（無条件） |
+| | `exists_witness_le_genBound` | 最小 Miller witness ≤ G(n)（無条件） |
+| | `exists_small_witness` | `BachBound →` witness ≤ 2 ln² n |
+| | `powMod_eq`, `sprp_iff`, `liar_of_prime` | 実装（高速べき乗・強擬素数判定）と仕様の一致、素数ではすべての単数が liar |
+| | `millerDet_iff` | `BachBound →` `millerDet` は素数判定として正しい |
 
-**重要: Lean のファイルはまだ一度もコンパイルしていない。** 作業セッションで Lean ツールチェーン（elan）のインストールが権限設定により拒否されたためである。証明は短く書いたが、Mathlib の API 名の修正などは必要になるはずである。
+Monier–Rabin の証明は教科書の「Carmichael 数かどうか」による場合分けを使わず、n が素数べきかどうかだけで分けた。
 
-手元で検証するには次を実行する。
+- **n = p^e（e ≥ 2）の場合**: Fermat liar の部分群 {a | a^(n−1) = 1} を使う。1+p がこの部分群に入らないことは、mod p² で (1+p)^N = 1 + Np となることから示せる。
+- **n = n₁n₂（互いに素）の場合**: u^(2^k·d) = −1 となる単数 u が存在する最大の k をとり、H = {a | a^(2^k·d) = ±1} とする。中国剰余定理で (−1, 1) を持ち上げると H の外の元になる。この議論は n が Carmichael 数でなくてもそのまま通る。
+
+ビルド方法:
 
 ```sh
 cd lean && lake exe cache get && lake build
 ```
+
+環境についての注意:
+- Lake のパッケージレジストリ（Reservoir）に届かない環境だったので、`lakefile.toml` では Mathlib を git URL で指定している。
+- ビルド済みキャッシュは `cache.mathlib.org` から取得する。
 
 ## 次に掘る候補
 
 - δ の存在と値を GRH の下で証明する（有効 Chebotarev + n₂ の裾の評価）。ℓ = 3 が最難になる割合 9.91% も同じモデルで予測できるはず。
 - 合成数 n に対する G(n) の漸近形を ω(n) の関数として求め、Bach 定数を ω に依存した形に精密化する。
 - liar 集合の濃度を使って、W(n) の GRH 条件付き上界を 2 ln² n よりも鋭くする。
-- Lean: `strongLiars_le_proper` と `powers_ne_top` を埋め、`millerDet n = true ↔ n.Prime`（`BachBound` 仮定）を完成させる。
+- Lean: 決定的平方根（Tonelli–Shanks）を実装し、`BachBound` の下で正しさを証明する（平方非剰余の探索部分は `exists_small_nonsquare` で済んでいる）。
+- Lean: 解析的な橋 `GRH → BachBound` は今の Mathlib では遠い。代わりに、有限範囲 n ≤ N で `BachBound` が成り立つことを計算で証明し、その範囲では無条件に `millerDet` が正しいことを示す。
