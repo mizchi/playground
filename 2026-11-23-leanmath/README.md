@@ -51,11 +51,13 @@ python3 analyze_gn.py gn.csv              # → results/composite.md
 ./gp 3 4294967291 > gp.out                # 全素数 p < 2^32 の G(p) を ℓ 乗非剰余に分解（4 分割して並列実行した）
 python3 analyze_gp.py gp.out              # → results/primes.md
 python3 model_delta.py                    # 密度 δ のヒューリスティック値
+python3 model_bottleneck.py gp.out        # ボトルネック ℓ の分布: モデル vs 観測 → results/bottleneck.md
+./gp 1000000000000 1002800000000          # 10^12 付近の約 10^8 素数（10^15 も同様、64 bit 対応）
 ./ap 20000 200000000 > ap.csv && python3 analyze_ap.py ap.csv   # → results/ap.md
 ./gaps 4294967291                          # → results/gaps.md
 ```
 
-所要時間は 4 コアで合計数分。
+所要時間は 4 コアで合計十数分。
 
 ## 結果
 
@@ -80,9 +82,29 @@ python3 model_delta.py                    # 密度 δ のヒューリスティ�
 
 つまり「乱択を GRH で除去したときに、どの根の計算がボトルネックになるか」は、相互法則まで含めたべき剰余の統計だけで定量的に説明できた。調べた範囲では文献で見た覚えがない、地味だが新しい定数である（未確認）。
 
-予想: この密度は存在し、補正モデルの値 0.14646 に等しい。GRH の下では Chebotarev 密度定理の有効版から証明できる可能性がある。
+**大きな素数でも同じ値になる。** 10¹² と 10¹⁵ の近くでそれぞれ約 10⁸ 個の連続する素数を調べた（`results/bottleneck.md`）。
 
-ボトルネックになった ℓ の内訳（p < 2³²）は、ℓ = 2 が 85.35%、3 が 9.91%、5 が 2.38%、7 が 1.05%、… である（`results/primes.md`）。
+| 範囲 | 素数の数 | δ（観測） | 補正モデルとの差 |
+|---|---|---|---|
+| [2³⁰, 2³²) | 148,880,193 | 0.146470 | +0.4σ |
+| 10¹² 付近 | 101,331,814 | 0.146398 | −1.7σ |
+| 10¹⁵ 付近 | 101,333,575 | 0.146468 | +0.3σ |
+
+**ボトルネックの内訳までモデルで予測できる。** 同じモデルで「どの ℓ がボトルネックになるか」（G(p) = n_ℓ(p) となる最小の ℓ）の分布を計算した（`explore/model_bottleneck.py`）。p ∈ [2³⁰, 2³²) での比較は次の通り。
+
+| ℓ | 補正モデル | 観測 | 差 | 素朴モデルとの差 |
+|---|---|---|---|---|
+| 3 | 0.099073 | 0.099076 | +0.1σ | +0.2σ |
+| 5 | 0.023772 | 0.023766 | −0.5σ | **−17.9σ** |
+| 7 | 0.010529 | 0.010533 | +0.5σ | +0.5σ |
+| 11 | 0.003780 | 0.003784 | +0.8σ | +0.8σ |
+| 13 | 0.002615 | 0.002610 | −1.0σ | −1.0σ |
+
+- 3 つの範囲 × 8 個の ℓ、計 24 の比較のうち、2σ を超えたのは 2 つだけ（統計的に想定される数）。
+- 素朴モデルで δ が 7σ ずれた原因は、ほぼ **ℓ = 5 の一項だけ**だった。5 ≡ 1 (mod 4) なので、p ≡ 1 (mod 5) なら 5 は自動的に平方剰余になり、n₂(p) = 5 となることはない。独立モデルはこの起こりえない組み合わせ（n₂ = 5 かつ 5 乗根がボトルネック）にも確率を割り当てるので、ℓ = 5 の割合を過大評価する（0.02399 vs 観測 0.02377）。
+- 13 や 17 も ≡ 1 (mod 4) だが、n₂(p) > 13 となる素数自体が稀なので、効果は誤差に埋もれる。
+
+予想: この密度は存在し、補正モデルの値 0.146459… に等しい。GRH の下では Chebotarev 密度定理の有効版から証明できる可能性がある。
 
 ### 発見 2: G(p) の記録保持者はすべて平方非剰余が支配している
 
@@ -114,13 +136,15 @@ GRH を経由する証明は「liar の集合 ⊂ 真部分群」という粗い
 
 ## Lean（`lean/`）
 
-Lean 4.36.0 + Mathlib v4.36.0 で **`sorry` なしでビルドが通る**。主定理は次の通り。
+Lean 4.36.0 + Mathlib v4.36.0 で **`sorry` なしでビルドが通る**。主定理は次の 2 つ。依頼文のリストのうち「素数判定」と「素数を法とする平方根」の 2 項目にあたる。
 
 ```lean
 theorem millerDet_iff (hB : BachBound) (n : ℕ) : millerDet n = true ↔ n.Prime
+theorem detSqrt_sq (hB : BachBound) {p : ℕ} [Fact p.Prime] (hp2 : p ≠ 2) {a : ZMod p}
+    (ha : IsSquare a) : detSqrt p a ^ 2 = a
 ```
 
-`millerDet` は `#eval` で実行できる決定的 Miller 判定（基数 2 … 2(⌊log₂ n⌋+1)²）である。GRH 由来の入力は仮定 `hB : BachBound` の一点だけで、それ以外はすべて初等的に証明した。`#print axioms` が返すのは `propext`, `Classical.choice`, `Quot.sound` のみである。
+`millerDet` と `detSqrt` は `#eval` で実行できる（`millerDet` は基数 2 … 2(⌊log₂ n⌋+1)² の決定的 Miller 判定）。GRH 由来の入力は仮定 `hB : BachBound` の一点だけで、それ以外はすべて初等的に証明した。`#print axioms` が返すのは `propext`, `Classical.choice`, `Quot.sound` のみである。
 
 | ファイル | 定理 | 内容 |
 |---|---|---|
@@ -134,6 +158,8 @@ theorem millerDet_iff (hB : BachBound) (n : ℕ) : millerDet n = true ↔ n.Prim
 | | `exists_small_witness` | `BachBound →` witness ≤ 2 ln² n |
 | | `powMod_eq`, `sprp_iff`, `liar_of_prime` | 実装（高速べき乗・強擬素数判定）と仕様の一致、素数ではすべての単数が liar |
 | | `millerDet_iff` | `BachBound →` `millerDet` は素数判定として正しい |
+| `Sqrt.lean` | `tsLoop_sq` / `tonelliShanks_sq` | Tonelli–Shanks は平方非剰余 z が与えられれば正しい（無条件、ループ不変条件による証明） |
+| | `detSqrt_sq` | `BachBound →` `detSqrt`（z ≤ 2(⌊log₂ p⌋+1)² を Euler 規準で探索し、Tonelli–Shanks を実行）は、平方剰余すべてに平方根を返す |
 
 Monier–Rabin の証明は教科書の「Carmichael 数かどうか」による場合分けを使わず、n が素数べきかどうかだけで分けた。
 
@@ -152,8 +178,9 @@ cd lean && lake exe cache get && lake build
 
 ## 次に掘る候補
 
-- δ の存在と値を GRH の下で証明する（有効 Chebotarev + n₂ の裾の評価）。ℓ = 3 が最難になる割合 9.91% も同じモデルで予測できるはず。
+- δ の存在と値を GRH の下で証明する（有効 Chebotarev + n₂ の裾の評価）。補正モデルの式はそのまま候補になる。
+- 補正モデルの残りの絡み合い（ℓ ≡ 3 (mod 4) では (ℓ/p) = (−1/p) となり、複数の ℓ の平方剰余性が連動する）を入れて、10⁻⁶ 精度で検証する。
 - 合成数 n に対する G(n) の漸近形を ω(n) の関数として求め、Bach 定数を ω に依存した形に精密化する。
 - liar 集合の濃度を使って、W(n) の GRH 条件付き上界を 2 ln² n よりも鋭くする。
-- Lean: 決定的平方根（Tonelli–Shanks）を実装し、`BachBound` の下で正しさを証明する（平方非剰余の探索部分は `exists_small_nonsquare` で済んでいる）。
+- Lean: ℓ 乗根（Adleman–Manders–Miller）も同様に形式化する（ℓ 乗非剰余の探索部分は `exists_small_nonpower` で済んでいる）。
 - Lean: 解析的な橋 `GRH → BachBound` は今の Mathlib では遠い。代わりに、有限範囲 n ≤ N で `BachBound` が成り立つことを計算で証明し、その範囲では無条件に `millerDet` が正しいことを示す。

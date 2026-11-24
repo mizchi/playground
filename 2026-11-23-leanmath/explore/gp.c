@@ -1,4 +1,4 @@
-// gp.c — for every prime p in [lo, hi] (hi < 2^32): decompose G(p) by maximal subgroup.
+// gp.c — for every prime p in [lo, hi] (hi < 2^63): decompose G(p) by maximal subgroup.
 //
 // (Z/pZ)^* is cyclic, so its maximal subgroups are the l-th powers for primes l | p-1, and
 //   G(p) = max_{l | p-1} n_l(p),   n_l(p) := least l-th power non-residue mod p.
@@ -18,7 +18,10 @@
 #include <string.h>
 #include <math.h>
 
-static inline uint64_t mulmod(uint64_t a, uint64_t b, uint64_t m) { return a * b % m; }
+static inline uint64_t mulmod(uint64_t a, uint64_t b, uint64_t m) {
+  if (m < (1ULL << 32)) return a * b % m;
+  return (uint64_t)((unsigned __int128)a * b % m);
+}
 static uint64_t powmod(uint64_t a, uint64_t e, uint64_t m) {
   uint64_t r = 1; a %= m;
   while (e) { if (e & 1) r = mulmod(r, a, m); a = mulmod(a, a, m); e >>= 1; }
@@ -36,7 +39,7 @@ static int jacobi(uint64_t a, uint64_t n) { // n odd
 }
 
 #define MAXF 12
-#define SEG (1u << 20)
+#define SEG (1u << 22)
 #define NSMALL 2000
 
 int main(int argc, char **argv) {
@@ -81,12 +84,12 @@ int main(int argc, char **argv) {
     for (uint32_t i = 0; i < len; i++) {
       uint64_t p = L + i;
       if (!isp[i] || p < 3) continue;
-      uint32_t ls[MAXF + 1]; int nl = 0;
+      uint64_t ls[MAXF + 1]; int nl = 0;
       for (int j = 0; j < nf[i]; j++) ls[nl++] = fac[i * MAXF + j];
-      if (rem[i] > 1) ls[nl++] = (uint32_t)rem[i];
-      uint32_t G = 0, Gl = 0, n2 = 0;
+      if (rem[i] > 1) ls[nl++] = rem[i];
+      uint32_t G = 0, n2 = 0; uint64_t Gl = 0;
       for (int j = 0; j < nl; j++) {
-        uint32_t l = ls[j], nlv = 0;
+        uint64_t l = ls[j]; uint32_t nlv = 0;
         for (uint32_t k = 0;; k++) {
           uint32_t a = k < nbp ? bp[k] : 0; if (!a) { fprintf(stderr, "ran out\n"); return 1; }
           int nonres = (l == 2) ? (jacobi(a, p) == -1) : (powmod(a, (p - 1) / l, p) != 1);
@@ -94,10 +97,10 @@ int main(int argc, char **argv) {
         }
         if (l == 2) n2 = nlv;
         if (l == 3 && nlv > recN3) { recN3 = nlv; printf("REC n3 %llu %u\n", (unsigned long long)p, nlv); }
-        if (l >= 5 && nlv > recNl) { recNl = nlv; printf("REC nl %llu %u %u\n", (unsigned long long)p, l, nlv); }
+        if (l >= 5 && nlv > recNl) { recNl = nlv; printf("REC nl %llu %llu %u\n", (unsigned long long)p, (unsigned long long)l, nlv); }
         if (nlv > G || (nlv == G && l < Gl)) { G = nlv; Gl = l; }   // ties -> smallest l
       }
-      if (G > recG) { recG = G; printf("REC G %llu %u %u\n", (unsigned long long)p, G, Gl); }
+      if (G > recG) { recG = G; printf("REC G %llu %u %llu\n", (unsigned long long)p, G, (unsigned long long)Gl); }
       if (n2 > recN2) { recN2 = n2; printf("REC n2 %llu %u\n", (unsigned long long)p, n2); }
       if (Gl < 64) argcount[Gl]++; else arg_big++;
       int dec = (int)floor(log10((double)p));
