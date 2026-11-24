@@ -14,7 +14,7 @@ ts/    nn.ts (MLP+backprop+Adam, ~200行)  bloom.ts  urls.ts
 rust/  src/lib.rs (Mlp, int8 QuantMlp, Bloom, n-gram hashing)  src/urls.rs
        examples/learned_bloom.rs  examples/branch_predictor.rs
 explainer/  mizchi/explainer スキルで書いた速習資料 (図つき、出力は再実行して照合)
-bench/      Rust (自前・perpetual) と Python (scikit-learn・LightGBM) の比較
+bench/      Rust (自前・perpetual) と Python (scikit-learn・LightGBM) の比較、ONNX の経路 (bench/onnx)
 GUIDE.md    いつ・どこで・どの入力量で・どの出力に、何を使うかの整理
 templates/  小さいモデルの雛形 (TS・Rust・Python・Julia、微分可能プログラミング版つき)
 ```

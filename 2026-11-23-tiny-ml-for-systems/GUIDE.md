@@ -28,8 +28,8 @@
 | 同期、予算 µs | Rust サーバ | 数百次元以下、1 行ずつ | 自前 + 重みを `const` に（int8 にもできる） | 計測：1 行 91〜282ns（256 次元の MLP は 1.0µs） |
 | 同期、予算 ns〜µs | カーネル・`no_std`・マイコン | 数十次元以下 | 自前の int8、整数のパーセプトロン。`.tflite` があるなら `microflow` | 計測：パーセプトロン分岐予測。資料：MicroFlow の論文 |
 | 非同期でよい、予算 ms | ブラウザ | 数百〜数万次元、バッチ 16 以上 | WebNN（`mizchi/webnn-mbt`）か onnxruntime-web | 資料：webnn-mbt の BENCHMARK.md。1 回の呼び出しに 35〜50µs、MNIST のバッチ 100 で素朴な CPU 実装の 1/85 |
-| 同期か非同期 | Node サーバ | 表形式で GBDT が要る | LightGBM で学習 → ONNX → `onnxruntime-node` | 未計測 |
-| 同期か非同期 | Rust サーバ | 表形式で GBDT が要る | LightGBM で学習 → Rust で推論（`lightgbm3`、ONNX + `tract`、木を自前で評価） | 計測：学習は LightGBM が 0.4〜2.0 秒、`perpetual` が 1.4〜304 秒。推論の経路は未計測 |
+| 非同期でよい、予算 10µs 以上 | Node サーバ | 表形式で GBDT が要る | LightGBM で学習 → ONNX → `onnxruntime-node` | 計測：1 行 12.1µs（`await`）、まとめて 2.6µs/行（`bench/onnx`） |
+| 同期、予算 10µs 以上 | Rust サーバ | 表形式で GBDT が要る | LightGBM で学習 → ONNX → `ort`（`tract` は木が遅すぎる） | 計測：`ort` 1 行 9.8µs、`tract` 1 行 1.1ms（`bench/onnx`）。学習は LightGBM 0.4〜2.0 秒 |
 | どこでも | Python から呼ぶ | — | 避ける | 計測：scikit-learn・LightGBM の 1 行推論は 23〜90µs（まとめて推論すれば速い） |
 
 ## 学習：いつ・どの入力量なら、何を使うか
@@ -68,12 +68,12 @@
 | Python 自前（`templates/python`） | ◎ | ○ | ○ | ○ | numpy だけ。学習 0.54 秒。1 行推論は 2.9〜4.0µs で製品には不向きだが、まとめての推論は 42ns で最速。重みを JSON で各言語へ |
 | Julia 自前（`templates/julia`） | ○ | ○ | ○ | ○ | 標準ライブラリだけ。学習 0.15 秒で最速（初回のコンパイルを除く）、1 行推論 461ns。本体の入手と初回のコンパイルが要る。重みを JSON で各言語へ |
 | scikit-learn | ◎ | ○ | ○ | ○ | 1 行で学習。Python での 1 行推論は 63〜90µs で製品には不向き。LR・MLP の重みを書き出せば各言語で自前推論できる |
-| LightGBM | ◎ | △ | △ | ◎ | 2 行で学習、0.37〜2.0 秒で最速。JS・Rust へは ONNX か C API 経由（未計測）。C API と R・Java などのバインディングがある |
+| LightGBM | ◎ | ○ | ○ | ◎ | 2 行で学習、0.37〜2.0 秒で最速。ONNX にすれば onnxruntime-node で 1 行 12.1µs、Rust の `ort` で 9.8µs（予測の差 2.1e-7）。C API と R・Java などのバインディングもある |
 | JAX（微分可能プログラミング） | ○ | ○ | ○ | ○ | `pip install jax`、損失 15 行、12.0 秒。OHR を直接最適化して 40.0%（最高）。学習専用で、小さい MLP の重みを各言語へ持ち出す |
 | Julia Enzyme.jl（微分可能プログラミング） | △ | ○ | ○ | ○ | 普通のループを安定版のまま微分できる。15.6 秒で JAX とほぼ同じ。初回の `Pkg.instantiate()` に約 5 分。重みを各言語へ持ち出す |
 | Rust `std::autodiff` | △ | △ | ○ | △ | nightly + enzyme + `lto = "fat"` が必要で実験的。普通のループを微分でき、JAX と同じ結果（OHR 40.0%）。損失をイテレータで書けば 14.1 秒で JAX と同じ速さ（添字で書くと 6 倍遅い） |
 | `perpetual`（純 Rust GBDT） | △ | △ | ○ | ○ | 36 crate、nightly が必要、ビルド 18.8 秒。256 次元で学習 304 秒。BHR 16.9% で MLP と同じ。Python・R のバインディングがある |
-| ONNX ランタイム（`onnxruntime-node`・`ort`・`tract`） | ○ | △ | △ | ◎ | 他所で学習したモデルの標準の持ち出し先。この実験では未計測（1 回の呼び出しの手間を測っていない） |
+| ONNX ランタイム（`onnxruntime-node`・`ort`・`tract`） | ○ | ○ | ○ | ◎ | 他所で学習したモデルの標準の持ち出し先。1 回の呼び出しに 4.6〜9.2µs かかり、小さい MLP の 1 行推論は自前の 25〜90 倍遅い。まとめてなら 26〜53ns/行で速い。onnxruntime-node は非同期。`ort` は既定の取得先が塞がれていて、npm の `libonnxruntime.so` を読ませた。`tract` は木のモデルが 1 行 1ms（`bench/onnx`） |
 | WebNN（`mizchi/webnn-mbt`） | × | △ | × | △ | Chrome Canary とフラグが必要で、非同期。1 回の呼び出しに 35〜50µs。バッチ 16 以上や大きめのモデルで速い（webnn-mbt の BENCHMARK.md） |
 
 組み合わせると、次のようになる。

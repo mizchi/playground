@@ -1,0 +1,9 @@
+{
+  "name": "onnx-bench-ts",
+  "private": true,
+  "type": "module",
+  "description": "onnxruntime-node で ../*.onnx を推論し、1 行ずつとまとめての速さを測る",
+  "dependencies": {
+    "onnxruntime-node": "^1.31.1"
+  }
+}
